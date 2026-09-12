@@ -1,0 +1,29 @@
+.build/
+.build-test/
+# SwiftPM/Xcode custom scratch residues must not live at the repository root.
+/.buildSystem_debug
+/.lock
+/CACHEDIR.TAG
+/checkouts/
+/debug
+/manifest.pif
+/out/
+/repositories/
+/workspace-state.json
+.codex/
+.worktrees/
+dist/
+artifacts/
+.DS_Store
+*.xcuserdata/
+*.xcuserstate
+screenshots/
+monetization/
+release/function-check/
+release/*.dmg
+release/*.zip
+release/* [0-9].dmg
+release/* [0-9].zip
+release/* [0-9][0-9].dmg
+release/* [0-9][0-9].zip
+release/rc-*/

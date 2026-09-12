@@ -1,0 +1,4 @@
+8e77c5623b51878be6b8b39798ca3d7d22c1b5f321b7bfa4aa6504ff060f6fa2  StorageCleanerMac-1.8.6.dmg
+0f134e0a35bdf3a631b5b1bda069e97c0d74cf8b01c88ee71ab019c23f7f7b57  StorageCleanerMac-1.8.6.zip
+592c3a6af13b7e0a4ad3b1f27e4b5460681e38bc7caac2e328a9d0f2fada4a8f  StorageCleanerMac-zhHans-1.8.6.dmg
+3852e63e220d0bf61b06730796bb4a70a4972b7da286f30189e73a82db6e2ec9  StorageCleanerMac-zhHans-1.8.6.zip

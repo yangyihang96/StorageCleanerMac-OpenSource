@@ -1,0 +1,5 @@
+{
+  "code": 1003,
+  "domain": "NetworkQualityErrorDomain",
+  "message": "System measurement service is unavailable"
+}

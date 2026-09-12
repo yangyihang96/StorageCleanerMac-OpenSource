@@ -1,0 +1,9 @@
+{
+  "base_rtt": 21,
+  "dl_bytes_transferred": 12000,
+  "dl_throughput": 512000000,
+  "interface_name": "en0",
+  "responsiveness": 749.993347,
+  "ul_bytes_transferred": "3000",
+  "ul_throughput": 48000000
+}

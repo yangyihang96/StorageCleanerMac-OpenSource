@@ -1,0 +1,32 @@
+name: Release candidate verification
+
+# Validation runs locally. Keep GitHub runners opt-in to avoid automatic costs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-candidate:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      SWIFT_BUILD_JOBS: "2"
+    steps:
+      - name: Check out complete source history
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Verify release candidate
+        run: ./script/build-release.sh --candidate
+      - name: Verify immutable version tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: ./script/build-release.sh --verify-tag
+
+# Developer ID credentials, notarization, Sparkle signing, appcast mutation,
+# and GitHub Release publication intentionally remain outside untrusted PR jobs.

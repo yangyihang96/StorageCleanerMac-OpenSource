@@ -1,0 +1,4 @@
+c5f7b5a12e100f8d98eb318ecea4698bf3f903629530f9c0bee26b6eca431310  StorageCleanerMac-1.9.1.dmg
+6343b0c78e303dd9297d78b3edb327436358ad2d0b59ef70c4476ddff2ac122c  StorageCleanerMac-1.9.1.zip
+4135f0b94bb3e0a77fc86fb8949619a47ebef7f7cef9d2f95137b4f678fe0f47  StorageCleanerMac-zhHans-1.9.1.dmg
+890e1129d1144963eeeac13dc5f888c3e2f1630ec06837a1a99f9785d896fc55  StorageCleanerMac-zhHans-1.9.1.zip

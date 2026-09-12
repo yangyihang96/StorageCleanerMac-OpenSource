@@ -1,0 +1,68 @@
+存储清理助手 1.9.7 发布验证报告
+
+一、发布身份
+
+- 版本：1.9.7
+- Build：202607242155
+- 发布源码提交：0a458a828975ae5c78f2e8d2286eefe9e5f0e00a
+- 标签：v1.9.7，指向上述发布源码提交
+- Updates appcast 提交：258d390e47b66f84c003825f3544fb99244bb853
+- 最低系统版本：macOS 14.0
+- 架构：Apple Silicon arm64
+
+二、测试与构建
+
+- 完整自动化测试：1,773 项
+- 失败：0
+- 跳过：5；均为显式硬件或环境依赖测试
+- Apple Silicon 生产基线门禁：通过
+- 干净的独立 Release 源码工作树：通过
+- 四个正式归档、两个 DMG、SHA-256 清单：通过
+- DMG 文件系统校验：通过
+- 主 App、内嵌辅助程序和 Sparkle 组件 codesign --verify --deep --strict：通过
+
+三、正式资产 SHA-256
+
+- StorageCleanerMac-1.9.7.dmg
+  5f41e2d672882b3ba3902e64986e570029cd4f009e477fe7cc1b66109f771e11
+- StorageCleanerMac-1.9.7.zip
+  fe0fb5163e561a5e0d0de05f12958e68a08a5879c5e246c09cef4d668cd44004
+- StorageCleanerMac-zhHans-1.9.7.dmg
+  3d61a9f04146ba54a83c414e836b1475f0893a31cca775883547befb64a39e76
+- StorageCleanerMac-zhHans-1.9.7.zip
+  11f29fb6f1e8bb41229d06b98faec69514e5f8aae0dbe96d4c09c7ba38dd4410
+
+四、Sparkle 更新验证
+
+- App 内置公钥：9zE8Bh4PM/yp47qqC5RmAVnvkrqlX7TtT7POVCz2wEo=
+- 更新 ZIP 长度：15,541,238 bytes
+- EdDSA 签名：ASA0IUVbndRW0VaEWq4BV5OPlnaFxax/3LcsbE1Md8x9TjdVi8NNx8rkTKCcw1b8U0WO1FG1J0jAqj1lPvjEBw==
+- 使用既有钥匙串专用账户 com.local.StorageCleanerMac 生成签名：通过
+- 使用同一正式 ZIP 反向验证签名：通过
+- 公开 ZIP 无登录下载：通过
+- 公开 ZIP 与本地正式 ZIP 逐字节比较：一致
+- 公开 ZIP 解包后版本、Build、feed URL 和内置公钥回读：一致
+- 公开 ZIP 解包后严格 codesign 验证：通过
+
+五、远端发布状态
+
+- 私有源码 Release：正式发布，非草稿、非预发布，5 个全新资产
+  https://github.com/yangyihang96/StorageCleanerMac/releases/tag/v1.9.7
+- 公开 Updates Release：正式发布，非草稿、非预发布，5 个全新资产
+  https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.9.7
+- 两个 Release 的资产名称、大小与 GitHub SHA-256 回读：一致
+- appcast 首项：1.9.7（202607242155）
+- appcast 条目总数：49
+- 公开 appcast HTTP 200，首项、Build、长度和 EdDSA 签名回读一致
+- 1.9.6 及更早标签、Release、资产和 appcast 条目均未覆盖
+
+六、签名与安装边界
+
+- 签名身份：Apple Development: developer@example.com (DEVELOPMENT_TEAM)
+- 不是 Developer ID Application 签名
+- 没有 Apple notarization
+- Gatekeeper spctl 拒绝符合预期
+- 1.9.7 不得描述为 notarized 或 public-safe
+- 本阶段完成的是发布，不包含把 1.9.7 安装到 /Applications
+- /Applications/存储清理助手.app 仍为 1.9.6（202607241944），未被本次发布改动
+- 本阶段没有执行 1.9.6 → 1.9.7 的最终 Sparkle 替换演练，不得误称已经完成该项

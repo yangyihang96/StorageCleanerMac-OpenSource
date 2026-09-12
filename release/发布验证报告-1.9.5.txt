@@ -1,0 +1,151 @@
+存储清理助手 发布验证报告
+
+生成时间: 2026-07-23 21:04:59 +1000
+签名身份: Apple Development: developer@example.com (DEVELOPMENT_TEAM)
+发布要求: 未强制 Developer ID；非 Developer ID 产物仅适合本机或受控测试
+版本: 1.9.5 (202607231704)
+构建工具链: Xcode 26.6 Build version 17F113 , macOS SDK 26.5
+构建配置: release
+DMG: /Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/存储清理助手-1.9.5.dmg
+ZIP: /Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/存储清理助手-1.9.5.zip
+ASCII 文件名 DMG（内含存储清理助手.app）: /Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/StorageCleanerMac-1.9.5.dmg
+ASCII 文件名 ZIP（内含存储清理助手.app）: /Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/StorageCleanerMac-1.9.5.zip
+本地验证 App: /private/tmp/storage-cleaner-1.9.5-release-dist/StorageCleanerMac.app
+
+codesign:
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app: satisfies its Designated Requirement
+/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: satisfies its Designated Requirement
+verified: macOS 14.0+, linked SDK 26.5, arm64
+/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app: metadata OK (com.local.StorageCleanerMac, 1.9.5, 202607231704)
+
+dmg contents:
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app: satisfies its Designated Requirement
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: satisfies its Designated Requirement
+verified: macOS 14.0+, linked SDK 26.5, arm64
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-dmg-mount/存储清理助手.app: metadata OK (com.local.StorageCleanerMac, 1.9.5, 202607231704)
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/存储清理助手-1.9.5.dmg: includes 首次打开说明.txt
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/存储清理助手-1.9.5.dmg: includes THIRD_PARTY_NOTICES.md
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app: satisfies its Designated Requirement
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: satisfies its Designated Requirement
+verified: macOS 14.0+, linked SDK 26.5, arm64
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-dmg-mount/存储清理助手.app: metadata OK (com.local.StorageCleanerMac, 1.9.5, 202607231704)
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/StorageCleanerMac-1.9.5.dmg: includes README-FIRST.txt
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/StorageCleanerMac-1.9.5.dmg: includes THIRD_PARTY_NOTICES.md
+
+zip contents:
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/存储清理助手-1.9.5.zip: includes 首次打开说明.txt
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/存储清理助手-1.9.5.zip: includes THIRD_PARTY_NOTICES.md
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app: satisfies its Designated Requirement
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: satisfies its Designated Requirement
+verified: macOS 14.0+, linked SDK 26.5, arm64
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/zh-zip/存储清理助手.app: metadata OK (com.local.StorageCleanerMac, 1.9.5, 202607231704)
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/StorageCleanerMac-1.9.5.zip: includes README-FIRST.txt
+/Users/developer/Documents/好玩的/StorageCleanerMac/.worktrees/panel-polish-v1.9.1/release/StorageCleanerMac-1.9.5.zip: includes THIRD_PARTY_NOTICES.md
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+--prepared:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
+--validated:/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Frameworks/Sparkle.framework/Versions/Current/.
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app: satisfies its Designated Requirement
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: valid on disk
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app/Contents/Resources/StorageCleanerFanControlHelper: satisfies its Designated Requirement
+verified: macOS 14.0+, linked SDK 26.5, arm64
+/private/tmp/storage-cleaner-1.9.5-final-build/archive-verify/ascii-zip/存储清理助手.app: metadata OK (com.local.StorageCleanerMac, 1.9.5, 202607231704)
+
+checksums:
+StorageCleanerMac-1.9.5.dmg: OK
+StorageCleanerMac-1.9.5.zip: OK
+StorageCleanerMac-zhHans-1.9.5.dmg: OK
+StorageCleanerMac-zhHans-1.9.5.zip: OK
+
+spctl:
+/private/tmp/storage-cleaner-1.9.5-final-build/dmg-staging/存储清理助手.app: rejected
+
+可用证书:
+  1) LOCAL_SIGNING_CERTIFICATE_SHA1 "Apple Development: developer@example.com (DEVELOPMENT_TEAM)"
+     1 valid identities found
+
+结论: 已用 Apple Development 证书签名，签名结构有效；但这不是公开分发用 Developer ID，也不是 Apple 公证版本。
+
+功能与真实硬件验证:
+- 完整测试执行 1,736 项，0 失败；5 项依赖显式真机或环境的测试按预期跳过。
+- 本机为双风扇 Apple Silicon Mac。固定风扇组在真实硬件上写入并回读约 5,622 RPM，随后恢复 macOS 系统控制。
+- Battery 与 AC 能源模式均从小窗真实三级菜单完成自动模式 0、低电量模式 1、再恢复自动模式 0 的切换，pmset 逐次回读一致，后续切换没有重复出现管理员授权窗口。
+- 最终公开 App 内嵌辅助程序完成一次批准后，与 /Library/PrivilegedHelperTools/com.local.StorageCleanerMac.FanControlHelper 逐字节一致；签名有效，XPC LaunchDaemon 正在运行。设置页显示“已安装 / 系统控制 / 已连接”。
+- 发布完成后的最终公开辅助程序再次通过 AC 低电量模式 1 写入，并恢复自动模式 0；Battery 与 AC 的最终状态均为 0。
+
+公开发布与更新验证:
+- 源码发布标签对象: 762506e49986eba3a3acd7ccb3a9ed19ac54c60e；标签目标提交: e53c02ac93f71f34093525814e849dcff869de21。
+- 源码 main 后续仅追加发布说明测试计数修正，当前提交: 1c16b1d。
+- 源码 Release: https://github.com/yangyihang96/StorageCleanerMac/releases/tag/v1.9.5
+- 公开更新 Release: https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.9.5
+- 两个 Release 均为正式发布（非 Draft、非 Prerelease），各包含 5 项全新 1.9.5 资产；未覆盖 1.9.2、1.9.3、1.9.4 的标签、Release 或资产。
+- 源码仓库当前为 Private；源码 Release 仅登录后可取。StorageCleanerMacUpdates 仓库为 Public，5 项 1.9.5 资产可匿名下载。
+- Updates 仓库 appcast 提交: ed66fefae7a3a65a25f497a52ce4ac636ca3344b。
+- 公开 appcast 首项: 1.9.5 (202607231704)，历史条目总数 47；enclosure 长度为 15308451。
+- 私有源码 Release、公开 Updates Release 和本地冻结发布目录的四个归档及 SHA-256 清单逐字节一致。
+- 公开 Updates ZIP 的 Sparkle EdDSA 签名已使用钥匙串专用账户 com.local.StorageCleanerMac 反向验证通过。
+- StorageCleanerMac-1.9.5.dmg SHA-256: 8866bebd999b820df94b59b129b03b183df1d988d5d257599d935461a5fe9cc0
+- StorageCleanerMac-1.9.5.zip SHA-256: f33593d7dca0ef80a67854f2c229d39c48de1319464ef1ad9efd5124a8a2a922
+- StorageCleanerMac-zhHans-1.9.5.dmg SHA-256: 744c8e7c69921e3b99a41e53066299048b435a57631812e0f4fc1c4c8638b6b2
+- StorageCleanerMac-zhHans-1.9.5.zip SHA-256: cc90a634c6b33cbdcff038523f7c964ad1219f0420f9a4c6195bff1372888329
+
+实际安装验证:
+- /Applications/存储清理助手.app 已替换为从公开 Updates ZIP 解压的 1.9.5 (202607231704)，并重新启动运行。
+- 公开 ZIP 解压 App 与实际安装 App 的 rsync 校验无差异；主可执行文件 SHA-256 为 406280feaf0f70558d6e4df36298705a06746d2706013d91a81c927485990125。
+- 实际安装 App 执行 codesign --verify --deep --strict 通过；签名身份为 Apple Development: developer@example.com (DEVELOPMENT_TEAM)。
+- Gatekeeper spctl 拒绝符合当前发布边界：本版本不是 Developer ID Application 签名且没有 Apple 公证，不得描述为 notarized 或 public-safe。

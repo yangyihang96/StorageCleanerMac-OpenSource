@@ -1,0 +1,77 @@
+存储清理助手 1.9.8 发布验证报告
+
+生成时间：2026-07-30 18:36 +1000
+
+一、版本与源码
+
+- 正式版本：1.9.8
+- Build：202607301737
+- 实际构建源码提交：29b4c2b7b279a723c6fe2d6d2fd14f90ee08d36a
+- v1.9.8 为注释标签，反向解析后准确指向上述构建提交。
+- 公开 Updates appcast 提交：4ba25d9a8e55ea1ad94822f12421b8aed2640e90
+- 没有修改或覆盖 1.9.2 至 1.9.7 的标签、Release、资产或 appcast 条目。
+
+二、GitHub Release
+
+- 私有源码 Release：
+  https://github.com/yangyihang96/StorageCleanerMac/releases/tag/v1.9.8
+- 公开更新 Release：
+  https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.9.8
+- 两个 Release 均为正式版本，不是草稿或预发布。
+- 两个 Release 各有 5 个上传完成的资产：四个 DMG/ZIP 和一份 SHA-256 清单。
+- 两个仓库的 Latest 均为 v1.9.8。
+
+三、Sparkle 与公开下载
+
+- 公开 appcast：
+  https://raw.githubusercontent.com/yangyihang96/StorageCleanerMacUpdates/main/appcast.xml
+- appcast HTTP 200，XML 解析通过。
+- appcast 首项：1.9.8（Build 202607301737）。
+- appcast 条目总数：50。
+- 公开更新 ZIP 长度：16218055 bytes。
+- Sparkle EdDSA 签名：
+  oZP+zmrs1C8TaB0/TACMuj6bBLocxzHVpuoW+POFGGHG8mVwxwnXkROIE6RKus8rtFVOw7oXInhg/0DFxap1Aw==
+- 签名使用钥匙串账户 com.local.StorageCleanerMac 生成，并使用 Sparkle 2.9.4 sign_update 完成反向验证。
+- 已通过无登录 curl 从公开 Release 下载 ZIP；公开 ZIP 与本地正式 ZIP 逐字节一致。
+- 公开 ZIP 的 SHA-256：
+  c96492fe3710f1abf70608cae0c6890a99d8e748980c15948dcad6fbfeb85ffa
+- 公开 ZIP 解包后核对通过：Bundle ID、1.9.8、Build 202607301737、公开 appcast 地址、Sparkle 公钥和 arm64 架构。
+
+四、测试与构建
+
+- Debug 全量测试：1820 项，0 失败，5 项显式硬件或环境依赖测试按预期跳过。
+- Release 候选测试：1812 项，0 失败，5 项显式硬件或环境依赖测试按预期跳过。
+- Apple Silicon 生产基线门禁通过。
+- Xcode 26.6、macOS SDK 26.5、Release 配置、macOS 14.0+、arm64。
+- 两个 DMG、两个 ZIP、DMG 挂载、归档内容和 SHA-256 复核通过。
+- 主 App、风扇控制辅助程序以及 Sparkle 内嵌 Framework、Updater、Autoupdate、Downloader 和 Installer 严格代码签名验证通过。
+
+五、正式资产 SHA-256
+
+- StorageCleanerMac-1.9.8.dmg
+  73bd59c6e7952bc41776099d05c6d3d00dd7d65f5dae3ac9f996d1aab3b619b8
+- StorageCleanerMac-1.9.8.zip
+  c96492fe3710f1abf70608cae0c6890a99d8e748980c15948dcad6fbfeb85ffa
+- StorageCleanerMac-zhHans-1.9.8.dmg
+  5ada24b835ac11450a68dd75691d0d12182c246b847c430d5d885b7427aa889f
+- StorageCleanerMac-zhHans-1.9.8.zip
+  715d13b086ef40ac560a947a62e575aae6a2120eb4938c71f294768c23a3e396
+
+六、签名、公证与 Gatekeeper 边界
+
+- 签名身份：Apple Development: developer@example.com (DEVELOPMENT_TEAM)
+- TeamIdentifier：T9GZL52H8R
+- Hardened Runtime：已启用。
+- codesign --verify --deep --strict：通过。
+- 当前钥匙串没有 Developer ID Application 证书。
+- 没有提交 Apple notarization，也没有 stapling。
+- spctl 拒绝符合预期；本版本不得描述为 notarized 或 public-safe。
+- GitHub 发布成功不等于 Gatekeeper 信任；手动下载的新用户仍可能遇到系统拦截。
+
+七、安装与运行边界
+
+- 本轮只完成 GitHub Release 和 appcast 发布，没有安装或替换 /Applications 中的 App。
+- 当前 /Applications/存储清理助手.app 仍为 1.9.8（Build 202607300007），为 ad hoc 签名。
+- 没有执行 Build 202607301737 的首次启动验收。
+- 没有执行真实 Sparkle 稳定版到 1.9.8 Build 202607301737 的下载、替换、退出、重启、数据保留或失败恢复演练。
+- 因此，发布、签名、appcast 可发现性、安装、运行和真实 Sparkle 替换必须继续分别汇报。

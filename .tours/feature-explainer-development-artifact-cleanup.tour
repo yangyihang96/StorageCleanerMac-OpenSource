@@ -1,0 +1,122 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "开发工具与构建产物清理 — 端到端实现导览",
+  "description": "面向后续规划者的深度功能导览：从页面路由、版本化规则、只读扫描与稳定身份，到冻结计划、预检、明确确认、执行复核、废纸篓回执，并解释旧磁盘扫描器与当前 V2 安全链之间的能力差距。",
+  "ref": "main",
+  "steps": [
+    {
+      "file": "AGENTS.md",
+      "line": 3,
+      "title": "先确认产品安全边界",
+      "description": "这个功能的第一原则写在仓库约束里：扫描必须只读，任何清理都必须来自显式界面动作，并优先移入废纸篓。后续看到旧扫描器把项目标成绿色时，不应直接推断它已经获得新版执行授权。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Models/CleanupScanModels.swift",
+      "line": 24,
+      "title": "生产默认走 V2 完整清理架构",
+      "description": "CleanupFeatureConfiguration.productDefault 固定为 v2Full，因此当前产品主路径不是旧 StorageItem 删除流程，而是 ScanSession、CleanupSelection、CleanPlan、Preflight、Execute 这一套冻结证据链。legacy 仍存在，但属于兼容路径。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Views/ContentView.swift",
+      "line": 797,
+      "title": "页面在新旧结果之间做兼容路由",
+      "description": "“安全清理”和“开发工具与构建产物”共用 cleanupWorkspace。有 CleanupScanSession 时显示新版 CleanupScanResultsView；只有旧 ScanResult 时才回退到 ItemListView。这个分支解释了为什么同一个入口可能呈现两套不同粒度的开发文件。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Views/CleanupScanViews.swift",
+      "line": 29,
+      "title": "开发产物页面只是过滤 developer 分类",
+      "description": "CleanupScanResultsView 并没有创建第二个扫描器。filter 为 devCaches 时，它只从同一 ScanSession 中取 categoryID=developer 的分类；选择、统计、排序和执行仍复用统一清理工作流。"
+    },
+    {
+      "file": "Resources/CleanupRules.v2.json",
+      "line": 6,
+      "title": "当前真正启用的开发清理规则只有 npm 两个子目录",
+      "description": "developer.npx-cache 与 developer.npm-content-cache 共享 ~/.npm 允许根，但分别精确匹配 _npx 和 _cacache。_npx 为推荐且默认选择，_cacache 为可选且默认不选；备份后缀目录、整个 ~/.npm、项目源码、会话、日志和发布包都不在授权里。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/ReadOnlyCleanupScanner.swift",
+      "line": 4,
+      "title": "规则从安装包加载并在使用前校验",
+      "description": "CleanupRuleSetLoader 优先读取 App Bundle 内的 CleanupRules.v2.json，开发环境才回退到源码资源；JSON 解码后必须通过 CleanupRuleValidator。旧 schema 会被拒绝，旧 rulesVersion 产生的会话和计划不能继续执行。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/ReadOnlyCleanupScanner.swift",
+      "line": 30,
+      "title": "验证器用允许根和禁止根阻止规则越权",
+      "description": "自动 moveToTrash 只能落在明确的可再生开发缓存根；Library、Documents、Downloads、Pictures 和云盘根等被禁止作为自动清理根。验证器限制深度、体积、Bundle ID、风险与动作组合；同根自动规则只有精确名称集合可证明互斥时才允许并存。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Stores/ScanStore.swift",
+      "line": 2045,
+      "title": "ScanStore 启动同一份规则和同一扫描会话",
+      "description": "startCleanupV2Scan 先加载并迁移规则，清空旧计划状态，再通过 HeavyWorkCoordinator 获取 mainScan 租约执行 CleanupScanOperation。结果保存为 ScanSession，并用 CleanupSelection.defaults 建立初始选择，避免扫描、选择和执行引用不同批次。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/ReadOnlyCleanupScanner.swift",
+      "line": 425,
+      "title": "扫描阶段只枚举和读取元数据",
+      "description": "ReadOnlyCleanupScanner 为本次运行生成 ScanSessionID 和截止时间，逐条规则解析根目录。它拒绝越界根、符号链接、只读卷和不符合云文件策略的对象；权限缺失、超时和取消被记录为 partial/cancelled，而不是强行继续。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/ReadOnlyCleanupScanner.swift",
+      "line": 910,
+      "title": "容量统计按文件身份去重并受规则深度约束",
+      "description": "aggregateSize 递归读取逻辑大小和已分配大小，优先使用 allocated bytes；每一层都复查路径边界并用 device+inode+kind 去重。权限失败、符号链接、排除子树或深度上限会把容量标记为 lowerBound/failed，候选仍可展示但不能进入计划。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/ReadOnlyCleanupScanner.swift",
+      "line": 1066,
+      "title": "候选 ID 绑定规则版本、路径、卷和 inode",
+      "description": "ScanCandidateID 不是界面行号，而是 rule ID、selectionPolicyVersion、标准化路径、卷标识、文件身份和创建时间的稳定组合。候选同时保留允许根、风险、动作、需关闭的 Bundle ID 和证据代码，为后续身份复核提供冻结输入。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Models/CleanupScanModels.swift",
+      "line": 251,
+      "title": "风险、推荐、默认选择和执行资格彼此独立",
+      "description": "CleanupRule 明确保存 risk、recommendation、defaultSelection、executionEligibility 和 measurementRequirement。可选绿色不一定默认勾选；advisoryOnly 永远不能执行。CleanupSelection 另外记录黄色/红色的 explicit selection，推荐按钮也不会清掉用户已主动选择的复核项。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Models/CleanupExecutionModels.swift",
+      "line": 316,
+      "title": "CleanPlanBuilder 冻结本次用户选择",
+      "description": "计划构建要求会话未取消、规则版本一致、候选 ID 唯一且仍属于当前会话。每项还要匹配规则动作、风险、允许根、写入能力、云状态和文件身份；路径或身份重复会直接失败。计划一旦生成，之后修改界面选择不会改变它。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Stores/ScanStore.swift",
+      "line": 1715,
+      "title": "点击清理先建计划和预检，不会立即移动文件",
+      "description": "requestV2Cleanup 把当前页面的候选范围与 CleanupSelection 取交集，创建 CleanPlan 后调用 SafeCleanupExecutor.preflight。只有至少一项 ready，状态机才进入 awaitingConfirmation；失效、受限或规则变化的项目不会绕过预检。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Views/CleanupExecutionViews.swift",
+      "line": 3,
+      "title": "确认页显示冻结计划和预检结果",
+      "description": "确认页展示项目数、将移入废纸篓的容量和 ready 数，并明确区分清空废纸篓后最多可释放的容量与当前可用空间变化。黄色需要一次风险确认，红色需要两次确认。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/SafeCleanupExecutor.swift",
+      "line": 428,
+      "title": "执行前再次验证规则、路径、身份和运行状态",
+      "description": "skipReason 是 fail-closed 核心：它复查预检批准列表、规则版本与动作、允许根、用户排除项、符号链接、inode 身份、卷、可写性、云占位状态和需关闭应用。任一变化都转为 skipped，不把旧扫描结果当作当前事实。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/SafeCleanupExecutor.swift",
+      "line": 275,
+      "title": "真正移动时再做两次相邻复核并生成回执",
+      "description": "execute 消耗一次性 plan ID，获取 cleanup 独占租约，只处理预检批准项；每项在系统移动前连续调用两次 skipReason，随后使用 FileManager.trashItem 或专用隔离区移动。移动后读取目标元数据比对原 identity，并把结果、容量变化和可恢复回执写入 CleanReport。"
+    },
+    {
+      "file": "Sources/StorageCleanerMac/Services/DiskScanner.swift",
+      "line": 623,
+      "title": "旧扫描器识别范围更广，但不是 V2 规则授权",
+      "description": "兼容 DiskScanner 会识别 Codex/Claude/OpenClaw 缓存、pip/uv/Cargo/npm/pnpm/Gradle/Maven、Xcode DerivedData、模拟器、设备支持、Go、Docker，以及项目内 .build/.swiftpm 等目录；日志、截图、release/dist 又分到人工审查组。它使用硬编码路径、阈值、时间预算和路径级分类，不能直接替代 V2 的稳定身份与版本化规则链。"
+    },
+    {
+      "file": "Tests/StorageCleanerMacTests/CleanupRuleScannerTests.swift",
+      "line": 19,
+      "title": "测试锁定精确匹配、选择语义和容量安全门",
+      "description": "测试分别覆盖 _npx/_cacache 命中、备份后缀与大小写不命中、Unicode 规范等价、optional 默认不选、推荐按钮保留显式黄色选择，以及 lowerBound/failed 候选不能进入计划。后续迁移 Xcode、SwiftPM 或其他缓存时仍需逐条增加同等级安全测试。"
+    }
+  ]
+}

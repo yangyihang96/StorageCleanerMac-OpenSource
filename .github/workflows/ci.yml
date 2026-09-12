@@ -1,0 +1,37 @@
+name: CI
+
+# Validation runs locally. Keep GitHub runners opt-in to avoid automatic costs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            verify_bundle: "0"
+            developer_dir: /Applications/Xcode_16.2.app/Contents/Developer
+          - runner: macos-26
+            verify_bundle: "1"
+            developer_dir: /Applications/Xcode.app/Contents/Developer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      STORAGE_CLEANER_VERIFY_BUNDLE: ${{ matrix.verify_bundle }}
+      STORAGE_CLEANER_UI_SMOKE: "0"
+      SWIFT_BUILD_JOBS: "2"
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - name: Verify repository
+        run: ./script/verify.sh
