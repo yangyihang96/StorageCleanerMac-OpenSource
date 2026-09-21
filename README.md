@@ -1,12 +1,14 @@
 # 存储清理助手 / Storage Cleaner Mac
 
-**最新测试版 / Latest beta:** `1.10.1`（Build `20260921041501`） · **稳定版 / Stable:** `1.9.13`
+**当前版本 / Current version:** `1.10.1`
 
-[下载 1.10.1 测试版 / Download beta](https://github.com/yangyihang96/StorageCleanerMac-OpenSource/releases/tag/v1.10.1-beta.20260921041501) · [下载稳定版 / Download stable](https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.9.13)
+[下载与更新说明 / Downloads and update notes](https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.10.1) · [源码发布 / Source release](https://github.com/yangyihang96/StorageCleanerMac-OpenSource/releases/tag/v1.10.1)
 
-测试版适用于 Apple silicon、macOS 14 或更高版本，安装名称为“测试版.app”。本次提供已在本地验证的 Apple Development 签名包，尚未获得 Developer ID 公证或 Gatekeeper 发行批准；部分 Mac 可能阻止打开。正式版更新源保持不变。
+正式版使用原有 `appcast.xml`，测试版使用独立的 `appcast-beta.xml`；均通过 Sparkle 验证更新包签名。旧正式版可在“工具 → 检查存储清理助手更新”获取 1.10.1。此前关闭更新器的测试版需要先手动替换为本次测试版，以后可在应用内检查更新。两个通道保持不同应用标识，不互相覆盖。
 
-The beta requires Apple silicon and macOS 14 or later and installs as `测试版.app`. This locally validated build uses an Apple Development signature; it is not Developer ID notarized or Gatekeeper-approved for distribution and may be blocked on other Macs. The stable update feed is unchanged.
+下载包适用于 Apple silicon、macOS 14 或更高版本。目前仍为 Apple Development 签名，尚未 Developer ID 公证，其他 Mac 可能阻止打开；应用内更新签名通过不等于 Gatekeeper 发行批准。
+
+Production retains `appcast.xml`; Beta uses a separate `appcast-beta.xml`. Both use Sparkle archive-signature verification. Earlier local-only betas need one manual replacement to enable in-app updates. The two bundle identities stay separate. Downloads require Apple silicon and macOS 14+. Builds use Apple Development signing and are not Developer ID notarized; other Macs may block them.
 
 存储清理助手是一款原生 macOS SwiftUI 应用，用来把本机磁盘占用、可自动清理、大文件、重复文件、应用残留、启动项、程序升级和内存状态放到一个可复核的界面里。它强调“先看清楚，再决定处理”，扫描阶段保持只读，清理动作需要用户明确确认，并优先移到废纸篓。
 
@@ -207,9 +209,11 @@ Storage Cleaner Mac is a native macOS SwiftUI app that brings storage usage, aut
 
 ## 发布状态 / Release Status
 
-`1.10.1 Beta` 包含浅色界面、小窗响应与后台开销优化、安全回执及 M 系列 Core18 草案。改动和本地验证分别记录在 [更新日志](CHANGELOG.md) 与 [测试版验收记录](docs/RELEASE_VALIDATION_1.10.1-beta.md)。Core18 尚无生产参考，只显示原始结果；未完成的扩展、其他硬件验证和独立视觉验收不算通过。GitHub Actions 保持关闭，本次验证均在本机进行。稳定版 `1.9.13` 的记录保留在 [原发布验收记录](docs/RELEASE_VALIDATION_1.9.13.md)。
+`1.10.1` 包含浅色界面、小窗响应与后台开销优化、安全回执、M 系列 Core18 草案及独立通道的应用内更新。完整改动见 [更新日志](CHANGELOG.md)，本次更新链路、签名和发布状态见 [发行记录](docs/RELEASE_VALIDATION_1.10.1.md)。按用户要求，本次未运行测试套件，也未运行 GitHub Actions。此前 [初次 Beta 验证记录](docs/RELEASE_VALIDATION_1.10.1-beta.md) 只描述其原始构建，不能视为本次更新改动的测试结果。
 
-`1.10.1 Beta` adds light appearance, menu-bar responsiveness and background-efficiency work, recovery receipts, and the draft M-series Core18 protocol. See the [changelog](CHANGELOG.md) and [beta validation](docs/RELEASE_VALIDATION_1.10.1-beta.md). Core18 remains raw-only without a production reference; unfinished extensions, additional hardware coverage, and independent visual acceptance remain open. All validation runs locally and GitHub Actions remains disabled. Signing, notarization, publication, and observed upgrades are separate evidence states.
+Core18 尚无生产参考，只显示原始结果；未完成扩展、其他硬件验证、端到端性能预算和原 49 项视觉验收仍独立保留，不因发布而标记通过。
+
+See the [changelog](CHANGELOG.md) and [release record](docs/RELEASE_VALIDATION_1.10.1.md). Test suites were not run for this update at the user's request; GitHub Actions was not used. Earlier beta results describe only that earlier build. Core18 remains raw-only without a production reference, and pending hardware, performance and visual acceptance remains open.
 
 本机测试包：
 

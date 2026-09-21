@@ -90,7 +90,7 @@ if [ "$BETA_MODE" -eq 1 ]; then
   # signature after copying (same policy as make_release_dmg.sh DIST_DIR).
   BETA_ARTIFACT_DIR="${BETA_DIST_DIR_OVERRIDE:-/tmp/storage-cleaner-beta-dist}"
   BETA_ARTIFACT_BUNDLE="$BETA_ARTIFACT_DIR/测试版.app"
-  UPDATE_FEED_URL=""
+  UPDATE_FEED_URL="https://raw.githubusercontent.com/yangyihang96/StorageCleanerMacUpdates/main/appcast-beta.xml"
 fi
 
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -310,11 +310,19 @@ if [ "$BETA_MODE" -eq 0 ] && [ "$MODE" != "--bundle-only" ] && [ "$MODE" != "bun
   pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 fi
 
-if [ "$BETA_MODE" -eq 1 ] && [ "$BETA_INSTALL" -eq 1 ]; then
-  STORAGE_CLEANER_VERIFY_BUNDLE=0 "$ROOT_DIR/script/verify.sh"
-fi
-
-"$ROOT_DIR/script/verify_menu_bar_performance.sh"
+case "${STORAGE_CLEANER_SKIP_TESTS:-0}" in
+  0)
+    if [ "$BETA_MODE" -eq 1 ] && [ "$BETA_INSTALL" -eq 1 ]; then
+      STORAGE_CLEANER_VERIFY_BUNDLE=0 "$ROOT_DIR/script/verify.sh"
+    fi
+    "$ROOT_DIR/script/verify_menu_bar_performance.sh"
+    ;;
+  1)
+    echo "NOT RUN: test suites and performance tests explicitly skipped by request (STORAGE_CLEANER_SKIP_TESTS=1)."
+    echo "Bundle, signing, architecture and update configuration checks remain enabled."
+    ;;
+  *) echo "STORAGE_CLEANER_SKIP_TESTS must be 0 or 1" >&2; exit 2 ;;
+esac
 
 prepare_swift_build_dir "$SWIFT_BUILD_DIR"
 swift_build_args=(
@@ -485,10 +493,16 @@ if [ "$BETA_MODE" -eq 1 ]; then
   cat >>"$INFO_PLIST" <<PLIST
   <key>StorageCleanerBetaBuild</key>
   <true/>
+  <key>SUFeedURL</key>
+  <string>$UPDATE_FEED_URL</string>
+  <key>SUPublicEDKey</key>
+  <string>$SPARKLE_PUBLIC_KEY</string>
   <key>SUEnableAutomaticChecks</key>
-  <false/>
+  <true/>
   <key>SUAutomaticallyUpdate</key>
   <false/>
+  <key>SUScheduledCheckInterval</key>
+  <integer>21600</integer>
   <key>SUVerifyUpdateBeforeExtraction</key>
   <true/>
 PLIST
@@ -557,8 +571,9 @@ verify_sparkle_bundle() {
       [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$localized_info")" = "$APP_DISPLAY_NAME" ]
       [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$localized_info")" = "$APP_DISPLAY_NAME" ]
     done < <(find "$APP_RESOURCES" -path '*.lproj/InfoPlist.strings' -print0)
-    ! /usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$INFO_PLIST" >/dev/null 2>&1
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$INFO_PLIST")" = "false" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$INFO_PLIST")" = "$UPDATE_FEED_URL" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$INFO_PLIST")" = "$SPARKLE_PUBLIC_KEY" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$INFO_PLIST")" = "true" ]
     [ "$(/usr/libexec/PlistBuddy -c 'Print :SUAutomaticallyUpdate' "$INFO_PLIST")" = "false" ]
     strings "$APP_BINARY" | grep -F "$BUNDLE_ID" >/dev/null
     strings "$APP_FAN_HELPER" | grep -F "$FAN_HELPER_LABEL" >/dev/null
@@ -591,7 +606,7 @@ verify_sparkle_bundle() {
   verify_executable_compatibility "$APP_BINARY"
   codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
   if [ "$BETA_MODE" -eq 1 ]; then
-    echo "verified: signed Beta bundle, isolated identity, local-update policy and BuildInfo"
+    echo "verified: signed Beta bundle, isolated identity, dedicated signed update feed and BuildInfo"
   else
     echo "verified: Sparkle framework, feed, signing key and automatic update policy"
   fi

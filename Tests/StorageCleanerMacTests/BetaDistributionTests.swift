@@ -68,8 +68,9 @@ final class BetaDistributionTests: XCTestCase {
         ] {
             XCTAssertTrue(script.contains(required), "missing Beta contract: \(required)")
         }
-        XCTAssertTrue(updater.contains("startingUpdater: !StorageCleanerBuildIdentity.isBeta"))
-        XCTAssertTrue(updater.contains("不会连接或安装正式版更新"))
+        XCTAssertTrue(updater.contains("startingUpdater: true"))
+        XCTAssertFalse(updater.contains("guard !StorageCleanerBuildIdentity.isBeta"))
+        XCTAssertTrue(script.contains("StorageCleanerMacUpdates/main/appcast-beta.xml"))
         XCTAssertTrue(hardwareControl.contains(
             "if telemetry.telemetryAvailable, telemetry.fanCount > 0"
         ))
