@@ -27,3 +27,7 @@ release/* [0-9].zip
 release/* [0-9][0-9].dmg
 release/* [0-9][0-9].zip
 release/rc-*/
+# Private local evidence and audit backups are not release source material.
+/.storagecleaner-audit-backup-*/
+/DAY_APPEARANCE_ACCEPTANCE.md
+/PERFORMANCE_BEFORE_AFTER.md

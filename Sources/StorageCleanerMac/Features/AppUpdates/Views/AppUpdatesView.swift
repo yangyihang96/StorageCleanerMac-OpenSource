@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AppUpdaterView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.windowLayoutMetrics) private var layout
     @ObservedObject var store: ScanStore
 
     @State private var searchText = ""
@@ -60,6 +61,7 @@ struct AppUpdaterView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(height: layout.viewportHeight, alignment: .top)
         .animation(
             reduceMotion ? nil : .easeInOut(duration: 0.18),
             value: store.appUpdatePresentationState.phase
@@ -135,7 +137,17 @@ struct AppUpdaterView: View {
         case let .completed(report):
             reportPage(report: report, fallbackOutcome: .allSucceeded)
         case let .cancelled(report):
-            reportPage(report: report, fallbackOutcome: .cancelled)
+            if let report {
+                reportPage(report: report, fallbackOutcome: .cancelled)
+            } else {
+                // A nil report is the cancelled read-only inventory scan;
+                // installation sessions retain their own execution report.
+                AppUpdateScanCancelledPage(
+                    canScan: store.canRefreshAppUpdates,
+                    onScan: store.refreshAppUpdates,
+                    onBack: store.resetAppUpdatePresentation
+                )
+            }
         case let .failed(report):
             reportPage(report: report, fallbackOutcome: .allFailed)
         }
@@ -378,6 +390,35 @@ private struct AppUpdateCompactMetric: View {
     }
 }
 
+struct AppUpdateScanCancelledPage: View {
+    @Environment(\.moduleTheme) private var theme
+    let canScan: Bool
+    let onScan: () -> Void
+    let onBack: () -> Void
+
+    var body: some View {
+        SmartScanPageShell(fitsVisibleHeight: true) {
+            AppPageHeader(title: ReviewFilter.updater.sidebarTitle,
+                subtitle: ReviewFilter.updater.pageSubtitle,
+                systemImage: ReviewFilter.updater.systemImage, isHero: true) { EmptyView() }
+        } content: {
+            RuntimeActivityColumns(module: .updater) {
+                RuntimeActivityCard(
+                    title: L10n.text("扫描已取消", "Scan Cancelled"),
+                    subtitle: L10n.text("可以重新检查应用的可用更新。", "You can check for available application updates again."),
+                    state: .cancelled
+                ) { EmptyView() }
+            }
+        } footer: {
+            RuntimeActivityFooter(text: L10n.text("只读检查 · 安装更新前确认", "Read-only check · Confirm before installation")) {
+                AppButton(title: L10n.text("返回", "Back"), systemImage: "chevron.left", action: onBack)
+                AppButton(title: L10n.text("重新检查", "Check Again"), systemImage: "arrow.clockwise",
+                    kind: .primary, tint: theme.accent, isDisabled: !canScan, action: onScan)
+            }
+        }
+    }
+}
+
 private struct AppUpdateScanningPage: View {
     @Environment(\.moduleTheme) private var theme
 
@@ -386,112 +427,47 @@ private struct AppUpdateScanningPage: View {
     let onCancel: () -> Void
 
     var body: some View {
-        VStack(spacing: 22) {
-            ZStack {
-                Circle()
-                    .fill(theme.accent.opacity(0.15))
-                    .frame(width: 108, height: 108)
-                Image(systemName: "square.grid.2x2.fill")
-                    .font(.system(size: 46, weight: .medium))
-                    .foregroundStyle(theme.accent)
-                    .accessibilityHidden(true)
-            }
-
-            VStack(spacing: 7) {
-                Text(L10n.text("正在扫描应用", "Scanning Applications"))
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(theme.primaryText)
-                Text(progress.stage.title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(theme.primaryText.opacity(0.92))
-                Text(progressDetail)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(theme.secondaryText)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 480)
-            }
-
-            ContentPanel(cornerRadius: 14) {
-                VStack(alignment: .leading, spacing: 14) {
-                    AppUpdateProgressIndicator(
-                        fraction: progress.progressFraction,
-                        completedUnitCount: progress.completedUnitCount,
-                        totalUnitCount: progress.totalUnitCount
-                    )
-
+        SmartScanPageShell(fitsVisibleHeight: true) {
+            AppPageHeader(
+                title: ReviewFilter.updater.sidebarTitle,
+                subtitle: ReviewFilter.updater.pageSubtitle,
+                systemImage: ReviewFilter.updater.systemImage,
+                isHero: true
+            ) { EmptyView() }
+        } content: {
+            RuntimeActivityColumns(module: .updater) {
+                RuntimeActivityCard(
+                    title: L10n.text("正在检查应用", "Checking Applications"),
+                    subtitle: progress.stage.title,
+                    fraction: progress.progressFraction,
+                    metrics: [.init(title: L10n.text("已处理", "Processed"), value: progress.totalUnitCount.map {
+                        "\(progress.completedUnitCount) / \($0)"
+                    } ?? String(progress.completedUnitCount))],
+                    currentItem: progress.currentApplicationName
+                ) {
                     AppUpdateStageRail(activeStage: progress.stage)
                 }
-                .padding(18)
             }
-            .frame(maxWidth: 560)
-
-            AppButton(
-                title: L10n.text("停止扫描", "Stop Scanning"),
-                systemImage: "stop.circle",
-                kind: .secondary,
-                tint: theme.accent,
-                isDisabled: !canCancel,
-                help: L10n.text(
-                    "在当前扫描器的安全边界停止；已读取的结果不会被当作完整扫描",
-                    "Stop at the current scanner safety boundary; partial results are not treated as a completed scan"
-                ),
-                action: onCancel
-            )
-        }
-        .padding(.horizontal, AppDesignTokens.Layout.pagePadding)
-        .padding(.vertical, 26)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .accessibilityElement(children: .contain)
-    }
-
-    private var progressDetail: String {
-        if let name = progress.currentApplicationName?.trimmed.nonEmpty {
-            return L10n.text("正在处理：\(name)", "Processing: \(name)")
-        }
-        return progress.stage.detail
-    }
-}
-
-private struct AppUpdateProgressIndicator: View {
-    @Environment(\.moduleTheme) private var theme
-
-    let fraction: Double?
-    let completedUnitCount: Int
-    let totalUnitCount: Int?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if let fraction {
-                ProgressView(value: fraction)
-                    .progressViewStyle(.linear)
-                    .tint(theme.accent)
-                    .accessibilityValue("\(Int(min(max(fraction, 0), 1) * 100))%")
-            } else {
-                ProgressView()
-                    .progressViewStyle(.linear)
-                    .tint(theme.accent)
-                    .accessibilityValue(L10n.text("总量正在确定", "Determining total"))
+        } footer: {
+            RuntimeActivityFooter(text: L10n.text(
+                "只读检查 · 安装更新前确认", "Read-only check · Confirm before installation"
+            )) {
+                AppButton(
+                    title: L10n.text("停止扫描", "Stop Scanning"),
+                    systemImage: "stop.circle",
+                    kind: .secondary,
+                    tint: theme.accent,
+                    isDisabled: !canCancel,
+                    help: L10n.text(
+                        "在当前扫描器的安全边界停止；已读取的结果不会被当作完整扫描",
+                        "Stop at the current scanner safety boundary; partial results are not treated as a completed scan"
+                    ),
+                    action: onCancel
+                )
             }
-
-            HStack {
-                Text(L10n.text("扫描进度", "Scan Progress"))
-                Spacer()
-                Text(progressText)
-                    .monospacedDigit()
-            }
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(.secondary)
         }
-        .accessibilityElement(children: .combine)
     }
 
-    private var progressText: String {
-        guard let totalUnitCount, totalUnitCount > 0 else {
-            return L10n.text("已处理 \(completedUnitCount)", "\(completedUnitCount) processed")
-        }
-        return "\(completedUnitCount) / \(totalUnitCount)"
-    }
 }
 
 private struct AppUpdateStageRail: View {
@@ -500,7 +476,7 @@ private struct AppUpdateStageRail: View {
     let activeStage: AppScanStage
 
     var body: some View {
-        HStack(spacing: 0) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 8)], spacing: 12) {
             ForEach(AppScanStage.allPresentationStages, id: \.self) { stage in
                 HStack(spacing: 6) {
                     Image(systemName: symbol(for: stage))
@@ -890,6 +866,7 @@ private struct AppUpdateManagerPage: View {
     @Environment(\.moduleTheme) private var theme
     @Environment(\.windowLayoutMetrics) private var layout
     @State private var selectedAutomaticApplicationIDs = Set<String>()
+    @State private var showsCompactDetails = false
 
     let snapshot: AppUpdateCatalogSnapshot
     @Binding var searchText: String
@@ -949,6 +926,20 @@ private struct AppUpdateManagerPage: View {
         .onChange(of: visibleEntries.map(\.id)) { _, ids in
             normalizeSelection(ids)
         }
+        .sheet(isPresented: $showsCompactDetails) {
+            VStack(spacing: 12) {
+                HStack {
+                    Text(L10n.text("应用详情", "Application Details"))
+                        .font(.headline)
+                    Spacer()
+                    Button(L10n.text("完成", "Done")) { showsCompactDetails = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+                detail
+            }
+            .padding(16)
+            .frame(minWidth: 480, idealWidth: 600, minHeight: 360, idealHeight: 500)
+        }
     }
 
     @ViewBuilder
@@ -980,6 +971,10 @@ private struct AppUpdateManagerPage: View {
                 }
             }
             .padding(10)
+            .fixedSize(horizontal: false, vertical: true)
+#if DEBUG
+            .layoutProbe("appUpdateManager.footer")
+#endif
         }
     }
 
@@ -988,10 +983,16 @@ private struct AppUpdateManagerPage: View {
         if layout.density == .compact {
             VStack(spacing: 0) {
                 catalogList
-                    .frame(minHeight: 180, maxHeight: .infinity)
+                    .frame(minHeight: 0, maxHeight: .infinity)
                 Divider()
-                detail
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                HStack {
+                    Button(L10n.text("查看所选应用详情", "Show Selected Application Details")) {
+                        showsCompactDetails = true
+                    }
+                    .disabled(selectedEntry == nil)
+                    Spacer(minLength: 0)
+                }
+                .padding(10)
             }
         } else {
             HStack(spacing: 0) {

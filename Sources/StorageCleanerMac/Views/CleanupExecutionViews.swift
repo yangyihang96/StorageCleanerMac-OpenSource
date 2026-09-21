@@ -416,45 +416,28 @@ struct SmartScanCleanupProgressPage: View {
     }
 
     var body: some View {
-        VStack(spacing: AppDesignTokens.Spacing.large) {
-            AppStateIconRing(
-                systemImage: isVerifying ? "checkmark.shield.fill" : "trash.fill",
-                tint: theme.actionFill,
-                size: 144,
-                progress: progressFraction,
-                isActive: progressFraction == nil && !isCancelling
-            )
-
-            VStack(spacing: AppDesignTokens.Spacing.small) {
-                Text(title)
-                    .font(AppDesignTokens.Typography.heroTitle)
-                Text(detail)
-                    .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .monospacedDigit()
-                    .frame(maxWidth: 440)
-            }
-
-            CleanupExecutionStageList(
-                hasStartedMoving: progress != nil,
-                isVerifying: isVerifying,
-                isCancelling: isCancelling
-            )
-
+        FeatureRuntimePage(
+            module: .green, title: title, subtitle: detail,
+            state: isCancelling ? .stopping : .running,
+            fraction: progressFraction,
+            metrics: progress.map { [
+                RuntimeWorkflowMetric(title: L10n.text("已移动", "Moved"), value: String($0.movedItemCount)),
+                RuntimeWorkflowMetric(title: L10n.text("已跳过", "Skipped"), value: String($0.skippedItemCount)),
+                RuntimeWorkflowMetric(title: L10n.text("未完成", "Not Completed"), value: String($0.failedItemCount))
+            ] } ?? [],
+            trustText: L10n.text("仅处理已确认项目 · 移至废纸篓后验证", "Confirmed items only · Verify after moving to Trash")
+        ) {
+            CleanupExecutionStageList(hasStartedMoving: progress != nil,
+                isVerifying: isVerifying, isCancelling: isCancelling)
+        } actions: {
             if let onCancel {
-                Button(isCancelling
-                    ? L10n.text("正在停止", "Stopping")
-                    : L10n.text("安全取消", "Cancel Safely"),
-                    action: onCancel)
-                    .appButtonChrome(.secondary)
-                    .disabled(isCancelling)
+                Button(isCancelling ? L10n.text("正在停止", "Stopping") : L10n.text("安全取消", "Cancel Safely"), action: onCancel)
+                    .appButtonChrome(.secondary).disabled(isCancelling)
             }
         }
-        .padding(AppDesignTokens.Layout.pagePadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .contain)
     }
+
 }
 
 /// A complete safe-cleanup report page. The prominent number is the moved
@@ -500,32 +483,36 @@ struct SmartScanCleanupCompletedPage: View {
             : L10n.text("项目已移至隔离区，可在需要时恢复。", "Items moved to quarantine and can be restored if needed.")
     }
 
+    private var outcomeState: RuntimeWorkflowState {
+        switch report.outcome {
+        case .completed: .completed
+        case .partiallyCompleted: .attention
+        case .cancelled: .cancelled
+        case .failed: .failed
+        }
+    }
+
     var body: some View {
-        VStack(spacing: AppDesignTokens.Spacing.large) {
-            AppStateIconRing(
-                systemImage: report.outcome == .completed ? "checkmark" : "exclamationmark",
-                tint: report.outcome == .completed ? AppDesignTokens.Palette.success : AppDesignTokens.Palette.warning,
-                size: 144,
-                progress: 1
-            )
-
-            VStack(spacing: AppDesignTokens.Spacing.small) {
-                Text(title)
-                    .font(AppDesignTokens.Typography.heroTitle)
-                Text(ByteFormat.string(report.summary.movedToRecoverableLocationBytes))
-                    .font(.system(size: 42, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                Text(didMoveToTrash
-                    ? L10n.text("已移入废纸篓的容量", "Capacity Moved to Trash")
-                    : L10n.text("已移入隔离区的容量", "Capacity Moved to Quarantine"))
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
-                Text(summary)
-                    .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+        FeatureRuntimePage(
+            module: .green, title: title, subtitle: summary, state: outcomeState,
+            metrics: [
+                .init(title: didMoveToTrash ? L10n.text("已移入废纸篓", "Moved to Trash") : L10n.text("已移入隔离区", "Quarantined"),
+                      value: ByteFormat.string(report.summary.movedToRecoverableLocationBytes)),
+                .init(title: L10n.text("已移动", "Moved"), value: String(report.summary.movedItemCount)),
+                .init(title: L10n.text("跳过 / 失败", "Skipped / Failed"),
+                      value: "\(report.summary.skippedItemCount) / \(report.summary.failedItemCount)")
+            ],
+            trustText: report.summary.movedItemCount == 0
+                ? L10n.text("未移动任何文件", "No files were moved")
+                : didMoveToTrash
+                ? L10n.text("文件可从废纸篓恢复 · 清空后才会释放空间", "Restore files from Trash · Space is reclaimed when Trash is emptied")
+                : L10n.text("文件已安全隔离，可恢复", "Quarantined files can be restored")
+        ) {
+            if report.persistenceFailure != nil {
+                Text(L10n.text("部分回执尚未保存；已发生的移动仍列在下方，请保留本次结果。", "Some receipts could not be saved. Completed moves remain listed below; keep this result."))
+                    .foregroundStyle(AppDesignTokens.Palette.warning)
+                    .accessibilityLabel(L10n.text("回执保存失败", "Receipt saving failed"))
             }
-
             DisclosureGroup(L10n.text("清理详情", "Cleanup Details"), isExpanded: $showsDetails) {
                 VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
                     CleanupReportDetailRow(
@@ -568,7 +555,7 @@ struct SmartScanCleanupCompletedPage: View {
                 prominence: .quiet
             )
 
-            HStack(spacing: AppDesignTokens.Spacing.small) {
+        } actions: {
                 if !report.restorableReceipts.isEmpty,
                    store.cleanupRecoveryReport == nil {
                     Button {
@@ -580,12 +567,14 @@ struct SmartScanCleanupCompletedPage: View {
                     .disabled(store.isRestoringV2Cleanup)
                 }
 
+                if report.summary.movedItemCount > 0 {
                 Button {
                     store.openLatestV2CleanupLocation()
                 } label: {
                     Label(L10n.text("查看位置", "Show Location"), systemImage: "folder")
                 }
                 .appButtonChrome(.secondary)
+                }
 
                 Button(L10n.text("完成", "Done")) {
                     (onDone ?? store.dismissV2CleanupReport)()
@@ -594,9 +583,6 @@ struct SmartScanCleanupCompletedPage: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(store.isRestoringV2Cleanup)
             }
-        }
-        .padding(AppDesignTokens.Layout.pagePadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func availableSpaceDeltaText(_ bytes: Int64?) -> String {
@@ -950,6 +936,10 @@ struct CleanupV2OperationOverlay: View {
             }
         }
         switch failure.code {
+        case .persistenceFailed:
+            return L10n.text("回执保存失败，已停止后续操作", "Receipt saving failed; further operations stopped")
+        case .moveOutcomeUnknown:
+            return L10n.text("移动结果待核实，禁止自动重试", "Move outcome needs verification; automatic retry blocked")
         case .trashMoveRejected:
             return L10n.text("系统拒绝移入废纸篓", "Trash move rejected")
         case .trashMoveFailed:

@@ -111,6 +111,10 @@ enum CleanReportStore {
         _ report: CleanReport,
         defaults: UserDefaults = .standard
     ) -> Bool {
+        if defaults === UserDefaults.standard {
+            do { try CleanupReportJournal.live.checkpoint(report, expectedIdentities: [:]) }
+            catch { return false }
+        }
         var reports = load(defaults: defaults)
         reports.removeAll { $0.id == report.id || $0.planID == report.planID }
         reports.insert(report, at: 0)
@@ -129,16 +133,21 @@ enum CleanReportStore {
     }
 
     static func load(defaults: UserDefaults = .standard) -> [CleanReport] {
-        guard let data = defaults.data(forKey: defaultsKey),
-              data.count <= maximumEncodedBytes,
-              let reports = try? JSONDecoder().decode([CleanReport].self, from: data) else {
-            return []
+        let cached: [CleanReport]
+        if let data = defaults.data(forKey: defaultsKey), data.count <= maximumEncodedBytes,
+           let decoded = try? JSONDecoder().decode([CleanReport].self, from: data) {
+            cached = decoded
+        } else { cached = [] }
+        guard defaults === UserDefaults.standard else {
+            return Array(cached.sorted { $0.completedAt > $1.completedAt }.prefix(maximumReportCount))
         }
-        return Array(
-            reports
-                .sorted { $0.completedAt > $1.completedAt }
-                .prefix(maximumReportCount)
-        )
+        let durable = (try? CleanupReportJournal.live.load()) ?? []
+        var byPlan = Dictionary(cached.map { ($0.planID, $0) }, uniquingKeysWith: { a, b in
+            a.completedAt > b.completedAt ? a : b
+        })
+        // Disk evidence is authoritative, including restore updates.
+        for report in durable { byPlan[report.planID] = report }
+        return byPlan.values.sorted { $0.completedAt > $1.completedAt }
     }
 
     static func removingRestoredReceipts(
@@ -146,23 +155,14 @@ enum CleanReportStore {
         originalPaths: Set<String>
     ) -> CleanReport {
         guard !originalPaths.isEmpty else { return report }
-        let remainingItems = report.items.filter { item in
-            guard case let .moved(receipt) = item.outcome else { return true }
-            return !originalPaths.contains(PathSafety.lexicalPath(receipt.originalPath))
-        }
-        guard remainingItems.count != report.items.count else { return report }
-        return CleanReport(
-            id: report.id,
-            planID: report.planID,
-            sessionID: report.sessionID,
-            rulesVersion: report.rulesVersion,
-            disposition: report.disposition,
-            scanWasPartial: report.scanWasPartial,
-            startedAt: report.startedAt,
-            completedAt: report.completedAt,
-            outcome: report.outcome,
-            items: remainingItems,
-            summary: report.summary
-        )
+        let restored = report.restorableReceipts.filter {
+            originalPaths.contains(PathSafety.lexicalPath($0.originalPath))
+        }.map { CleanupRecoveryItem(id: UUID(), originalPath: $0.originalPath, outcome: .restored) }
+        guard !restored.isEmpty else { return report }
+        var updated = report
+        updated.recoveryAttempts = (report.recoveryAttempts ?? []) + [
+            CleanupRecoveryReport(completedAt: Date(), items: restored, attemptID: UUID())
+        ]
+        return updated
     }
 }

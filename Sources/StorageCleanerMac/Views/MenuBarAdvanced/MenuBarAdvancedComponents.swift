@@ -68,6 +68,21 @@ struct MiniWindowStatusCapsule: View {
 }
 
 
+/// One concise runtime cue for the whole secondary page. It is included in
+/// natural-height measurement so even a short display never hides the last row.
+struct MiniWindowPausedSamplingRow: View {
+    var body: some View {
+        Label(L10n.text("自动刷新已暂停", "Automatic Refresh Paused"), systemImage: AppSymbols.Action.pause)
+            .font(AdvancedPanelTypography.captionStrong)
+            .foregroundStyle(AppDesignTokens.Palette.warning)
+            .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+            .padding(.horizontal, GeekVisualTokens.cardHorizontalPadding)
+            .background(AppDesignTokens.Palette.warning.opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: GeekVisualTokens.cardRadius))
+            .accessibilityElement(children: .combine)
+    }
+}
+
 extension MenuBarAdvancedStatusView {
     var overviewContextMenu: some View {
         let actions = PanelToolbarActions(

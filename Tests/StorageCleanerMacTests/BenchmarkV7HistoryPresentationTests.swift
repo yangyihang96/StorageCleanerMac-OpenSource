@@ -35,7 +35,7 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
         XCTAssertTrue(profile.isBalanced)
     }
 
-    func testLocalBestUsesOnlyCurrentComparableSuccessfulRecordsAndDeletesByRecordID() async throws {
+    func testLegacyScoresRemainExportableAndDeletableButCannotBecomeNewProtocolBest() async throws {
         let olderCurrent = try makeCurrentResult(
             recordID: UUID(),
             overallScore: 8_400,
@@ -82,15 +82,12 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
 
         await store.loadHistory()
 
-        XCTAssertEqual(store.currentComparableOfficialV7History.count, 3)
-        XCTAssertTrue(lowConfidence.isCurrentLocalBestEligible)
-        XCTAssertTrue(lowConfidence.isCurrentOfficialRankingEligible)
-        XCTAssertEqual(store.localBestOfficialV7Result?.recordID, lowConfidence.recordID)
-        XCTAssertEqual(
-            store.localBestOfficialV7ResultsByCategory[.cpu]?.recordID,
-            lowConfidence.recordID
-        )
-        XCTAssertEqual(store.latestOfficialV7Result?.recordID, lowConfidence.recordID)
+        XCTAssertEqual(store.currentComparableOfficialV7History.count, 0)
+        XCTAssertFalse(lowConfidence.isCurrentLocalBestEligible)
+        XCTAssertFalse(lowConfidence.isCurrentOfficialRankingEligible)
+        XCTAssertNil(store.localBestOfficialV7Result)
+        XCTAssertNil(store.localBestOfficialV7ResultsByCategory[.cpu])
+        XCTAssertNil(store.latestOfficialV7Result)
         XCTAssertFalse(incompatibleManifest.isCurrentComparableOfficialResult)
         XCTAssertFalse(failed.isCurrentComparableOfficialResult)
 
@@ -106,7 +103,7 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
         let deleted = await store.deleteV7HistoryRecord(recordID: recordID)
         XCTAssertTrue(deleted)
         XCTAssertFalse(store.v7History.contains { $0.recordID == recordID })
-        XCTAssertEqual(store.localBestOfficialV7Result?.recordID, localBest.recordID)
+        XCTAssertNil(store.localBestOfficialV7Result)
         XCTAssertNil(store.exportV7HistoryRecord(recordID: recordID))
     }
 
@@ -146,11 +143,8 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
 
         await store.loadHistory()
 
-        XCTAssertEqual(store.localBestOfficialV7Result?.recordID, eligible.recordID)
-        XCTAssertEqual(
-            store.localBestOfficialV7ResultsByCategory[.cpu]?.recordID,
-            eligible.recordID
-        )
+        XCTAssertNil(store.localBestOfficialV7Result)
+        XCTAssertNil(store.localBestOfficialV7ResultsByCategory[.cpu])
         XCTAssertTrue(disqualified.allSatisfy { !$0.isCurrentOfficialRankingEligible })
     }
 
@@ -181,7 +175,7 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
             revocationDefaults: defaults
         )
         await store.loadHistory()
-        XCTAssertEqual(store.latestOfficialV7Result?.recordID, confirmed.recordID)
+        XCTAssertNil(store.latestOfficialV7Result)
 
         let deleted = await store.deleteV7HistoryRecord(
             recordID: try XCTUnwrap(confirmed.recordID)
@@ -208,7 +202,7 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
         XCTAssertFalse(earlyStop.isCurrentOfficialRankingEligible)
     }
 
-    func testLatestProjectionNeverUsesOlderScoringManifest() async throws {
+    func testLatestProjectionNeverRelabelsLegacyScoresAsTheNewProtocol() async throws {
         let current = try makeCurrentResult(
             recordID: UUID(),
             overallScore: 9_000,
@@ -228,8 +222,8 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
 
         await store.loadHistory()
 
-        XCTAssertEqual(store.latestOfficialV7Result?.recordID, current.recordID)
-        XCTAssertEqual(store.currentV7ScoringVersion, current.versions.scoringVersion)
+        XCTAssertNil(store.latestOfficialV7Result)
+        XCTAssertEqual(store.currentV7ScoringVersion, MSeriesProtocol.scoring)
     }
 
     private func makeStore(
@@ -263,7 +257,7 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
         thermalState: BenchmarkThermalState = .nominal,
         sustainedReachedTarget: Bool = true
     ) throws -> BenchmarkV7Result {
-        let official = OfficialBenchmarkPlan.current
+        let official = OfficialBenchmarkPlan.legacyV9
         let preflight = makePreflight(
             powerSource: powerSource,
             lowPowerModeEnabled: lowPowerModeEnabled,

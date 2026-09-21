@@ -4,6 +4,15 @@ struct EnergyImpactScanLandingView: View {
     @ObservedObject var store: ScanStore
 
     var body: some View {
+        if store.isEnergyImpactPageScanActive {
+            FeatureRuntimePage(
+                module: .energy,
+                title: L10n.text("正在测量应用能耗", "Measuring App Energy Impact"),
+                trustText: L10n.text("只读测量 · 不会更改电源模式或结束应用", "Read-only measurement · Power modes and apps stay unchanged")
+            ) {
+                EnergyImpactScanPipelineView(phase: visiblePhase, showsStageDetails: true)
+            } actions: { EmptyView() }
+        } else {
         FeatureLandingPageShell(
             title: L10n.text("能耗", "Energy"),
             subtitle: ReviewFilter.energy.pageSubtitle,
@@ -24,6 +33,7 @@ struct EnergyImpactScanLandingView: View {
             action: { store.scanEnergyImpact() }
         ) {
             EnergyImpactScanPipelineView(phase: visiblePhase, showsStageDetails: true)
+        }
         }
     }
 
@@ -96,6 +106,7 @@ struct EnergyImpactScanPipelineView: View {
                 .accessibilityLabel(L10n.text("能耗扫描进度", "Energy scan progress"))
                 .accessibilityValue("\(Int(progressFraction * 100))%")
 
+            if !showsStageDetails {
             Text(
                 phase?.detail
                     ?? L10n.text(
@@ -106,6 +117,7 @@ struct EnergyImpactScanPipelineView: View {
             .font(AppDesignTokens.Typography.compactLabel)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            }
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -119,13 +131,18 @@ struct EnergyImpactScanPipelineView: View {
     private var detailedStages: some View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(EnergyImpactScanPhase.allCases.enumerated()), id: \.element.id) { index, step in
+                let isComplete = phase.map { step.rawValue < $0.rawValue } ?? false
+                let isCurrent = phase == step
                 HStack(spacing: 14) {
-                    Text("\(index + 1)")
-                        .font(.system(size: 13, weight: .medium)).monospacedDigit()
-                        .frame(width: 23, height: 23)
-                        .background(theme.accent.opacity(0.7), in: Circle())
-                        .overlay(Circle().strokeBorder(.white.opacity(0.30)))
-                        .accessibilityHidden(true)
+                    Group {
+                        if isComplete { Image(systemName: "checkmark") }
+                        else { Text("\(index + 1)").monospacedDigit() }
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 23, height: 23)
+                    .background((isComplete ? AppDesignTokens.Palette.success : isCurrent ? theme.accent : Color.secondary).opacity(0.15), in: Circle())
+                    .foregroundStyle(isComplete ? AppDesignTokens.Palette.success : isCurrent ? theme.accent : Color.secondary)
+                    .accessibilityHidden(true)
                     Text(step.shortTitle)
                         .font(AppDesignTokens.Typography.compactLabelEmphasis)
                         .frame(width: 48, alignment: .leading)

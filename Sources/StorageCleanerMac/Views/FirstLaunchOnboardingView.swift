@@ -290,23 +290,16 @@ struct PermissionSetupCard<Actions: View>: View {
             )
 
             VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                HStack(spacing: AppDesignTokens.Spacing.small) {
-                    Text(title)
-                        .font(AppDesignTokens.Typography.inlineTitle)
-
-                    Text(requirement)
-                        .font(AppDesignTokens.Typography.compactLabel)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(.quaternary, in: Capsule())
-
-                    Spacer(minLength: 8)
-
-                    Label(status, systemImage: "circle.fill")
-                        .font(AppDesignTokens.Typography.compactLabel)
-                        .foregroundStyle(statusTint)
-                        .labelStyle(.titleAndIcon)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        permissionTitle.fixedSize()
+                        Spacer(minLength: 8)
+                        permissionStatus.fixedSize()
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        permissionTitle
+                        permissionStatus
+                    }
                 }
 
                 Text(detail)
@@ -318,8 +311,9 @@ struct PermissionSetupCard<Actions: View>: View {
                     .font(AppDesignTokens.Typography.caption)
                     .foregroundStyle(.tertiary)
 
-                HStack(spacing: AppDesignTokens.Spacing.small) {
-                    actions
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: AppDesignTokens.Spacing.small) { actions.fixedSize() }
+                    VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) { actions }
                 }
                 .controlSize(.regular)
                 .padding(.top, AppDesignTokens.Spacing.compact)
@@ -335,4 +329,22 @@ struct PermissionSetupCard<Actions: View>: View {
                 .strokeBorder(AppDesignTokens.Palette.separator, lineWidth: 0.5)
         }
     }
+
+    private var permissionTitle: some View {
+        HStack(spacing: 8) {
+            Text(title).font(AppDesignTokens.Typography.inlineTitle)
+            Text(requirement).font(AppDesignTokens.Typography.compactLabel)
+                .foregroundStyle(.secondary).padding(.horizontal, 7).padding(.vertical, 2)
+                .background(.quaternary, in: Capsule())
+        }
+    }
+
+    private var permissionStatus: some View {
+        Label(status, systemImage: "circle.fill")
+            .font(AppDesignTokens.Typography.compactLabel)
+            .foregroundStyle(statusTint)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(statusTint.opacity(0.1), in: Capsule())
+    }
+
 }

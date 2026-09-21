@@ -6,7 +6,7 @@ enum BenchmarkV7LeaderboardConstants {
     static let maximumResponseBytes = 512 * 1_024
 
     static var currentVersions: BenchmarkV7VersionManifest {
-        BenchmarkV7ReferenceCatalog.versions(for: OfficialBenchmarkPlan.current.plan)
+        BenchmarkV7ReferenceCatalog.versions(for: OfficialBenchmarkPlan.legacyV9.plan)
     }
 
     static let requiredCoreMetricIDs = [
@@ -289,7 +289,7 @@ struct BenchmarkV7LeaderboardDraft: Identifiable, Equatable, Sendable {
         installationID: UUID,
         displayName: String
     ) throws -> Self {
-        guard result.isCurrentOfficialRankingEligible else {
+        guard result.isLegacyArchiveEligible else {
             throw BenchmarkV7LeaderboardEligibilityError.notRankingEligible
         }
         guard let recordID = result.recordID else {

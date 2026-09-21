@@ -73,6 +73,7 @@ enum MiniWindowDemoData {
         case overviewCustomizer = "menu.overview.customizer"
         case memorySecondary = "menu.memory.secondary"
         case memoryHistory = "menu.memory.history"
+        case memoryComposition = "menu.memory.composition"
         case memoryProcessesInitial = "menu.memory.processes.initial"
         case memoryProcessesSelected = "menu.memory.processes.selected"
         case memoryProcessesQuitResult = "menu.memory.processes.quitResult"
@@ -97,7 +98,6 @@ enum MiniWindowDemoData {
         case sensorSecondary = "menu.sensor.secondary"
         case sensorGPUTemperature = "menu.sensor.gpuTemperature"
         case sensorCPUTemperature = "menu.sensor.cpuTemperature"
-        case sensorCPUFrequencyInspector = "menu.sensor.cpuFrequencyInspector"
         case sensorFanSpeedHistory = "menu.sensor.fanSpeedHistory"
         case fanCurveEditor = "menu.fan.curveEditor"
         case fanControlFull = "menu.fan.control.full"
@@ -127,6 +127,8 @@ enum MiniWindowDemoData {
                 .secondary(.power)
             case .memoryHistory:
                 .tertiary(.memory, .memory)
+            case .memoryComposition:
+                .inline(.memory, debugRouteIdentifier)
             case .cpuHistory:
                 .tertiary(.processor, .processor)
             case .diskIOHistory:
@@ -146,7 +148,7 @@ enum MiniWindowDemoData {
             case .networkHistory:
                 .inline(.network, debugRouteIdentifier)
             case .sensorGPUTemperature, .sensorCPUTemperature,
-                 .sensorCPUFrequencyInspector, .sensorFanSpeedHistory:
+                 .sensorFanSpeedHistory:
                 .inline(.sensors, debugRouteIdentifier)
             case .networkVPNPPP, .networkVPNThirdParty, .networkVPNSystem,
                  .networkVPNReadOnly, .networkVPNDisconnectConfirmation:
@@ -550,8 +552,14 @@ enum MiniWindowDemoData {
     }
 
 #if DEBUG || STORAGE_CLEANER_BETA
-    static var isCapturingMenuBarPanelSnapshots: Bool {
-        isCapturingMenuBarPanelSnapshots(
+    @MainActor private static var hasCompletedMenuBarPanelSnapshots = false
+
+    @MainActor static func finishMenuBarPanelSnapshots() {
+        hasCompletedMenuBarPanelSnapshots = true
+    }
+
+    @MainActor static var isCapturingMenuBarPanelSnapshots: Bool {
+        !hasCompletedMenuBarPanelSnapshots && isCapturingMenuBarPanelSnapshots(
             arguments: ProcessInfo.processInfo.arguments
         )
     }

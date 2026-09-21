@@ -383,28 +383,6 @@ final class LargeFilesStore: ObservableObject {
         storageMapBrowsePhase = .idle
     }
 
-    var storageMapSunburstSegments: [StorageSunburstLayout.Segment] {
-        guard let currentStorageMapSnapshot else { return [] }
-        let rootEntries = StorageTreemapPresentation.mapLayoutEntries(
-            from: StorageTreemapPresentation.visibleEntries(from: currentStorageMapSnapshot),
-            measuredBytes: currentStorageMapSnapshot.measuredBytes,
-            referenceBytes: currentStorageMapSnapshot.referenceBytes,
-            limit: 30
-        )
-        let scanner = DiskScanner(excludedPaths: [])
-        return StorageSunburstLayout.segments(entries: rootEntries) { entry in
-            guard let index = storageAnalysis?.index,
-                  let snapshot = try? scanner.storageMapSnapshot(at: entry.path, using: index) else { return [] }
-            // ponytail: bound child wedges; the existing list exposes every indexed item.
-            return StorageTreemapPresentation.mapLayoutEntries(
-                from: snapshot.entries,
-                measuredBytes: snapshot.measuredBytes,
-                referenceBytes: snapshot.referenceBytes,
-                limit: 6
-            )
-        }
-    }
-
     func openStorageMapDirectory(_ entry: StorageTreemapEntry, fromLevel level: Int? = nil) {
         guard entry.canDescend,
               !storageMapBrowsePhase.isLoading,
@@ -415,7 +393,7 @@ final class LargeFilesStore: ObservableObject {
         let targetPath = DiskScanner.storageMapLogicalPath(entry.path)
         guard DiskScanner.storageMapPath(targetPath, isWithinRoot: basePath) else { return }
 
-        // Deep sunburst sectors must keep every parent in the breadcrumb. Resolve
+        // Direct navigation must keep every parent in the breadcrumb. Resolve
         // these levels from the completed index before changing navigation.
         var parentPaths: [String] = []
         var parent = DiskScanner.storageMapParentPath(targetPath)

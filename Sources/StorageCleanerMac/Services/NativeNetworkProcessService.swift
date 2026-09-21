@@ -39,6 +39,7 @@ enum NativeNetworkProcessService {
     ) -> NativeNetworkProcessSnapshot? {
         guard !cancellationCheck() else { return nil }
 
+        let observedSince = Date()
         let result: ShellCommandResult
         do {
             result = try Shell.run(
@@ -54,12 +55,14 @@ enum NativeNetworkProcessService {
 
         guard result.terminationStatus == 0,
               !cancellationCheck() else { return nil }
-        return parse(result.standardOutput, generatedAt: Date())
+        return parse(result.standardOutput, generatedAt: Date(), observedSince: observedSince)
     }
 
     static func parse(
         _ output: String,
-        generatedAt: Date
+        generatedAt: Date,
+        observedSince: Date? = nil,
+        metadataResolver: ((Int32, Date) -> ProcessMetadata?)? = nil
     ) -> NativeNetworkProcessSnapshot? {
         let lines = output
             .split(whereSeparator: \Character.isNewline)
@@ -79,10 +82,24 @@ enum NativeNetworkProcessService {
             .filter { $0.downloadBytesPerSecond > 0 || $0.uploadBytesPerSecond > 0 }
             .sorted(by: processSort)
 
-        return NativeNetworkProcessSnapshot(
-            generatedAt: generatedAt,
-            processes: Array(parsedRows.prefix(5))
-        )
+        // Resolve only the Top-K numeric range. Include the complete boundary
+        // tie because the existing final tiebreaker uses localized app names.
+        let cutoff = parsedRows.count > 5 ? parsedRows[4] : nil
+        let candidates = parsedRows.prefix { row in
+            guard let cutoff else { return true }
+            return row.totalBytesPerSecond > cutoff.totalBytesPerSecond
+                || (row.totalBytesPerSecond == cutoff.totalBytesPerSecond
+                    && row.downloadBytesPerSecond >= cutoff.downloadBytesPerSecond)
+        }
+        let resolve = metadataResolver ?? resolveMetadata
+        let resolved = candidates.map { row in
+            let metadata = resolve(row.processIdentifier, observedSince ?? generatedAt)
+            return NativeNetworkProcessTransfer(processIdentifier: row.processIdentifier,
+                name: metadata?.name ?? row.name, iconPath: metadata?.iconPath ?? "",
+                downloadBytesPerSecond: row.downloadBytesPerSecond,
+                uploadBytesPerSecond: row.uploadBytesPerSecond)
+        }.sorted(by: processSort)
+        return NativeNetworkProcessSnapshot(generatedAt: generatedAt, processes: Array(resolved.prefix(5)))
     }
 
     private static func parseDeltaRow(_ line: String) -> NativeNetworkProcessTransfer? {
@@ -106,27 +123,34 @@ enum NativeNetworkProcessService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !fallbackName.isEmpty else { return nil }
 
-        let runningApplication = NSRunningApplication(
-            processIdentifier: processIdentifier
-        )
-        let name = runningApplication?.localizedName?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let displayName = name.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackName
-        let executablePath = runningApplication?.executableURL?.path
-            ?? processExecutablePath(for: processIdentifier)
-        let iconPath = resolvedApplicationIconPath(
-            bundlePath: runningApplication?.bundleURL?.path,
-            executablePath: executablePath
-        )
+        return NativeNetworkProcessTransfer(processIdentifier: processIdentifier,
+            name: fallbackName, iconPath: "", downloadBytesPerSecond: downloadBytes,
+            uploadBytesPerSecond: uploadBytes)
+    }
 
-        return NativeNetworkProcessTransfer(
-            processIdentifier: processIdentifier,
-            name: displayName,
-            iconPath: iconPath,
-            downloadBytesPerSecond: downloadBytes,
-            uploadBytesPerSecond: uploadBytes
-        )
+    struct ProcessMetadata {
+        let name: String?
+        let iconPath: String
+    }
+
+    private static func processBirth(_ pid: Int32) -> UInt64? {
+        var info = proc_bsdinfo()
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+            == MemoryLayout<proc_bsdinfo>.size else { return nil }
+        return info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+    }
+
+    private static func resolveMetadata(_ pid: Int32, observedSince: Date) -> ProcessMetadata? {
+        guard let birth = processBirth(pid),
+              Double(birth) / 1_000_000 <= observedSince.timeIntervalSince1970 else { return nil }
+        let application = NSRunningApplication(processIdentifier: pid)
+        let name = application?.localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = resolvedApplicationIconPath(bundlePath: application?.bundleURL?.path,
+            executablePath: application?.executableURL?.path ?? processExecutablePath(for: pid))
+        // Exit or PID reuse during metadata resolution leaves the nettop label
+        // intact, without assigning the replacement process's name/icon.
+        guard processBirth(pid) == birth else { return nil }
+        return ProcessMetadata(name: name.flatMap { $0.isEmpty ? nil : $0 }, iconPath: path)
     }
 
     static func resolvedApplicationIconPath(

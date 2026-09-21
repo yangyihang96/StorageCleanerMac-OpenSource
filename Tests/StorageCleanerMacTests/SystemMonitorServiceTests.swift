@@ -2062,7 +2062,7 @@ final class SystemMonitorServiceTests: XCTestCase {
             ".onChange(of: panelSettingsState.geekDashboardConfiguration)"
         ))
         XCTAssertTrue(advancedSource.contains("monitorState.history"))
-        XCTAssertFalse(advancedSource.contains("@State private var history"))
+        XCTAssertFalse(advancedSource.contains("@State private var history: ["))
         XCTAssertTrue(telemetryModelSource.contains("static let duration: TimeInterval = 28 * 24 * 60 * 60"))
         XCTAssertTrue(telemetryModelSource.contains("static let highResolutionDuration: TimeInterval = 60 * 60"))
         XCTAssertTrue(telemetryModelSource.contains("static let bucketDuration: TimeInterval = 60"))
@@ -2089,7 +2089,6 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(advancedSource.contains("valueRange: 0...fanTrendMaximum"))
         XCTAssertTrue(advancedSource.contains("channel: .fanRPM"))
         XCTAssertFalse(advancedSource.contains("sensorTrendSeries"))
-        XCTAssertFalse(advancedSource.contains("geekMemoryCompositionHoverTarget"))
         XCTAssertFalse(advancedSource.contains("GeekMemoryCompositionHoverDetail"))
         XCTAssertTrue(advancedSource.contains("GPU、温度和风扇约每 2 秒更新"))
         XCTAssertTrue(advancedSource.contains(".monospacedDigit()"))
@@ -2649,9 +2648,10 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(sidebarSource.contains("ForEach(SidebarGroup.allCases)"))
         XCTAssertFalse(sidebarSource.contains(".scrollIndicators(.hidden)"))
         XCTAssertTrue(sidebarSource.contains("LinearGradient("))
-        XCTAssertTrue(sidebarSource.contains(".environment(\\.colorScheme, .dark)"),
-                      "Golden sidebar colors must keep semantic text readable in a light system appearance")
-        XCTAssertTrue(sidebarSource.contains("filter.moduleTheme.accent.opacity(0.30)"))
+        XCTAssertFalse(sidebarSource.contains(".environment(\\.colorScheme, .dark)"),
+                       "The sidebar must inherit the selected day/night appearance")
+        XCTAssertTrue(sidebarSource.contains("AppAppearanceColors.sidebarTop"))
+        XCTAssertTrue(sidebarSource.contains("accent.opacity(colorScheme == .dark ? 0.30 : 0.12)"))
         XCTAssertFalse(sidebarSource.contains("List(selection: listSelection)"))
         XCTAssertFalse(sidebarSource.contains("legacyBackdrop"))
         XCTAssertFalse(glassSource.contains(".glassEffect("))

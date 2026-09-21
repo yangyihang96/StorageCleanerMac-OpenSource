@@ -124,6 +124,8 @@ struct SystemEnergySessionSnapshot: Codable, Equatable, Sendable {
             lastSample = nil
             return
         }
+        // A stale callback must not become the next integration baseline.
+        if let previous = lastSample, sample.monotonicSeconds <= previous.monotonicSeconds { return }
         defer {
             lastSample = sample
             updatedAt = max(updatedAt, sample.wallClock)
@@ -178,7 +180,7 @@ enum SystemEnergyAccumulatorLocation {
 
 enum SystemEnergySessionStore {
     static func load(from url: URL) -> SystemEnergySessionSnapshot? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let data = try? BoundedMonitoringFile.read(url, maximumBytes: 65_536) else { return nil }
         return try? JSONDecoder().decode(SystemEnergySessionSnapshot.self, from: data)
     }
 
@@ -198,7 +200,14 @@ actor SystemEnergyPersistenceWriter {
 
     private var newestUpdatedAt = Date.distantPast
     private var newestTotalWattHours: Double = -1
-    private var lastSuccessfulSaveAt = Date.distantPast
+    private(set) var saveSchedule = MonitoringSaveSchedule()
+    private(set) var preservedLoadFailure = false
+    private var checkedExistingFile = false
+    private let write: @Sendable (SystemEnergySessionSnapshot, URL) throws -> Void
+
+    init(write: @escaping @Sendable (SystemEnergySessionSnapshot, URL) throws -> Void = SystemEnergySessionStore.save) {
+        self.write = write
+    }
 
     func save(
         _ snapshot: SystemEnergySessionSnapshot,
@@ -208,17 +217,30 @@ actor SystemEnergyPersistenceWriter {
         guard snapshot.updatedAt > newestUpdatedAt
             || (snapshot.updatedAt == newestUpdatedAt
                 && snapshot.totalWattHours >= newestTotalWattHours) else { return }
-        guard force
-            || snapshot.updatedAt.timeIntervalSince(lastSuccessfulSaveAt)
-                >= Self.minimumSaveInterval else { return }
+        guard !preservedLoadFailure,
+              saveSchedule.begin(at: snapshot.updatedAt, interval: Self.minimumSaveInterval, force: force) else { return }
         do {
-            try SystemEnergySessionStore.save(snapshot, to: url)
+            if !checkedExistingFile {
+                do {
+                    if let data = try BoundedMonitoringFile.read(url, maximumBytes: 65_536) {
+                        _ = try JSONDecoder().decode(SystemEnergySessionSnapshot.self, from: data)
+                    }
+                    checkedExistingFile = true
+                } catch {
+                    if case MonitoringFileError.unavailable(let code) = error, code != ELOOP {
+                        // Access/I/O failures can recover; retry with bounded backoff.
+                    } else {
+                        preservedLoadFailure = true
+                    }
+                    throw error
+                }
+            }
+            try write(snapshot, url)
             newestUpdatedAt = snapshot.updatedAt
             newestTotalWattHours = snapshot.totalWattHours
-            lastSuccessfulSaveAt = snapshot.updatedAt
+            saveSchedule.succeeded(at: snapshot.updatedAt)
         } catch {
-            // A failed write does not advance the throttle, so the next sample
-            // immediately retries the same monotonic snapshot.
+            saveSchedule.failed(at: snapshot.updatedAt)
         }
     }
 }
@@ -249,22 +271,9 @@ enum SystemEnergyPowerSampleService {
             )
         }
 
-        // macOS exposes no public, portable AC wall-power meter. Reuse the
-        // existing attributed-process sampler as an explicitly labelled lower
-        // confidence estimate instead of treating adapter rating as live draw.
-        let attributed = await Task.detached(priority: .utility) {
-            await EnergyImpactService.snapshot(sampleInterval: .milliseconds(600))
-        }.value
-        let watts = attributed.totalCurrentPowerWatts
-        guard watts.isFinite, watts > 0 else { return nil }
-        return SystemEnergyPowerSample(
-            monotonicSeconds: ProcessInfo.processInfo.systemUptime,
-            wallClock: Date(),
-            watts: watts,
-            powerSource: powerSource,
-            confidence: .estimated,
-            source: "attributed-process-estimate"
-        )
+        // AC attribution is supplied by the existing, explicitly requested
+        // detail sampler. A background energy timer must never enumerate apps.
+        return nil
     }
 }
 
@@ -280,6 +289,13 @@ final class SystemEnergyAccumulator {
     private let sampleProvider: SampleProvider
     private let persistenceWriter = SystemEnergyPersistenceWriter()
     private var monitorTask: Task<Void, Never>?
+    private var sampleTask: Task<SystemEnergyPowerSample?, Never>?
+    private var generation = 0
+    private var isStopping = false
+    private var isSleeping = false
+    private var isStarted = false
+    private var persistenceTask: Task<Void, Never>?
+    private var pendingPersistence: (snapshot: SystemEnergySessionSnapshot, force: Bool)?
     private var powerSourceObserver: BatteryPowerSourceObserver?
     private var workspaceObservers: [NSObjectProtocol] = []
 
@@ -301,9 +317,13 @@ final class SystemEnergyAccumulator {
         }
     }
 
-    func start() {
-        guard monitorTask == nil else { return }
+    func start(passive: Bool = false) {
+        guard !isStarted, !isStopping else { return }
+        isStarted = true
         observeLifecycle()
+        // Production reuses the auxiliary monitor's battery reading and the
+        // visible process sampler; it owns no second sampling clock.
+        guard !passive else { return }
         powerSourceObserver = BatteryPowerSourceObserver { [weak self] in
             Task { @MainActor in await self?.sampleNow() }
         }
@@ -322,20 +342,83 @@ final class SystemEnergyAccumulator {
     }
 
     func stopAndFlush() async {
+        isStopping = true
+        generation &+= 1
         monitorTask?.cancel()
-        monitorTask = nil
+        sampleTask?.cancel()
         powerSourceObserver = nil
         stopObservingLifecycle()
+        // Retain both handles until the physical read has returned.
+        _ = await sampleTask?.value
+        await monitorTask?.value
+        monitorTask = nil
+        sampleTask = nil
+        await persistenceTask?.value
         await persist()
+        isStarted = false
+        isStopping = false
     }
 
     func sampleNow() async {
-        guard let sample = await sampleProvider() else {
+        guard !isStopping, !isSleeping else { return }
+        if let sampleTask { _ = await sampleTask.value; return }
+        let capturedGeneration = generation
+        let provider = sampleProvider
+        let task = Task.detached(priority: .utility) { await provider() }
+        sampleTask = task
+        let sample = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: { task.cancel() }
+        sampleTask = nil
+        guard !Task.isCancelled, generation == capturedGeneration,
+              !isStopping, !isSleeping else { return }
+        guard let sample else {
             snapshot.markGap(at: Date())
             publish()
             return
         }
         record(sample)
+    }
+
+    func recordBattery(_ battery: BatteryPowerSnapshot?, electrical: NativeBatteryElectricalSnapshot?) {
+        guard !isStopping, !isSleeping, battery?.powerSource == .batteryPower else { return }
+        guard let electrical, let watts = electrical.powerWatts.map(abs), watts.isFinite, watts > 0 else {
+            snapshot.markGap(at: Date())
+            publish()
+            return
+        }
+        guard shouldRecordSharedSample(at: electrical.generatedAt, source: .battery) else { return }
+        record(SystemEnergyPowerSample(monotonicSeconds: ProcessInfo.processInfo.systemUptime,
+            wallClock: electrical.generatedAt, watts: watts, powerSource: .battery,
+            confidence: .measured, source: "native-battery-voltage-current"))
+    }
+
+    func recordAttributed(_ reading: EnergyImpactSnapshot, powerSource: BatteryPowerSource, continuous: Bool = false) {
+        guard !isStopping, !isSleeping, powerSource == .acPower,
+              reading.totalCurrentPowerWatts.isFinite, reading.totalCurrentPowerWatts > 0 else { return }
+        if !continuous { snapshot.markGap(at: reading.generatedAt) }
+        guard shouldRecordSharedSample(at: reading.generatedAt, source: .ac) else { return }
+        record(SystemEnergyPowerSample(monotonicSeconds: ProcessInfo.processInfo.systemUptime,
+            wallClock: reading.generatedAt, watts: reading.totalCurrentPowerWatts,
+            powerSource: .ac, confidence: .estimated, source: "attributed-process-estimate"))
+    }
+
+    func endAttributedObservation() {
+        guard snapshot.lastSample?.confidence == .estimated else { return }
+        markObservationGap()
+    }
+
+    func markObservationGap() {
+        snapshot.markGap(at: Date())
+        publish()
+    }
+
+    private func shouldRecordSharedSample(at date: Date, source: SystemEnergyPowerSource) -> Bool {
+        guard let last = snapshot.lastSample else { return true }
+        // Sampling cadence uses the monotonic clock; a wall-clock correction
+        // must not freeze the energy view until the old date is reached.
+        return source != last.powerSource
+            || ProcessInfo.processInfo.systemUptime - last.monotonicSeconds >= 30
     }
 
     func record(_ sample: SystemEnergyPowerSample) {
@@ -344,25 +427,36 @@ final class SystemEnergyAccumulator {
     }
 
     func markSleep(at date: Date = Date()) {
+        isSleeping = true
+        generation &+= 1
+        sampleTask?.cancel()
         snapshot.markGap(at: date)
         publish(forcePersistence: true)
     }
 
     func markWake(at date: Date = Date()) {
+        isSleeping = false
+        generation &+= 1
         snapshot.markGap(at: date)
         publish()
-        Task { @MainActor [weak self] in await self?.sampleNow() }
+        if monitorTask != nil {
+            Task { @MainActor [weak self] in await self?.sampleNow() }
+        }
     }
 
     private func publish(forcePersistence: Bool = false) {
         onSnapshot?(snapshot)
-        Task { [snapshot, fileURL, persistenceWriter, forcePersistence] in
-            guard let fileURL else { return }
-            await persistenceWriter.save(
-                snapshot,
-                to: fileURL,
-                force: forcePersistence
-            )
+        pendingPersistence = (snapshot, forcePersistence || pendingPersistence?.force == true)
+        guard persistenceTask == nil else { return }
+        persistenceTask = Task { [weak self] in
+            guard let self else { return }
+            while let pending = pendingPersistence {
+                pendingPersistence = nil
+                if let fileURL {
+                    await persistenceWriter.save(pending.snapshot, to: fileURL, force: pending.force)
+                }
+            }
+            persistenceTask = nil
         }
     }
 

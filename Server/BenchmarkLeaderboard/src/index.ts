@@ -20,6 +20,8 @@ import {
 import { assertHMACSecret, hmacHex, sha256Hex } from "./crypto";
 import { handleV2Request, isV2Path } from "./v2";
 
+import { handleMSeriesRequest } from "./mseries-contract";
+
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "X-Content-Type-Options": "nosniff",
@@ -44,6 +46,7 @@ export default {
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   try {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/v3/mseries/")) return handleMSeriesRequest(request, url);
     if (isV2Path(url.pathname)) return await handleV2Request(request, env, url);
     if (request.method === "OPTIONS") return optionsResponse();
     if (request.method === "GET" && url.pathname === "/v1/health") {

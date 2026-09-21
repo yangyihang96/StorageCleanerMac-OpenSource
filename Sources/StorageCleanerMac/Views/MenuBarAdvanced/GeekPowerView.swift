@@ -105,17 +105,21 @@ enum GeekBatteryRingState: Equatable {
 extension MenuBarAdvancedStatusView {
     var geekPowerPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
+            liveCard(.battery) {
+                VStack(spacing: GeekPanelLayout.detailSpacing) {
             if hasInternalBattery {
                 geekPowerGaugeCard
                 geekPowerHistoryCard
             } else {
                 geekPowerAdapterCard
             }
-            if showsExtendedGeekDetails {
-                if hasAvailableEnergyMode {
-                    geekPowerModeCard
                 }
-                geekSignificantEnergyCard
+            }
+            if showsExtendedGeekDetails {
+                liveCard(.controls) {
+                    if hasAvailableEnergyMode { geekPowerModeCard }
+                }
+                liveCard(.energyProcesses) { geekSignificantEnergyCard }
             }
         }
         .task {
@@ -123,13 +127,10 @@ extension MenuBarAdvancedStatusView {
             guard !MiniWindowDemoData.isEnabled else { return }
 #endif
             auxiliaryState.refreshBatteryChargeLimitState()
-            if showsExtendedGeekDetails,
-               geekShouldRefreshEnergyImpact {
-                store.refreshEnergyImpact(priority: .utility)
-            }
             await computerHealthStore.refreshBatteryPowerModes()
             await computerHealthStore.refresh()
         }
+
     }
 
     var batteryRuntimeEstimate: GeekBatteryRemainingTime.Estimate? {
@@ -149,7 +150,7 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekPowerAdapterCard: some View {
-        GeekCombinedCard(height: GeekPowerLayout.adapterHeight, verticalPadding: 4) {
+        GeekCombinedCard(height: GeekPowerLayout.adapterHeight) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(L10n.text("电源适配器", "Power Adapter").uppercased())
@@ -317,8 +318,7 @@ extension MenuBarAdvancedStatusView {
             appCount: apps.count
         )
         return GeekCombinedCard(
-            height: GeekPowerLayout.significantEnergyHeight(for: apps.count),
-            verticalPadding: 2
+            height: GeekPowerLayout.significantEnergyHeight(for: apps.count)
         ) {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
@@ -364,17 +364,11 @@ extension MenuBarAdvancedStatusView {
             return true
         }
 #endif
-        return store.energyImpactSnapshot != nil
+        return store.menuBarPreparedProcesses != nil
     }
 
     private var geekShouldRefreshEnergyImpact: Bool {
-        guard store.canRefreshEnergyImpact else { return false }
-#if DEBUG || STORAGE_CLEANER_BETA
-        guard !MiniWindowDemoData.isEnabled else { return false }
-#endif
-        return GeekOnDemandSnapshotFreshness.state(
-            generatedAt: store.energyImpactSnapshot?.generatedAt
-        ) != .current
+        geekShouldRefreshOnDemandSnapshot
     }
 
     private var geekPowerModeTitle: String? {
@@ -536,11 +530,11 @@ extension MenuBarAdvancedStatusView {
     private func geekPowerSamplingRow(_ title: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: AppSymbols.Panel.powerLimit)
-                .font(.system(size: 10, weight: .regular))
+                .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.secondary)
                 .frame(width: 14, height: 14)
             Text(title)
-                .font(.footnote)
+                .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -559,14 +553,14 @@ private struct GeekPowerEnergyAppRow: View {
                 .frame(width: 15, height: 15)
 
             Text(app.name)
-                .font(.footnote)
+                .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
 
             Spacer(minLength: 0)
 
             Text(app.currentPowerWattsText)
-                .font(.caption2.monospacedDigit())
+                .font(AdvancedPanelTypography.body.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }

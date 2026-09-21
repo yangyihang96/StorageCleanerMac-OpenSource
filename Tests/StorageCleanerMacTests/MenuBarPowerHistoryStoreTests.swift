@@ -138,10 +138,9 @@ final class MenuBarPowerHistoryStoreTests: XCTestCase {
         )
         try MenuBarPowerHistoryStore.save([legacyPoint], to: legacyURL)
 
-        let migrated = await MetricHistoryStore(
-            url: unifiedURL,
-            legacyPowerURL: legacyURL
-        ).load(now: now)
+        let migrationStore = MetricHistoryStore(url: unifiedURL, legacyPowerURL: legacyURL)
+        let migrated = await migrationStore.load(now: now)
+        try await migrationStore.flush(now: now)
         XCTAssertEqual(migrated.power, [legacyPoint])
         XCTAssertTrue(FileManager.default.fileExists(atPath: unifiedURL.path))
 

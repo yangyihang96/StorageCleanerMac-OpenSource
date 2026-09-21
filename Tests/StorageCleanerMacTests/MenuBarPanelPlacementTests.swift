@@ -332,7 +332,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             ),
             CGSize(
                 width: GeekPanelPresentationMetrics.tertiaryMinimumDimension,
-                height: GeekPanelPresentationMetrics.tertiaryMaximumSize.height
+                height: 9_000
             )
         )
         XCTAssertEqual(

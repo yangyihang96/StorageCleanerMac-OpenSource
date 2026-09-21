@@ -512,9 +512,12 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     }
 
     private func makePersistedDuplicateFixture() throws -> PersistedDuplicateFixture {
+        // Documents can receive provenance/sync attributes just after creation,
+        // changing ctime and correctly invalidating the saved file snapshot.
+        // Keep owned fixtures outside that managed directory; production file
+        // identity and metadata validation remain fully enabled.
         let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents", isDirectory: true)
-            .appendingPathComponent("DuplicateResultStoreTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent(".StorageCleanerDuplicateResultTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700],

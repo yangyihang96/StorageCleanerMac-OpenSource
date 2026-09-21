@@ -19,6 +19,11 @@ struct BenchmarkV7DashboardView: View {
         case leaderboard
     }
 
+    private struct ScrollIdentity: Hashable {
+        let page: Page
+        let running: Bool
+    }
+
     private enum HistoryFeedback: Equatable {
         case success(String)
         case failure(String)
@@ -74,15 +79,20 @@ struct BenchmarkV7DashboardView: View {
     private var accent: Color { moduleTheme.accent }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: AppDesignTokens.Layout.pageSpacing) {
-                pagePicker
-                pageContent
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: AppDesignTokens.Layout.pageSpacing) {
+                    pagePicker
+                    pageContent
+                }
+                .padding(AppDesignTokens.Layout.pagePadding)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .padding(AppDesignTokens.Layout.pagePadding)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // Reset only when changing page/run state, keeping cancellation
+            // visible without resetting the scroll position on every sample.
+            .id(ScrollIdentity(page: selectedPage, running: isRunning))
+            // Reserve real layout space. A transparent safe-area inset lets
+            // scrolling content draw underneath these status labels on macOS.
             if selectedPage == .benchmark && !isRunning {
                 benchmarkStatusBar.padding(.horizontal, AppDesignTokens.Layout.pagePadding)
             }
@@ -125,7 +135,7 @@ struct BenchmarkV7DashboardView: View {
                 .tag(Page.localBest)
             Text(L10n.text("历史记录", "History"))
                 .tag(Page.history)
-            Text(L10n.text("全球排行", "Global ranking"))
+            Text(L10n.text("社区提交榜", "Community submissions"))
                 .tag(Page.leaderboard)
         }
         .pickerStyle(.segmented)
@@ -151,10 +161,13 @@ struct BenchmarkV7DashboardView: View {
         case .history:
             historyPage
         case .leaderboard:
-            BenchmarkV7LeaderboardSection(
-                store: leaderboardStore,
-                results: ([latestResult] + history.map(Optional.some)).compactMap { $0 }
-            )
+            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
+                Text(L10n.text("新协议服务端尚未部署，当前不可提交新成绩。", "The new server protocol is not deployed; new results cannot be submitted."))
+                BenchmarkV7LeaderboardSection(
+                    store: leaderboardStore,
+                    results: ([latestResult] + history.map(Optional.some)).compactMap { $0 }.filter { $0.mSeries == nil }
+                )
+            }
         }
     }
 
@@ -171,6 +184,11 @@ struct BenchmarkV7DashboardView: View {
                     actionCard
                     benchmarkMonitor
                 }
+            }
+            if let result = visibleLatestResult?.mSeries { MSeriesRawResultView(result: result) }
+            if let latest = latestResult?.mSeries, !latest.isCompleteCore,
+               latest.sessionID != visibleLatestResult?.mSeries?.sessionID {
+                MSeriesRawResultView(result: latest)
             }
         }
     }
@@ -196,7 +214,7 @@ struct BenchmarkV7DashboardView: View {
             Spacer(minLength: AppDesignTokens.Spacing.medium)
 
             Label(
-                L10n.text("测试可随时取消", "The test can be cancelled at any time"),
+                L10n.text("可请求取消；收尾状态另行显示", "Cancellation can be requested; cleanup is tracked separately"),
                 systemImage: "checkmark.shield.fill"
             )
             .foregroundStyle(AppDesignTokens.Palette.success)
@@ -215,17 +233,25 @@ struct BenchmarkV7DashboardView: View {
                 Divider()
 
                 Text(L10n.text(
-                    "7 个阶段自动完成，预计约 \(durationText(Double(officialPlan.expectedMaximumDurationSeconds)))",
-                    "7 stages run automatically, expected to take about \(durationText(Double(officialPlan.expectedMaximumDurationSeconds)))"
+                    "18 项 Core 自动完成，预计不超过 \(durationText(Double(officialPlan.expectedMaximumDurationSeconds)))",
+                    "18 Core workloads run automatically, estimated up to \(durationText(Double(officialPlan.expectedMaximumDurationSeconds)))"
                 ))
                 .font(AppDesignTokens.Typography.secondary)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-                DisclosureGroup(L10n.text("7 个阶段说明", "About the 7 stages")) {
+                DisclosureGroup(L10n.text("测试项目与边界", "Workloads and limits")) {
                     benchmarkScopeDetails
                 }
                 .font(AppDesignTokens.Typography.metadata)
+
+                Text(L10n.text(
+                    "这是新协议的原始性能测量，不用于判断硬件故障。真实 Release 校准尚未完成，因此不生成本协议整机性能指数；读盘校验不计入读取耗时。",
+                    "This protocol reports raw performance, not hardware diagnosis. Release calibration is incomplete, so no whole-machine performance index is generated. Read verification is outside read timing."
+                ))
+                .font(AppDesignTokens.Typography.metadata)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
                 if let explanation {
                     Label(explanation, systemImage: "exclamationmark.triangle")
@@ -272,6 +298,9 @@ struct BenchmarkV7DashboardView: View {
             HStack(alignment: .top, spacing: AppDesignTokens.Spacing.small) {
                 ForEach(BenchmarkV7Category.corePerformance, id: \.self) { category in
                     let score = result?.coreScore?.categoryScores[category]?.score
+                    let raw = result?.mSeries
+                    let ids = MSeriesProtocol.coreIDs.filter { $0.hasPrefix(category.rawValue + ".") }
+                    let measured = raw?.metrics.filter { ids.contains($0.id) && $0.availability == .available }.count
                     VStack(spacing: AppDesignTokens.Spacing.small) {
                         Image(systemName: categorySystemImage(category))
                             .font(.system(size: 32, weight: .regular))
@@ -280,10 +309,10 @@ struct BenchmarkV7DashboardView: View {
                             .accessibilityHidden(true)
                         Text(categoryTitle(category))
                             .font(AppDesignTokens.Typography.secondary)
-                        Text(scoreText(score))
+                        Text(measured.map { "\($0)/\(ids.count)" } ?? scoreText(score))
                             .font(.system(size: 24, weight: .medium))
                             .monospacedDigit()
-                        Text(validScore(score) != nil
+                        Text(raw != nil ? L10n.text("项已测量", "Measured") : validScore(score) != nil
                             ? L10n.text("上次分项", "Last score")
                             : result == nil
                                 ? L10n.text("尚未测试", "Not tested")
@@ -322,18 +351,11 @@ struct BenchmarkV7DashboardView: View {
 
     private var benchmarkScopeDetails: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-            Text(L10n.text("1. CPU：单核与多核工作负载", "1. CPU: single and multi-core workloads"))
-            Text(L10n.text("2. GPU：图形渲染与计算", "2. GPU: graphics rendering and compute"))
-            Text(L10n.text("3. 内存：带宽与延迟", "3. Memory: bandwidth and latency"))
-            Text(L10n.text("4. 存储：连续读写与随机访问", "4. Storage: sequential I/O and random access"))
-            Text(L10n.text("5. 显示：刷新节奏", "5. Display: frame cadence"))
-            Text(L10n.text("6. 持续检查：CPU 与 GPU 负载稳定性", "6. Sustained check: CPU and GPU load stability"))
-            Text(L10n.text("7. 校验评分：核对采样并保存结果", "7. Validation: verify samples, score, and save"))
+            Text(L10n.text("CPU：单线程 4 项、多线程 4 项，使用全部逻辑核心。", "CPU: 4 single-thread and 4 all-logical-core workloads."))
+            Text(L10n.text("GPU：离屏图形、FP32、FP16；内存：复制、Triad、指针追逐。", "GPU: offscreen graphics, FP32, FP16. Memory: copy, triad, pointer chase."))
+            Text(L10n.text("存储：顺序读写、4K QD1 随机读写，仅用私有测试文件。", "Storage: sequential read/write and 4K QD1 random read/write, using private fixtures only."))
+            Text(L10n.text("预热不计分，所有 3 轮样本均保留；扩展未实现项目单独标示。", "Warmup is excluded; all 3 samples are retained. Unimplemented extensions are listed separately."))
         }
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, AppDesignTokens.Spacing.small)
     }
 
     private var runningCard: some View {
@@ -633,6 +655,12 @@ struct BenchmarkV7DashboardView: View {
                 Text(L10n.text("本次未生成综合分", "No overall score was generated for this run"))
                     .font(AppDesignTokens.Typography.secondary)
                     .foregroundStyle(.secondary)
+            }
+
+            if let raw = result.mSeries {
+                DisclosureGroup(L10n.text("原始分项与稳定程度", "Raw measurements and stability")) {
+                    MSeriesRawResultView(result: raw)
+                }
             }
 
             if result.failure == nil, !result.isCurrentComparableOfficialResult {
@@ -1138,7 +1166,32 @@ struct BenchmarkV7DashboardView: View {
 
     private var preflightWarning: String? {
         guard let preflight, !preflight.warnings.isEmpty else { return nil }
-        return preflight.warnings.map(\.detail).joined(separator: " · ")
+        return preflight.warnings.map { check in
+            switch check.issue {
+            case .acPowerRecommended:
+                L10n.text("建议连接外接电源。", check.detail)
+            case .lowPowerMode:
+                L10n.text("当前已开启低电量模式。", check.detail)
+            case .thermalFair:
+                L10n.text("系统温度高于正常状态，结果可能受影响。", check.detail)
+            case .thermalSerious:
+                L10n.text("系统报告严重温度压力，暂不运行测试。", check.detail)
+            case .thermalCritical:
+                L10n.text("系统报告危险温度压力，暂不运行测试。", check.detail)
+            case .highBackgroundLoad:
+                L10n.text("当前后台负载较高，结果可能受影响。", check.detail)
+            case .lowAvailableMemory:
+                L10n.text("当前可用内存不足 1 GiB。", check.detail)
+            case .targetVolumeReadOnly:
+                L10n.text("测试资源所在卷为只读。", check.detail)
+            case .storageSpaceInsufficient:
+                L10n.text("测试资源所在卷的可用空间不足。", check.detail)
+            case .displayUnavailable:
+                L10n.text("当前无法可靠读取显示器信息。", check.detail)
+            case .displayMirroring:
+                L10n.text("当前显示器处于镜像模式，显示测量可能受影响。", check.detail)
+            }
+        }.joined(separator: " · ")
     }
 
     private func categoryTitle(_ category: BenchmarkV7Category) -> String {
@@ -1161,7 +1214,7 @@ struct BenchmarkV7DashboardView: View {
         case "memory.copy.bandwidth": L10n.text("复制", "Copy")
         case "memory.triad.bandwidth": L10n.text("带宽", "Bandwidth")
         case "memory.pointer-chase.latency": L10n.text("延迟", "Latency")
-        case "storage.sequential.read": L10n.text("顺序读", "Seq read")
+        case "storage.sequential.read": L10n.text("顺序读（含校验）", "Seq read + verify")
         case "storage.sequential.write": L10n.text("顺序写", "Seq write")
         case "storage.random.read.qd1.iops", "storage.random.read.qd16.iops":
             L10n.text("随机读 IOPS", "Random read IOPS")

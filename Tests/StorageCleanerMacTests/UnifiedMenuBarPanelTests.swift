@@ -24,7 +24,7 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
     }
 
     @MainActor
-    func testAuxiliarySamplerMergesConsumersAndHonorsPauseAndCleanup() {
+    func testAuxiliarySamplerMergesConsumersAndHonorsPauseAndCleanup() async {
         let state = MenuBarAuxiliaryMonitorState(
             diskCounterProvider: { nil },
             powerHistoryURL: nil
@@ -52,6 +52,7 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertTrue(state.isDiskIOSamplingActive)
 
         state.setPaused(true)
+        await waitUntil { !state.isDiskIOSamplingActive }
         XCTAssertFalse(state.isDiskIOSamplingActive)
 
         state.setPaused(false)
@@ -59,6 +60,7 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
 
         state.unregisterConsumer(second)
         XCTAssertEqual(state.activeConsumerCount, 0)
+        await waitUntil { !state.isDiskIOSamplingActive && !state.isProcessorRefreshActive }
         XCTAssertFalse(state.isDiskIOSamplingActive)
         XCTAssertFalse(state.isProcessorRefreshActive)
     }
@@ -105,6 +107,64 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertEqual(storageProbe.value, 1)
         XCTAssertEqual(batteryProbe.value, 1)
         state.unregisterConsumer(secondConsumer)
+    }
+
+    @MainActor
+    func testSlowVolumeReadDoesNotHoldBatteryUpdatesOrOverwriteNewerReadings() async {
+        let volumeGate = DispatchSemaphore(value: 0)
+        let batteryProbe = MenuBarProbeCounter()
+        let state = MenuBarAuxiliaryMonitorState(
+            diskCounterProvider: { nil },
+            storageVolumeProvider: {
+                _ = volumeGate.wait(timeout: .now() + 5)
+                return .empty
+            },
+            batterySnapshotProvider: {
+                batteryProbe.increment()
+                return (nil, nil)
+            },
+            powerHistoryURL: nil
+        )
+        let consumer = UUID()
+        state.registerConsumer(consumer, demand: .init(
+            needsProcessorTelemetry: false, needsDiskIOSampling: false,
+            needsNetworkInterface: false, needsPublicNetworkAddress: false,
+            needsNetworkProcesses: false, needsStorageVolumes: true
+        ), paused: false)
+        defer {
+            volumeGate.signal()
+            state.unregisterConsumer(consumer)
+        }
+        await waitUntil { state.batteryRefreshedAt != nil }
+        XCTAssertNil(state.storageRefreshedAt)
+        let firstBatteryDate = state.batteryRefreshedAt
+        state.requestManualRefresh()
+        await waitUntil { state.batteryRefreshedAt != firstBatteryDate }
+        XCTAssertEqual(batteryProbe.value, 2)
+        XCTAssertNil(state.storageRefreshedAt, "Battery must publish while the volume query is still blocked")
+        let latestBatteryDate = state.batteryRefreshedAt
+        volumeGate.signal()
+        await waitUntil { state.storageRefreshedAt != nil && !state.isRefreshingLocalData }
+        XCTAssertEqual(state.batteryRefreshedAt, latestBatteryDate)
+    }
+
+    @MainActor
+    func testPausedAuxiliaryMonitorDiscardsPendingBatteryRead() async {
+        let batteryGate = DispatchSemaphore(value: 0)
+        let state = MenuBarAuxiliaryMonitorState(
+            diskCounterProvider: { nil },
+            batterySnapshotProvider: {
+                _ = batteryGate.wait(timeout: .now() + 5)
+                return (nil, nil)
+            },
+            powerHistoryURL: nil
+        )
+        state.refreshBackgroundBatteryHistory(force: true)
+        state.setPaused(true)
+        batteryGate.signal()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(state.batteryRefreshedAt)
+        XCTAssertFalse(state.isRefreshingLocalData)
     }
 
     @MainActor
@@ -626,25 +686,14 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertTrue(telemetry.contains("static let maximumMinutePointCount = 28 * 24 * 60 + 1"))
     }
 
-    func testGeekOverviewPrimesExistingProcessSnapshotsBeforeHoverDetailsOpen() throws {
-        let panel = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
-        )
-        let advancedView = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"
-        )
-        let prefetch = try XCTUnwrap(
-            panel.components(separatedBy: "private func prefetchGeekDetailSnapshots() {").last?
-                .components(separatedBy: "    var geekSelectedDetailPage").first
-        )
-
-        XCTAssertTrue(advancedView.contains("@State var hasPrefetchedGeekDetails = false"))
-        XCTAssertTrue(panel.contains("guard !hasPrefetchedGeekDetails else { return }"))
-        XCTAssertTrue(panel.contains("hasPrefetchedGeekDetails = true"))
-        XCTAssertTrue(prefetch.contains("store.refreshMemory(priority: .utility)"))
-        XCTAssertTrue(prefetch.contains("store.refreshEnergyImpact(priority: .utility)"))
-        XCTAssertFalse(prefetch.contains("Timer"))
-        XCTAssertFalse(prefetch.contains("MenuBarMonitorState("))
+    func testGeekOverviewDefersProcessReadsUntilVisiblePageDeclaresDemand() throws {
+        let panel = try sourceText("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift")
+        let view = try sourceText("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift")
+        XCTAssertFalse(panel.contains("prefetchGeekDetailSnapshots"))
+        XCTAssertFalse(panel.contains("store.refreshEnergyImpact("))
+        XCTAssertFalse(panel.contains("store.refreshMemory("))
+        XCTAssertTrue(view.contains("store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)"))
+        XCTAssertTrue(view.contains("store.updateMenuBarProcessConsumer(consumerID, section: nil)"))
     }
 
     func testMenuBarSeparatesFreshDisplayMemoryFromProcessSnapshots() throws {
@@ -682,7 +731,7 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertTrue(status.contains("private var snapshot: MemorySnapshot?"))
         XCTAssertTrue(status.contains("store.memorySnapshot"))
         XCTAssertTrue(geek.contains("processMemorySnapshot?.topProcesses"))
-        XCTAssertTrue(memory.contains("store.memorySnapshot?.appsByResidentUsage"))
+        XCTAssertTrue(memory.contains("store.menuBarPreparedMemoryApps"))
         XCTAssertTrue(combined.contains("if let memorySnapshot = processMemorySnapshot"))
     }
 
@@ -727,9 +776,10 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
             XCTAssertTrue(userFacing.contains(field), field)
         }
         XCTAssertTrue(components.contains("ByteFormat.storageString(abs(value))"))
-        for source in [status, diskPanel, combined, geek, geekDisk, cleanup, tertiary, hover] {
+        for source in [status, diskPanel, combined, geek, geekDisk, cleanup, hover] {
             XCTAssertTrue(source.contains("ByteFormat.storageString("))
         }
+        XCTAssertTrue(tertiary.contains("GeekDiskIOHoverDetail("))
         XCTAssertFalse(status.contains("storageSnapshot?.usedRatio"))
         XCTAssertFalse(combined.contains("storageSnapshot.usedRatio"))
         XCTAssertFalse(geekDisk.contains("volume.capacity.usedRatio"))
@@ -816,7 +866,6 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
             "L10n.text(\"GPU 温度\", \"GPU Temperature\")",
             "L10n.text(\"电池\", \"BATTERY\")",
             "L10n.text(\"电池健康\", \"HEALTH\")",
-            "L10n.text(\"文件映射\", \"File Backed\")",
             "L10n.text(\"左侧风扇\", \"Left Fan\")",
             "L10n.text(\"公共 IP 地址\", \"Public IP Addresses\")",
             "L10n.text(\"频道\", \"Channel\")",

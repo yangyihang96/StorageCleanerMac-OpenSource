@@ -166,6 +166,45 @@ final class SystemEnergyAccumulatorTests: XCTestCase {
         XCTAssertEqual(accumulator.snapshot.totalWattHours, 0)
     }
 
+    @MainActor
+    func testConcurrentRequestsCoalesceAndStopDrainsBeforeIgnoringOldResult() async {
+        let gate = EnergySamplingGate()
+        let accumulator = SystemEnergyAccumulator(fileURL: nil, sampleProvider: { await gate.read() })
+        let first = Task { await accumulator.sampleNow() }
+        while await gate.calls == 0 { await Task.yield() }
+        let second = Task { await accumulator.sampleNow() }
+        await Task.yield()
+        let calls = await gate.calls
+        XCTAssertEqual(calls, 1)
+        let stop = Task { await accumulator.stopAndFlush() }
+        await Task.yield()
+        await gate.release(sample(at: 10, watts: 60, source: .ac))
+        await first.value
+        await second.value
+        await stop.value
+        XCTAssertNil(accumulator.snapshot.lastSample, "Cancelled physical reads cannot publish")
+    }
+
+    @MainActor
+    func testPassiveProductionModeDoesNotStartItsOwnSampler() async {
+        let gate = EnergySamplingGate()
+        let accumulator = SystemEnergyAccumulator(fileURL: nil, sampleProvider: { await gate.read() })
+        accumulator.start(passive: true)
+        for _ in 0..<20 { await Task.yield() }
+        let calls = await gate.calls
+        XCTAssertEqual(calls, 0)
+        await accumulator.stopAndFlush()
+    }
+
+    func testOutOfOrderCallbackCannotBecomeAnIntegrationBaseline() {
+        var session = makeSession()
+        session.append(sample(at: 10, watts: 60, source: .ac))
+        session.append(sample(at: 70, watts: 60, source: .ac))
+        session.append(sample(at: 20, watts: 600, source: .ac))
+        session.append(sample(at: 80, watts: 60, source: .ac))
+        XCTAssertEqual(session.acWattHours, 70.0 / 60.0, accuracy: 0.0001)
+    }
+
     private func makeSession(bootID: String = "boot") -> SystemEnergySessionSnapshot {
         SystemEnergySessionSnapshot(
             boot: bootIdentity(id: bootID),
@@ -201,5 +240,18 @@ final class SystemEnergyAccumulatorTests: XCTestCase {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("StorageCleanerMac-SystemEnergy-\(UUID().uuidString)")
             .appendingPathComponent("session.json")
+    }
+}
+
+private actor EnergySamplingGate {
+    private(set) var calls = 0
+    private var continuation: CheckedContinuation<SystemEnergyPowerSample?, Never>?
+    func read() async -> SystemEnergyPowerSample? {
+        calls += 1
+        return await withCheckedContinuation { continuation = $0 }
+    }
+    func release(_ sample: SystemEnergyPowerSample?) {
+        continuation?.resume(returning: sample)
+        continuation = nil
     }
 }

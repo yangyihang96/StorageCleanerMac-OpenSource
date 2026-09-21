@@ -194,8 +194,7 @@ struct BenchmarkV7RunProgressView: View {
         case gpu
         case memory
         case storage
-        case display
-        case sustained
+        case extensions
         case validation
 
         var id: Self { self }
@@ -206,9 +205,8 @@ struct BenchmarkV7RunProgressView: View {
             case .gpu: L10n.text("GPU", "GPU")
             case .memory: L10n.text("内存", "Memory")
             case .storage: L10n.text("存储", "Storage")
-            case .display: L10n.text("显示", "Display")
-            case .sustained: L10n.text("持续", "Sustained")
-            case .validation: L10n.text("评分", "Score")
+            case .extensions: L10n.text("扩展", "Extensions")
+            case .validation: L10n.text("保存", "Save")
             }
         }
 
@@ -218,9 +216,7 @@ struct BenchmarkV7RunProgressView: View {
             case .gpu: .gpu
             case .memory: .memory
             case .storage: .storage
-            case .display: .display
-            case .sustained: .sustained
-            case .validation: nil
+            case .extensions, .validation: nil
             }
         }
     }
@@ -240,58 +236,37 @@ struct BenchmarkV7RunProgressView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(phaseTitle, systemImage: "bolt.horizontal.circle")
-                    .font(AppDesignTokens.Typography.cardTitle)
-                    .foregroundStyle(accent)
-                Spacer()
+            RuntimeInlineStatus(
+                state: state.phase == .cancelling ? .stopping : .running,
+                title: phaseTitle,
+                detail: currentTaskTitle
+            )
+            HStack(spacing: 12) {
+                if let repetition = state.repetition, repetition > 0 {
+                    Text(L10n.text("第 \(repetition) 次采样", "Sample \(repetition)"))
+                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                if let progressValue {
+                    Text(progressValue.formatted(.percent.precision(.fractionLength(0))))
+                        .font(.system(size: 23, weight: .semibold)).monospacedDigit().foregroundStyle(accent)
+                }
                 if canCancel {
-                    Button(role: .destructive, action: onCancel) {
-                        Label(L10n.text("取消测试", "Cancel test"), systemImage: "stop.circle")
+                    Button(role: .cancel, action: onCancel) {
+                        Label(L10n.text("取消测试", "Cancel Test"), systemImage: "stop.circle")
                     }
-                    .buttonStyle(.bordered)
+                    .appButtonChrome(.secondary)
+                    .disabled(state.phase == .cancelling)
                 }
             }
-
-            HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.small) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(currentTaskTitle)
-                        .font(AppDesignTokens.Typography.secondary.weight(.semibold))
-                    if let repetition = state.repetition, repetition > 0 {
-                        Text(L10n.text(
-                            "第 " + String(repetition) + " 次采样",
-                            "Sample " + String(repetition)
-                        ))
-                            .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer()
-                Text(progressLabel)
-                    .font(.system(.title3, design: .rounded, weight: .semibold))
-                    .foregroundStyle(accent)
-                    .monospacedDigit()
+            if let progressValue { ProgressView(value: progressValue).tint(accent) }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 58), spacing: 8),
+                                     count: Stage.allCases.count), spacing: 10) {
+                ForEach(Stage.allCases) { stage in stageView(stage) }
             }
-
-            if let progressValue {
-                ProgressView(value: progressValue)
-                    .tint(accent)
-            } else {
-                ProgressView()
-                    .tint(accent)
-            }
-
-            HStack(alignment: .top, spacing: 5) {
-                ForEach(Stage.allCases) { stage in
-                    stageView(stage)
-                }
-            }
-
             Text(stageCaption)
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
-
             BenchmarkSystemMonitor(telemetryPoints: telemetryPoints, accent: accent)
         }
         .accessibilityElement(children: .contain)
@@ -320,7 +295,7 @@ struct BenchmarkV7RunProgressView: View {
         case .warmingUp, .calibrating: L10n.text("正在预热", "Warming up")
         case .running: L10n.text("正在进行性能测试", "Running performance test")
         case .validating, .aggregating, .scoring:
-            L10n.text("正在校验与评分", "Validating and scoring")
+            L10n.text("正在校验原始结果", "Validating raw results")
         case .persisting: L10n.text("正在保存结果", "Saving result")
         case .cancelling: L10n.text("正在取消测试", "Stopping test")
         case .idle, .cancelled, .failed, .completed:
@@ -339,6 +314,14 @@ struct BenchmarkV7RunProgressView: View {
         case .persisting: return L10n.text("安全保存本次结果", "Safely saving this result")
         case .cancelling: return L10n.text("等待当前工作负载安全停止", "Waiting for the current workload to stop safely")
         default: break
+        }
+
+        if let id = state.workloadID, id.hasPrefix("cpu.threadCurve.") {
+            let workers = id.split(separator: ".").last.map(String.init) ?? "—"
+            return L10n.text("扩展：CPU 线程曲线（\(workers) 线程）", "Extension: CPU thread curve (\(workers) workers)")
+        }
+        if state.workloadID?.hasPrefix("cpu.sustained.short.") == true {
+            return L10n.text("扩展：短持续表现观察", "Extension: short sustained observation")
         }
 
         switch state.workloadID {
@@ -360,18 +343,7 @@ struct BenchmarkV7RunProgressView: View {
     }
 
     private var progressValue: Double? {
-        if let progress = state.progress, progress.isFinite {
-            return min(1, max(0, progress))
-        }
-        switch state.phase {
-        case .validating, .aggregating, .scoring, .persisting: return 0.98
-        default: return nil
-        }
-    }
-
-    private var progressLabel: String {
-        progressValue?.formatted(.percent.precision(.fractionLength(0)))
-            ?? L10n.text("准备中", "Preparing")
+        RuntimeWorkflowState.measuredFraction(state.progress)
     }
 
     private var currentStage: Stage? {
@@ -379,6 +351,10 @@ struct BenchmarkV7RunProgressView: View {
         case .validating, .aggregating, .scoring, .persisting:
             return .validation
         default:
+            if state.workloadID?.hasPrefix("cpu.threadCurve.") == true
+                || state.workloadID?.hasPrefix("cpu.sustained.short.") == true {
+                return .extensions
+            }
             guard let category = state.category else { return nil }
             return Stage.allCases.first { $0.category == category }
         }
@@ -386,7 +362,7 @@ struct BenchmarkV7RunProgressView: View {
 
     private var stageCaption: String {
         guard let currentStage else {
-            return L10n.text("环境检查完成后，将依次运行 7 个阶段", "After the environment check, 7 stages run in order")
+            return L10n.text("环境检查完成后，将依次运行 18 项 Core 并保存", "After the environment check, 18 Core workloads run and are saved")
         }
         return L10n.text(
             "第 \(currentStage.rawValue + 1) / \(Stage.allCases.count) 阶段 · \(currentStage.title)",

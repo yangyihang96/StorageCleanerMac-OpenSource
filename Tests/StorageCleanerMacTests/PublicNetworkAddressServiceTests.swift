@@ -3,6 +3,16 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class PublicNetworkAddressServiceTests: XCTestCase {
+    @MainActor
+    func testDefaultsNotificationFromBackgroundDoesNotAssertMainActorIsolation() async {
+        let state = MenuBarAuxiliaryMonitorState(publicNetworkConsentProvider: { false })
+        await Task.detached {
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: nil)
+        }.value
+        await Task.yield()
+        withExtendedLifetime(state) { }
+    }
+
     func testValidationAcceptsPublicAddressesAndRejectsLocalOrMalformedValues() {
         XCTAssertEqual(
             PublicNetworkAddressService.validatedAddress(" 115.70.50.19\n", family: AF_INET),
@@ -54,6 +64,7 @@ final class PublicNetworkAddressServiceTests: XCTestCase {
             publicNetworkAddressProvider: {
                 await provider.snapshot()
             },
+            publicNetworkConsentProvider: { true },
             powerHistoryURL: nil
         )
         let consumer = UUID()

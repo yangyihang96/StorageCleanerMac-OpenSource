@@ -127,7 +127,7 @@ struct BenchmarkV7VersionManifest: Equatable, Codable, Sendable {
     }
 
     var isValid: Bool {
-        schemaVersion == Self.resultSchemaVersion
+        (schemaVersion == Self.resultSchemaVersion || schemaVersion == MSeriesProtocol.schema)
             && nonempty(planVersion)
             && nonempty(workloadVersion)
             && nonempty(cpuWorkloadVersion)

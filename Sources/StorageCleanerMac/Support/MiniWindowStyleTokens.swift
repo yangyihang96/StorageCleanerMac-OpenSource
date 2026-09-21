@@ -20,10 +20,17 @@ enum MiniWindowStyleTokens {
 
     static let outerCornerRadius: CGFloat = 12
     static let cardCornerRadius: CGFloat = 10
+    static let controlCornerRadius: CGFloat = 6
     // iStat-like density: one equal inset on all four shell edges, with a
     // smaller repeated gap between sibling cards.
     static let contentInset: CGFloat = 8
     static let cardSpacing: CGFloat = 5
+    static let cardHorizontalInset: CGFloat = 8
+    static let cardVerticalInset: CGFloat = 6
+    static let rowSpacing: CGFloat = 4
+    static let inlineSpacing: CGFloat = 6
+    static let dataRowHeight: CGFloat = 16
+    static let controlRowHeight: CGFloat = 24
     static let lightShellShadowOpacity: Double = 0.24
     static let darkShellShadowOpacity: Double = 0.44
     static let lightShellShadowRadius: CGFloat = 14
@@ -321,12 +328,12 @@ private struct MiniWindowTooltipChrome: ViewModifier {
     @Environment(\.displayScale) private var displayScale
 
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
         content
-            .background(shape.fill(Color.black.opacity(0.88)))
+            .background(shape.fill(AppAppearanceColors.tooltip))
             .overlay {
                 shape
-                    .strokeBorder(Color.white.opacity(0.16), lineWidth: MiniWindowPixel.onePhysicalPixel(displayScale: displayScale))
+                    .strokeBorder(AppAppearanceColors.ink.opacity(0.16), lineWidth: MiniWindowPixel.onePhysicalPixel(displayScale: displayScale))
                     .allowsHitTesting(false)
             }
             .shadow(color: .black.opacity(0.24), radius: 5, y: 2)

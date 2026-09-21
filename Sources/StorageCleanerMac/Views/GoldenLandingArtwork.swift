@@ -39,12 +39,29 @@ struct GoldenLandingArtwork: View {
                 .scaledToFill()
                 .frame(width: side, height: side)
                 .clipped()
+                .modifier(LandingArtworkCompositing())
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // Pure-black source margins blend into the shared navy surface.
-        .blendMode(.screen)
         .accessibilityHidden(true)
         .allowsHitTesting(false)
+    }
+}
+
+/// Screen blending preserves the original night artwork but disappears on a
+/// white canvas. In daylight, use the source luminance as an alpha mask while
+/// retaining its RGB colors. The original bundled illustration is unchanged.
+struct LandingArtworkCompositing: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if colorScheme == .dark {
+            content.blendMode(.screen)
+        } else {
+            // Double the mask's midtones without lifting pure black. This
+            // retains colored detail instead of making the artwork look disabled.
+            content.mask(content.brightness(0.25).contrast(2).luminanceToAlpha())
+        }
     }
 }
 

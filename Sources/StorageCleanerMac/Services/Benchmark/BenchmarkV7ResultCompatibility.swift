@@ -8,6 +8,7 @@ import Foundation
 /// and reference-set revisions can all change the meaning of a score.
 extension BenchmarkV7Result {
     var isCurrentComparableOfficialResult: Bool {
+        if let mSeries { return isCurrentOfficialResult && mSeries.isValid }
         guard isCurrentOfficialResult,
               let coreScore,
               let experienceScore,

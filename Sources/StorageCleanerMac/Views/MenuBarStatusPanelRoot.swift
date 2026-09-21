@@ -111,12 +111,10 @@ struct PanelScene: View {
     }
 
     private var resolvedPanelChartAccentColor: Color? {
-        return PanelAppearancePreferences.color(
-            from: PanelColorTheme.resolvedChartHex(
-                storedTheme: panelColorTheme,
-                backgroundHex: panelBackgroundColor,
-                customHex: panelChartColor
-            ) ?? ""
+        PanelColorTheme.chartColor(
+            storedTheme: panelColorTheme,
+            backgroundHex: panelBackgroundColor,
+            customHex: panelChartColor
         )
     }
 

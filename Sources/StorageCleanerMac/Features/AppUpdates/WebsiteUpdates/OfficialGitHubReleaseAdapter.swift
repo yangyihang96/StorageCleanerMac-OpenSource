@@ -77,11 +77,7 @@ struct URLSessionOfficialReleaseDataLoader: OfficialReleaseDataLoading {
             delegateQueue: nil
         )
         defer { session.finishTasksAndInvalidate() }
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else {
-            throw URLError(.badServerResponse)
-        }
-        return (data, response)
+        return try await BoundedHTTPSReader.data(for: request, session: session, maximumBytes: 2 * 1024 * 1024)
     }
 }
 

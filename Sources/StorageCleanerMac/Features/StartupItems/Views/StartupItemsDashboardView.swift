@@ -210,7 +210,7 @@ struct StartupItemsDashboardView: View {
 
     private func overview(_ presentation: StartupItemsPresentation) -> some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-            if isLoading {
+            if isLoading && !presentation.visibleItems.isEmpty {
                 scanStatus
             }
 
@@ -234,39 +234,10 @@ struct StartupItemsDashboardView: View {
     }
 
     private var scanStatus: some View {
-        HStack(spacing: AppDesignTokens.Spacing.small) {
-            ProgressView()
-                .controlSize(.small)
-
-            Text(progress?.title ?? L10n.text("正在扫描登录项", "Scanning login items"))
-                .font(AppTypography.body.weight(.semibold))
-
-            Spacer(minLength: AppDesignTokens.Spacing.medium)
-
-            Text(L10n.text(
-                "已发现 \(progress?.discoveredCount ?? items.count) 项",
-                "\(progress?.discoveredCount ?? items.count) found"
-            ))
-            .font(AppTypography.caption)
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
-        }
-        .padding(.horizontal, AppDesignTokens.Spacing.medium)
-        .frame(minHeight: AppControlSizes.iconHitRegion)
-        .background(
-            theme.accent.opacity(0.08),
-            in: RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl, style: .continuous)
+        RuntimeInlineStatus(
+            title: progress?.title ?? L10n.text("正在扫描登录项", "Scanning Login Items"),
+            detail: L10n.text("已发现 \(progress?.discoveredCount ?? items.count) 项", "\(progress?.discoveredCount ?? items.count) items found")
         )
-        .overlay {
-            RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl, style: .continuous)
-                .strokeBorder(theme.accent.opacity(0.18), lineWidth: 1)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(progress?.title ?? L10n.text("正在扫描登录项", "Scanning login items"))
-        .accessibilityValue(L10n.text(
-            "已发现 \(progress?.discoveredCount ?? items.count) 项",
-            "\(progress?.discoveredCount ?? items.count) found"
-        ))
     }
 
     @ViewBuilder
@@ -361,7 +332,10 @@ struct StartupItemsDashboardView: View {
         GlassSegmentedControl(
             selection: primaryCategoryBinding,
             options: primaryCategories,
-            title: { "\($0.title) \(presentation.count(for: $0))" }
+            title: { category in
+                let count = isLoading && items.isEmpty ? "—" : String(presentation.count(for: category))
+                return "\(category.title) \(count)"
+            }
         )
         .accessibilityLabel(L10n.text("启动项分类", "Startup item category"))
     }
@@ -478,7 +452,7 @@ struct StartupItemsDashboardView: View {
                     }
                 }
                 .listStyle(.inset)
-                .environment(\.defaultMinListRowHeight, 0)
+                .environment(\.defaultMinListRowHeight, 52)
                 .scrollContentBackground(.hidden)
                 .listRowSeparatorTint(Color.primary.opacity(0.10))
                 .accessibilityLabel(L10n.text("登录项与后台任务列表", "Login items and background tasks list"))

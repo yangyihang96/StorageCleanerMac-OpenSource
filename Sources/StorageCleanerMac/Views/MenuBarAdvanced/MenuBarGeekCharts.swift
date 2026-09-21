@@ -23,7 +23,7 @@ enum GeekChartUnit {
     }
 }
 
-enum GeekPrecisionChartStyle {
+enum GeekPrecisionChartStyle: Sendable {
     case line
     case stackedBars
 }
@@ -525,7 +525,7 @@ enum GeekChartWindow {
 
 }
 
-struct GeekChartBucketSnapshot {
+struct GeekChartBucketSnapshot: Sendable {
     let indices: [Int]
     let x: CGFloat
     let start: Date
@@ -782,7 +782,7 @@ enum GeekBarChartScale {
 
 }
 
-struct GeekNetworkHistorySnapshot {
+struct GeekNetworkHistorySnapshot: Sendable {
     let dates: [Date]
     let uploadSamples: [MenuBarChartSample]
     let downloadSamples: [MenuBarChartSample]
@@ -821,7 +821,7 @@ struct GeekNetworkHistorySnapshot {
     }
 }
 
-struct GeekPreparedNetworkBucket {
+struct GeekPreparedNetworkBucket: Sendable {
     let x: CGFloat
     let end: Date
     let upload: Double?
@@ -830,7 +830,7 @@ struct GeekPreparedNetworkBucket {
     let downloadIsEstimated: Bool
 }
 
-struct GeekPreparedNetworkFrame {
+struct GeekPreparedNetworkFrame: Sendable {
     let range: (start: Date, end: Date, dataStart: Date)
     let buckets: [GeekPreparedNetworkBucket]
     let uploadMarks: [GeekMirroredBarMark]
@@ -912,7 +912,7 @@ struct GeekPreparedNetworkFrame {
     }
 }
 
-struct GeekMirroredBarMark {
+struct GeekMirroredBarMark: Sendable {
     let x: CGFloat
     let value: Double
     var isEstimated = false
@@ -1003,8 +1003,8 @@ private struct GeekMirroredBarSeries: View {
 
 /// CPU columns share one preparation result with hit testing. The configured
 /// interval bounds measured coverage; plot width alone determines column geometry.
-struct GeekCPUHistoryFrame {
-    struct Mark {
+struct GeekCPUHistoryFrame: Sendable {
+    struct Mark: Sendable {
         let bucket: GeekChartBucketSnapshot
         let rect: CGRect
         let latest: MenuBarTelemetryPoint
@@ -1169,32 +1169,11 @@ private struct GeekStackedBarSeries: View {
     let duration: TimeInterval
     let referenceDate: Date
     var cpuFrame: GeekCPUHistoryFrame?
+    var prepared: GeekPreparedLineFrame?
 
     var body: some View {
-        let dates = points.map(\.date)
-        let timeRange = GeekChartWindow.barRange(
-            for: dates,
-            duration: duration,
-            referenceDate: referenceDate
-        )
-        let buckets = cpuFrame == nil ? GeekChartWindow.displayBuckets(
-            for: dates,
-            in: plotRect,
-            range: timeRange,
-            referenceDate: referenceDate,
-            displayScale: displayScale,
-            isValid: { index in series.allSatisfy { $0.channel.value(in: points[index])?.isFinite == true } },
-            isMissing: { index in series.allSatisfy { $0.channel.value(in: points[index]) == nil } },
-            holdLatestWhileFresh: true
-        ) : []
-        let bucketValues = buckets.map { bucket in
-            series.map { item in
-                bucket.displayValue { index in
-                    guard series.allSatisfy({ $0.channel.value(in: points[index])?.isFinite == true }) else { return nil }
-                    return item.channel.value(in: points[index])
-                }
-            }
-        }
+        let buckets = prepared?.buckets ?? []
+        let bucketValues = prepared?.values ?? []
         let metrics = GeekChartWindow.barMetrics(displayScale: displayScale)
 
         Canvas { context, _ in
@@ -1242,7 +1221,7 @@ private struct GeekStackedBarSeries: View {
     }
 }
 
-struct GeekSeriesStatistics {
+struct GeekSeriesStatistics: Sendable {
     let current: Double
     let minimum: Double
     let average: Double
@@ -1284,12 +1263,22 @@ struct GeekPrecisionLineChart: View {
     var lineWidth: CGFloat = 1.35
     var fillOpacity: Double = 0
     var cpuSamplingInterval: TimeInterval = 1
+    var showsSamplingDetails = true
 
     @State private var hoverLocation: CGPoint?
 
     var body: some View {
-        let visibleSeries = renderableSeries
-        let visibleAccessibilitySummary = accessibilitySummary(for: visibleSeries)
+        let channels = series.map(\.channel)
+        return MenuBarChartPreparation(kind: "line-summary", first: points.first?.date, last: points.last?.date,
+            count: points.count, configuration: channels.map(\.rawValue).joined(separator: ","),
+            cost: max(256, points.count * 64), build: { [points] in
+                GeekPreparedLineSummary(points: points, channels: channels)
+            }) { summary in chartBody(summary: summary) }
+    }
+
+    private func chartBody(summary: GeekPreparedLineSummary) -> some View {
+        let visibleSeries = series.filter { summary.channels.contains($0.channel) }
+        let visibleAccessibilitySummary = accessibilitySummary(for: visibleSeries, statistics: summary.statistics)
 
         return VStack(alignment: .leading, spacing: 2) {
             if showsLegend {
@@ -1316,14 +1305,18 @@ struct GeekPrecisionLineChart: View {
                                 height: max(1, proxy.size.height - (showsTimelineLabels ? 20 : 4))
                             )
                             let visibleValueRange = resolvedValueRange
-                            let cpuFrame = usesCPUHistoryBuckets ? GeekCPUHistoryFrame.prepare(
-                                points: points,
-                                plotRect: plotRect,
-                                duration: duration,
-                                referenceDate: referenceDate,
-                                samplingInterval: cpuSamplingInterval,
-                                displayScale: displayScale
-                            ) : nil
+                            let channels = visibleSeries.map(\.channel)
+                            MenuBarChartPreparation(kind: "line-frame", first: points.first?.date, last: points.last?.date,
+                                count: points.count,
+                                configuration: "\(channels.map(\.rawValue)):\(plotRect):\(duration):\(displayScale):\(style):\(visibleValueRange):\(cpuSamplingInterval)",
+                                clockRevision: floor(referenceDate.timeIntervalSince1970),
+                                cost: max(512, points.count * 512),
+                                build: { [points, duration, cpuSamplingInterval, displayScale, style] in
+                                    GeekPreparedLineFrame(points: points, channels: channels, plot: plotRect,
+                                        duration: duration, reference: referenceDate, samplingInterval: cpuSamplingInterval,
+                                        scale: displayScale, stacked: style == .stackedBars, valueRange: visibleValueRange)
+                                }) { prepared in
+                            let cpuFrame = prepared.cpu
 
                             ZStack(alignment: .topLeading) {
                                 Color.clear
@@ -1346,17 +1339,13 @@ struct GeekPrecisionLineChart: View {
                                         valueRange: visibleValueRange,
                                         duration: duration,
                                         referenceDate: referenceDate,
-                                        cpuFrame: cpuFrame
+                                        cpuFrame: cpuFrame,
+                                        prepared: prepared
                                     )
                                 } else {
                                     ForEach(visibleSeries, id: \.id) { item in
                                         let color = resolvedColor(for: item, renderableSeries: visibleSeries)
-                                        let segments = pointSegments(
-                                            for: item.channel,
-                                            in: plotRect,
-                                            valueRange: visibleValueRange,
-                                            referenceDate: referenceDate
-                                        )
+                                        let segments = prepared.segments[item.channel] ?? []
                                         let path = directPath(segments)
 
                                         if fillOpacity > 0 {
@@ -1390,17 +1379,18 @@ struct GeekPrecisionLineChart: View {
                                 }
 
                                 if showsTimelineLabels {
-                                    timelineLabels(
-                                        in: plotRect,
-                                        referenceDate: referenceDate
-                                    )
+                                    GeekBarTimelineLabels(timeRange: prepared.range, plotRect: plotRect)
                                 }
                                 if showsTooltip {
                                     hoverOverlay(
                                         in: plotRect,
                                         renderableSeries: visibleSeries,
                                         referenceDate: referenceDate,
-                                        cpuFrame: cpuFrame
+                                        cpuFrame: cpuFrame,
+                                        preparedBuckets: prepared.buckets,
+                                        preparedPoints: prepared.sourcePoints,
+                                        preparedValues: prepared.hoverValues,
+                                        preparedEstimated: prepared.hoverEstimated
                                     )
                                 }
                             }
@@ -1416,6 +1406,7 @@ struct GeekPrecisionLineChart: View {
                             .transaction { transaction in
                                 transaction.animation = nil
                             }
+                            }
                         }
                     }
                 }
@@ -1425,7 +1416,7 @@ struct GeekPrecisionLineChart: View {
         .accessibilityLabel(accessibilityLabel)
         .accessibilityValue(visibleAccessibilitySummary)
         .accessibilityHint(samplingWindowDescription)
-        .help(samplingWindowDescription)
+        .help(usesCPUHistoryBuckets || !showsSamplingDetails ? "" : samplingWindowDescription)
     }
 
     var samplingWindowDescription: String {
@@ -1600,15 +1591,16 @@ struct GeekPrecisionLineChart: View {
         in plotRect: CGRect,
         renderableSeries: [MenuBarTelemetrySeries],
         referenceDate: Date,
-        cpuFrame: GeekCPUHistoryFrame?
+        cpuFrame: GeekCPUHistoryFrame?,
+        preparedBuckets: [GeekChartBucketSnapshot],
+        preparedPoints: [MenuBarTelemetryPoint],
+        preparedValues: [[Double?]],
+        preparedEstimated: [[Bool]]
     ) -> some View {
         if let cpuFrame {
             cpuHoverOverlay(in: plotRect, series: renderableSeries, frame: cpuFrame)
         } else if hoverLocation != nil {
-            let buckets = chartBuckets(
-                in: plotRect,
-                referenceDate: referenceDate
-            )
+            let buckets = preparedBuckets
             if let hoveredPoint = hoveredPoint(
                 in: plotRect,
                 buckets: buckets
@@ -1627,13 +1619,15 @@ struct GeekPrecisionLineChart: View {
 
                 GeekHoverTooltip(
                     date: hoveredPoint.bucket.end,
-                    values: hoverValues(
-                        at: hoveredPoint.index,
-                        in: buckets,
-                        renderableSeries: renderableSeries
-                    ),
+                    values: renderableSeries.enumerated().compactMap { column, item in
+                        guard preparedValues.indices.contains(hoveredPoint.index),
+                              preparedValues[hoveredPoint.index].indices.contains(column),
+                              let value = preparedValues[hoveredPoint.index][column] else { return nil }
+                        return GeekHoverValue(title: item.title, value: unit.formatted(value), color: item.color,
+                                              isEstimated: preparedEstimated[hoveredPoint.index][column])
+                    },
                     visibleDuration: duration,
-                    detail: bucketDescription(hoveredPoint.bucket, series: renderableSeries)
+                    detail: showsSamplingDetails ? bucketDescription(hoveredPoint.bucket, series: renderableSeries, points: preparedPoints) : nil
                 )
                 .position(
                     x: min(plotRect.maxX - 72, max(plotRect.minX + 72, hoverLocation.x)),
@@ -1654,16 +1648,13 @@ struct GeekPrecisionLineChart: View {
             let values = series.compactMap { item -> GeekHoverValue? in
                 guard let value = item.channel.value(in: mark.mean) else { return nil }
                 return GeekHoverValue(
-                    title: item.title, value: unit.formatted(value), color: item.color, isEstimated: mark.isEstimated
+                    title: item.title, value: unit.formatted(value), color: item.color, isEstimated: mark.isEstimated, showsTitle: false
                 )
-            } + (mark.isEstimated ? [] : [GeekHoverValue(
+            } + [GeekHoverValue(
                 title: L10n.text("该段总 CPU 峰值", "Segment total CPU peak"),
-                value: unit.formatted(mark.peakTotal),
+                value: mark.isEstimated ? "—" : unit.formatted(mark.peakTotal),
                 color: .primary, isEstimated: false
-            )])
-            let start = PanelChartDateFormatting.string(for: mark.bucket.start, visibleDuration: duration)
-            let end = PanelChartDateFormatting.string(for: mark.bucket.end, visibleDuration: duration)
-            let peakDate = observationDate(mark.peak)
+            )]
             let hairline = MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
             Path { path in
                 path.move(to: CGPoint(x: mark.rect.midX, y: plotRect.minY))
@@ -1673,11 +1664,7 @@ struct GeekPrecisionLineChart: View {
             GeekHoverTooltip(
                 date: mark.latest.date,
                 values: values,
-                visibleDuration: duration,
-                detail: mark.isEstimated
-                    ? L10n.text("\(start)–\(end) · 短缺口估算", "\(start)–\(end) · Short-gap estimate")
-                    : L10n.text("\(start)–\(end) · 平均值；峰值实测 \(peakDate)",
-                                "\(start)–\(end) · Mean; peak observed \(peakDate)")
+                visibleDuration: duration
             )
             .position(
                 x: min(plotRect.maxX - 72, max(plotRect.minX + 72, hoverLocation.x)),
@@ -1688,7 +1675,7 @@ struct GeekPrecisionLineChart: View {
 
     private func bucketDescription(
         _ bucket: GeekChartBucketSnapshot,
-        series: [MenuBarTelemetrySeries]
+        series: [MenuBarTelemetrySeries], points: [MenuBarTelemetryPoint]
     ) -> String {
         let start = PanelChartDateFormatting.string(for: bucket.start, visibleDuration: duration)
         let end = PanelChartDateFormatting.string(for: bucket.end, visibleDuration: duration)
@@ -1770,7 +1757,7 @@ struct GeekPrecisionLineChart: View {
     private func hoverValues(
         at bucketIndex: Int,
         in buckets: [GeekChartBucketSnapshot],
-        renderableSeries: [MenuBarTelemetrySeries]
+        renderableSeries: [MenuBarTelemetrySeries], points: [MenuBarTelemetryPoint]
     ) -> [GeekHoverValue] {
         if buckets[bucketIndex].averagingGroups != nil {
             return renderableSeries.compactMap { item in
@@ -1863,10 +1850,11 @@ struct GeekPrecisionLineChart: View {
     }
 
     private func accessibilitySummary(
-        for renderableSeries: [MenuBarTelemetrySeries]
+        for renderableSeries: [MenuBarTelemetrySeries],
+        statistics: [MenuBarTelemetryChannel: GeekSeriesStatistics]
     ) -> String {
         let summary = renderableSeries.compactMap { item -> String? in
-            guard let stats = statistics(for: item.channel) else { return nil }
+            guard let stats = statistics[item.channel] else { return nil }
             return L10n.text(
                 "\(item.title)：当前 \(unit.formatted(stats.current))，平均 \(unit.formatted(stats.average))，最低 \(unit.formatted(stats.minimum))，最高 \(unit.formatted(stats.maximum))",
                 "\(item.title): current \(unit.formatted(stats.current)), average \(unit.formatted(stats.average)), minimum \(unit.formatted(stats.minimum)), maximum \(unit.formatted(stats.maximum))"
@@ -1895,7 +1883,14 @@ struct GeekPrecisionNetworkChart: View {
     @StateObject private var dynamicAxisScale = PanelChartAxisScale()
 
     var body: some View {
-        let history = GeekNetworkHistorySnapshot(points: points)
+        MenuBarChartPreparation(kind: "network-summary", first: points.first?.date, last: points.last?.date,
+            count: points.count, configuration: "network", cost: max(256, points.count * 96),
+            build: { [points] in GeekNetworkHistorySnapshot(points: points) }) { history in
+                chartBody(history: history)
+            }
+    }
+
+    private func chartBody(history: GeekNetworkHistorySnapshot) -> some View {
         let visibleAccessibilitySummary = accessibilitySummary(for: history)
 
         return VStack(alignment: .leading, spacing: 2) {
@@ -1931,13 +1926,15 @@ struct GeekPrecisionNetworkChart: View {
                                 width: max(1, proxy.size.width - horizontalInset * 2),
                                 height: max(1, proxy.size.height - (showsTimelineLabels ? 20 : 4))
                             )
-                            let preparedFrame = GeekPreparedNetworkFrame(
-                                history: history,
-                                plotRect: plotRect,
-                                duration: duration,
-                                referenceDate: referenceDate,
-                                displayScale: displayScale
-                            )
+                            MenuBarChartPreparation(kind: "network-frame", first: points.first?.date, last: points.last?.date,
+                                count: points.count,
+                                configuration: "\(plotRect):\(duration):\(displayScale)",
+                                clockRevision: floor(referenceDate.timeIntervalSince1970),
+                                cost: max(512, points.count * 128),
+                                build: { [duration, displayScale] in
+                                    GeekPreparedNetworkFrame(history: history, plotRect: plotRect,
+                                        duration: duration, referenceDate: referenceDate, displayScale: displayScale)
+                                }) { preparedFrame in
                             let targetMaximum = preparedFrame.maximum
                             let maximum = dynamicAxisScale.displayedMaximum(
                                 fallback: targetMaximum
@@ -2014,6 +2011,7 @@ struct GeekPrecisionNetworkChart: View {
                             .foregroundStyle(.tertiary)
                             .transaction { transaction in
                                 transaction.animation = nil
+                            }
                             }
                         }
                     }
@@ -2201,6 +2199,14 @@ struct GeekDiskIOChart: View {
     @StateObject private var dynamicAxisScale = PanelChartAxisScale()
 
     var body: some View {
+        MenuBarChartPreparation(kind: "disk-summary", first: points.first?.date, last: points.last?.date,
+            count: points.count, configuration: "disk:\(duration)", cost: 512,
+            build: { GeekPreparedDiskSummary(points: points, duration: duration) }) { summary in
+            chartBody(summary)
+        }
+    }
+
+    private func chartBody(_ summary: GeekPreparedDiskSummary) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             if showsLegend {
                 HStack(spacing: 14) {
@@ -2216,7 +2222,7 @@ struct GeekDiskIOChart: View {
             }
 
             Group {
-                if !hasRenderableData {
+                if !summary.hasData {
                     PanelChartSamplingPlaceholder()
                 } else {
                     GeekLiveChartTimeline(duration: duration) { referenceDate in
@@ -2227,10 +2233,12 @@ struct GeekDiskIOChart: View {
                                 width: max(1, proxy.size.width - horizontalInset * 2),
                                 height: max(1, proxy.size.height - (showsTimelineLabels ? 20 : 4))
                             )
-                            let targetMaximum = chartMaximum(
-                                in: plotRect,
-                                referenceDate: referenceDate
-                            )
+                            MenuBarChartPreparation(kind: "disk-frame", first: points.first?.date, last: points.last?.date,
+                                count: points.count, configuration: "\(plotRect):\(duration):\(displayScale)",
+                                clockRevision: floor(referenceDate.timeIntervalSince1970), cost: max(1024, points.count * 128),
+                                build: { [points, duration, displayScale] in GeekPreparedDiskFrame(points: points, plot: plotRect, duration: duration,
+                                    reference: referenceDate, scale: displayScale) }) { prepared in
+                            let targetMaximum = prepared.maximum
                             let maximum = dynamicAxisScale.displayedMaximum(
                                 fallback: targetMaximum
                             )
@@ -2239,39 +2247,21 @@ struct GeekDiskIOChart: View {
                                 Color.clear
 
                                 zeroBaseline(in: plotRect)
-                                bars(
-                                    values: readValues,
-                                    dates: points.map(\.date),
-                                    in: plotRect,
-                                    maximum: maximum,
-                                    color: diskReadColor,
-                                    upward: true,
-                                    referenceDate: referenceDate
-                                )
-                                bars(
-                                    values: writeValues,
-                                    dates: points.map(\.date),
-                                    in: plotRect,
-                                    maximum: maximum,
-                                    color: diskWriteColor,
-                                    upward: false,
-                                    referenceDate: referenceDate
-                                )
+                                GeekMirroredBarSeries(marks: prepared.readMarks, plotRect: plotRect,
+                                    maximum: maximum, color: diskReadColor, upward: true)
+                                GeekMirroredBarSeries(marks: prepared.writeMarks, plotRect: plotRect,
+                                    maximum: maximum, color: diskWriteColor, upward: false)
 
                                 if showsTimelineLabels {
                                     GeekBarTimelineLabels(
-                                        timeRange: GeekChartWindow.barRange(
-                                            for: points.map(\.date),
-                                            duration: duration,
-                                            referenceDate: referenceDate
-                                        ),
+                                        timeRange: prepared.range,
                                         plotRect: plotRect
                                     )
                                 }
                                 if showsTooltip {
                                     hoverOverlay(
                                         in: plotRect,
-                                        referenceDate: referenceDate
+                                        prepared: prepared
                                     )
                                 }
                             }
@@ -2308,6 +2298,7 @@ struct GeekDiskIOChart: View {
                             .transaction { transaction in
                                 transaction.animation = nil
                             }
+                            }
                         }
                     }
                 }
@@ -2315,16 +2306,8 @@ struct GeekDiskIOChart: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityValue(accessibilitySummary)
+        .accessibilityValue(accessibilitySummary(summary))
         .accessibilityHint(TimeBucketAggregator.nearestFillDescription)
-    }
-
-    private var readValues: [Double] {
-        points.map { Double($0.readBytesPerSecond) }
-    }
-
-    private var writeValues: [Double] {
-        points.map { Double($0.writeBytesPerSecond) }
     }
 
     private var diskReadColor: Color {
@@ -2333,99 +2316,6 @@ struct GeekDiskIOChart: View {
 
     private var diskWriteColor: Color {
         AppChartPalette.primary
-    }
-
-    private var hasRenderableData: Bool {
-        PanelChartSampling.hasRenderableTrend(
-            points.map {
-                MenuBarChartSample(date: $0.date, value: Double($0.readBytesPerSecond))
-            }
-        ) || PanelChartSampling.hasRenderableTrend(
-            points.map {
-                MenuBarChartSample(date: $0.date, value: Double($0.writeBytesPerSecond))
-            }
-        )
-    }
-
-    private var readStatistics: GeekSeriesStatistics? {
-        GeekSeriesStatistics(values: readValues)
-    }
-
-    private var writeStatistics: GeekSeriesStatistics? {
-        GeekSeriesStatistics(values: writeValues)
-    }
-
-    private func chartMaximum(
-        in plotRect: CGRect,
-        referenceDate: Date
-    ) -> Double {
-        let timeRange = GeekChartWindow.barRange(
-            for: points.map(\.date),
-            duration: duration,
-            referenceDate: referenceDate
-        )
-        let values = GeekChartWindow.displayBuckets(
-            for: points.map(\.date),
-            in: plotRect,
-            range: timeRange,
-            referenceDate: referenceDate,
-            displayScale: displayScale,
-            intervalStart: { points[$0].intervalStart },
-            holdLatestWhileFresh: true
-        ).flatMap { bucket in
-            return [
-                bucket.displayValue { readValues[$0] },
-                bucket.displayValue { writeValues[$0] },
-            ].compactMap { $0 }
-        }
-        return GeekBarChartScale.throughputUpperBound(for: values)
-    }
-
-    private func bars(
-        values: [Double],
-        dates: [Date],
-        in plotRect: CGRect,
-        maximum: Double,
-        color: Color,
-        upward: Bool,
-        referenceDate: Date
-    ) -> some View {
-        let timeRange = GeekChartWindow.barRange(
-            for: dates,
-            duration: duration,
-            referenceDate: referenceDate
-        )
-        let buckets = GeekChartWindow.displayBuckets(
-            for: dates,
-            in: plotRect,
-            range: timeRange,
-            referenceDate: referenceDate,
-            displayScale: displayScale,
-            intervalStart: { points[$0].intervalStart },
-            holdLatestWhileFresh: true
-        )
-        let preparedValues = TimeBucketAggregator.nearestFilled(
-            buckets.map { bucket in
-                bucket.displayValue { values[$0] }
-            }
-        )
-        let marks = zip(buckets, preparedValues).compactMap { bucket, prepared in
-            prepared.value.map {
-                GeekMirroredBarMark(
-                    x: bucket.x,
-                    value: $0,
-                    isEstimated: bucket.isEstimated || prepared.isEstimated
-                )
-            }
-        }
-
-        return GeekMirroredBarSeries(
-            marks: marks,
-            plotRect: plotRect,
-            maximum: maximum,
-            color: color,
-            upward: upward
-        )
     }
 
     private func zeroBaseline(in plotRect: CGRect) -> some View {
@@ -2449,12 +2339,10 @@ struct GeekDiskIOChart: View {
     @ViewBuilder
     private func hoverOverlay(
         in plotRect: CGRect,
-        referenceDate: Date
+        prepared: GeekPreparedDiskFrame
     ) -> some View {
-        if let hoveredPoint = hoveredPoint(
-            in: plotRect,
-            referenceDate: referenceDate
-        ), let hoverLocation {
+        if let index = hoveredIndex(in: plotRect, prepared: prepared), let hoverLocation {
+            let hoveredPoint = prepared.buckets[index]
             let hairline = MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
             let indicatorX = MiniWindowPixel.strokeCenter(
                 hoveredPoint.x,
@@ -2470,7 +2358,7 @@ struct GeekDiskIOChart: View {
             GeekHoverTooltip(
                 date: hoveredPoint.end,
                 values: [
-                    hoveredPoint.displayValue { readValues[$0] }.map { value in
+                    prepared.reads[index].map { value in
                         GeekHoverValue(
                         title: L10n.text("读取", "Read"),
                         value: GeekChartUnit.bytesPerSecond.formatted(value),
@@ -2478,7 +2366,7 @@ struct GeekDiskIOChart: View {
                         isEstimated: hoveredPoint.isEstimated
                         )
                     },
-                    hoveredPoint.displayValue { writeValues[$0] }.map { value in
+                    prepared.writes[index].map { value in
                         GeekHoverValue(
                         title: L10n.text("写入", "Write"),
                         value: GeekChartUnit.bytesPerSecond.formatted(value),
@@ -2496,45 +2384,19 @@ struct GeekDiskIOChart: View {
         }
     }
 
-    private func hoveredPoint(
-        in plotRect: CGRect,
-        referenceDate: Date
-    ) -> GeekChartBucketSnapshot? {
-        guard let hoverLocation,
-              plotRect.insetBy(dx: -4, dy: -4).contains(hoverLocation),
-              !points.isEmpty else { return nil }
-        let dates = points.map(\.date)
-        let timeRange = GeekChartWindow.barRange(
-            for: dates,
-            duration: duration,
-            referenceDate: referenceDate
-        )
-        let marks = GeekChartWindow.displayBuckets(
-            for: dates,
-            in: plotRect,
-            range: timeRange,
-            referenceDate: referenceDate,
-            displayScale: displayScale,
-            intervalStart: { points[$0].intervalStart },
-            holdLatestWhileFresh: true
-        )
-        let candidates = marks.filter { !$0.indices.isEmpty }
-        let nearest = candidates
-        .min { abs($0.x - hoverLocation.x) < abs($1.x - hoverLocation.x) }
-        guard let nearest,
-              abs(nearest.x - hoverLocation.x) <= max(
-                8,
-                GeekChartWindow.barMarkWidth * 2
-              ) else {
-            return nil
+    private func hoveredIndex(in plotRect: CGRect, prepared: GeekPreparedDiskFrame) -> Int? {
+        guard let hoverLocation, plotRect.insetBy(dx: -4, dy: -4).contains(hoverLocation) else { return nil }
+        let nearest = prepared.buckets.indices.filter { !prepared.buckets[$0].indices.isEmpty }.min {
+            abs(prepared.buckets[$0].x - hoverLocation.x) < abs(prepared.buckets[$1].x - hoverLocation.x)
         }
+        guard let nearest, abs(prepared.buckets[nearest].x - hoverLocation.x) <= max(8, GeekChartWindow.barMarkWidth * 2) else { return nil }
         return nearest
     }
 
-    private var accessibilitySummary: String {
-        guard hasRenderableData,
-              let readStatistics,
-              let writeStatistics else {
+    private func accessibilitySummary(_ summary: GeekPreparedDiskSummary) -> String {
+        guard summary.hasData,
+              let readStatistics = summary.read,
+              let writeStatistics = summary.write else {
             return PanelChartSampling.statusText
         }
         return L10n.text(
@@ -2549,6 +2411,7 @@ struct GeekHoverValue: Identifiable {
     let value: String
     let color: Color
     var isEstimated = false
+    var showsTitle = true
 
     var id: String { title }
 }
@@ -2573,8 +2436,10 @@ struct GeekHoverTooltip: View {
                     Circle()
                         .fill(item.color)
                         .frame(width: 6, height: 6)
-                    Text(item.title)
-                        .foregroundStyle(item.color)
+                    if item.showsTitle {
+                        Text(item.title)
+                            .foregroundStyle(item.color)
+                    }
                     Spacer(minLength: 8)
                     Text(item.value)
                         .monospacedDigit()
@@ -2584,11 +2449,11 @@ struct GeekHoverTooltip: View {
             if let detail {
                 Text(detail)
                     .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.white.opacity(0.82))
+                    .foregroundStyle(AppAppearanceColors.ink.opacity(0.82))
                     .lineLimit(3)
             }
         }
-        .foregroundStyle(.white.opacity(0.95))
+        .foregroundStyle(AppAppearanceColors.ink.opacity(0.95))
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .frame(width: 156)

@@ -26,6 +26,12 @@ struct ComputerHealthView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: AppDesignTokens.Layout.pageSpacing) {
+                        if healthStore.isRefreshing {
+                            RuntimeInlineStatus(
+                                title: L10n.text("正在更新健康检查", "Updating Health Check"),
+                                detail: L10n.text("当前保留上次检查结果", "Previous results remain visible")
+                            )
+                        }
                         if healthStore.evaluation != nil {
                             if layout.density == .compact {
                                 healthScoreHero

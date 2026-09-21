@@ -28,7 +28,7 @@ struct HealthFactorGrid: View {
                     "Only four verifiable factors affect the score"
                 ))
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
             }
 
             LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
@@ -82,7 +82,7 @@ struct HealthFactorGrid: View {
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.10))
+                    Capsule().fill(AppAppearanceColors.ink.opacity(0.10))
                     if let progress {
                         Capsule().fill(color.gradient)
                             .frame(width: proxy.size.width * min(1, max(0, progress / 100)))
@@ -98,7 +98,7 @@ struct HealthFactorGrid: View {
                 Spacer()
                 if let updatedAt = component?.evaluatedAt {
                     Text(updatedAt.formatted(date: .omitted, time: .shortened))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
                         .monospacedDigit()
                 }
             }
@@ -106,8 +106,8 @@ struct HealthFactorGrid: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 176, alignment: .topLeading)
-        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.12), lineWidth: 1))
+        .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppAppearanceColors.ink.opacity(0.12), lineWidth: 1))
         .accessibilityElement(children: .contain)
     }
 

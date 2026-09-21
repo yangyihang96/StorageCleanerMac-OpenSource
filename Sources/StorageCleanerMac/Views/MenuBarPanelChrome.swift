@@ -327,8 +327,9 @@ struct GeekAttachedPanelShell<Detail: View, Overview: View, Tertiary: View>: Vie
                         borderEdges: detailBorderEdges,
                         showsShadow: false
                     ) {
-                        detail
-                            .frame(width: detailSize.width, height: detailSize.height, alignment: .top)
+                        MiniWindowFittedPage(contentSize: detailSize, availableSize: detailFrame.size) {
+                            detail
+                        }
                         }
                         .contentShape(Rectangle())
                         .onContinuousHover { phase in
@@ -383,12 +384,9 @@ struct GeekAttachedPanelShell<Detail: View, Overview: View, Tertiary: View>: Vie
                             borderEdges: tertiaryBorderEdges,
                             showsShadow: false
                         ) {
-                            tertiary
-                                .frame(
-                                    width: tertiarySize.width,
-                                    height: tertiarySize.height,
-                                    alignment: .top
-                                )
+                            MiniWindowFittedPage(contentSize: tertiarySize, availableSize: tertiaryFrame.size) {
+                                tertiary
+                            }
                             }
                             .contentShape(Rectangle())
                             .onContinuousHover { phase in

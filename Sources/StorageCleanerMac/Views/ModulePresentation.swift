@@ -84,6 +84,7 @@ struct WindowLayoutMetrics {
     }
 
     let density: Density
+    let viewportHeight: CGFloat
     let isShort: Bool
     let sidebarMinimumWidth: CGFloat
     let sidebarIdealWidth: CGFloat
@@ -102,6 +103,7 @@ struct WindowLayoutMetrics {
     let footerHeight: CGFloat
 
     init(contentSize: CGSize) {
+        viewportHeight = contentSize.height
         let compact = contentSize.width < AppWindowLayoutPolicy.compactBreakpoint
         density = compact ? .compact : .regular
         isShort = contentSize.height < 560
@@ -148,15 +150,18 @@ extension EnvironmentValues {
 /// Only the middle slot changes its contents; header/footer geometry stays put.
 struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
     @Environment(\.windowLayoutMetrics) private var layout
+    private let fitsVisibleHeight: Bool
     private let header: Header
     private let content: Content
     private let footer: Footer
 
     init(
+        fitsVisibleHeight: Bool = false,
         @ViewBuilder header: () -> Header,
         @ViewBuilder content: () -> Content,
         @ViewBuilder footer: () -> Footer
     ) {
+        self.fitsVisibleHeight = fitsVisibleHeight
         self.header = header()
         self.content = content()
         self.footer = footer()
@@ -166,6 +171,7 @@ struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
                 header
+                    .fixedSize(horizontal: false, vertical: true)
 #if DEBUG
                     .layoutProbe(LayoutProbeID.smartScanHeader)
 #endif
@@ -178,7 +184,7 @@ struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
 #endif
 
                 footer
-                    .frame(height: layout.footerHeight)
+                    .frame(minHeight: layout.footerHeight)
                     .frame(maxWidth: .infinity)
 #if DEBUG
                     .layoutProbe(LayoutProbeID.smartScanFooter)
@@ -189,7 +195,7 @@ struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
             .padding(.bottom, layout.contentPadding)
             .frame(
                 width: proxy.size.width,
-                height: proxy.size.height,
+                height: fitsVisibleHeight ? min(proxy.size.height, layout.viewportHeight) : proxy.size.height,
                 alignment: .top
             )
 #if DEBUG
@@ -399,11 +405,11 @@ struct IntegratedTitlebar: View {
                         .padding(.vertical, AppDesignTokens.Spacing.hairline)
                         .background(
                             Capsule(style: .continuous)
-                                .fill(Color.white.opacity(0.14))
+                                .fill(AppAppearanceColors.ink.opacity(0.14))
                         )
                         .overlay {
                             Capsule(style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                                .strokeBorder(AppAppearanceColors.ink.opacity(0.22), lineWidth: 1)
                         }
                 }
             }
@@ -440,8 +446,6 @@ final class TitlebarDragView: NSView {
 }
 
 struct MainContentHost<Content: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     let route: ReviewFilter
     let showsIntegratedTitlebar: Bool
     private let content: Content
@@ -464,18 +468,54 @@ struct MainContentHost<Content: View>: View {
                 IntegratedTitlebar(theme: theme)
             }
 
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            AdaptivePageViewport(resetID: route) {
+                content
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(ModuleBackground(theme: theme))
         .environment(\.moduleTheme, theme)
-        // The golden main-window surface is dark even when macOS is light.
-        // Scope native label/control contrast here; neutral settings stay native.
-        .environment(\.colorScheme, theme.isImmersive ? .dark : colorScheme)
         .tint(theme.accent)
         .foregroundStyle(theme.primaryText)
 
+    }
+}
+
+/// Keep a usable content area when macOS tiles a window below its normal
+/// minimum size. Lists keep their own bounded scrolling; the page itself only
+/// overflows in short windows, instead of squeezing those lists to zero height.
+struct AdaptivePageViewport<Content: View>: View {
+    private let resetID: ReviewFilter?
+    private let content: Content
+
+    init(resetID: ReviewFilter? = nil, @ViewBuilder content: () -> Content) {
+        self.resetID = resetID
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ScrollViewReader { reader in
+                ScrollView(.vertical) {
+                    content
+                        .frame(
+                            width: proxy.size.width,
+                            height: max(AppWindowLayoutPolicy.minimumReferenceContentSize.height, proxy.size.height),
+                            alignment: .top
+                        )
+                        .id("main-page-top")
+                }
+                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                .onChange(of: resetID) {
+                    reader.scrollTo("main-page-top", anchor: .top)
+                }
+            }
+            // Measure the detail column, not the window including its sidebar.
+            .environment(\.windowLayoutMetrics, WindowLayoutMetrics(contentSize: proxy.size))
+        }
+#if DEBUG
+        .layoutProbe(LayoutProbeID.pageViewport)
+#endif
     }
 }
 
@@ -650,12 +690,23 @@ enum ScanStatusPresentation: Equatable {
 }
 
 struct ScanStatusView: View {
+    @Environment(\.moduleTheme) private var theme
     let status: ScanStatusPresentation
+
+    private var statusTint: Color {
+        switch status {
+        case .completed: AppDesignTokens.Palette.success
+        case .failed: AppDesignTokens.Palette.destructive
+        case .expired: AppDesignTokens.Palette.warning
+        case .scanning: theme.accent
+        case .idle, .neverScanned: .secondary
+        }
+    }
 
     var body: some View {
         Label(status.title, systemImage: status.systemImage)
             .font(AppTypography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(statusTint)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel(status.title)
     }
@@ -674,6 +725,7 @@ struct HeroScanPage<Accessory: View>: View {
     let status: ScanStatusPresentation
     let isLoading: Bool
     let isActionDisabled: Bool
+    let allowsActionWhileLoading: Bool
     let trustText: String?
     let action: () -> Void
     private let showsAccessory: Bool
@@ -690,6 +742,7 @@ struct HeroScanPage<Accessory: View>: View {
         status: ScanStatusPresentation,
         isLoading: Bool = false,
         isActionDisabled: Bool = false,
+        allowsActionWhileLoading: Bool = false,
         trustText: String? = nil,
         showsAccessory: Bool = true,
         action: @escaping () -> Void,
@@ -705,6 +758,7 @@ struct HeroScanPage<Accessory: View>: View {
         self.status = status
         self.isLoading = isLoading
         self.isActionDisabled = isActionDisabled
+        self.allowsActionWhileLoading = allowsActionWhileLoading
         self.trustText = trustText
         self.action = action
         self.showsAccessory = showsAccessory
@@ -725,6 +779,7 @@ struct HeroScanPage<Accessory: View>: View {
             status: status,
             isLoading: isLoading,
             isActionDisabled: isActionDisabled,
+            allowsActionWhileLoading: allowsActionWhileLoading,
             trustText: trustText ?? "",
             action: action
         ) {
@@ -745,6 +800,7 @@ extension HeroScanPage where Accessory == EmptyView {
         status: ScanStatusPresentation,
         isLoading: Bool = false,
         isActionDisabled: Bool = false,
+        allowsActionWhileLoading: Bool = false,
         trustText: String? = nil,
         action: @escaping () -> Void
     ) {
@@ -759,6 +815,7 @@ extension HeroScanPage where Accessory == EmptyView {
             status: status,
             isLoading: isLoading,
             isActionDisabled: isActionDisabled,
+            allowsActionWhileLoading: allowsActionWhileLoading,
             trustText: trustText,
             showsAccessory: false,
             action: action,

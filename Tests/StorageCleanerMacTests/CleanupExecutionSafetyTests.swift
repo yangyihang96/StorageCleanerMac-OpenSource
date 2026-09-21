@@ -832,13 +832,14 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         var states = fixture.states
         states[firstDestination.path] = .snapshot(fixture.candidates[0].snapshot)
         let mover = SuspendingCleanupMover(resultURL: firstDestination)
+        let coordinator = HeavyWorkCoordinator()
         let executor = SafeCleanupExecutor(
             metadataReader: FixtureMetadataReader(states: states),
             mover: mover,
             volumeChecker: FixedVolumeChecker(available: true),
             runningApplicationChecker: FixedRunningApplicationChecker(running: false),
             capacityReader: FixedCapacityReader(values: []),
-            coordinator: HeavyWorkCoordinator()
+            coordinator: coordinator
         )
         let executionContext = context(
             for: fixture,
@@ -854,6 +855,12 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         }
         await mover.waitUntilStarted()
         task.cancel()
+        let drainingOwner = await coordinator.activeOwner
+        XCTAssertEqual(drainingOwner, .cleanup)
+        do {
+            _ = try await coordinator.acquire(owner: .benchmark)
+            XCTFail("Cancellation must not release a lease while a move is in flight")
+        } catch { }
         await mover.finish()
         let report = await task.value
         XCTAssertEqual(report.outcome, .cancelled)
@@ -861,6 +868,8 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         XCTAssertEqual(report.summary.notProcessedItemCount, 2)
         let cancellationCallCount = await mover.callCount
         XCTAssertEqual(cancellationCallCount, 1)
+        let finishedOwner = await coordinator.activeOwner
+        XCTAssertNil(finishedOwner)
     }
 
     func testExecutorRejectsSecondExecutionStaleSessionAndNonV2Modes() async throws {
@@ -1844,5 +1853,91 @@ private actor FixedCapacityReader: CleanupCapacityReading {
 
     func availableCapacity(at url: URL) async -> Int64? {
         values.isEmpty ? nil : values.removeFirst()
+    }
+}
+
+extension CleanupExecutionSafetyTests {
+    func testJournalFailureBeforeFirstMoveLeavesAllFilesUntouched() async throws {
+        let fixture = makeFixture(count: 2)
+        let plan = try makePlan(fixture)
+        let mover = RecordingCleanupMover()
+        let executor = SafeCleanupExecutor(
+            metadataReader: FixtureMetadataReader(states: fixture.states), mover: mover,
+            volumeChecker: FixedVolumeChecker(available: true),
+            runningApplicationChecker: FixedRunningApplicationChecker(running: false),
+            capacityReader: FixedCapacityReader(values: []), coordinator: HeavyWorkCoordinator(),
+            persistReport: { _, _ in throw CocoaError(.fileWriteOutOfSpace) }
+        )
+        let report = await executor.execute(plan: plan,
+            context: context(for: fixture, approvedPlanItemIDs: Set(plan.items.map(\.id))), progress: { _ in })
+        let paths = await mover.paths
+        XCTAssertTrue(paths.isEmpty)
+        XCTAssertEqual(report.outcome, .failed)
+        XCTAssertEqual(report.summary.movedItemCount, 0)
+    }
+
+    func testJournalFailureAfterMoveKeepsReceiptAndStopsNextMove() async throws {
+        let fixture = makeFixture(count: 2)
+        let plan = try makePlan(fixture)
+        let first = plan.items[0]
+        let destination = URL(fileURLWithPath: first.sourceURL.path + ".trash")
+        var states = fixture.states
+        states[destination.path] = .snapshot(first.expectedSnapshot)
+        let mover = RecordingCleanupMover(outcomes: [first.sourceURL.path: .success(destination)])
+        let writes = FailingJournalProbe(failAt: 3)
+        let executor = SafeCleanupExecutor(
+            metadataReader: FixtureMetadataReader(states: states), mover: mover,
+            volumeChecker: FixedVolumeChecker(available: true),
+            runningApplicationChecker: FixedRunningApplicationChecker(running: false),
+            capacityReader: FixedCapacityReader(values: []), coordinator: HeavyWorkCoordinator(),
+            persistReport: { report, _ in try writes.record(report) }
+        )
+        let report = await executor.execute(plan: plan,
+            context: context(for: fixture, approvedPlanItemIDs: Set(plan.items.map(\.id))), progress: { _ in })
+        let paths = await mover.paths
+        XCTAssertEqual(paths, [first.sourceURL.path])
+        XCTAssertEqual(report.restorableReceipts.count, 1)
+        XCTAssertEqual(report.restorableReceipts.first?.resultingItemURL, destination)
+        XCTAssertEqual(writes.reports.last?.items.filter {
+            if case .failed(let failure) = $0.outcome { return failure.code == .moveOutcomeUnknown }
+            return false
+        }.count, 1)
+    }
+
+    func testJournalReloadRetainsIdentityAndRejectsChangedIntent() throws {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = CleanupReportJournal(directory: root)
+        let fixture = makeFixture(count: 1)
+        let plan = try makePlan(fixture)
+        let report = makeReport(plan: plan)
+        let identities = [plan.items[0].sourceURL.path: plan.items[0].fileIdentity]
+        try journal.checkpoint(report, expectedIdentities: identities)
+        XCTAssertEqual(try journal.load(), [report])
+        try Data("corrupted".utf8).write(to: root.appendingPathComponent("damaged.json"))
+        let loaded = try journal.loadAvailable()
+        XCTAssertEqual(loaded.reports, [report])
+        XCTAssertEqual(loaded.unreadableEntries, ["damaged.json"])
+        let changed = [plan.items[0].sourceURL.path: FileIdentity(deviceID: 99, inode: 99,
+            entryKind: .regularFile, creationTimeNanoseconds: nil)]
+        XCTAssertThrowsError(try journal.checkpoint(report, expectedIdentities: changed))
+        XCTAssertEqual(try journal.load(), [report])
+    }
+}
+
+private final class FailingJournalProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var saved: [CleanReport] = []
+    private let failAt: Int
+    init(failAt: Int) { self.failAt = failAt }
+    var reports: [CleanReport] { lock.withLock { saved } }
+    func record(_ report: CleanReport) throws {
+        try lock.withLock {
+            count += 1
+            if count >= failAt { throw CocoaError(.fileWriteOutOfSpace) }
+            saved.append(report)
+        }
     }
 }

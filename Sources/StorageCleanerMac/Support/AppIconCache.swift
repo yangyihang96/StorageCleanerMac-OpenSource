@@ -34,41 +34,114 @@ final class AppIconCache: Sendable {
 
         private let cache: NSCache<NSString, Entry>
         private let loader: @Sendable (String) -> NSImage?
-        private var inFlight: [String: Task<LoadedImage, Never>] = [:]
+        private struct Request {
+            var subscribers: [UUID: CheckedContinuation<LoadedImage, Never>]
+            var invalidated = false
+        }
+        private var requests: [String: Request] = [:]
+        private var pending: [String] = []
+        private var activePath: String?
+        private var cacheGeneration = 0
+        private let maximumPending: Int
 
-        init(capacity: Int, loader: @escaping @Sendable (String) -> NSImage?) {
+        init(capacity: Int, maximumPending: Int, loader: @escaping @Sendable (String) -> NSImage?) {
             let cache = NSCache<NSString, Entry>()
             cache.countLimit = capacity
             cache.totalCostLimit = capacity * AppIconCache.cachedBitmapCost
             self.cache = cache
             self.loader = loader
+            self.maximumPending = maximumPending
         }
 
         func image(for path: String) async -> LoadedImage {
-            let key = path as NSString
-            if let cached = cache.object(forKey: key) {
-                return LoadedImage(image: cached.image)
+            let subscriber = UUID()
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    guard !Task.isCancelled else { continuation.resume(returning: LoadedImage(image: nil)); return }
+                    if let cached = cache.object(forKey: path as NSString) {
+                        continuation.resume(returning: LoadedImage(image: cached.image))
+                        return
+                    }
+                    if var request = requests[path] {
+                        guard request.subscribers.count < 256 else {
+                            continuation.resume(returning: LoadedImage(image: nil)); return
+                        }
+                        request.subscribers[subscriber] = continuation
+                        requests[path] = request
+                        return
+                    }
+                    // A recent visible request takes the place of the oldest
+                    // queued request. No synchronous decoder is interrupted.
+                    if pending.count >= maximumPending, let oldest = pending.first {
+                        pending.removeFirst()
+                        complete(oldest, with: LoadedImage(image: nil))
+                    }
+                    requests[path] = Request(subscribers: [subscriber: continuation])
+                    pending.append(path)
+                    pump()
+                }
+            } onCancel: {
+                Task { await self.cancel(path: path, subscriber: subscriber) }
             }
-
-            if let task = inFlight[path] {
-                return await task.value
-            }
-
-            let loader = self.loader
-            let task = Task.detached(priority: .utility) {
-                await Self.load(path: path, using: loader)
-            }
-            inFlight[path] = task
-
-            let loadedImage = await task.value
-            cache.setObject(
-                Entry(image: loadedImage.image),
-                forKey: key,
-                cost: AppIconCache.memoryCost(of: loadedImage.image)
-            )
-            inFlight[path] = nil
-            return loadedImage
         }
+
+        private func cancel(path: String, subscriber: UUID) {
+            guard var request = requests[path], let waiter = request.subscribers.removeValue(forKey: subscriber) else { return }
+            waiter.resume(returning: LoadedImage(image: nil))
+            requests[path] = request
+            if request.subscribers.isEmpty, activePath != path {
+                requests[path] = nil
+                pending.removeAll { $0 == path }
+            }
+        }
+
+        private func pump() {
+            guard activePath == nil, !pending.isEmpty else { return }
+            let path = pending.removeFirst()
+            activePath = path
+            let loader = self.loader
+            let generation = cacheGeneration
+            Task {
+                let loaded = await Self.load(path: path, using: loader)
+                finish(path, loaded: loaded, generation: generation)
+            }
+        }
+
+        private func finish(_ path: String, loaded: LoadedImage, generation: Int) {
+            activePath = nil
+            if var request = requests[path], request.invalidated, !request.subscribers.isEmpty {
+                request.invalidated = false
+                requests[path] = request
+                pending.insert(path, at: 0)
+            } else {
+                if requests[path]?.subscribers.isEmpty == false, generation == cacheGeneration {
+                    cache.setObject(Entry(image: loaded.image), forKey: path as NSString,
+                                    cost: AppIconCache.memoryCost(of: loaded.image))
+                }
+                complete(path, with: loaded)
+            }
+            pump()
+        }
+
+        private func complete(_ path: String, with value: LoadedImage) {
+            let request = requests.removeValue(forKey: path)
+            request?.subscribers.values.forEach { $0.resume(returning: value) }
+        }
+
+        func purge() {
+            cacheGeneration &+= 1
+            cache.removeAllObjects()
+            let queued = pending
+            pending.removeAll()
+            for path in queued { complete(path, with: LoadedImage(image: nil)) }
+        }
+
+        func invalidate(_ path: String) {
+            cache.removeObject(forKey: path as NSString)
+            if activePath == path { requests[path]?.invalidated = true }
+        }
+
+        var queueCounts: (active: Int, pending: Int) { (activePath == nil ? 0 : 1, pending.count) }
 
         private static func load(
             path: String,
@@ -90,11 +163,12 @@ final class AppIconCache: Sendable {
 
     init(
         capacity: Int,
+        maximumPending: Int = 64,
         loader: @escaping @Sendable (String) -> NSImage?
     ) {
         let capacity = max(1, capacity)
         self.capacity = capacity
-        state = State(capacity: capacity, loader: loader)
+        state = State(capacity: capacity, maximumPending: max(1, maximumPending), loader: loader)
     }
 
     func loadedIcon(for path: String) async -> LoadedImage {
@@ -106,6 +180,12 @@ final class AppIconCache: Sendable {
         let standardizedPath = (path as NSString).standardizingPath
         return await state.image(for: standardizedPath)
     }
+
+    func purge() async { await state.purge() }
+    func invalidate(path: String) async {
+        await state.invalidate((path as NSString).standardizingPath)
+    }
+    func queueCounts() async -> (active: Int, pending: Int) { await state.queueCounts }
 
     static func loadBundleIcon(atPath path: String) -> NSImage? {
         guard let bundle = resolvedBundle(atPath: path) else { return nil }

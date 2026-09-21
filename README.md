@@ -1,20 +1,16 @@
 # 存储清理助手 / Storage Cleaner Mac
 
-**当前版本 / Current version:** `1.9.13`
+**最新测试版 / Latest beta:** `1.10.1`（Build `20260921041501`） · **稳定版 / Stable:** `1.9.13`
+
+[下载 1.10.1 测试版 / Download beta](https://github.com/yangyihang96/StorageCleanerMac-OpenSource/releases/tag/v1.10.1-beta.20260921041501) · [下载稳定版 / Download stable](https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.9.13)
+
+测试版适用于 Apple silicon、macOS 14 或更高版本，安装名称为“测试版.app”。本次提供已在本地验证的 Apple Development 签名包，尚未获得 Developer ID 公证或 Gatekeeper 发行批准；部分 Mac 可能阻止打开。正式版更新源保持不变。
+
+The beta requires Apple silicon and macOS 14 or later and installs as `测试版.app`. This locally validated build uses an Apple Development signature; it is not Developer ID notarized or Gatekeeper-approved for distribution and may be blocked on other Macs. The stable update feed is unchanged.
 
 存储清理助手是一款原生 macOS SwiftUI 应用，用来把本机磁盘占用、可自动清理、大文件、重复文件、应用残留、启动项、程序升级和内存状态放到一个可复核的界面里。它强调“先看清楚，再决定处理”，扫描阶段保持只读，清理动作需要用户明确确认，并优先移到废纸篓。
 
 Storage Cleaner Mac is a native macOS SwiftUI app that brings storage usage, auto-clean items, large files, duplicate files, app leftovers, startup items, app updates, and memory status into one review-first interface. It is designed around a clear safety boundary: scans are read-only, cleanup actions require explicit user confirmation, and removable items are moved to Trash first whenever possible.
-
-## 开源与下载 / Source and Downloads
-
-本仓库是 1.9.13 的 MIT 开源快照，包含完整源码、测试和构建素材。为保护开发隐私，不包含原私有仓库的提交历史；文档中的个人路径和签名身份已替换为示例。
-
-- 源码：https://github.com/yangyihang96/StorageCleanerMac-OpenSource
-- 安装包：https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.9.13
-- 所有构建和测试在本地完成；本仓库不运行 GitHub Actions。
-
-This repository is a sanitized MIT-licensed source snapshot of version 1.9.13. Original private development history is not included. Download locally built installers from the release link above.
 
 ## 它基于什么实现 / What It Is Based On
 
@@ -64,7 +60,7 @@ This repository is a sanitized MIT-licensed source snapshot of version 1.9.13. O
 - **1.1.43 沉浸式界面与小窗统一**：主窗口改为整窗一体化环境背景和自定义侧栏；扫描前聚焦单一体检操作，扫描后切换为四个可直接进入复核的任务磁贴。浅色、深色和窄窗口均使用同一套响应式布局，菜单栏小窗同步使用品牌图标、语义色指标块和统一网络上下行排版。
 - **1.1.42 任务页界面统一**：可自动清理默认只显示可操作的绿色项目；大文件摘要合并为一个状态区；重复文件在首次扫描前不再展示无意义的零指标；工具箱和筛选工具栏可随窗口宽度自动换行。
 - **1.1.41 智能体检界面重构**：首页改为以真实健康度、扫描新鲜度、权限状态和可清理量为中心的单一任务界面；扫描完成后直接切换到可操作的清理状态。侧边栏压缩为单行导航，功能卡只显示必要值，未加载数据不再显示误导性的 `0`。
-- **1.1.40 自动更新重构**：使用 Sparkle 2.9.4 从独立公开更新源检查、下载、EdDSA 校验、原子替换并重启应用；不再要求用户安装或登录 GitHub CLI。默认每 6 小时检查并自动下载更新，菜单栏“检测更新”可随时手动触发。
+- **1.1.40 自动更新重构**：使用 Sparkle 2.9.4 从独立公开更新源检查、下载、EdDSA 校验、原子替换并重启应用；源码仓库继续保持私有，不再要求用户安装或登录 GitHub CLI。默认每 6 小时检查并自动下载更新，菜单栏“检测更新”可随时手动触发。
 - **1.1.38 能耗统计重构**：累计电量直接读取 macOS `ri_energy_nj` 进程归因计数并换算为 Wh/mWh，实时功率使用 1.2 秒能量增量；系统接口未覆盖的少量应用进程优先按本机实测样本校准，仅在整机无法校准时使用兼容兜底，不再把 Activity Monitor 相对分数当作瓦特。只统计可识别应用，同一应用的主进程与 Helper 会合并，并提供应用图标、实测覆盖、累计/当前/平均功率、搜索、排序、切换应用和 Finder 定位。
 - **1.1.37 界面与小窗视觉迭代**：主界面与菜单栏小窗统一为更紧凑的仪表界面，使用中性玻璃材质、清晰边框、克制阴影、统一圆角和轻量网格；侧边栏、首页状态卡、开发缓存等扫描入口采用同一排版密度。小窗增加信号线与分区图标，紧凑/标准/宽松三种宽度都优先保留完整 App 名称，并继续统一网络上下行的字号、字重与颜色。修复固定深色或浅色时主窗口与菜单栏小窗外观不同步的问题，设置切换与应用启动都会同步 AppKit 外观。
 - **安全分级模型**：沿用 `storage-analyzer` 的风险分层思想，把项目分为绿色可清理、黄色需人工判断、红色谨慎处理，并保留云盘、应用数据、聊天记录、媒体库和敏感目录边界。
@@ -117,7 +113,7 @@ This repository is a sanitized MIT-licensed source snapshot of version 1.9.13. O
 - **Version 1.1.43 immersive interface and mini-window unification:** The main window now uses one integrated ambient surface and a custom sidebar. Before scanning it focuses on one Smart Care action; after scanning it becomes four directly reviewable task tiles. Light, dark, and narrow layouts share the same responsive structure, while the menu-bar panel now uses the brand icon, semantic metric tiles, and matching download/upload typography.
 - **Version 1.1.42 task-page unification:** Auto Clean now defaults to actionable green items, Large Files uses one consolidated summary, Duplicates hides meaningless zero metrics before its first scan, and Toolbox/filter controls reflow with window width.
 - **Version 1.1.41 Smart Care interface rebuild:** The home screen now focuses on measured health, scan freshness, access state, and cleanable space as one clear workflow, then switches directly to actionable cleanup after a scan. Sidebar navigation is denser, module cards show only useful values, and unloaded data is no longer presented as a misleading zero.
-- **Version 1.1.40 automatic updater rebuild:** Sparkle 2.9.4 checks a separate public update feed, downloads the archive, verifies its EdDSA signature, atomically replaces the app, and relaunches it. Users no longer need GitHub CLI access. Updates are checked every six hours by default and can be triggered from the Check for Updates menu command.
+- **Version 1.1.40 automatic updater rebuild:** Sparkle 2.9.4 checks a separate public update feed, downloads the archive, verifies its EdDSA signature, atomically replaces the app, and relaunches it. The source repository remains private, and users no longer need GitHub CLI access. Updates are checked every six hours by default and can be triggered from the Check for Updates menu command.
 - **Version 1.1.38 energy redesign:** Cumulative app energy now reads the macOS `ri_energy_nj` process-attribution counter and converts it to Wh/mWh, while live power uses a 1.2-second energy delta. The few uncovered app processes prefer calibration learned from measured processes on the same Mac, with a compatibility fallback only when local calibration is unavailable; Activity Monitor's relative score is no longer treated as watts. Main and helper processes are merged per app, with icons, measured coverage, cumulative/current/average power, search, sorting, app activation, and Finder reveal actions.
 - **Version 1.1.37 interface and mini-window visual iteration:** The main window and menu-bar panel now share a tighter instrument-style visual system with neutral glass, crisp borders, restrained shadows, consistent radii, and a subtle grid. Sidebar rows, overview status cards, and scan entry pages use the same information density. The mini-window adds a signal line and section icons; compact, balanced, and expanded widths prioritize complete app names while retaining matching download/upload typography and color. AppKit appearance is now synchronized at launch and whenever the setting changes, fixing mismatched main-window and popover colors in forced light or dark mode.
 - **Safety tier model:** The app follows the original `storage-analyzer` risk-tier concept: green items are generally rebuildable, yellow items need manual review, and red items are high-risk or open-only. Cloud folders, app data, chat records, media libraries, and sensitive paths are treated conservatively.
@@ -211,9 +207,9 @@ This repository is a sanitized MIT-licensed source snapshot of version 1.9.13. O
 
 ## 发布状态 / Release Status
 
-`1.9.13` 的改动和本地验证分别记录在 [更新日志](CHANGELOG.md) 与 [发布验收记录](docs/RELEASE_VALIDATION_1.9.13.md)。GitHub 自动构建和测试已关闭，本次验证均在本机进行。签名、Apple 公证、公开上传与实际更新回读按独立证据报告；Apple Development 签名包不代表 Developer ID 或 Gatekeeper 批准。
+`1.10.1 Beta` 包含浅色界面、小窗响应与后台开销优化、安全回执及 M 系列 Core18 草案。改动和本地验证分别记录在 [更新日志](CHANGELOG.md) 与 [测试版验收记录](docs/RELEASE_VALIDATION_1.10.1-beta.md)。Core18 尚无生产参考，只显示原始结果；未完成的扩展、其他硬件验证和独立视觉验收不算通过。GitHub Actions 保持关闭，本次验证均在本机进行。稳定版 `1.9.13` 的记录保留在 [原发布验收记录](docs/RELEASE_VALIDATION_1.9.13.md)。
 
-Changes and local validation for `1.9.13` are recorded in the [changelog](CHANGELOG.md) and [release validation](docs/RELEASE_VALIDATION_1.9.13.md). GitHub runner validation is disabled for this release. Signing, notarization, publication, and observed updates are separate evidence states; Apple Development signing does not imply Developer ID or Gatekeeper approval.
+`1.10.1 Beta` adds light appearance, menu-bar responsiveness and background-efficiency work, recovery receipts, and the draft M-series Core18 protocol. See the [changelog](CHANGELOG.md) and [beta validation](docs/RELEASE_VALIDATION_1.10.1-beta.md). Core18 remains raw-only without a production reference; unfinished extensions, additional hardware coverage, and independent visual acceptance remain open. All validation runs locally and GitHub Actions remains disabled. Signing, notarization, publication, and observed upgrades are separate evidence states.
 
 本机测试包：
 

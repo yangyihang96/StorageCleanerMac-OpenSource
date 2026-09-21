@@ -6,7 +6,22 @@ struct BrowserPrivacyWorkspaceView: View {
 
     var body: some View {
         Group {
-            if shouldUseHeroPresentation {
+            if browserPrivacyStore.state == .scanning && !browserPrivacyStore.hasCachedResults {
+                FeatureRuntimePage(
+                    module: .privacy,
+                    title: L10n.text("正在读取浏览器记录", "Reading Browser Records"),
+                    subtitle: L10n.text("正在检查可访问的浏览器与历史记录", "Checking accessible browsers and history"),
+                    trustText: L10n.text("只读扫描 · 删除前确认", "Read-only scan · Confirm before deletion")
+                ) {
+                    EmptyView()
+                } actions: {
+                    AppButton(title: L10n.text("取消扫描", "Cancel Scan"), systemImage: "xmark.circle",
+                              action: browserPrivacyStore.cancel)
+                }
+#if DEBUG
+                .layoutProbe(LayoutProbeID.privacy)
+#endif
+            } else if shouldUseHeroPresentation {
                 GeometryReader { proxy in
                     heroPage
                         .frame(width: proxy.size.width, height: proxy.size.height)
@@ -35,7 +50,10 @@ struct BrowserPrivacyWorkspaceView: View {
                         }
                     }
                 } controls: {
-                    EmptyView()
+                    if browserPrivacyStore.state == .scanning {
+                        RuntimeInlineStatus(title: L10n.text("正在重新读取浏览器记录", "Refreshing Browser Records"),
+                            detail: L10n.text("上次结果保留到本次读取完成", "Previous results remain visible until this read finishes"))
+                    }
                 } content: {
                     privacyContent
                 }
@@ -59,6 +77,7 @@ struct BrowserPrivacyWorkspaceView: View {
             actionSystemImage: browserPrivacyStore.state == .scanning ? "xmark" : "viewfinder",
             status: heroStatus,
             isLoading: browserPrivacyStore.state == .scanning,
+            allowsActionWhileLoading: true,
             trustText: L10n.text("只读扫描 · 删除前确认", "Read-only scan · Confirm before deletion"),
             showsAccessory: true
         ) {
@@ -87,8 +106,8 @@ struct BrowserPrivacyWorkspaceView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 92)
                 }
-                .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.12)))
+                .background(AppAppearanceColors.ink.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
             }
             if browserPrivacyStore.state == .permissionDenied {
                 GlassToolbarButton(
@@ -176,8 +195,8 @@ struct BrowserPrivacyDateControls: View {
                 }
             }
             .padding(2)
-            .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(.white.opacity(0.12)))
+            .background(AppAppearanceColors.ink.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
             HStack {
                 Picker(L10n.text("分组", "Grouping"), selection: $store.groupsByWebsite) {
                     Text(L10n.text("按网站分组", "Group by website")).tag(true)

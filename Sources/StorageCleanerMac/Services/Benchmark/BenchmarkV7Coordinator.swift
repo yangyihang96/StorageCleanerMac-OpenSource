@@ -16,6 +16,7 @@ actor BenchmarkV7Coordinator {
     private let environmentProvider: any MacBenchmarkEnvironmentProviding
     private let hardwareProfileProvider: any BenchmarkV7HardwareProfileProviding
     private let timeouts: BenchmarkV7TimeoutPolicy
+    private let resourceJournal: CleanupReportJournal?
     private var activeSessionID: UUID?
     private var cleanupSessionID: UUID?
     /// A deadline can return while a kernel is still executing. Once that
@@ -41,6 +42,7 @@ actor BenchmarkV7Coordinator {
         self.environmentProvider = environmentProvider
         self.hardwareProfileProvider = hardwareProfileProvider
         self.timeouts = timeouts
+        resourceJournal = nil
     }
 
     init(
@@ -52,7 +54,8 @@ actor BenchmarkV7Coordinator {
             = SystemMacBenchmarkEnvironmentProvider(),
         hardwareProfileProvider: any BenchmarkV7HardwareProfileProviding
             = SystemBenchmarkV7HardwareProfileProvider(),
-        timeouts: BenchmarkV7TimeoutPolicy = .standard
+        timeouts: BenchmarkV7TimeoutPolicy = .standard,
+        resourceJournal: CleanupReportJournal? = .live
     ) {
         coreService = nil
         self.workloadRunner = workloadRunner
@@ -62,6 +65,7 @@ actor BenchmarkV7Coordinator {
         self.environmentProvider = environmentProvider
         self.hardwareProfileProvider = hardwareProfileProvider
         self.timeouts = timeouts
+        self.resourceJournal = resourceJournal
     }
 
     func preflight(
@@ -129,6 +133,9 @@ actor BenchmarkV7Coordinator {
     ) async -> BenchmarkV7Result {
         let requestedCategories = categories ?? plan.categories
         let sessionID = suppliedSessionID ?? UUID()
+        if plan.planVersion == MSeriesProtocol.plan {
+            return await runMSeries(sessionID: sessionID, targetDirectory: targetDirectory, progress: progress)
+        }
         if let restartRequiredContext {
             let preflight = Self.fallbackPreflight(targetDirectory: targetDirectory)
             return BenchmarkV7Result(
@@ -242,7 +249,7 @@ actor BenchmarkV7Coordinator {
                 progress: progress
             )
         }
-        if OfficialBenchmarkPlan.current.matches(
+        if OfficialBenchmarkPlan.legacyV9.matches(
             plan: plan,
             categories: requestedCategories
         ), hardBlockedCategories.contains(.storage) {
@@ -1427,4 +1434,53 @@ private actor BenchmarkV7TimedProgressRelay {
     func timeoutContext() -> BenchmarkV7TimeoutContext { context }
 
     func close() { isOpen = false }
+
+}
+
+extension BenchmarkV7Coordinator {
+    private func runMSeries(sessionID: UUID, targetDirectory: URL,
+                            progress: @escaping ProgressHandler) async -> BenchmarkV7Result {
+        let plan = MSeriesProtocol.officialPlan
+        var preflight = Self.fallbackPreflight(targetDirectory: targetDirectory)
+        func envelope(_ payload: MSeriesResult?, failure: BenchmarkV7Failure?) -> BenchmarkV7Result {
+            BenchmarkV7Result(mSeries: payload,
+                session: BenchmarkV7Session(id: sessionID, plan: plan, storageTarget: preflight.storageTarget),
+                preflight: preflight, environment: environment(for: preflight),
+                hardwareProfile: hardwareProfileProvider.capture(), versions: MSeriesProtocol.versions,
+                metrics: [], coreScore: nil,
+                runtimeWarnings: ["Calibration unavailable: raw-only", "Extensions pending implementation"],
+                completionStatus: payload?.cancelled == true ? .cancelled :
+                    (payload?.isCompleteCore == true ? .completed : .partiallyCompleted),
+                completedAt: payload?.completedAt, failure: failure)
+        }
+        guard activeSessionID == nil, cleanupSessionID == nil, restartRequiredContext == nil,
+              let heavyWorkCoordinator else { return envelope(nil, failure: .alreadyRunning) }
+        activeSessionID = sessionID
+        defer { activeSessionID = nil }
+        let lease: HeavyWorkCoordinator.Lease
+        do { lease = try await heavyWorkCoordinator.acquire(owner: .benchmark) }
+        catch { return envelope(nil, failure: .alreadyRunning) }
+        // No detached worker is abandoned on cancellation. Release happens only
+        // after run returns, which includes command-buffer drain and cleanup.
+        preflight = await preflightService.capture(plan: plan, categories: plan.categories, targetDirectory: targetDirectory)
+        if Task.isCancelled {
+            await heavyWorkCoordinator.release(lease)
+            return envelope(nil, failure: .cancelled)
+        }
+        if preflight.thermalState == .serious || preflight.thermalState == .critical {
+            await heavyWorkCoordinator.release(lease)
+            return envelope(nil, failure: .preflightBlocked)
+        }
+        let result = await MSeriesCoreRunner.run(sessionID: sessionID, root: targetDirectory,
+                                                resourceJournal: resourceJournal) { token, id, index in
+            let category: BenchmarkV7Category = id.hasPrefix("cpu.") ? .cpu :
+                id.hasPrefix("gpu.") ? .gpu : id.hasPrefix("memory.") ? .memory : .storage
+            await progress(.phase(.running, sessionID: token, category: category,
+                workloadID: id, progress: min(0.98, Double(index) / 19)))
+        }
+        await heavyWorkCoordinator.release(lease)
+        return envelope(result, failure: result.cancelled ? .cancelled :
+            (result.globalFailure != nil ? .validationFailed(result.globalFailure!) : nil))
+    }
+
 }

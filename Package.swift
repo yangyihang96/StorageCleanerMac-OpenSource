@@ -22,6 +22,8 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4")
     ],
     targets: [
+        .target(name: "MSeriesKernels", path: "Sources/MSeriesKernels",
+                publicHeadersPath: "include", linkerSettings: [.linkedLibrary("compression")]),
         .target(
             name: "FanControlShared",
             path: "Sources/FanControlShared"
@@ -34,6 +36,7 @@ let package = Package(
             dependencies: [
                 "FanControlShared",
                 "CSQLite",
+                "MSeriesKernels",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             swiftSettings: [

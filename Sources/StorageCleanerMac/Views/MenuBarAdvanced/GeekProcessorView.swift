@@ -3,19 +3,16 @@ import SwiftUI
 extension MenuBarAdvancedStatusView {
     var geekProcessorPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
-            geekProcessorActivityHoverTarget
-            geekProcessorCoreCard
-            geekProcessorProcessCard
+            liveCard(.cpu) { geekProcessorActivityHoverTarget }
+            liveCard(.cpu) { geekProcessorCoreCard }
+            liveCard(.energyProcesses) { geekProcessorProcessCard }
             if showsExtendedGeekDetails {
-                geekProcessorGPUHoverTarget
-                geekProcessorUsageHoverTarget
-                geekProcessorUptimeHoverTarget
+                liveCard(.sensors) { geekProcessorGPUHoverTarget }
+                liveCard(.cpu) { geekProcessorUsageHoverTarget }
+                liveCard(.cpu) { geekProcessorUptimeHoverTarget }
             }
         }
-        .task {
-            guard geekShouldRefreshOnDemandSnapshot else { return }
-            store.refreshEnergyImpact(priority: .utility)
-        }
+
     }
 
     private var geekProcessorActivityHoverTarget: some View {
@@ -40,8 +37,7 @@ extension MenuBarAdvancedStatusView {
         GeekCombinedCard(
             height: GeekProcessorCoreLayout.cardHeight(
                 for: geekProcessorCoreReadings.count
-            ),
-            verticalPadding: 4
+            )
         ) {
             VStack(spacing: 3) {
                 LazyVGrid(
@@ -74,7 +70,7 @@ extension MenuBarAdvancedStatusView {
                         }
                     }
                 }
-                .font(.footnote)
+                .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.secondary)
             }
             .padding(.top, 5)
@@ -84,13 +80,12 @@ extension MenuBarAdvancedStatusView {
 
     private var geekProcessorProcessCard: some View {
         GeekCombinedCard(
-            height: showsExtendedGeekDetails ? 111 : 75,
-            verticalPadding: 4
+            height: showsExtendedGeekDetails ? 111 : 75
         ) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(L10n.text("进程", "PROCESSES"))
-                        .font(.callout.weight(.medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                         .foregroundStyle(processorTint)
                         .lineLimit(1)
                         .help(L10n.text(
@@ -101,7 +96,7 @@ extension MenuBarAdvancedStatusView {
 
                     Spacer(minLength: 0)
                     Text(geekOnDemandSnapshotStatusText)
-                        .font(.caption2)
+                        .font(AdvancedPanelTypography.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -114,7 +109,7 @@ extension MenuBarAdvancedStatusView {
                                 .controlSize(.small)
                         } else {
                             Text("—")
-                                .font(.callout)
+                                .font(AdvancedPanelTypography.body)
                                 .foregroundStyle(.tertiary)
                         }
                     }
@@ -136,7 +131,7 @@ extension MenuBarAdvancedStatusView {
             VStack(spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("GPU")
-                        .font(.footnote.weight(.medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                         .foregroundStyle(resolvedGPUTint)
 
                     Spacer(minLength: 0)
@@ -226,9 +221,8 @@ extension MenuBarAdvancedStatusView {
                 Text(geekProcessorUsageSummaryText)
                     .foregroundStyle(.primary)
                     .monospacedDigit()
-                    .minimumScaleFactor(0.82)
             }
-            .font(.footnote)
+            .font(AdvancedPanelTypography.body)
             .lineLimit(1)
             .accessibilityElement(children: .combine)
         }
@@ -273,7 +267,7 @@ extension MenuBarAdvancedStatusView {
                     .foregroundStyle(.primary)
                     .monospacedDigit()
             }
-            .font(.footnote)
+            .font(AdvancedPanelTypography.body)
             .lineLimit(1)
             .accessibilityElement(children: .combine)
         }
@@ -366,16 +360,12 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekCPUAppsByUsage: [EnergyImpactApp] {
-        Array(
-            geekEnergyApps
-                .sorted {
-                    if $0.cpuPercent != $1.cpuPercent {
-                        return $0.cpuPercent > $1.cpuPercent
-                    }
-                    return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                }
-                .prefix(showsExtendedGeekDetails ? 5 : 3)
-        )
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled {
+            return Array(geekEnergyApps.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(showsExtendedGeekDetails ? 5 : 3))
+        }
+#endif
+        return Array((store.menuBarPreparedProcesses?.cpu ?? []).prefix(showsExtendedGeekDetails ? 5 : 3))
     }
 
     private func geekProcessorCoreTint(at index: Int) -> Color {
@@ -469,13 +459,13 @@ private struct GeekCPUProcessRow: View {
                 .frame(width: 14, height: 14)
 
             Text(app.name)
-                .font(.callout)
+                .font(AdvancedPanelTypography.body)
                 .lineLimit(1)
 
             Spacer(minLength: 4)
 
             Text(app.cpuPercentText)
-                .font(.callout)
+                .font(AdvancedPanelTypography.body)
                 .monospacedDigit()
                 .lineLimit(1)
         }

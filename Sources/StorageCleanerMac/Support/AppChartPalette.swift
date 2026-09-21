@@ -162,6 +162,24 @@ enum PanelColorTheme: String, CaseIterable, Identifiable {
             theme.chartHex
         }
     }
+
+    /// Keep saved hues intact, but give the built-in pastel series a deeper
+    /// daylight variant. A user's custom RGB value remains their choice.
+    static func chartColor(storedTheme: String, backgroundHex: String, customHex: String) -> Color? {
+        guard let color = PanelAppearancePreferences.color(from: resolvedChartHex(
+            storedTheme: storedTheme, backgroundHex: backgroundHex, customHex: customHex
+        ) ?? "") else { return nil }
+        let theme = resolved(storedTheme: storedTheme, backgroundHex: backgroundHex, chartHex: customHex)
+        let light: UInt32
+        switch theme {
+        case .ocean: light = 0x016CA6
+        case .violet: light = 0x8733B4
+        case .mint: light = 0x087663
+        case .graphite: light = 0x60606A
+        case .system, .custom: return color
+        }
+        return AppAppearanceColors.adaptive(light: light, dark: color)
+    }
 }
 
 private struct PanelBackgroundTintKey: EnvironmentKey {
@@ -189,7 +207,9 @@ extension EnvironmentValues {
 enum AppChartPalette {
     /// Warm activity series used when paired with the primary blue series.
     /// Kept stable across appearances so compact stacked bars remain legible.
-    private static let activityRose = Color(red: 0.90, green: 0.36, blue: 0.61)
+    private static let activityRose = AppAppearanceColors.adaptive(
+        light: 0xB53368, dark: Color(red: 0.90, green: 0.36, blue: 0.61)
+    )
 
     static let primary = AppDesignTokens.Palette.information
     static let secondary = AppDesignTokens.Palette.diagnostic

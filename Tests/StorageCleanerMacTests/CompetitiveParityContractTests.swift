@@ -26,7 +26,8 @@ final class CompetitiveParityContractTests: XCTestCase {
         XCTAssertFalse(themeSource.contains("检查系统垃圾、隐私风险与性能状态"))
         XCTAssertFalse(progressSource.contains("Checking cleanup, privacy, and performance status"))
         XCTAssertTrue(themeSource.contains("检查可清理垃圾与需要人工判断的文件"))
-        XCTAssertTrue(progressSource.contains("Checking cleanup candidates and files that need review"))
+        XCTAssertTrue(progressSource.contains("subtitle: module.pageSubtitle"))
+        XCTAssertTrue(themeSource.contains("Check cleanup candidates and files that need review"))
     }
 
     func testStorageMapUsesOneReusableIndexAndKeepsFinderAsExplicitAction() throws {
@@ -71,12 +72,14 @@ final class CompetitiveParityContractTests: XCTestCase {
         XCTAssertTrue(mapSource.contains(".id(snapshot.path)"))
         XCTAssertTrue(mapSource.contains("currentLocationIdentity"))
         XCTAssertTrue(mapSource.contains("accessibilityAddTraits(isSelected ? .isSelected : [])"))
-        XCTAssertTrue(mapSource.contains(".accessibilityChildren {"))
+        XCTAssertTrue(mapSource.contains(".accessibilityElement(children: .contain)"))
         XCTAssertTrue(mapSource.contains(".accessibilityValue(mapSelectionAccessibilityValue)"))
-        XCTAssertTrue(mapSource.contains(".accessibilityAction(named: Text(L10n.text(\"选择\", \"Select\")))"))
-        XCTAssertTrue(mapSource.contains(".accessibilityHint(mapEntryAccessibilityHint(segment.entry))"))
+        XCTAssertTrue(mapSource.contains(".accessibilityAction(named: Text(L10n.text(\"打开\", \"Open\")), onActivate)"))
+        XCTAssertTrue(mapSource.contains(".accessibilityHint(entry.role != .content"))
         XCTAssertTrue(mapSource.contains("if !entry.isDirectory, !entry.path.isEmpty"))
-        XCTAssertTrue(mapSource.contains("this item cannot be opened"))
+        XCTAssertTrue(mapSource.contains("StorageTreemapTile("))
+        XCTAssertFalse(largeFilesSource.contains("case sunburstMap"))
+        XCTAssertTrue(mapSource.contains("rectangularMapCanvas"))
         XCTAssertTrue(mapSource.contains("measuredShare:"))
         XCTAssertTrue(mapSource.contains("StorageTreemapPresentation.mapLayoutEntries"))
         XCTAssertTrue(mapSource.contains("referenceBytes: currentSnapshot.referenceBytes"))

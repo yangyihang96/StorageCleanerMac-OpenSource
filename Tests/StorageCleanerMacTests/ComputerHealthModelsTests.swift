@@ -702,9 +702,11 @@ private actor SuspendedSequencedHealthProbe: ComputerHealthProbing {
     }
 
     func waitUntilStarted(_ expectedCount: Int, maximumYields: Int) async -> Bool {
-        for _ in 0..<maximumYields {
+        // Task.yield() need not schedule the MainActor on another executor.
+        // This is fixture synchronization, not a product performance budget.
+        for _ in 0..<min(maximumYields, 2_000) {
             if callCount >= expectedCount { return true }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
         }
         return callCount >= expectedCount
     }

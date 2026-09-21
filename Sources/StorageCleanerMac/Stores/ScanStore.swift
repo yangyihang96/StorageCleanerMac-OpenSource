@@ -105,7 +105,7 @@ struct ApplicationUpdateRelauncher {
     }
 
     private let runningApplications: @MainActor () -> [RunningApplication]
-    private let installedIdentity: @MainActor (URL) throws -> ApplicationIdentity
+    private let installedIdentity: @MainActor (URL) async throws -> ApplicationIdentity
     private let openApplication: @MainActor (URL) async throws -> Void
 
     init(workspace: NSWorkspace = .shared) {
@@ -118,16 +118,7 @@ struct ApplicationUpdateRelauncher {
             }
         }
         installedIdentity = { url in
-            let signature = try CodeSignatureVerifier().verifyCode(at: url)
-            guard signature.isValid,
-                  let bundleIdentifier = Bundle(url: url)?.bundleIdentifier else {
-                throw RelaunchError.installedIdentityChanged(url.lastPathComponent)
-            }
-            return ApplicationIdentity(
-                bundleIdentifier: bundleIdentifier,
-                signingTeamIdentifier: signature.teamIdentifier,
-                codeSigningIdentifier: signature.codeSigningIdentifier
-            )
+            try await SignatureVerification.shared.identity(at: url)
         }
         openApplication = { url in
             try await withCheckedThrowingContinuation { continuation in
@@ -145,9 +136,25 @@ struct ApplicationUpdateRelauncher {
         }
     }
 
+    private actor SignatureVerification {
+        static let shared = SignatureVerification()
+        func identity(at url: URL) throws -> ApplicationIdentity {
+            let signature = try CodeSignatureVerifier().verifyCode(at: url)
+            guard signature.isValid,
+                  let bundleIdentifier = Bundle(url: url)?.bundleIdentifier else {
+                throw RelaunchError.installedIdentityChanged(url.lastPathComponent)
+            }
+            return ApplicationIdentity(
+                bundleIdentifier: bundleIdentifier,
+                signingTeamIdentifier: signature.teamIdentifier,
+                codeSigningIdentifier: signature.codeSigningIdentifier
+            )
+        }
+    }
+
     init(
         runningApplications: @escaping @MainActor () -> [RunningApplication],
-        installedIdentity: @escaping @MainActor (URL) throws -> ApplicationIdentity,
+        installedIdentity: @escaping @MainActor (URL) async throws -> ApplicationIdentity,
         openApplication: @escaping @MainActor (URL) async throws -> Void
     ) {
         self.runningApplications = runningApplications
@@ -159,9 +166,10 @@ struct ApplicationUpdateRelauncher {
         let expectedPath = ApplicationUpdateGracefulQuitRequester.comparisonKey(
             for: target.bundleURL
         )
-        guard try installedIdentity(target.bundleURL) == target.identity else {
+        guard try await installedIdentity(target.bundleURL) == target.identity else {
             throw RelaunchError.installedIdentityChanged(target.displayName)
         }
+        try Task.checkCancellation()
         if runningApplications().contains(where: {
             $0.bundleIdentifier == target.identity.bundleIdentifier
                 && $0.bundleURL.map {
@@ -417,6 +425,79 @@ final class MenuBarMonitorState: ObservableObject {
     @Published fileprivate(set) var snapshot: SystemMonitorSnapshot?
     private var telemetryHistory = MenuBarTelemetryHistory()
     private var memoryTelemetryHistory = MenuBarTelemetryHistory()
+    private var displayDurations: Set<TimeInterval> = []
+    private var displayHistoryTask: Task<Void, Never>?
+    private var displayHistoryGeneration = 0
+    private var displayHistoryPending = false
+    private var telemetrySourceVersion: UInt64 = 0
+    private var memorySourceVersion: UInt64 = 0
+    private var preparedTelemetrySourceVersion: UInt64?
+    private var preparedMemorySourceVersion: UInt64?
+    private(set) var displayTelemetryVersion: UInt64 = 0
+    private(set) var displayMemoryVersion: UInt64 = 0
+    private var preparedTelemetry: [TimeInterval: [MenuBarTelemetryPoint]] = [:]
+    private var preparedMemory: [TimeInterval: [MenuBarTelemetryPoint]] = [:]
+
+    private var displayConsumers: [UUID: Set<TimeInterval>] = [:]
+    func updateDisplayHistoryConsumer(_ id: UUID, durations: Set<TimeInterval>) {
+        displayConsumers[id] = durations.isEmpty ? nil : durations
+        setDisplayHistoryDemand(Set(displayConsumers.values.flatMap { $0 }))
+    }
+
+    func setDisplayHistoryDemand(_ durations: Set<TimeInterval>) {
+        guard durations != displayDurations else { return }
+        displayDurations = Set(durations.sorted().prefix(4))
+        preparedTelemetrySourceVersion = nil
+        preparedMemorySourceVersion = nil
+        displayHistoryGeneration &+= 1
+        displayHistoryTask?.cancel()
+        displayHistoryTask = nil
+        preparedTelemetry = preparedTelemetry.filter { displayDurations.contains($0.key) }
+        preparedMemory = preparedMemory.filter { displayDurations.contains($0.key) }
+        scheduleDisplayHistory()
+    }
+
+    func displayHistory(within duration: TimeInterval, memory: Bool = false) -> [MenuBarTelemetryPoint] {
+        (memory ? preparedMemory : preparedTelemetry)[duration] ?? []
+    }
+
+    private func scheduleDisplayHistory() {
+        guard !displayDurations.isEmpty else { return }
+        displayHistoryPending = true
+        guard displayHistoryTask == nil else { return }
+        let generation = displayHistoryGeneration
+        displayHistoryTask = Task { @MainActor [weak self] in
+            while let self, displayHistoryPending, generation == displayHistoryGeneration {
+                displayHistoryPending = false
+                let telemetry = telemetryHistory
+                let memory = memoryTelemetryHistory
+                let durations = displayDurations
+                let date = chartReferenceDate
+                let telemetryVersion = telemetrySourceVersion
+                let memoryVersion = memorySourceVersion
+                let needsTelemetry = preparedTelemetrySourceVersion != telemetryVersion
+                let needsMemory = preparedMemorySourceVersion != memoryVersion
+                let result = await Task.detached(priority: .userInitiated) {
+                    (needsTelemetry ? Dictionary(uniqueKeysWithValues: durations.map { ($0, telemetry.points(within: $0, referenceDate: date)) }) : nil,
+                     needsMemory ? Dictionary(uniqueKeysWithValues: durations.map { ($0, memory.points(within: $0, referenceDate: date)) }) : nil)
+                }.value
+                guard !Task.isCancelled, generation == displayHistoryGeneration else { return }
+                objectWillChange.send()
+                if let telemetry = result.0 {
+                    preparedTelemetry = telemetry
+                    preparedTelemetrySourceVersion = telemetryVersion
+                    displayTelemetryVersion &+= 1
+                }
+                if let memory = result.1 {
+                    preparedMemory = memory
+                    preparedMemorySourceVersion = memoryVersion
+                    displayMemoryVersion &+= 1
+                }
+            }
+            self?.displayHistoryTask = nil
+        }
+    }
+
     private let metricHistoryStore: MetricHistoryStore?
     private(set) var sessionDownloadedBytes: Int64 = 0
     private(set) var sessionUploadedBytes: Int64 = 0
@@ -479,6 +560,9 @@ final class MenuBarMonitorState: ObservableObject {
 #endif
         telemetryHistory.restore(points)
         memoryTelemetryHistory.restore(memoryPoints)
+        telemetrySourceVersion &+= 1
+        memorySourceVersion &+= 1
+        scheduleDisplayHistory()
     }
 
     func update(_ snapshot: SystemMonitorSnapshot) {
@@ -507,6 +591,8 @@ final class MenuBarMonitorState: ObservableObject {
         let historyPoint = point.replacingMemory(with: nil)
         telemetryHistory.append(historyPoint)
         self.snapshot = snapshot
+        telemetrySourceVersion &+= 1
+        scheduleDisplayHistory()
         if let metricHistoryStore {
             Task {
                 await metricHistoryStore.appendTelemetry(historyPoint)
@@ -518,8 +604,11 @@ final class MenuBarMonitorState: ObservableObject {
 #if DEBUG || STORAGE_CLEANER_BETA
         guard !MiniWindowDemoData.isEnabled else { return }
 #endif
+        objectWillChange.send()
         let point = MenuBarTelemetryPoint(memorySnapshot: snapshot)
         memoryTelemetryHistory.append(point)
+        memorySourceVersion &+= 1
+        scheduleDisplayHistory()
         if let metricHistoryStore {
             Task {
                 await metricHistoryStore.appendMemoryTelemetry(point)
@@ -597,9 +686,6 @@ final class ScanStore: ObservableObject {
     private static let startupBackgroundTaskDiagnosticTimeout: TimeInterval = 60
     private enum SmartScanPresentationTiming {
         static let preparingMinimum: TimeInterval = 0.20
-        static let scanningMinimum: TimeInterval = 0.70
-        static let finalizingMinimum: TimeInterval = 0.25
-        static let cleanupVerificationMinimum: TimeInterval = 0.25
         static let progressPublicationMinimum: TimeInterval = 0.12
     }
 
@@ -621,6 +707,10 @@ final class ScanStore: ObservableObject {
     @Published private(set) var cleanupExecutionProgress: CleanupExecutionProgress?
     @Published private(set) var lastCleanReport: CleanReport?
     @Published private(set) var cleanupRecoveryReport: CleanupRecoveryReport?
+    @Published private(set) var operationReports: [CleanReport] = []
+    @Published private(set) var operationReportWarning: String?
+    @Published private(set) var operationRecoveryResult: CleanupRecoveryReport?
+    @Published private(set) var isRestoringRecordedOperation = false
 #if DEBUG
     @Published private(set) var isDebugSmartScanSessionFixtureActive = false
     // The launch flag is visible before any parent view can schedule the
@@ -675,6 +765,14 @@ final class ScanStore: ObservableObject {
     @Published private(set) var pendingMemoryOptimizationPlan: MemoryOptimizationPlan?
     @Published private(set) var memoryOptimizationState: MemoryOptimizationState = .idle
     @Published var isMemoryBatchQuitConfirmationPresentedInMenuBar = false
+    @Published private(set) var menuBarPreparedProcesses: MenuBarPreparedProcesses?
+    @Published private(set) var menuBarPreparedMemoryApps: [MemoryAppUsage] = []
+    private(set) var menuBarPreparedMemoryAppsVersion: UInt64 = 0
+    private var menuBarPreparedMemoryAppsDate: Date?
+    private let menuBarContinuousProcessSampler = MenuBarProcessSampler()
+    private var menuBarProcessDemand: PanelSection = .overview
+    private var menuBarVisibleProcessTask: Task<Void, Never>?
+    private var menuBarVisibleProcessGeneration = 0
     @Published var energyImpactSnapshot: EnergyImpactSnapshot?
     @Published var isLoadingEnergyImpact = false
     @Published private(set) var hasScannedEnergyImpact = false
@@ -743,6 +841,12 @@ final class ScanStore: ObservableObject {
     private var menuBarNetworkSample: NetworkMonitorSample?
     private var menuBarMemoryStatusSnapshot: MemorySnapshot?
     private var menuBarMemorySnapshotRefreshedAt: Date?
+    private let menuBarMemoryStatusProvider: @Sendable () async -> MemorySnapshot
+    private var menuBarMemoryStatusTask: Task<Void, Never>?
+    private var menuBarMemoryStatusGeneration = 0
+    private let menuBarMemoryProcessProvider: @Sendable () async -> MemorySnapshot
+    private var menuBarMemoryProcessTask: Task<Void, Never>?
+    private var menuBarMemoryProcessGeneration = 0
     private let metricHistoryStore: MetricHistoryStore?
     private var didStartMetricHistoryLoad = false
     private var metricHistoryLoadTask: Task<Void, Never>?
@@ -898,6 +1002,12 @@ final class ScanStore: ObservableObject {
         metricHistoryStore: MetricHistoryStore? = nil,
         systemEnergyAccumulator: SystemEnergyAccumulator? = nil,
         memoryCoordinator: MemoryCoordinator? = nil,
+        menuBarMemoryStatusProvider: @escaping @Sendable () async -> MemorySnapshot = {
+            await MemoryOptimizerService.statusSnapshot()
+        },
+        menuBarMemoryProcessProvider: @escaping @Sendable () async -> MemorySnapshot = {
+            await MemoryOptimizerService.snapshot()
+        },
         startupScanCoordinator: StartupScanCoordinator = StartupScanCoordinator(),
         startupItemManager: StartupItemsDomain.UserLaunchAgentManager? = nil,
         applicationInventoryScanner: any ApplicationInventoryScanning = ApplicationInventoryScanner(),
@@ -918,6 +1028,8 @@ final class ScanStore: ObservableObject {
         }
     ) {
         self.cleanupPreferences = cleanupPreferences
+        self.menuBarMemoryStatusProvider = menuBarMemoryStatusProvider
+        self.menuBarMemoryProcessProvider = menuBarMemoryProcessProvider
         developerInactivityThresholdDays = DeveloperCleanupAgePolicy.normalizedThresholdDays(
             cleanupPreferences.integer(forKey: Self.developerInactivityThresholdDefaultsKey)
         )
@@ -963,7 +1075,10 @@ final class ScanStore: ObservableObject {
         self.cleanupScanOperation = cleanupScanOperation
         self.cleanupRuleSetLoader = cleanupRuleSetLoader
         self.cleanupExecutor = cleanupExecutor ?? SafeCleanupExecutor(
-            coordinator: heavyWorkCoordinator
+            coordinator: heavyWorkCoordinator,
+            persistReport: { report, identities in
+                try CleanupReportJournal.live.checkpoint(report, expectedIdentities: identities)
+            }
         )
         self.cleanupRecoveryService = cleanupRecoveryService
         self.startupScanCoordinator = startupScanCoordinator
@@ -1140,77 +1255,37 @@ final class ScanStore: ObservableObject {
         mainScanLastProgressPublishedAt = now
     }
 
-    /// The scan result is already retained before this task runs. The task only
-    /// paces the visible state, and the token prevents an older scan from
-    /// changing a newer one.
+    /// Called only after the operation and its required persistence/drain return.
+    /// Finish synchronously; presentation must not hold a completed result.
     private func finishScanPresentation(
         with terminalState: SmartScanPresentationState,
-        matching sessionID: UUID,
-        enforcingMinimumDuration: Bool
+        matching sessionID: UUID
     ) {
+        guard scanPresentationSessionID == sessionID else { return }
         scanPresentationTimingTask?.cancel()
-        scanPresentationTimingTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            if enforcingMinimumDuration {
-                if self.scanPresentationState == .preparing {
-                    guard await self.waitForMinimumPresentationDuration(
-                        SmartScanPresentationTiming.preparingMinimum,
-                        state: .preparing,
-                        matching: sessionID
-                    ) else { return }
-                    self.transitionScanPresentation(to: .scanning, matching: sessionID)
-                }
-
-                if self.scanPresentationState == .scanning {
-                    guard await self.waitForMinimumPresentationDuration(
-                        SmartScanPresentationTiming.scanningMinimum,
-                        state: .scanning,
-                        matching: sessionID
-                    ) else { return }
-                    self.transitionScanPresentation(to: .finalizing, matching: sessionID)
-                }
-
-                if self.scanPresentationState == .finalizing {
-                    guard await self.waitForMinimumPresentationDuration(
-                        SmartScanPresentationTiming.finalizingMinimum,
-                        state: .finalizing,
-                        matching: sessionID
-                    ) else { return }
-                }
+        scanPresentationTimingTask = nil
+        if terminalState == .results {
+            if scanPresentationState == .preparing {
+                transitionScanPresentation(to: .scanning, matching: sessionID)
             }
-
-            guard self.transitionScanPresentation(to: terminalState, matching: sessionID) else {
-                return
+            if scanPresentationState == .scanning {
+                transitionScanPresentation(to: .finalizing, matching: sessionID)
             }
-            self.mainScanProgress = nil
-            self.scanPresentationRoute = nil
-            self.scanPresentationTimingTask = nil
         }
+        guard transitionScanPresentation(to: terminalState, matching: sessionID) else { return }
+        mainScanProgress = nil
+        scanPresentationRoute = nil
     }
 
-    /// Cleanup execution and report persistence have already completed. This
-    /// task only leaves a brief, token-bound verification state on screen.
+    /// Execution, identity revalidation and report persistence already completed.
     private func finishCleanupVerificationPresentation(
         with terminalState: SmartScanPresentationState,
         matching sessionID: UUID
     ) {
+        guard scanPresentationSessionID == sessionID else { return }
         scanPresentationTimingTask?.cancel()
-        scanPresentationTimingTask = Task { @MainActor [weak self] in
-            guard let self,
-                  await self.waitForMinimumPresentationDuration(
-                    SmartScanPresentationTiming.cleanupVerificationMinimum,
-                    state: .verifying,
-                    matching: sessionID
-                  ),
-                  self.transitionScanPresentation(
-                    to: terminalState,
-                    matching: sessionID
-                  ) else {
-                return
-            }
-            self.scanPresentationTimingTask = nil
-        }
+        scanPresentationTimingTask = nil
+        transitionScanPresentation(to: terminalState, matching: sessionID)
     }
 
     private func waitForMinimumPresentationDuration(
@@ -1400,7 +1475,14 @@ final class ScanStore: ObservableObject {
         didStartMetricHistoryLoad = true
         metricHistoryLoadTask = Task { @MainActor [weak self] in
             let snapshot = await metricHistoryStore.load()
+            let historyLoadFailed = await metricHistoryStore.loadFailure != nil
             guard let self else { return }
+            if historyLoadFailed {
+                showActionMessage(L10n.text(
+                    "监测历史无法读取，原文件已保留。新读数暂时仅保留在本次运行中。",
+                    "Monitoring history could not be read. The original is preserved; new readings are kept only for this session."
+                ))
+            }
             menuBarMonitorState.restoreHistory(
                 snapshot.telemetry,
                 memoryPoints: snapshot.memoryTelemetry
@@ -1421,7 +1503,10 @@ final class ScanStore: ObservableObject {
             self?.systemEnergySnapshot = snapshot
         }
         systemEnergySnapshot = systemEnergyAccumulator.snapshot
-        systemEnergyAccumulator.start()
+        menuBarAuxiliaryMonitorState.onBatterySample = { [weak self] battery, electrical in
+            self?.systemEnergyAccumulator.recordBattery(battery, electrical: electrical)
+        }
+        systemEnergyAccumulator.start(passive: true)
     }
 
     func stopAndFlushSystemEnergyMonitoring() async {
@@ -1630,8 +1715,7 @@ final class ScanStore: ObservableObject {
                 selectedItemID = scanResult.topItems.first?.id
                 finishScanPresentation(
                     with: .results,
-                    matching: generation,
-                    enforcingMinimumDuration: true
+                    matching: generation
                 )
             } catch {
                 guard mainScanGeneration == generation else {
@@ -1640,8 +1724,7 @@ final class ScanStore: ObservableObject {
                 }
                 finishScanPresentation(
                     with: error is CancellationError ? .cancelled : .failed,
-                    matching: generation,
-                    enforcingMinimumDuration: false
+                    matching: generation
                 )
                 handleHeavyWorkError(error)
                 await activityStore.refresh()
@@ -1982,7 +2065,9 @@ final class ScanStore: ObservableObject {
                 self.cleanupExecutionGeneration = nil
             }
             guard pendingCleanPlan?.id == plan.id else { return }
-            _ = CleanReportStore.record(report)
+            if !CleanReportStore.record(report) {
+                errorMessage = L10n.text("回执保存失败；本次已完成的移动仍保留在结果中。", "Receipt saving failed; completed moves remain in this result.")
+            }
             lastCleanReport = report
             pendingCleanPlan = nil
             cleanupWorkflowState = .completed(reportID: report.id)
@@ -2019,6 +2104,47 @@ final class ScanStore: ObservableObject {
             transitionScanPresentation(to: .cancelling, matching: presentationSessionID)
         }
         task.cancel()
+    }
+
+    func refreshOperationReports() {
+        Task {
+            _ = try? await heavyWorkCoordinator.withLease(owner: .restore) { _ in
+                try await Task.detached(priority: .utility) {
+                    try CleanupReportJournal.live.reconcileInterruptedTrashMoves()
+                    try CleanupReportJournal.live.reconcileInterruptedRecoveries()
+                }.value
+            }
+            let loaded = await Task.detached(priority: .utility) {
+                let reports = CleanReportStore.load()
+                let journal = try? CleanupReportJournal.live.loadAvailable()
+                return (reports, journal?.unreadableEntries.count)
+            }.value
+            operationReports = loaded.0
+            if loaded.1 == nil || loaded.1! > 0 {
+                operationReportWarning = L10n.text(
+                    "部分回执无法读取；有效回执仍可查看，损坏记录已保留。",
+                    "Some receipts cannot be read. Valid receipts remain available; damaged records were retained.")
+            } else { operationReportWarning = nil }
+        }
+    }
+
+    func restoreRecordedOperation(_ report: CleanReport) {
+        guard !isRestoringRecordedOperation, !report.restorableReceipts.isEmpty else { return }
+        isRestoringRecordedOperation = true
+        let service = cleanupRecoveryService
+        Task {
+            defer { isRestoringRecordedOperation = false }
+            do {
+                let coordinator = heavyWorkCoordinator
+                let result = try await coordinator.withLease(owner: .restore) { lease in
+                    await service.restore(report: report, coordinator: coordinator, lease: lease)
+                }
+                operationRecoveryResult = result.recovery
+                if result.recovery.persistenceFailure != nil {
+                    operationReportWarning = L10n.text("恢复结果写入失败，请保留当前回执。", "Recovery result could not be saved. Keep this receipt.")
+                } else { refreshOperationReports() }
+            } catch { handleHeavyWorkError(error) }
+        }
     }
 
     func dismissV2CleanupReport() {
@@ -2068,7 +2194,6 @@ final class ScanStore: ObservableObject {
         let recoveryService = cleanupRecoveryService
         let coordinator = heavyWorkCoordinator
         let activityStore = heavyWorkActivityStore
-        let receipts = report.restorableReceipts
 
         cleanupRecoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2080,13 +2205,21 @@ final class ScanStore: ObservableObject {
                 }
             }
             do {
-                let recovery = try await coordinator.withLease(owner: .restore) { _ in
-                    await recoveryService.restore(receipts: receipts)
+                let restored = try await coordinator.withLease(owner: .restore) { lease in
+                    await recoveryService.restore(report: report, coordinator: coordinator, lease: lease)
                 }
+                let recovery = restored.recovery
                 await activityStore.refresh()
                 guard self.cleanupRecoveryGeneration == recoveryGeneration,
                       self.lastCleanReport?.id == report.id else { return }
                 cleanupRecoveryReport = recovery
+                if recovery.persistenceFailure == nil {
+                    lastCleanReport = restored.report
+                } else {
+                    errorMessage = L10n.text(
+                        "文件已恢复，但恢复结果写入失败，请保留当前结果。",
+                        "Files were restored, but the recovery result could not be saved. Keep this result.")
+                }
                 showActionMessage(L10n.text(
                     "已恢复 \(recovery.restoredCount) 项；冲突或身份变化的项目保持原状。",
                     "Restored \(recovery.restoredCount) item(s); conflicts or identity changes were left untouched."
@@ -2234,8 +2367,7 @@ final class ScanStore: ObservableObject {
                 cleanupWorkflowState = .results(sessionID: session.id)
                 finishScanPresentation(
                     with: session.outcome == .cancelled ? .cancelled : .results,
-                    matching: generation,
-                    enforcingMinimumDuration: session.outcome != .cancelled
+                    matching: generation
                 )
                 if session.outcome == .cancelled {
                     showActionMessage(L10n.text(
@@ -2251,8 +2383,7 @@ final class ScanStore: ObservableObject {
                 if error is CancellationError {
                     finishScanPresentation(
                         with: .cancelled,
-                        matching: generation,
-                        enforcingMinimumDuration: false
+                        matching: generation
                     )
                     showActionMessage(L10n.text(
                         "扫描已取消，未改动任何文件",
@@ -2262,8 +2393,7 @@ final class ScanStore: ObservableObject {
                     cleanupWorkflowState = .failed
                     finishScanPresentation(
                         with: .failed,
-                        matching: generation,
-                        enforcingMinimumDuration: false
+                        matching: generation
                     )
                     errorMessage = error.localizedDescription
                 }
@@ -2510,6 +2640,13 @@ final class ScanStore: ObservableObject {
                     "\(item.title) 已移到废纸篓，清空前可恢复",
                     "\(item.title) moved to Trash and remains recoverable until Trash is emptied"
                 ))
+            } catch let partial as PartialTrashOperationError {
+                lastCleanReport = partial.report
+                _ = CleanReportStore.record(partial.report)
+                refreshOperationReports()
+                cleanupOperationSnapshot = nil
+                errorMessage = partial.localizedDescription
+                await activityStore.refresh()
             } catch {
                 guard cleanupGeneration == generation else {
                     await activityStore.refresh()
@@ -2590,6 +2727,8 @@ final class ScanStore: ObservableObject {
                 )
                 refreshCleanupHistory()
 
+                if let report = outcome.reports.last { lastCleanReport = report }
+                refreshOperationReports()
                 let movedCount = outcome.movedItems.count
                 cleanupOperationSnapshot = CleanupOperationSnapshot(
                     requestedCount: candidates.count,
@@ -2599,7 +2738,11 @@ final class ScanStore: ObservableObject {
                     failedCount: outcome.failedTitles.count,
                     duration: Date().timeIntervalSince(startedAt)
                 )
-                if outcome.failedTitles.isEmpty {
+                if outcome.cancelled {
+                    errorMessage = L10n.text(
+                        "清理已停止。已移动的路径保留恢复回执，另有 \(outcome.notProcessedPaths.count) 条路径未执行。",
+                        "Cleanup stopped. Moved paths retain recovery receipts; \(outcome.notProcessedPaths.count) paths were not executed.")
+                } else if outcome.failedTitles.isEmpty {
                     showActionMessage(L10n.text(
                         "\(movedCount) 个可安全清理项目已移到废纸篓，清空后才释放空间",
                         "\(L10n.items(movedCount)) marked safe to clean moved to Trash; space is freed after Trash is emptied"
@@ -2992,6 +3135,109 @@ final class ScanStore: ObservableObject {
         }
     }
 
+    /// Refresh the visible process list without invoking the explicit refresh
+    /// action, which resets the user's quit selection and confirmation state.
+    func refreshMenuBarMemoryProcesses(now: Date = Date()) {
+#if DEBUG || STORAGE_CLEANER_BETA
+        guard !MiniWindowDemoData.isEnabled else { return }
+#endif
+        guard menuBarMemoryProcessTask == nil, canAdoptLiveMemoryProcesses,
+              memorySnapshot.map({ now.timeIntervalSince($0.generatedAt) >= MenuBarPerformancePolicy.visibleProcessInterval }) ?? true else { return }
+        let generation = menuBarMemoryProcessGeneration
+        let provider = menuBarMemoryProcessProvider
+        menuBarMemoryProcessTask = Task { @MainActor [weak self] in
+            let snapshot = await provider()
+            let apps = await Task.detached(priority: .utility) { snapshot.appsByResidentUsage }.value
+            guard let self else { return }
+            menuBarMemoryProcessTask = nil
+            guard !Task.isCancelled, generation == menuBarMemoryProcessGeneration else { return }
+            guard canAdoptLiveMemoryProcesses,
+                  memorySnapshot.map({ snapshot.generatedAt >= $0.generatedAt }) ?? true else { return }
+            menuBarPreparedMemoryAppsVersion &+= 1
+            menuBarPreparedMemoryAppsDate = snapshot.generatedAt
+            menuBarPreparedMemoryApps = apps
+            adoptMenuBarMemorySnapshot(snapshot, as: .primaryAndMenuFromRefresh)
+        }
+    }
+
+    /// A single visible-page driver. UI callbacks only declare demand; all
+    /// enumeration and measurement preparation occurs after the current turn.
+    private var menuBarProcessConsumers: [UUID: (PanelSection, UInt64)] = [:]
+    private var menuBarProcessConsumerOrder: UInt64 = 0
+    func updateMenuBarProcessConsumer(_ id: UUID, section: PanelSection?) {
+        menuBarProcessConsumerOrder &+= 1
+        menuBarProcessConsumers[id] = section.map { ($0, menuBarProcessConsumerOrder) }
+        let selected = menuBarProcessConsumers.values.filter {
+            [.processor, .disk, .power, .memory].contains($0.0)
+        }.max { $0.1 < $1.1 }?.0 ?? .overview
+        setMenuBarProcessDemand(selected)
+    }
+
+    func setMenuBarProcessDemand(_ section: PanelSection) {
+        let resolved: PanelSection = isMenuBarRefreshPaused ? .overview : section
+        guard resolved != menuBarProcessDemand || (menuBarVisibleProcessTask == nil && resolved != .overview) else { return }
+        menuBarVisibleProcessGeneration &+= 1
+        menuBarVisibleProcessTask?.cancel()
+        menuBarVisibleProcessTask = nil
+        cancelMenuBarMemoryProcessRefresh()
+        if menuBarProcessDemand == .power, resolved != .power {
+            systemEnergyAccumulator.endAttributedObservation()
+        }
+        menuBarProcessDemand = resolved
+#if DEBUG || STORAGE_CLEANER_BETA
+        guard !MiniWindowDemoData.isEnabled else { return }
+#endif
+        guard [.processor, .disk, .power, .memory].contains(resolved) else { return }
+        let generation = menuBarVisibleProcessGeneration
+        let sampler = menuBarContinuousProcessSampler
+        menuBarVisibleProcessTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            await sampler.reset()
+            while !Task.isCancelled {
+                let started = ContinuousClock.now
+                guard let self, !isMenuBarRefreshPaused,
+                      menuBarVisibleProcessGeneration == generation else { return }
+                if resolved == .memory {
+                    refreshMenuBarMemoryProcesses()
+                } else {
+                    let worker = Task.detached(priority: .utility) {
+                        guard let snapshot = await sampler.sample(), !Task.isCancelled else { return Optional<MenuBarPreparedProcesses>.none }
+                        return MenuBarPreparedProcesses(snapshot: snapshot)
+                    }
+                    let prepared = await withTaskCancellationHandler {
+                        await worker.value
+                    } onCancel: { worker.cancel() }
+                    guard !Task.isCancelled, !isMenuBarRefreshPaused,
+                          menuBarVisibleProcessGeneration == generation else { return }
+                    if let prepared {
+                        menuBarPreparedProcesses = prepared
+                        if resolved == .power {
+                            systemEnergyAccumulator.recordAttributed(prepared.snapshot,
+                                powerSource: menuBarAuxiliaryMonitorState.batterySnapshot?.powerSource ?? .unknown,
+                                continuous: true)
+                        }
+                    }
+                }
+                let elapsed = started.duration(to: .now)
+                let remaining = Duration.seconds(max(MenuBarPerformancePolicy.visibleProcessInterval, menuBarRefreshInterval.seconds)) - elapsed
+                do { try await Task.sleep(for: max(.milliseconds(1), remaining)) }
+                catch { return }
+            }
+        }
+    }
+
+    private var canAdoptLiveMemoryProcesses: Bool {
+        !isMenuBarRefreshPaused && canRefreshMemory
+            && selectedMemoryProcessIDs.isEmpty && pendingMemoryProcess == nil
+            && !isMemoryBatchQuitConfirmationPresentedInMenuBar
+            && menuBarAuxiliaryMonitorState.activeConsumerCount > 0
+    }
+
+    func cancelMenuBarMemoryProcessRefresh() {
+        menuBarMemoryProcessGeneration &+= 1
+        menuBarMemoryProcessTask?.cancel()
+    }
+
     func optimizeMemory() {
         guard canOptimizeMemory else { return }
         isOptimizingMemory = true
@@ -3094,6 +3340,8 @@ final class ScanStore: ObservableObject {
                 )
             }.value
             energyImpactSnapshot = snapshot
+            systemEnergyAccumulator.recordAttributed(snapshot,
+                powerSource: menuBarAuxiliaryMonitorState.batterySnapshot?.powerSource ?? .unknown)
             if presentsInEnergyPage {
                 hasScannedEnergyImpact = true
             }
@@ -3110,6 +3358,11 @@ final class ScanStore: ObservableObject {
     func toggleMenuBarRefreshPaused() {
         isMenuBarRefreshPaused.toggle()
         if isMenuBarRefreshPaused {
+            systemEnergyAccumulator.markObservationGap()
+            setMenuBarProcessDemand(.overview)
+            cancelMenuBarMemoryProcessRefresh()
+            menuBarMemoryStatusGeneration &+= 1
+            menuBarMemoryStatusTask?.cancel()
             MenuBarSamplingGaps.shared.begin(.paused)
         } else {
             MenuBarSamplingGaps.shared.end(.paused)
@@ -3194,7 +3447,8 @@ final class ScanStore: ObservableObject {
         case .fullMemory:
             snapshot = await MemoryOptimizerService.snapshot()
         case .automatic where shouldRefreshMemorySnapshot:
-            snapshot = await MemoryOptimizerService.statusSnapshot()
+            refreshMenuBarMemoryStatus()
+            snapshot = currentMemorySnapshot
         case .lightweight, .automatic:
             snapshot = currentMemorySnapshot
         }
@@ -3202,7 +3456,7 @@ final class ScanStore: ObservableObject {
         if let sampledSnapshot = snapshot {
             let adoption = MenuBarMemorySnapshotAdoption.resolve(
                 policy: policy,
-                shouldRefreshMemorySnapshot: shouldRefreshMemorySnapshot,
+                shouldRefreshMemorySnapshot: policy == .fullMemory,
                 sampledSnapshotAvailable: true,
                 primarySnapshotMissing: primarySnapshotWasMissing,
                 monitorCreatedSnapshot: false
@@ -3217,7 +3471,8 @@ final class ScanStore: ObservableObject {
             previousNetworkSample: previousNetworkSample,
             thermalSamplingInterval: menuBarAuxiliaryMonitorState.activeConsumerCount > 0
                 ? SystemMonitorSamplingInterval.interactive
-                : SystemMonitorSamplingInterval.background
+                : SystemMonitorSamplingInterval.background,
+            resolvesMissingMemorySnapshot: false
         )
 
         if snapshot == nil, let resolvedMemorySnapshot = result.memorySnapshot {
@@ -3239,6 +3494,22 @@ final class ScanStore: ObservableObject {
         }
         FanControlCoordinator.shared.process(snapshot: result.snapshot)
         menuBarNetworkSample = result.networkSample
+    }
+
+    /// Memory pressure can require a slow system query. Keep it single-flight
+    /// and publish independently so it cannot stall CPU/network sampling.
+    private func refreshMenuBarMemoryStatus() {
+        guard menuBarMemoryStatusTask == nil, !isMenuBarRefreshPaused else { return }
+        let generation = menuBarMemoryStatusGeneration
+        let provider = menuBarMemoryStatusProvider
+        menuBarMemoryStatusTask = Task { @MainActor [weak self] in
+            let snapshot = await provider()
+            guard let self else { return }
+            menuBarMemoryStatusTask = nil
+            guard !Task.isCancelled, generation == menuBarMemoryStatusGeneration,
+                  !isMenuBarRefreshPaused else { return }
+            adoptMenuBarMemorySnapshot(snapshot, as: .menuStatusOnly)
+        }
     }
 
     private func shouldRefreshMenuBarMemorySnapshot(now: Date, force: Bool) -> Bool {
@@ -3272,6 +3543,15 @@ final class ScanStore: ObservableObject {
                 with: snapshot
             )
             if replacesPrimary {
+                if menuBarPreparedMemoryAppsDate != snapshot.generatedAt {
+                    Task { @MainActor [weak self] in
+                        let apps = await Task.detached(priority: .utility) { snapshot.appsByResidentUsage }.value
+                        guard let self, memorySnapshot?.generatedAt == snapshot.generatedAt else { return }
+                        menuBarPreparedMemoryAppsDate = snapshot.generatedAt
+                        menuBarPreparedMemoryAppsVersion &+= 1
+                        menuBarPreparedMemoryApps = apps
+                    }
+                }
                 memorySnapshot = snapshot
                 pruneMemoryProcessSelection(using: snapshot)
             }
@@ -3563,13 +3843,26 @@ final class ScanStore: ObservableObject {
 
         Task {
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
-                    try AppUninstallService.moveToTrash(app)
-                }.value
+                let result = try await heavyWorkCoordinator.withLease(owner: .cleanup) { _ in
+                    try Task.checkCancellation()
+                    return try await Task.detached(priority: .userInitiated) {
+                        try AppUninstallService.moveToTrash(app)
+                    }.value
+                }
+                guard let report = result.report else { throw AppUninstallError.moveNotVerified(app.path) }
+                lastCleanReport = report
+                if !CleanReportStore.record(report) || report.persistenceFailure != nil {
+                    errorMessage = L10n.text("卸载回执未能完整保存，请保留当前结果。", "The uninstall receipt could not be fully saved. Keep this result.")
+                }
+                guard report.summary.movedItemCount > 0 else {
+                    if errorMessage == nil { errorMessage = L10n.text("应用未移走，请查看操作回执。", "The app was not moved. Review the operation receipt.") }
+                    isUninstallingApp = false
+                    return
+                }
                 installedApps.removeAll { $0.id == app.id }
                 pendingUninstallApp = nil
                 showActionMessage(uninstallMessage(for: app, result: result))
-                if !app.relatedItems.isEmpty {
+                if app.relatedItems.contains(where: { $0.verifiedExclusiveOwnerBundleID == app.bundleIdentifier }) {
                     await Task.yield()
                     pendingRelatedCleanupApp = app
                 }
@@ -3590,9 +3883,26 @@ final class ScanStore: ObservableObject {
         isCleaningRelatedAppFiles = true
 
         Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                AppUninstallService.moveRelatedItemsToTrash(for: app)
-            }.value
+            let result: AppUninstallTrashResult
+            do {
+                result = try await heavyWorkCoordinator.withLease(owner: .cleanup) { _ in
+                    try Task.checkCancellation()
+                    return await Task.detached(priority: .userInitiated) {
+                        AppUninstallService.moveRelatedItemsToTrash(for: app)
+                    }.value
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                isCleaningRelatedAppFiles = false
+                return
+            }
+            if let report = result.report {
+                lastCleanReport = report
+                if !CleanReportStore.record(report) || report.persistenceFailure != nil {
+                    errorMessage = L10n.text("关联文件回执未能完整保存，请保留当前结果。", "Related file receipts could not be fully saved. Keep this result.")
+                }
+                refreshOperationReports()
+            }
             if result.movedRelatedItems.isEmpty {
                 showActionMessage(L10n.text(
                     "没有可清除的关联文件，原有数据已保留",
@@ -4775,6 +5085,13 @@ final class ScanStore: ObservableObject {
         case .failed: .failed
         }
         appUpdates[index].updateStatus = status
+        if status == .completed, previousStatus != .completed {
+            let path = appUpdates[index].bundleURL.path
+            Task {
+                await AppIconCache.shared.invalidate(path: path)
+                NotificationCenter.default.post(name: .storageCleanerAppIconChanged, object: path)
+            }
+        }
         appUpdates[index].updateError = task.errorDescription ?? task.detail
         if task.state == .waitingForQuit {
             // The targeted execution-time preflight can discover an app that
@@ -5215,7 +5532,9 @@ final class ScanStore: ObservableObject {
                 pendingDuplicateCleanPreflight = nil
                 duplicateCleanupBundle = nil
             }
-            _ = CleanReportStore.record(report)
+            if !CleanReportStore.record(report) {
+                errorMessage = L10n.text("回执保存失败；本次已完成的移动仍保留在结果中。", "Receipt saving failed; completed moves remain in this result.")
+            }
             duplicateCleanupReport = report
             let movedPaths = Set(report.items.compactMap { item -> String? in
                 guard case .moved = item.outcome else { return nil }
@@ -5249,7 +5568,6 @@ final class ScanStore: ObservableObject {
               !report.restorableReceipts.isEmpty,
               duplicateRecoveryTask == nil else { return }
         isDuplicateRestoreConfirmationPresented = false
-        let receipts = report.restorableReceipts
         let recoveryService = cleanupRecoveryService
         let coordinator = heavyWorkCoordinator
         let activityStore = heavyWorkActivityStore
@@ -5257,25 +5575,20 @@ final class ScanStore: ObservableObject {
             guard let self else { return }
             defer { duplicateRecoveryTask = nil }
             do {
-                let recovery = try await coordinator.withLease(owner: .restore) { _ in
-                    await recoveryService.restore(receipts: receipts)
+                let restored = try await coordinator.withLease(owner: .restore) { lease in
+                    await recoveryService.restore(report: report, coordinator: coordinator, lease: lease)
                 }
+                let recovery = restored.recovery
                 await activityStore.refresh()
                 duplicateCleanupRecoveryReport = recovery
                 let restoredPaths = Set(recovery.items.compactMap {
                     $0.outcome == .restored ? PathSafety.lexicalPath($0.originalPath) : nil
                 })
                 markDuplicateItemsRestored(at: restoredPaths)
-                if !restoredPaths.isEmpty {
-                    let updatedReport = CleanReportStore.removingRestoredReceipts(
-                        from: report,
-                        originalPaths: restoredPaths
-                    )
-                    if CleanReportStore.record(updatedReport) {
-                        duplicateCleanupReport = updatedReport.restorableReceipts.isEmpty
-                            ? nil
-                            : updatedReport
-                    }
+                if recovery.persistenceFailure == nil {
+                    duplicateCleanupReport = restored.report.restorableReceipts.isEmpty ? nil : restored.report
+                } else {
+                    errorMessage = L10n.text("恢复结果写入失败，请保留当前回执。", "Recovery result could not be saved. Keep this receipt.")
                 }
                 showActionMessage(L10n.text(
                     "已恢复 \(recovery.restoredCount) 个重复副本。",

@@ -3,7 +3,7 @@ import Combine
 import SwiftUI
 
 enum MenuBarPanelIdleReclamationPolicy {
-    static let delay: Duration = .seconds(60)
+    static let delay = MenuBarPerformancePolicy.cachedWindowLifetime
 
     @MainActor
     static func shouldReclaim(_ session: MenuBarPanelSession?) -> Bool {
@@ -42,6 +42,7 @@ final class MenuBarStatusController: NSObject, ObservableObject {
     private var refreshIntervalCancellable: AnyCancellable?
     private var refreshTask: Task<Void, Never>?
     private var panelReclamationTask: Task<Void, Never>?
+    private var panelMemoryPressureSource: DispatchSourceMemoryPressure?
     private var renderedIdentity: MenuBarStatusRenderIdentity?
     private var renderedWidth: CGFloat?
     private(set) var statusDisplayMode = MenuBarStatusDisplayMode.stored()
@@ -54,6 +55,21 @@ final class MenuBarStatusController: NSObject, ObservableObject {
         self.store = store
         self.computerHealthStore = computerHealthStore
         guard statusItem == nil else { return }
+        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        pressure.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                Task {
+                    await MenuBarDerivedCache.shared.purge()
+                    await AppIconCache.shared.purge()
+                }
+                guard let self, let session = self.panelSession,
+                      MenuBarPanelIdleReclamationPolicy.shouldReclaim(session) else { return }
+                self.cancelPanelReclamation()
+                session.teardown()
+            }
+        }
+        panelMemoryPressureSource = pressure
+        pressure.resume()
 
         let statusItem = NSStatusBar.system.statusItem(withLength: MenuBarStatusRenderer.initialWidth)
         guard let button = statusItem.button else {
@@ -156,7 +172,7 @@ final class MenuBarStatusController: NSObject, ObservableObject {
     @objc
     private func togglePanel(_ sender: NSStatusBarButton) {
         PerformanceTelemetry.panelInput("action", target: "status-item.toggle", window: sender.window)
-        if let session = panelSession,
+        if let session = self.panelSession,
            session.panel.isVisible,
            session.panel.isOnActiveSpace {
             session.hide(reason: "status-item-toggle")
@@ -168,9 +184,13 @@ final class MenuBarStatusController: NSObject, ObservableObject {
 
     private func presentPanel(from sender: NSStatusBarButton) {
         guard let store, let computerHealthStore else { return }
+        MenuBarPresentationTrace.startPresentation(event: NSApp.currentEvent)
         cancelPanelReclamation()
         startRefreshLoop(store: store)
-        store.refreshMenuBarLiveStatus(showLoadingWhenEmpty: false)
+        // Show the cached presentation before scheduling any live refresh.
+        Task { @MainActor [weak store] in
+            store?.refreshMenuBarLiveStatus(showLoadingWhenEmpty: false)
+        }
 
         let rectInWindow = sender.convert(sender.bounds, to: nil)
         let anchor = sender.window?.convertToScreen(rectInWindow)
@@ -187,7 +207,7 @@ final class MenuBarStatusController: NSObject, ObservableObject {
             return
         }
 
-        if let session = panelSession, !session.isTornDown {
+        if let session = self.panelSession, !session.isTornDown {
             let signpostID = PerformanceTelemetry.signposter.makeSignpostID()
             let state = PerformanceTelemetry.signposter.beginInterval(
                 "WindowOpen",

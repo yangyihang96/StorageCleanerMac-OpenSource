@@ -39,6 +39,7 @@ final class ControlPalettePresentationState: ObservableObject {
     func beginInteraction() { interactionDidBegin?() }
     private(set) var measuredContentWidth: CGFloat?
     private(set) var measuredContentHeight: CGFloat?
+    private(set) var hasNaturalContentMeasurement = false
 
     fileprivate var presentationDidChange: (() -> Void)?
 
@@ -46,6 +47,7 @@ final class ControlPalettePresentationState: ObservableObject {
         if self.kind != kind {
             measuredContentWidth = nil
             measuredContentHeight = nil
+            hasNaturalContentMeasurement = false
         }
         self.kind = kind
         if kind != .fan {
@@ -60,6 +62,7 @@ final class ControlPalettePresentationState: ObservableObject {
         fanPage = .controls
         measuredContentWidth = nil
         measuredContentHeight = nil
+        hasNaturalContentMeasurement = false
         presentationDidChange?()
     }
 
@@ -69,12 +72,20 @@ final class ControlPalettePresentationState: ObservableObject {
         fanPage = .curveEditor
         measuredContentWidth = nil
         measuredContentHeight = nil
+        hasNaturalContentMeasurement = false
         presentationDidChange?()
     }
 
     func setFanControlsExpanded(_ expanded: Bool) {
         guard kind == .fan, fanControlsExpanded != expanded else { return }
         fanControlsExpanded = expanded
+    }
+
+    func reportNaturalContentSize(_ size: CGSize) {
+        guard size.width.isFinite, size.width > 0,
+              size.height.isFinite, size.height > 0 else { return }
+        hasNaturalContentMeasurement = true
+        reportMeasuredContentSize(size)
     }
 
     func reportMeasuredContentSize(_ size: CGSize) {
@@ -98,6 +109,7 @@ final class ControlPalettePresentationState: ObservableObject {
         fanControlsExpanded = nil
         measuredContentWidth = nil
         measuredContentHeight = nil
+        hasNaturalContentMeasurement = false
     }
 }
 
@@ -734,7 +746,11 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
 #if DEBUG || STORAGE_CLEANER_BETA
         logControlPaletteEvent("native-resize kind=\(state.kind) size=\(NSStringFromSize(size)) frame=\(NSStringFromRect(panel.frame))")
 #endif
-        state.reportMeasuredContentSize(size)
+        // A screen-constrained viewport is not the page's natural height.
+        // Keep the native fallback only for hosts without a content measurement.
+        if !state.hasNaturalContentMeasurement {
+            state.reportMeasuredContentSize(size)
+        }
         reposition()
     }
 

@@ -1163,6 +1163,7 @@ final class FanControlPlannerTests: XCTestCase {
         let defaults = UserDefaults(suiteName: defaultsSuiteName)!
         defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
         let state = FanControlTimeoutTestState()
+        defer { state.releasePendingApply() }
         let coordinator = FanControlCoordinator(
             defaults: defaults,
             helperStatusOverride: .enabled,
@@ -1170,7 +1171,10 @@ final class FanControlPlannerTests: XCTestCase {
             requestSender: { request in
                 state.requests.append(request)
                 if request.operation == .apply {
-                    try? await Task.sleep(for: .milliseconds(80))
+                    // Keep the success reply pending until automatic recovery
+                    // has actually completed, independent of scheduler load.
+                    await withCheckedContinuation { state.pendingApply = $0 }
+                    state.didReturnDelayedApply = true
                 }
                 return FanControlHelperReply(
                     operation: request.operation,
@@ -1190,7 +1194,11 @@ final class FanControlPlannerTests: XCTestCase {
             at: Date(timeIntervalSince1970: 4_500),
             actualRPM: 2_300
         ))
-        try? await Task.sleep(for: .milliseconds(40))
+        await waitForCondition {
+            coordinator.selectedMode == .systemAutomatic
+                && !coordinator.isApplying
+                && state.requests.contains { $0.operation == .restoreAutomatic }
+        }
 
         XCTAssertEqual(coordinator.selectedMode, .systemAutomatic)
         XCTAssertFalse(coordinator.isApplying)
@@ -1201,7 +1209,8 @@ final class FanControlPlannerTests: XCTestCase {
                 || coordinator.lastMessage?.localizedCaseInsensitiveContains("timed out") == true
         )
 
-        try? await Task.sleep(for: .milliseconds(80))
+        state.releasePendingApply()
+        await waitForCondition { state.didReturnDelayedApply }
         XCTAssertEqual(coordinator.selectedMode, .systemAutomatic)
         XCTAssertNil(coordinator.observedMode)
         XCTAssertEqual(
@@ -1470,6 +1479,16 @@ final class FanControlPlannerTests: XCTestCase {
     }
 
     @MainActor
+    private func waitForCondition(_ condition: () -> Bool) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while !condition(), clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(condition(), "Expected asynchronous fan-control state did not arrive")
+    }
+
+    @MainActor
     private func waitUntilIdle(_ coordinator: FanControlCoordinator) async {
         for _ in 0..<100 {
             if !coordinator.isApplying { return }
@@ -1599,4 +1618,12 @@ private final class ControlledFanModeSender {
 @MainActor
 private final class FanControlTimeoutTestState {
     var requests: [FanControlHelperRequest] = []
+    var pendingApply: CheckedContinuation<Void, Never>?
+    var didReturnDelayedApply = false
+
+    func releasePendingApply() {
+        let pending = pendingApply
+        pendingApply = nil
+        pending?.resume()
+    }
 }

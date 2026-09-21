@@ -1465,6 +1465,132 @@ final class ControlPaletteTests: XCTestCase {
         XCTAssertNil(coordinator.observedMode)
     }
 
+    #if DEBUG || STORAGE_CLEANER_BETA
+    func testNativeSegmentsFillContentWidthAndOnlySubmitEnabledActions() async throws {
+        func segmentedControl(in view: NSView) -> NSSegmentedControl? {
+            if let control = view as? NSSegmentedControl { return control }
+            return view.subviews.lazy.compactMap { segmentedControl(in: $0) }.first
+        }
+        let labels = [
+            ["自动", "低功耗", "高功率"],
+            ["Automatic", "Low Power", "High Power"],
+            ["80%", "85%", "90%", "95%", "100%"],
+        ]
+        for (caseIndex, titles) in labels.enumerated() {
+            for width: CGFloat in [210, 248] {
+                let state = MiniWindowSegmentTestSelection()
+                let picker = MiniWindowSegmentedPicker(
+                    title: "Energy Mode",
+                    selection: Binding(get: { state.selection }, set: {
+                        state.selection = $0
+                        state.submissions += 1
+                    }),
+                    options: Array(titles.indices), label: { titles[$0] }
+                ).frame(width: width).padding(8)
+                    .environment(\.colorScheme, caseIndex == 1 ? .light : .dark)
+                let host = NSHostingView(rootView: AnyView(picker.disabled(false)))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width + 16, height: 40),
+                    styleMask: .borderless, backing: .buffered, defer: false)
+                window.contentView = host
+                let fits = await eventually {
+                    host.layoutSubtreeIfNeeded()
+                    return segmentedControl(in: host).map { abs($0.frame.width - width) < 0.5 } ?? false
+                }
+                XCTAssertTrue(fits, "The native control itself must fill the assigned width")
+                let control = try XCTUnwrap(segmentedControl(in: host))
+                XCTAssertEqual(control.segmentDistribution, .fillEqually)
+                XCTAssertEqual(control.segmentCount, titles.count)
+                XCTAssertEqual(control.selectedSegment, 1)
+                XCTAssertEqual(control.appearance?.name, caseIndex == 1 ? .aqua : .darkAqua)
+                XCTAssertEqual(state.submissions, 0, "Rendering must not submit a setting")
+                control.selectedSegment = titles.count - 1
+                control.sendAction(try XCTUnwrap(control.action), to: control.target)
+                XCTAssertEqual(state.selection, titles.count - 1)
+                XCTAssertEqual(state.submissions, 1)
+                host.rootView = AnyView(picker.disabled(true))
+                let disabled = await eventually {
+                    host.layoutSubtreeIfNeeded()
+                    return segmentedControl(in: host)?.isEnabled == false
+                }
+                XCTAssertTrue(disabled)
+                let disabledControl = try XCTUnwrap(segmentedControl(in: host))
+                disabledControl.selectedSegment = 0
+                disabledControl.sendAction(try XCTUnwrap(disabledControl.action), to: disabledControl.target)
+                XCTAssertEqual(state.submissions, 1, "Disabled actions must not submit a setting")
+                window.contentView = nil
+            }
+        }
+    }
+
+    func testFanPaletteNativeLayoutMatrixFitsAndKeepsHardwareReadOnly() async throws {
+        let states: [MiniWindowDemoData.HardwareControlDemoState] = [
+            .fanAutomatic, .fanManual65, .curveActive, .fanless,
+            .helperNotRegistered, .fanReadOnly, .thermalCritical, .fanReadbackFailed,
+        ]
+        let artifactDirectory = ProcessInfo.processInfo.environment["STORAGE_CLEANER_LAYOUT_EVIDENCE"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let artifactDirectory {
+            try FileManager.default.createDirectory(at: artifactDirectory, withIntermediateDirectories: true)
+        }
+        let previousArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        defer { UserDefaults.standard.setVolatileDomain(previousArguments, forName: UserDefaults.argumentDomain) }
+        for language in [AppLanguage.zhHans, .english] {
+            var arguments = previousArguments
+            arguments[L10n.languageDefaultsKey] = language.rawValue
+            UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+            for dark in [false, true] {
+                for state in states {
+                    let suite = "ControlPaletteTests.Layout.\(UUID().uuidString)"
+                    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+                    defer { defaults.removePersistentDomain(forName: suite) }
+                    let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
+                    let snapshot = fixtureSnapshot(profile)
+                    let fanControl = FanControlCoordinator.makeReadOnlyFixture(
+                        defaults: defaults, profile: profile, snapshot: snapshot)
+                    let store = ScanStore(cleanupPreferences: defaults, cleanReportLoader: { [] })
+                    store.menuBarMonitorState.update(snapshot)
+                    let health = ComputerHealthStore(probe: ControlPaletteUnusedHealthProbe())
+                    let parent = NSPanel(contentRect: NSRect(x: 650, y: 80, width: 312, height: 580),
+                        styleMask: .borderless, backing: .buffered, defer: false)
+                    let visible = NSRect(x: 0, y: 0, width: 1280, height: 760)
+                    let coordinator = ControlPaletteCoordinator(fixedVisibleFrame: visible, presentsPanelOnShow: false) { presentation in
+                        AnyView(ControlPaletteRootView(presentation: presentation, store: store,
+                            computerHealthStore: health, fanControl: fanControl)
+                            .environment(\.colorScheme, dark ? .dark : .light)
+                            .environment(\.displayScale, 2))
+                    }
+                    defer { coordinator.teardown() }
+                    let host = try XCTUnwrap(coordinator.panel.contentView as? NSHostingView<AnyView>)
+                    coordinator.toggle(.fan, anchorScreenRect: NSRect(x: 650, y: 120, width: 280, height: 24), parentWindow: parent)
+                    for expanded in [false, true] {
+                        coordinator.state.setFanControlsExpanded(expanded)
+                        let fits = await eventually {
+                            host.layoutSubtreeIfNeeded()
+                            coordinator.panel.displayIfNeeded()
+                            guard let measured = coordinator.state.measuredContentHeight else { return false }
+                            return abs(coordinator.panel.frame.height - measured) < 0.5
+                        }
+                        XCTAssertTrue(fits, "\(state) must fit its measured content, expanded=\(expanded)")
+                        XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
+                        XCTAssertTrue(visible.insetBy(dx: 6, dy: 6).contains(coordinator.panel.frame))
+                        XCTAssertLessThanOrEqual(host.fittingSize.width, ControlPaletteMetrics.fanSize.width + 0.5)
+                        XCTAssertNil(fanControl.requestedMode)
+                        XCTAssertFalse(fanControl.isApplying)
+                        XCTAssertEqual(fanControl.observedMode, profile.observedMode)
+                        if let artifactDirectory {
+                            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                            host.cacheDisplay(in: host.bounds, to: bitmap)
+                            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                            let name = "\(language.rawValue)-\(state.rawValue)-\(dark ? "dark" : "light")-\(expanded ? "expanded" : "compact").png"
+                            try png.write(to: artifactDirectory.appendingPathComponent(name))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #endif
+
     private func eventually(
         attempts: Int = 100,
         condition: @MainActor () -> Bool
@@ -1475,6 +1601,12 @@ final class ControlPaletteTests: XCTestCase {
         }
         return condition()
     }
+}
+
+@MainActor
+private final class MiniWindowSegmentTestSelection {
+    var selection = 1
+    var submissions = 0
 }
 
 @MainActor

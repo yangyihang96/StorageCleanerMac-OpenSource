@@ -158,9 +158,10 @@ struct GeekSensorMetricHoverDetail: View {
                     style: .stackedBars,
                     duration: duration,
                     showsLegend: false,
-                    showsTimelineLabels: true,
+                    showsTimelineLabels: false,
                     showsTooltip: true,
-                    horizontalInset: 2
+                    horizontalInset: 2,
+                    showsSamplingDetails: false
                 )
                 .frame(height: hasSecondaryDetail ? 148 : 172)
             } else {
@@ -234,7 +235,7 @@ struct GeekSensorMetricHoverDetail: View {
     }
 }
 
-enum GeekPowerHistoryMetric {
+enum GeekPowerHistoryMetric: Sendable {
     case charge
     case batteryPower
 
@@ -381,13 +382,13 @@ enum PowerConnectionTimeline {
     }
 }
 
-private struct GeekPowerBucketPayload {
+struct GeekPowerBucketPayload: Sendable {
     let value: Double
     let isCharging: Bool?
     let powerSource: BatteryPowerSource?
 }
 
-private struct GeekPreparedPowerBucket {
+struct GeekPreparedPowerBucket: Sendable {
     let bucket: GeekChartBucketSnapshot
     let payload: GeekPowerBucketPayload
     let isEstimated: Bool
@@ -408,7 +409,21 @@ struct GeekPowerHistoryChart: View {
 
     @State private var hoverLocation: CGPoint?
 
+    var activeFrame: GeekPreparedPowerFrame? = nil
+    private var preparationKernel: GeekPowerPreparationKernel {
+        .init(points: points, metric: metric, duration: duration, displayScale: displayScale)
+    }
+
     var body: some View {
+        let kernel = preparationKernel
+        return MenuBarChartPreparation(kind: "power-summary", first: points.first?.date, last: points.last?.date,
+            count: points.count, configuration: "\(metric):\(duration)", cost: 512,
+            build: { kernel.statistics }) { statistics in
+            chartBody(statistics: statistics)
+        }
+    }
+
+    private func chartBody(statistics: GeekSeriesStatistics?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             if metric == .batteryPower {
                 HStack(spacing: 6) {
@@ -439,15 +454,37 @@ struct GeekPowerHistoryChart: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityValue(accessibilitySummary)
-        .accessibilityHint(helpText)
+        .accessibilityValue(accessibilitySummary(statistics: statistics))
+        .accessibilityHint(helpText(statistics: statistics))
         // The compact preview is hosted inside GeekHoverDetailTarget. Let that
         // parent own the hit test so its delayed tertiary reveal sees the hover.
         .allowsHitTesting(showsTooltip)
     }
 
-    @ViewBuilder
     private func chartContent(referenceDate: Date) -> some View {
+        let kernel = preparationKernel
+        return GeometryReader { proxy in
+            let timeline = showsTimelineLabels && metric == .batteryPower && proxy.size.height >= 70
+            let rail = metric == .charge ? GeekPowerHistoryScale.connectionTimelineHeight + GeekPowerHistoryScale.connectionTimelineGap : 0
+            let plot = CGRect(x: 2, y: 2, width: max(1, proxy.size.width - 4),
+                              height: max(1, proxy.size.height - (timeline ? 20 : 4) - rail))
+            MenuBarChartPreparation(kind: "power-frame", first: points.first?.date, last: points.last?.date,
+                count: points.count, configuration: "\(metric):\(duration):\(plot):\(displayScale)",
+                clockRevision: floor(referenceDate.timeIntervalSince1970), cost: max(1024, points.count * 320),
+                build: { GeekPreparedPowerFrame(kernel: kernel, plot: plot, reference: referenceDate) }) { frame in
+                    preparedChartContent(frame, referenceDate: referenceDate)
+                }
+        }
+    }
+
+    private func preparedChartContent(_ frame: GeekPreparedPowerFrame, referenceDate: Date) -> some View {
+        var copy = self
+        copy.activeFrame = frame
+        return copy.renderChartContent(referenceDate: referenceDate)
+    }
+
+    @ViewBuilder
+    private func renderChartContent(referenceDate: Date) -> some View {
         let livePoints = usablePoints(endingAt: referenceDate)
         let liveSamples = livePoints.map {
             MenuBarChartSample(date: $0.date, value: $0.value)
@@ -541,122 +578,18 @@ struct GeekPowerHistoryChart: View {
         }
     }
 
-    func usablePoints(endingAt referenceDate: Date) -> [(
-        date: Date,
-        value: Double,
-        isCharging: Bool?,
-        powerSource: BatteryPowerSource?
-    )] {
-        let end = referenceDate
-        let start = end.addingTimeInterval(-duration)
-        let latestAllowedDate = end.addingTimeInterval(
-            GeekChartWindow.futureSampleTolerance
-        )
-        return points.compactMap { point in
-            guard point.date >= start, point.date <= latestAllowedDate,
-                  let value = metric.value(in: point),
-                  value.isFinite else { return nil }
-            return (
-                min(point.date, end),
-                value,
-                point.isCharging,
-                point.powerSource
-            )
-        }.sorted { $0.date < $1.date }
+    func usablePoints(endingAt referenceDate: Date) -> [GeekPreparedPowerFrame.Point] {
+        activeFrame?.points ?? preparationKernel.usablePoints(endingAt: referenceDate)
     }
 
-    private func batteryBuckets(
-        _ livePoints: [(
-            date: Date,
-            value: Double,
-            isCharging: Bool?,
-            powerSource: BatteryPowerSource?
-        )],
-        plot: CGRect,
-        referenceDate: Date
-    ) -> [GeekChartBucketSnapshot] {
-        let dates = livePoints.map(\.date)
-        guard !dates.isEmpty else { return [] }
-        let visibleRange = GeekChartWindow.barRange(
-            for: dates,
-            duration: duration,
-            referenceDate: referenceDate
-        )
-        let unavailableDates = points.filter { metric.value(in: $0)?.isFinite != true }.map(\.date)
-        return GeekChartWindow.displayBuckets(
-            for: dates,
-            in: plot,
-            range: visibleRange,
-            referenceDate: referenceDate,
-            displayScale: displayScale,
-            mayConnect: { before, after in
-                livePoints[before].powerSource == livePoints[after].powerSource
-                    && livePoints[before].isCharging == livePoints[after].isCharging
-                    && !unavailableDates.contains { $0 > dates[before] && $0 < dates[after] }
-            }
-        )
+    private func batteryBuckets(_ livePoints: [GeekPreparedPowerFrame.Point], plot: CGRect,
+                                referenceDate: Date) -> [GeekChartBucketSnapshot] {
+        activeFrame?.rawBuckets ?? preparationKernel.batteryBuckets(livePoints, plot: plot, referenceDate: referenceDate)
     }
 
-    private func preparedBatteryBuckets(
-        _ livePoints: [(
-            date: Date,
-            value: Double,
-            isCharging: Bool?,
-            powerSource: BatteryPowerSource?
-        )],
-        plot: CGRect,
-        referenceDate: Date
-    ) -> [GeekPreparedPowerBucket] {
-        let buckets = batteryBuckets(
-            livePoints,
-            plot: plot,
-            referenceDate: referenceDate
-        )
-        let payloads = TimeBucketAggregator.nearestFilled(
-            buckets.map { bucket -> GeekPowerBucketPayload? in
-                guard let latestIndex = bucket.indices.last,
-                      let value = (bucket.averagingGroups != nil
-                        ? bucket.mean({ livePoints[$0].value })
-                        : bucketValue(bucket.indices, in: livePoints)) else {
-                    return nil
-                }
-                let point = livePoints[latestIndex]
-                return GeekPowerBucketPayload(
-                    value: value,
-                    isCharging: point.isCharging,
-                    powerSource: point.powerSource
-                )
-            }
-        )
-        let chargingStates = TimeBucketAggregator.forwardFilled(
-            buckets.map { bucket -> Bool? in
-                guard let latestIndex = bucket.indices.last else { return nil }
-                return livePoints[latestIndex].isCharging
-            }
-        )
-        let powerSources = TimeBucketAggregator.forwardFilled(
-            buckets.map { bucket -> BatteryPowerSource? in
-                guard let latestIndex = bucket.indices.last,
-                      let source = livePoints[latestIndex].powerSource else {
-                    return nil
-                }
-                return source == .unknown ? nil : source
-            }
-        )
-        return buckets.indices.compactMap { index in
-            guard let payload = payloads[index].value else { return nil }
-            return GeekPreparedPowerBucket(
-                bucket: buckets[index],
-                payload: GeekPowerBucketPayload(
-                    value: payload.value,
-                    isCharging: chargingStates[index].value,
-                    powerSource: powerSources[index].value
-                ),
-                isEstimated: buckets[index].isEstimated || payloads[index].isEstimated
-                    || chargingStates[index].isEstimated
-                    || powerSources[index].isEstimated
-            )
-        }
+    private func preparedBatteryBuckets(_ livePoints: [GeekPreparedPowerFrame.Point], plot: CGRect,
+                                        referenceDate: Date) -> [GeekPreparedPowerBucket] {
+        activeFrame?.buckets ?? preparationKernel.preparedBatteryBuckets(livePoints, plot: plot, referenceDate: referenceDate)
     }
 
     private func valueRange(for values: [Double]) -> ClosedRange<Double> {
@@ -668,13 +601,6 @@ struct GeekPowerHistoryChart: View {
             let upper = max(1, (values.max() ?? 1) * 1.12)
             return lower...(upper - lower < 0.5 ? lower + 1 : upper)
         }
-    }
-
-    private var statistics: GeekSeriesStatistics? {
-        guard let end = points.last?.date else { return nil }
-        return GeekSeriesStatistics(
-            values: usablePoints(endingAt: end).map(\.value)
-        )
     }
 
     private var chartColor: Color {
@@ -877,19 +803,6 @@ struct GeekPowerHistoryChart: View {
         }
     }
 
-    private func bucketValue(
-        _ indices: [Int],
-        in points: [(date: Date, value: Double, isCharging: Bool?, powerSource: BatteryPowerSource?)]
-    ) -> Double? {
-        let values = indices.map { points[$0].value }
-        return switch metric {
-        case .charge:
-            TimeBucketAggregator.lastValid(values)
-        case .batteryPower:
-            TimeBucketAggregator.average(values)
-        }
-    }
-
     private func drawLightningBolt(
         context: inout GraphicsContext,
         in segment: CGRect
@@ -1021,9 +934,9 @@ struct GeekPowerHistoryChart: View {
         }
     }
 
-    private var helpText: String {
+    private func helpText(statistics: GeekSeriesStatistics?) -> String {
         [
-            accessibilitySummary,
+            accessibilitySummary(statistics: statistics),
             metric.meaningText,
             TimeBucketAggregator.nearestFillDescription,
         ]
@@ -1031,7 +944,7 @@ struct GeekPowerHistoryChart: View {
             .joined(separator: " ")
     }
 
-    private var accessibilitySummary: String {
+    private func accessibilitySummary(statistics: GeekSeriesStatistics?) -> String {
         guard let statistics else {
             return L10n.text("正在采样…", "Sampling…")
         }
@@ -1039,33 +952,6 @@ struct GeekPowerHistoryChart: View {
             "当前 \(metric.formatted(statistics.current))，最低 \(metric.formatted(statistics.minimum))，平均 \(metric.formatted(statistics.average))，最高 \(metric.formatted(statistics.maximum))",
             "Current \(metric.formatted(statistics.current)), minimum \(metric.formatted(statistics.minimum)), average \(metric.formatted(statistics.average)), maximum \(metric.formatted(statistics.maximum))"
         )
-    }
-}
-
-struct GeekFrequencyHoverDetail: View {
-    let clusters: [CPUPerformanceStateService.ClusterReading]
-
-    var body: some View {
-        GeekHoverDetailCanvas(title: L10n.text("CPU 频率", "CPU Frequency")) {
-            if clusters.isEmpty {
-                GeekHoverUnavailableState(text: L10n.text("当前机型未公开可读频率", "Readable frequency is unavailable on this Mac"))
-            } else {
-                VStack(spacing: 7) {
-                    ForEach(Array(clusters.prefix(4)), id: \.identifier) { cluster in
-                        GeekHoverValueRow(
-                            title: cluster.performanceLevelName,
-                            value: cluster.frequencyMHz.map {
-                                String(format: "%.2f GHz", $0 / 1_000)
-                            } ?? "--"
-                        )
-                    }
-                    Spacer(minLength: 0)
-                    Text(L10n.text("频率历史未采集", "Frequency history is not collected"))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
     }
 }
 
@@ -1102,7 +988,8 @@ struct GeekFanHoverDetail: View {
                     showsLegend: false,
                     showsTimelineLabels: false,
                     showsTooltip: true,
-                    horizontalInset: 2
+                    horizontalInset: 2,
+                    showsSamplingDetails: false
                 )
                 .frame(height: selectedFanIndex == nil ? 130 : 120)
             } else {
@@ -1132,7 +1019,6 @@ struct GeekFanHoverDetail: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(chartTitle)
-        .help(durationText)
     }
 
     private var chartTitle: String {
@@ -1347,7 +1233,7 @@ private struct GeekBatteryCompactValueRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.55)
         }
-        .font(.caption2)
+        .font(AdvancedPanelTypography.caption)
         .frame(maxWidth: .infinity, minHeight: 14, alignment: .leading)
     }
 }
@@ -1372,7 +1258,7 @@ struct GeekBatteryHistoryHoverDetail: View {
                 tint: tint,
                 chargingTint: chargingTint,
                 accessibilityLabel: L10n.text("电池电量趋势", "Battery-level trend"),
-                showsTimelineLabels: true,
+                showsTimelineLabels: false,
                 showsTooltip: true
             )
             .frame(height: 154)
@@ -1428,7 +1314,7 @@ struct GeekEnergyModeHoverDetail: View {
     let onChangeMode: (BatteryPowerSource, BatteryPowerMode) -> Void
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: MiniWindowStyleTokens.cardSpacing) {
             if showsChargeTargetSetting {
                 GeekChargeTargetSetting(
                     showsFullChargeAction: showsFullChargeAction,
@@ -1483,37 +1369,33 @@ private struct GeekChargeTargetSetting: View {
 
     var body: some View {
         GeekHoverDetailGroup(title: L10n.text("充电上限", "Charge Limit")) {
-            VStack(alignment: .leading, spacing: 4) {
-                VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
+                VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
                     if isRequesting {
                         ProgressView()
                             .controlSize(.small)
                     }
-                    Picker(
-                        L10n.text("充电上限", "Charge Limit"),
+                    MiniWindowSegmentedPicker(
+                        title: L10n.text("充电上限", "Charge Limit"),
                         selection: Binding(
                             get: { selectedTarget },
                             set: { updateTarget($0) }
-                        )
-                    ) {
-                        ForEach(availableTargets) { target in
-                            Text(target.displayText).tag(target)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                        ),
+                        options: availableTargets,
+                        label: { $0.displayText }
+                    )
                     .frame(maxWidth: .infinity)
                     .disabled(isRequesting || chargeLimitState == nil)
                 }
-                .font(.footnote)
-                .padding(.horizontal, 4)
+                .font(AdvancedPanelTypography.body)
+
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 if targetUpdateFailed || chargeLimitState == nil {
                     Text(targetStatusText)
-                        .font(.caption2).foregroundStyle(targetStatusColor)
+                        .font(AdvancedPanelTypography.caption).foregroundStyle(targetStatusColor)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 4)
+
                 }
 
                 Button(
@@ -1521,8 +1403,8 @@ private struct GeekChargeTargetSetting: View {
                     action: openBatterySettings
                 )
                 .buttonStyle(.link)
-                .font(.caption2)
-                .padding(.horizontal, 4)
+                .font(AdvancedPanelTypography.caption)
+
 
                 if showsFullChargeAction {
                     fullChargeButton
@@ -1566,8 +1448,8 @@ private struct GeekChargeTargetSetting: View {
                     .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
             }
-            .font(.footnote)
-            .padding(.horizontal, 4)
+            .font(AdvancedPanelTypography.body)
+
             .frame(height: 22)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -1762,31 +1644,38 @@ enum GeekEnergyModePowerTitle {
 
 private struct GeekHoverDetailGroup<Content: View>: View {
     let title: String
+    let isActive: Bool
+    let showsFailure: Bool
     let content: Content
 
-    init(title: String, @ViewBuilder content: () -> Content) {
+    init(title: String, isActive: Bool = false, showsFailure: Bool = false,
+         @ViewBuilder content: () -> Content) {
         self.title = title
+        self.isActive = isActive
+        self.showsFailure = showsFailure
         self.content = content()
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title.uppercased())
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
-                .lineLimit(1)
+        MiniWindowGroup {
+            HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
+                Text(title.uppercased())
+                    .font(AdvancedPanelTypography.captionStrong)
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if showsFailure {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(AdvancedPanelTypography.symbol)
+                        .foregroundStyle(AppDesignTokens.Palette.warning)
+                        .accessibilityHidden(true)
+                } else if isActive {
+                    Circle().fill(Color.accentColor).frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                }
+            }
             content
-        }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.34))
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.secondary.opacity(0.28), lineWidth: 1)
         }
     }
 }
@@ -1802,40 +1691,23 @@ private struct GeekEnergyModeGroup: View {
     let onChangeMode: (BatteryPowerSource, BatteryPowerMode) -> Void
 
     var body: some View {
-        GeekHoverDetailGroup(title: title) {
-            VStack(alignment: .leading, spacing: 4) {
-                Picker(title, selection: modeBinding) {
-                    if mode == nil { Text("—").tag(Optional<BatteryPowerMode>.none) }
-                    ForEach(supportedModes, id: \.self) { option in
-                        Text(title(for: option)).tag(Optional(option))
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.small)
+        GeekHoverDetailGroup(title: title, isActive: isActiveSource, showsFailure: showsFailure) {
+            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
+                MiniWindowSegmentedPicker(
+                    title: title,
+                    selection: modeBinding,
+                    options: (mode == nil ? [nil] : []) + supportedModes.map(Optional.some),
+                    label: { $0.map { title(for: $0) } ?? "—" }
+                )
+                .frame(maxWidth: .infinity)
                 .disabled(!controlsEnabled || adjustmentState.isChanging)
 
                 if let statusText {
                     Text(statusText)
-                        .font(.caption2)
+                        .font(AdvancedPanelTypography.caption)
                         .foregroundStyle(showsFailure ? AppDesignTokens.Palette.warning : .secondary)
                         .lineLimit(1)
                 }
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            if showsFailure {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(AppDesignTokens.Palette.warning)
-                    .padding(7)
-                    .accessibilityHidden(true)
-            } else if isActiveSource {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 8, height: 8)
-                    .padding(8)
-                    .accessibilityHidden(true)
             }
         }
         .help(statusText ?? L10n.text(
@@ -1945,17 +1817,17 @@ private struct GeekEnergyModeOptionRow: View {
                         .accessibilityHidden(true)
                 } else if selected {
                     Image(systemName: "checkmark")
-                        .font(.footnote.weight(.semibold))
+                        .font(AdvancedPanelTypography.captionStrong)
                         .accessibilityHidden(true)
                 }
             }
-            .font(.footnote)
-            .padding(.horizontal, 4)
+            .font(AdvancedPanelTypography.body)
+
             .frame(height: 18)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
                     .fill(
                         isHovered || isChanging
                             ? Color.accentColor.opacity(0.16)

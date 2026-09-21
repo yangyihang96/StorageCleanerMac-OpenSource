@@ -13,12 +13,19 @@ cd "$ROOT_DIR"
 "$ROOT_DIR/script/bootstrap.sh"
 
 swift build --scratch-path "$VERIFY_ROOT/debug" --jobs "$JOBS"
-swift build -c release --scratch-path "$VERIFY_ROOT/release" --jobs "$JOBS"
+# Validate the standard-workload timing against the optimized shipping code.
+# The unoptimized Debug kernel can exceed its wall-clock budget under local
+# load. Keep the full workload and the stricter Release limit; run this exact
+# test here instead of measuring it again in the Debug suite below.
+BENCHMARK_TIMING_TEST="MacBenchmarkKernelTests.testStandardQuickKernelsCompleteWithinDeclaredLimits"
+swift test -c release --scratch-path "$VERIFY_ROOT/release" --jobs "$JOBS" \
+  --filter "$BENCHMARK_TIMING_TEST"
 swift build \
   --scratch-path "$VERIFY_ROOT/concurrency" \
   --jobs "$JOBS" \
   -Xswiftc -strict-concurrency=complete
-swift test --scratch-path "$VERIFY_ROOT/debug" --jobs "$JOBS"
+swift test --scratch-path "$VERIFY_ROOT/debug" --jobs "$JOBS" \
+  --skip "$BENCHMARK_TIMING_TEST"
 
 if grep -R -n -E '(^|[^[:alnum:]_])Process[[:space:]]*\(|\.terminate\(|\.forceTerminate\(' Sources/StorageCleanerMac/Views; then
   echo "SwiftUI Views must not launch processes or terminate applications." >&2
@@ -35,6 +42,8 @@ if grep -R -n -E '^[[:space:]]*import[[:space:]].*Private|dlopen\(.*PrivateFrame
   echo "Private framework usage is not allowed." >&2
   exit 12
 fi
+
+"$ROOT_DIR/script/verify_menu_bar_performance.sh"
 
 git diff --check
 

@@ -210,7 +210,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(smartScan.contains("progress.progressKind"))
         XCTAssertTrue(smartScan.contains(".trim(from: 0, to: progressFraction)"))
         XCTAssertFalse(smartScan.contains(".trim(from: 0, to: 0.22)"))
-        XCTAssertTrue(smartScan.contains(".frame(width: 124, height: 124)"))
+        XCTAssertTrue(smartScan.contains(".frame(width: side, height: side)"))
         XCTAssertFalse(smartScan.contains("ScanProgressStatusItem("))
         XCTAssertTrue(smartScan.contains(".progressViewStyle(.linear)"))
         XCTAssertTrue(smartScan.contains("minHeight: 44"))
@@ -257,10 +257,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(startupItems.contains("正在扫描启动项目"))
         XCTAssertTrue(startupItems.contains("isLoading: true"))
         XCTAssertTrue(appUpdates.contains("AppUpdateScanningPage("))
-        XCTAssertTrue(appUpdates.contains("AppUpdateProgressIndicator("))
-        XCTAssertTrue(startupItems.contains("ProgressView("))
+        XCTAssertTrue(appUpdates.contains("RuntimeActivityCard("))
+        XCTAssertTrue(startupItems.contains("RuntimeInlineStatus("))
         XCTAssertTrue(startupItems.contains("List(selection: $selectedItemID)"))
-        XCTAssertTrue(appUpdates.contains("ProgressView(value: fraction)"))
+        XCTAssertTrue(appUpdates.contains("fraction: progress.progressFraction"))
         XCTAssertGreaterThanOrEqual(occurrences(of: "AppEmptyState(", in: startupItems), 2)
     }
 
@@ -273,7 +273,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         )
 
         XCTAssertTrue(overview.contains("CleanupScanResultsView("))
-        XCTAssertTrue(overview.contains("filter: .green"))
+        XCTAssertTrue(overview.contains("filter: .overview"))
         XCTAssertFalse(overview.contains("AppPageHeader("))
         XCTAssertFalse(overview.contains("store.showCleanupReview()"))
         XCTAssertFalse(overview.contains("@Binding var selection"))
@@ -583,8 +583,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
             to: "private struct ScanProgressStageList: View {"
         )
 
-        XCTAssertFalse(page.contains("MetadataPill("))
-        XCTAssertTrue(page.contains("Text(L10n.text(\"只读扫描\", \"Read-only\"))"))
+        XCTAssertTrue(page.contains("RuntimeActivityFooter"))
+        XCTAssertTrue(page.contains("L10n.text(\"只读扫描\", \"Read-only\")"))
         XCTAssertTrue(progressBar.contains("ProgressView(value: Double(fraction), total: 1)"))
         XCTAssertTrue(progressBar.contains(".accessibilityLabel(L10n.text(\"扫描进度\", \"Scan progress\"))"))
         XCTAssertTrue(progressBar.contains(".accessibilityValue"))
@@ -620,7 +620,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(presentation.contains("theme.startColor(for: colorScheme)"))
         XCTAssertTrue(presentation.contains("RadialGradient("))
         XCTAssertTrue(presentation.contains("theme.endColor(for: colorScheme)"))
-        XCTAssertTrue(presentation.contains("theme.isImmersive ? .dark : colorScheme"))
+        XCTAssertFalse(presentation.contains("theme.isImmersive ? .dark : colorScheme"))
         XCTAssertTrue(presentation.contains("@Environment(\\.accessibilityReduceTransparency)"))
         XCTAssertFalse(presentation.contains("ModuleTechnicalBackdrop"))
         XCTAssertFalse(presentation.contains("value: route.rawValue"))
@@ -987,7 +987,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(health.contains("miniRing"))
         XCTAssertFalse(health.contains("factorCard"))
 
-        XCTAssertTrue(largeFiles.contains("ProgressView(value:"))
+        XCTAssertTrue(largeFiles.contains("FeatureRuntimePage("))
         XCTAssertFalse(largeFiles.contains("Circle()"))
         XCTAssertFalse(largeFiles.contains("miniRing"))
 
@@ -1071,7 +1071,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(geek.contains("GeekBatteryLevelBar("))
         XCTAssertFalse(geek.contains(".environment(\\.geekCombinedCardUsesDivider, true)"))
         XCTAssertTrue(combinedCardDivider.contains("static let defaultValue = false"))
-        XCTAssertTrue(combinedCard.contains(".frame(maxWidth: .infinity, minHeight: height, maxHeight: height, alignment: .topLeading)"))
+        XCTAssertTrue(combinedCard.contains(".frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)"))
         XCTAssertEqual(occurrences(of: ".geekCardSurface(", in: combinedCard), 1,
                        "Each fixed-height overview module keeps one golden card surface")
         XCTAssertTrue(geek.contains("reading.displayRPM"))
@@ -1213,7 +1213,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(source.contains("暂时无法读取进程流量"))
         XCTAssertFalse(source.contains("等待采样"))
         XCTAssertFalse(source.contains("逐进程实时流量未采样"))
-        XCTAssertTrue(source.contains("GeekCombinedCard(height: geekNetworkProcessCardHeight, verticalPadding: 5)"))
+        XCTAssertTrue(source.contains("GeekCombinedCard(height: geekNetworkProcessCardHeight)"))
         XCTAssertTrue(source.contains("ProgressView()"))
         XCTAssertTrue(source.contains("if showsIPv6"))
         XCTAssertTrue(source.contains(".truncationMode(.middle)"))
@@ -1512,7 +1512,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         let menuTypography = try sourceSegment(
             typography,
             from: "enum AppPanelTypography {",
-            to: "typealias MenuBarPanelTypography = AppPanelTypography"
+            to: "enum MenuBarPanelTypography {"
         )
 
         XCTAssertTrue(tokens.contains("typealias Typography = AppTypography"))

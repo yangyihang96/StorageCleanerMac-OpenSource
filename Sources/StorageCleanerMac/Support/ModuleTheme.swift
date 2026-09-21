@@ -87,6 +87,12 @@ struct ModuleTheme {
     var actionFill: Color { accent }
     var scanProgressColor: Color { accent }
 
+    func actionGradient(for scheme: ColorScheme) -> [Color] {
+        // A translucent end stop was readable over navy, but washed white
+        // button labels out on the daylight canvas.
+        [accent, scheme == .dark ? accent.opacity(0.58) : accent]
+    }
+
     static let neutral = ModuleTheme(
         featureGroup: .settings,
         accent: .accentColor,
@@ -107,10 +113,10 @@ struct ModuleTheme {
         colorScheme == .dark ? darkGradientEnd : gradientEnd
     }
 
-    var primaryText: Color { isImmersive ? .white : .primary }
-    var secondaryText: Color { isImmersive ? Color.white.opacity(0.76) : .secondary }
+    var primaryText: Color { isImmersive ? AppAppearanceColors.ink : .primary }
+    var secondaryText: Color { isImmersive ? AppAppearanceColors.secondaryText : .secondary }
     var tertiaryText: Color {
-        isImmersive ? Color.white.opacity(0.58) : Color(nsColor: .tertiaryLabelColor)
+        isImmersive ? AppAppearanceColors.tertiaryText : Color(nsColor: .tertiaryLabelColor)
     }
 
     func panelFill(for colorScheme: ColorScheme, reduceTransparency: Bool) -> Color {
@@ -118,14 +124,14 @@ struct ModuleTheme {
             return Color(nsColor: .windowBackgroundColor)
         }
         if reduceTransparency {
-            return startColor(for: colorScheme)
+            return colorScheme == .light ? .white : startColor(for: colorScheme)
         }
-        return Color.white.opacity(0.035)
+        return AppAppearanceColors.panel
     }
 
     func panelBorder(for contrast: ColorSchemeContrast) -> Color {
         isImmersive
-            ? Color.white.opacity(contrast == .increased ? 0.65 : 0.20)
+            ? AppAppearanceColors.border.opacity(contrast == .increased ? 0.65 : 0.20)
             : Color(nsColor: .separatorColor).opacity(contrast == .increased ? 1 : 0.65)
     }
 }
@@ -145,7 +151,7 @@ enum ModuleThemeCatalog {
     static func theme(for filter: ReviewFilter) -> ModuleTheme {
         if filter == .memory {
             let base = theme(for: FeatureGroup.performance)
-            let accent = Color(red: 0.55, green: 0.36, blue: 0.96)
+            let accent = AppAppearanceColors.adaptive(light: 0x6A3ACA, dark: Color(red: 0.55, green: 0.36, blue: 0.96))
             return ModuleTheme(featureGroup: .performance, accent: accent,
                                gradientStart: base.gradientStart, gradientEnd: base.gradientEnd,
                                darkGradientStart: base.darkGradientStart, darkGradientEnd: base.darkGradientEnd,
@@ -155,9 +161,9 @@ enum ModuleThemeCatalog {
         if filter == .privacy {
             return ModuleTheme(
                 featureGroup: .protection,
-                accent: Color(red: 0.20, green: 0.78, blue: 0.55),
-                gradientStart: Color(red: 0.045, green: 0.085, blue: 0.14),
-                gradientEnd: Color(red: 0.04, green: 0.075, blue: 0.13),
+                accent: AppAppearanceColors.adaptive(light: 0x15784F, dark: Color(red: 0.20, green: 0.78, blue: 0.55)),
+                gradientStart: Color(red: 0.94, green: 0.98, blue: 0.98),
+                gradientEnd: Color(red: 0.98, green: 0.99, blue: 1.0),
                 darkGradientStart: Color(red: 0.045, green: 0.085, blue: 0.14),
                 darkGradientEnd: Color(red: 0.04, green: 0.075, blue: 0.13),
                 radialHighlight: Color.blue.opacity(0.06),
@@ -168,9 +174,9 @@ enum ModuleThemeCatalog {
         if filter == .devCaches {
             return ModuleTheme(
                 featureGroup: .cleanup,
-                accent: Color(red: 0.95, green: 0.60, blue: 0.12),
-                gradientStart: Color(red: 0.10, green: 0.09, blue: 0.065),
-                gradientEnd: Color(red: 0.045, green: 0.048, blue: 0.055),
+                accent: AppAppearanceColors.adaptive(light: 0x936000, dark: Color(red: 0.95, green: 0.60, blue: 0.12)),
+                gradientStart: Color(red: 0.99, green: 0.97, blue: 0.92),
+                gradientEnd: Color(red: 1.0, green: 0.99, blue: 0.97),
                 darkGradientStart: Color(red: 0.10, green: 0.09, blue: 0.065),
                 darkGradientEnd: Color(red: 0.045, green: 0.048, blue: 0.055),
                 radialHighlight: Color.orange.opacity(0.10),
@@ -185,12 +191,12 @@ enum ModuleThemeCatalog {
         guard featureGroup != .settings else { return .neutral }
         let accent: Color
         switch featureGroup {
-        case .smartScan: accent = Color(red: 0.23, green: 0.47, blue: 0.98)
-        case .cleanup: accent = Color(red: 1.0, green: 0.42, blue: 0.12)
-        case .protection: accent = Color(red: 0.20, green: 0.78, blue: 0.55)
-        case .performance: accent = Color(red: 0.87, green: 0.31, blue: 0.70)
-        case .applications: accent = Color(red: 0.58, green: 0.39, blue: 0.95)
-        case .files: accent = Color(red: 0.55, green: 0.36, blue: 0.96)
+        case .smartScan: accent = AppAppearanceColors.adaptive(light: 0x255AD4, dark: Color(red: 0.23, green: 0.47, blue: 0.98))
+        case .cleanup: accent = AppAppearanceColors.adaptive(light: 0xA94A08, dark: Color(red: 1.0, green: 0.42, blue: 0.12))
+        case .protection: accent = AppAppearanceColors.adaptive(light: 0x15784F, dark: Color(red: 0.20, green: 0.78, blue: 0.55))
+        case .performance: accent = AppAppearanceColors.adaptive(light: 0xAB287B, dark: Color(red: 0.87, green: 0.31, blue: 0.70))
+        case .applications: accent = AppAppearanceColors.adaptive(light: 0x7041CC, dark: Color(red: 0.58, green: 0.39, blue: 0.95))
+        case .files: accent = AppAppearanceColors.adaptive(light: 0x6A3ACA, dark: Color(red: 0.55, green: 0.36, blue: 0.96))
         case .settings: accent = .accentColor
         }
         let start = featureGroup == .protection
@@ -202,8 +208,12 @@ enum ModuleThemeCatalog {
         return ModuleTheme(
             featureGroup: featureGroup,
             accent: accent,
-            gradientStart: start,
-            gradientEnd: end,
+            gradientStart: featureGroup == .protection
+                ? Color(red: 0.94, green: 0.98, blue: 0.97)
+                : Color(red: 0.94, green: 0.96, blue: 1.0),
+            gradientEnd: featureGroup == .protection
+                ? Color(red: 0.98, green: 0.99, blue: 0.98)
+                : Color(red: 0.98, green: 0.98, blue: 1.0),
             darkGradientStart: start,
             darkGradientEnd: end,
             radialHighlight: accent.opacity(0.10),

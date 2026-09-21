@@ -61,4 +61,20 @@ enum AppPanelTypography {
     static let symbol: Font = .callout.weight(.medium)
 }
 
-typealias MenuBarPanelTypography = AppPanelTypography
+/// Fixed role sizes for every level of the menu-bar panel. Large gauge values
+/// and chart-axis labels have separate roles; ordinary rows never scale down
+/// to compensate for a cramped layout.
+enum MenuBarPanelTypography {
+    static let header: Font = .system(size: 12, weight: .semibold)
+    static let tabTitle = header
+    static let section: Font = .system(size: 11, weight: .semibold)
+    static let sectionTitle = section
+    static let metricValue: Font = .system(size: 20, weight: .medium)
+    static let value: Font = .system(size: 13, weight: .medium)
+    static let compactValue = value
+    static let body: Font = .system(size: 11)
+    static let caption = body
+    static let captionStrong = section
+    static let symbol: Font = .system(size: 11, weight: .medium)
+    static let chartLabel: Font = .system(size: 10)
+}

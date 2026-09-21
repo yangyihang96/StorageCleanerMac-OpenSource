@@ -88,8 +88,9 @@ actor RemoteOfficialSourceRegistryRefresher {
                 delegateQueue: nil
             )
             defer { session.finishTasksAndInvalidate() }
-            let (data, response) = try await session.data(from: configuration.remoteURL)
-            guard let httpResponse = response as? HTTPURLResponse,
+            let (data, httpResponse) = try await BoundedHTTPSReader.data(
+                for: URLRequest(url: configuration.remoteURL), session: session, maximumBytes: 2 * 1024 * 1024)
+            guard
                   (200..<300).contains(httpResponse.statusCode),
                   let finalURL = httpResponse.url,
                   (try? AllowedHostValidator().validate(

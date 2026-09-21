@@ -271,7 +271,11 @@ final class BenchmarkV7LeaderboardStore: ObservableObject {
     }
 
     func draft(for result: BenchmarkV7Result) throws -> BenchmarkV7LeaderboardDraft {
-        try BenchmarkV7LeaderboardDraft.make(
+        // The new protocol cannot fall back to the legacy upload endpoint.
+        guard result.isCurrentOfficialRankingEligible else {
+            throw BenchmarkV7LeaderboardEligibilityError.notRankingEligible
+        }
+        return try BenchmarkV7LeaderboardDraft.make(
             result: result,
             installationID: identityProvider.installationID(),
             displayName: identityProvider.anonymousDisplayName()

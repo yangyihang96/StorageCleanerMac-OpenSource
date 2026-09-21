@@ -80,6 +80,9 @@ final class DetailedPanelViewProfileTests: XCTestCase {
             XCTAssertTrue(source.contains(primaryTarget), file)
             if file == "GeekNetworkView.swift" {
                 XCTAssertTrue(source.contains("showsExtendedGeekDetails ? 4 : 2"), file)
+            } else if file == "GeekSensorsView.swift" {
+                XCTAssertFalse(source.contains("geekFrequencyCard"), file)
+                XCTAssertTrue(source.contains("compactFanHistoryRow"), file)
             } else {
                 XCTAssertTrue(source.contains("if showsExtendedGeekDetails"), file)
             }
@@ -96,8 +99,8 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         XCTAssertLessThan(localList.lowerBound, networkSection.lowerBound)
         XCTAssertTrue(source.contains("L10n.text(\"网络硬盘\", \"Network Drives\")"))
         XCTAssertTrue(source.contains("networkStorageVolumes.map"))
-        XCTAssertTrue(source.contains("volume.capacity.userUsedPercent"))
-        XCTAssertTrue(source.contains("ByteFormat.storageString(volume.capacity.userAvailableBytes)"))
+        XCTAssertTrue(source.contains("capacity.userUsedPercent"))
+        XCTAssertTrue(source.contains("ByteFormat.storageString(capacity.userAvailableBytes)"))
     }
 
     func testDiskCascadeKeepsCapacityProgressOnlyInTheOverview() throws {
@@ -110,7 +113,7 @@ final class DetailedPanelViewProfileTests: XCTestCase {
 
         XCTAssertTrue(overview.contains("max(0, 1 - storageSnapshot.userUsedRatio)"))
         XCTAssertFalse(detail.contains("GeekDiskUsageRing"))
-        XCTAssertTrue(detail.contains("volume.capacity.userUsedPercent"))
+        XCTAssertTrue(detail.contains("capacity.userUsedPercent"))
     }
 
     func testMiniWindowCardsShareBordersAndNarrowHeadersDoNotOverlap() throws {

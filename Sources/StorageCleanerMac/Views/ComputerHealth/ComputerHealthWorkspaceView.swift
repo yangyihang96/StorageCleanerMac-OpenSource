@@ -7,7 +7,14 @@ struct ComputerHealthWorkspaceView: View {
     @State private var isStartingCheck = false
 
     var body: some View {
-        if healthStore.evaluation == nil {
+        if healthStore.evaluation == nil && (isStartingCheck || healthStore.isRefreshing) {
+            FeatureRuntimePage(
+                module: .healthHub,
+                title: L10n.text("正在检查系统健康", "Checking System Health"),
+                subtitle: L10n.text("读取设备状态与可用的诊断信息", "Reading device status and available diagnostics"),
+                trustText: L10n.text("只读检查 · 不会更改系统设置", "Read-only check · System settings stay unchanged")
+            ) { HealthCheckScopeCards() } actions: { EmptyView() }
+        } else if healthStore.evaluation == nil {
             healthLanding
         } else {
             VStack(alignment: .leading, spacing: 10) {
@@ -20,8 +27,8 @@ struct ComputerHealthWorkspaceView: View {
                     networkStore: networkStore
                 )
             }
-            .background(.white.opacity(0.018), in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.10)))
+            .background(AppAppearanceColors.ink.opacity(0.018), in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(AppAppearanceColors.ink.opacity(0.10)))
             .padding(8)
         }
     }

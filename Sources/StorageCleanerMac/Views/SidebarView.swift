@@ -76,7 +76,6 @@ struct SidebarView: View {
                 .frame(width: 1)
                 .accessibilityHidden(true)
         }
-        .environment(\.colorScheme, .dark)
 #if DEBUG
         .layoutProbe(LayoutProbeID.smartScanSidebar)
 #endif
@@ -85,8 +84,8 @@ struct SidebarView: View {
     private var sidebarBackground: some View {
         LinearGradient(
             colors: [
-                Color(red: 0.07, green: 0.085, blue: 0.12),
-                Color(red: 0.045, green: 0.06, blue: 0.085)
+                AppAppearanceColors.sidebarTop,
+                AppAppearanceColors.sidebarBottom
             ],
             startPoint: .top,
             endPoint: .bottom
@@ -316,6 +315,7 @@ private struct SidebarSectionView<Content: View>: View {
 }
 
 private struct SidebarNavigationRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let filter: ReviewFilter
@@ -356,7 +356,7 @@ private struct SidebarNavigationRow: View {
             }
             .foregroundStyle(
                 isSelected
-                    ? Color.white
+                    ? (colorScheme == .dark ? .white : AppAppearanceColors.ink)
                     : AppDesignTokens.Palette.sidebarPrimaryText
             )
             .padding(.horizontal, 8)
@@ -379,7 +379,7 @@ private struct SidebarNavigationRow: View {
     }
 
     private var iconColor: Color {
-        isSelected ? .white : filter.moduleTheme.sidebarIconColor
+        isSelected && colorScheme == .dark ? .white : filter.moduleTheme.sidebarIconColor
     }
 
     @ViewBuilder
@@ -390,7 +390,7 @@ private struct SidebarNavigationRow: View {
         )
         if isSelected {
             shape
-                .fill(filter.moduleTheme.accent.opacity(0.30))
+                .fill(filter.moduleTheme.accent.opacity(colorScheme == .dark ? 0.30 : 0.12))
                 .overlay {
                     shape.strokeBorder(filter.moduleTheme.accent.opacity(0.54), lineWidth: 1)
                 }

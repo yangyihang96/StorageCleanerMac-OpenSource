@@ -12,10 +12,10 @@ final class BenchmarkV7LeaderboardTests: XCTestCase {
         let low = try makeResult(confidence: .low)
         let missing = try makeResult(confidence: nil)
 
-        XCTAssertTrue(high.isCurrentOfficialRankingEligible)
-        XCTAssertTrue(medium.isCurrentOfficialRankingEligible)
-        XCTAssertTrue(low.isCurrentOfficialRankingEligible)
-        XCTAssertFalse(missing.isCurrentOfficialRankingEligible)
+        XCTAssertTrue(high.isLegacyArchiveEligible)
+        XCTAssertTrue(medium.isLegacyArchiveEligible)
+        XCTAssertTrue(low.isLegacyArchiveEligible)
+        XCTAssertFalse(missing.isLegacyArchiveEligible)
         XCTAssertEqual(
             try BenchmarkV7LeaderboardDraft.make(
                 result: high,
@@ -123,7 +123,7 @@ final class BenchmarkV7LeaderboardTests: XCTestCase {
         XCTAssertNil(defaults.string(forKey: "hardwareUUID"))
     }
 
-    func testStoreHasNoAutomaticUploadAndManualSubmitUsesHighestEligibleScore() async throws {
+    func testStoreCannotUploadOrDowngradeWhileNewProtocolServerIsUnavailable() async throws {
         let service = RecordingBenchmarkV7LeaderboardService()
         let identity = FixtureBenchmarkV7LeaderboardIdentityProvider()
         let store = BenchmarkV7LeaderboardStore(
@@ -142,20 +142,15 @@ final class BenchmarkV7LeaderboardTests: XCTestCase {
         let finalSubmitCount = await service.submitCount()
         let submittedScore = await service.lastSubmission()?.proposedScore
         let expectedEntryID = await service.lastExpectedEntryID()
-        XCTAssertEqual(finalSubmitCount, 1)
-        XCTAssertEqual(submittedScore, 9_000)
+        XCTAssertEqual(finalSubmitCount, 0)
+        XCTAssertNil(submittedScore)
         XCTAssertNil(expectedEntryID)
-        guard case let .submitted(entryID, disposition) = store.mutationState else {
-            return XCTFail("Expected a separately reported accepted submission")
-        }
-        XCTAssertEqual(disposition, .created)
-        XCTAssertEqual(entryID, store.lastSubmittedEntryID)
-        guard case .loaded = store.loadState else {
-            return XCTFail("Successful submission refresh should finish loaded")
-        }
+        XCTAssertEqual(store.mutationState, .failed(.incompatibleResult))
+        XCTAssertNil(store.lastSubmittedEntryID)
+
     }
 
-    func testStorePassesPersistedEntryIDWhenSubmittingSameWorkload() async throws {
+    func testUnavailableNewProtocolPreservesLegacyRemovalIdentityWithoutSubmitting() async throws {
         let persisted = BenchmarkV7LeaderboardSubmittedIdentity(
             entryID: String(repeating: "c", count: 32),
             workloadVersion: BenchmarkV7LeaderboardConstants.currentVersions.workloadVersion
@@ -171,7 +166,9 @@ final class BenchmarkV7LeaderboardTests: XCTestCase {
         await store.submitBest([try makeResult(score: 9_000)])
 
         let expectedEntryID = await service.lastExpectedEntryID()
-        XCTAssertEqual(expectedEntryID, persisted.entryID)
+        XCTAssertNil(expectedEntryID)
+        XCTAssertEqual(store.lastSubmittedEntryID, persisted.entryID)
+        XCTAssertEqual(store.mutationState, .failed(.incompatibleResult))
     }
 
     func testStoreLoadsEveryPageWithoutReplacingEarlierEntries() async {
@@ -547,7 +544,7 @@ final class BenchmarkV7LeaderboardTests: XCTestCase {
         score: Double = 8_000,
         confidence: BenchmarkV7ConfidenceRating? = .high
     ) throws -> BenchmarkV7Result {
-        let official = OfficialBenchmarkPlan.current
+        let official = OfficialBenchmarkPlan.legacyV9
         let completedAt = Date(timeIntervalSince1970: 1_785_521_846)
         let preflight = makePreflight()
         let environment = BenchmarkEnvironmentMetadata(

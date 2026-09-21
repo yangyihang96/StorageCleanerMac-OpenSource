@@ -8,20 +8,20 @@ enum AppDesignTokens {
         // keep their native behavior.
         static let primary: Color = .accentColor
         static let secondary: Color = .indigo
-        static let tertiary: Color = .cyan
+        static let tertiary = AppAppearanceColors.adaptive(light: 0x087487, dark: .cyan)
         static let steadyChrome: Color = .accentColor
-        static let technicalLine: Color = .cyan
+        static let technicalLine = tertiary
 
         static let primaryText = Color(nsColor: .labelColor)
-        static let secondaryText = Color(nsColor: .secondaryLabelColor)
-        static let tertiaryText = Color(nsColor: .tertiaryLabelColor)
+        static let secondaryText = AppAppearanceColors.adaptive(light: 0x4B576B, dark: Color(nsColor: .secondaryLabelColor))
+        static let tertiaryText = AppAppearanceColors.adaptive(light: 0x596477, dark: Color(nsColor: .tertiaryLabelColor))
         static let accent: Color = .accentColor
         static let onAccent = Color(nsColor: .alternateSelectedControlTextColor)
-        static let information: Color = .blue
-        static let destructive: Color = .red
-        static let success: Color = .green
-        static let warning: Color = .orange
-        static let sensitive: Color = .pink
+        static let information = AppAppearanceColors.adaptive(light: 0x245BCC, dark: .blue)
+        static let destructive = AppAppearanceColors.adaptive(light: 0xC32C35, dark: .red)
+        static let success = AppAppearanceColors.adaptive(light: 0x18753C, dark: .green)
+        static let warning = AppAppearanceColors.adaptive(light: 0xA95300, dark: .orange)
+        static let sensitive = AppAppearanceColors.adaptive(light: 0xB32C61, dark: .pink)
         // Battery health is informational capacity, not an error state.
         // Keep it visibly magenta-pink rather than sharing destructive red.
         static let batteryHealth = Color(
@@ -29,10 +29,10 @@ enum AppDesignTokens {
             green: 0.24,
             blue: 0.62
         )
-        static let diagnostic: Color = .purple
-        static let storage: Color = .teal
-        static let freshness: Color = .mint
-        static let caution: Color = .yellow
+        static let diagnostic = AppAppearanceColors.adaptive(light: 0x7643B5, dark: .purple)
+        static let storage = AppAppearanceColors.adaptive(light: 0x08776F, dark: .teal)
+        static let freshness = AppAppearanceColors.adaptive(light: 0x11734F, dark: .mint)
+        static let caution = AppAppearanceColors.adaptive(light: 0x805B00, dark: .yellow)
 
         /// Stable categorical colors for the storage map. These colors describe
         /// content type only; they intentionally do not reuse cleanup risk colors.

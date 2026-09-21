@@ -920,7 +920,7 @@ final class PanelChartNormalizationTests: XCTestCase {
             ".padding(GeekPanelLayout.contentPadding)"
         ))
         XCTAssertTrue(palette.contains(".controlPaletteContentLayout(presentation)"))
-        XCTAssertTrue(palette.contains("presentation.reportMeasuredContentSize(proxy.size)"))
+        XCTAssertTrue(palette.contains("reportSize: presentation.reportNaturalContentSize"))
         XCTAssertFalse(palette.contains(
             ".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)"
         ))
@@ -1519,16 +1519,23 @@ final class PanelChartNormalizationTests: XCTestCase {
         let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift")
         let cpuHistory = try XCTUnwrap(detail.components(separatedBy: "struct GeekProcessorActivityHoverDetail: View {").last?.components(separatedBy: "struct GeekGPUHoverDetail").first)
         let memoryHistory = try XCTUnwrap(detail.components(separatedBy: "struct GeekMemoryHistoryHoverDetail: View {").last?.components(separatedBy: "struct GeekSwapHoverDetail").first)
-        for history in [cpuHistory, memoryHistory] {
-            XCTAssertTrue(history.contains("showsTimelineLabels: true"))
-            XCTAssertTrue(history.contains("showsValueLabels: true"))
-            XCTAssertTrue(history.contains("GeekHistoryStatisticsRow("))
-        }
+        XCTAssertTrue(memoryHistory.contains("showsTimelineLabels: false"))
+        XCTAssertTrue(memoryHistory.contains("showsValueLabels: true"))
+        XCTAssertFalse(memoryHistory.contains("GeekHistoryStatisticsRow("))
+        XCTAssertFalse(memoryHistory.contains("GeekHistoryCoverageRow("))
+        XCTAssertFalse(memoryHistory.contains(".swapUsedBytes"))
+
+        XCTAssertTrue(cpuHistory.contains("showsTimelineLabels: false"))
+        XCTAssertFalse(cpuHistory.contains("GeekHistoryStatisticsRow("))
+        XCTAssertFalse(cpuHistory.contains("GeekHistoryCoverageRow("))
+        XCTAssertFalse(cpuHistory.contains("固定柱槽"))
 
         let chartSource = try source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekCharts.swift"
         )
-        XCTAssertTrue(chartSource.contains("Text(PanelChartDateFormatting.string("))
+        XCTAssertTrue(chartSource.contains("isEstimated: mark.isEstimated, showsTitle: false"))
+        XCTAssertTrue(cpuHistory.contains("showsLegend: false"))
+        XCTAssertTrue(cpuHistory.contains("title: \"\","))
 
         let powerSource = try source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsPowerHoverDetails.swift"
@@ -1728,7 +1735,7 @@ final class PanelChartNormalizationTests: XCTestCase {
                 .components(separatedBy: "struct GeekDiskIOChart: View {").first
         )
         XCTAssertEqual(
-            networkChart.components(separatedBy: "let preparedFrame = GeekPreparedNetworkFrame(").count - 1,
+            networkChart.components(separatedBy: "GeekPreparedNetworkFrame(").count - 1,
             1
         )
         XCTAssertFalse(networkChart.contains("networkMarks("))
@@ -1846,12 +1853,12 @@ final class PanelChartNormalizationTests: XCTestCase {
                 .components(separatedBy: "struct GeekSeriesStatistics").first
         )
 
-        XCTAssertTrue(source.contains("let visibleSeries = renderableSeries"))
+        XCTAssertTrue(source.contains("let visibleSeries = series.filter { summary.channels.contains($0.channel) }"))
         XCTAssertTrue(source.contains("let visibleValueRange = resolvedValueRange"))
         XCTAssertTrue(source.contains("case .percent:\n            return .fixed(min: 0, max: 100)"))
         XCTAssertTrue(stackedBars.contains("Canvas"))
         XCTAssertTrue(stackedBars.contains("valueRange: ClosedRange<Double>"))
-        XCTAssertTrue(stackedBars.contains("bucket.displayValue"))
+        XCTAssertTrue(stackedBars.contains("prepared?.values"))
         XCTAssertFalse(stackedBars.contains("TimeBucketAggregator.average("))
         XCTAssertFalse(stackedBars.contains("LinearGradient"))
     }
@@ -2006,7 +2013,7 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(geek.contains("PanelChartSamplingPlaceholder()"))
         XCTAssertTrue(geek.contains("case .percent:"))
         XCTAssertTrue(geek.contains("MenuBarChartGeometry.niceCeiling"))
-        XCTAssertTrue(geek.contains("let targetMaximum = chartMaximum("))
+        XCTAssertTrue(geek.contains("let targetMaximum = prepared.maximum"))
         XCTAssertTrue(geek.contains("@StateObject private var dynamicAxisScale"))
         XCTAssertTrue(geek.contains("GeekChartWindow.barBucketSnapshots("))
         XCTAssertTrue(geek.contains("TimeBucketAggregator.nearestFilled("))
@@ -2073,7 +2080,6 @@ final class PanelChartNormalizationTests: XCTestCase {
         )
         XCTAssertFalse(processor.contains(".frame(height: 72)"))
         XCTAssertFalse(memory.contains(".frame(height: 72)"))
-        XCTAssertFalse(memory.contains("geekMemoryCompositionHoverTarget"))
         XCTAssertFalse(memory.contains("Grid(horizontalSpacing: 12, verticalSpacing: 2)"))
         XCTAssertTrue(memory.contains("geekMemoryPagesCard"))
         XCTAssertTrue(memory.contains("geekMemorySwapCard"))
@@ -2104,15 +2110,12 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(panel.contains("geekMemoryPressureRing(size: GeekVisualTokens.overviewMemoryGaugeSize)"))
         XCTAssertTrue(panel.contains("value: memoryRingUsedPercentText"))
         XCTAssertTrue(panel.contains("progress: memoryRingUsedProgress"))
-        XCTAssertTrue(panel.contains("Text(memoryUsedAmountText)"))
-        XCTAssertTrue(panel.contains("Text(\"/ \" + memoryTotalAmountText)"))
-        XCTAssertTrue(panel.contains(".accessibilityValue(memoryUsageAmountText)"))
         XCTAssertTrue(panel.contains("geekFanTelemetry.actualRPM.map(String.init)"))
         XCTAssertFalse(panel.contains(".environment(\\.geekCombinedCardUsesDivider, true)"))
         let pressureRing = try XCTUnwrap(panel.components(separatedBy: "func geekMemoryPressureRing(size: CGFloat)").last?
             .components(separatedBy: "var geekNetworkCard").first)
-        XCTAssertTrue(pressureRing.contains("progress: nil"))
-        XCTAssertTrue(pressureRing.contains("isStatusOnly:"))
+        XCTAssertTrue(pressureRing.contains("progress: percent.map { Double($0) / 100 }"))
+        XCTAssertFalse(pressureRing.contains("isStatusOnly:"))
         XCTAssertFalse(pressureRing.contains("memoryPressureStateProgress"))
         XCTAssertTrue(charts.contains("var horizontalInset: CGFloat = 6"))
         XCTAssertTrue(charts.contains("proxy.size.width - horizontalInset * 2"))
@@ -2151,7 +2154,7 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertFalse(panel.contains("geekProcessorFrequencyAndTemperatureText"))
         XCTAssertFalse(scene.contains("if MiniWindowDemoData.isEnabled { return nil }"))
         XCTAssertTrue(scene.contains("PanelColorTheme.resolvedBackgroundHex("))
-        XCTAssertTrue(scene.contains("PanelColorTheme.resolvedChartHex("))
+        XCTAssertTrue(scene.contains("PanelColorTheme.chartColor("))
     }
 
     func testMemoryRingsUseMeasuredCompositionAndThreeStableSemanticColors() throws {
@@ -2200,7 +2203,7 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(geek.contains("value: memoryRingUsedPercentText"))
         XCTAssertTrue(geek.contains("progress: memoryRingUsedProgress"))
         XCTAssertTrue(combined.contains("segments: memoryRingSegments"))
-        XCTAssertTrue(geek.contains(".help(memoryRingExplanation"))
+        XCTAssertFalse(geek.contains(".help(memoryRingExplanation"))
         XCTAssertTrue(combined.contains(".accessibilityHint(memoryRingExplanation)"))
     }
 
@@ -2251,7 +2254,7 @@ final class PanelChartNormalizationTests: XCTestCase {
 
     func testMemoryStatusLabelsUseIndependentLowFrequencyClockWithoutSampling() throws {
         XCTAssertEqual(MemorySampleStatusPresentation.refreshInterval, 15)
-        for file in ["MenuBarGeekPanel.swift", "GeekMemoryView.swift"] {
+        for file in ["GeekMemoryView.swift"] {
             let view = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/\(file)")
             let label = try XCTUnwrap(view.components(separatedBy:
                 "TimelineView(.periodic(from: .now, by: MemorySampleStatusPresentation.refreshInterval)) { timeline in"
@@ -2405,15 +2408,15 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertFalse(sensorSource.contains("GeekFanControlCard("))
         XCTAssertFalse(sensorSource.contains("GeekPowerModeControlCard("))
         XCTAssertTrue(sensorSource.contains("geekHardwareControlSummaryCard"))
-        // The FANS ring opens the palette on hover; the monitoring card's
-        // "Fan Control" row opens it click-pinned. Both anchors coexist.
+        // Fan history and the inline control button share the fan row;
+        // the control palette still supports hover and click pinning.
         XCTAssertTrue(sensorSource.contains("ControlPaletteHoverAnchor("))
         XCTAssertTrue(sensorSource.contains("selectedFanIndex: reading.index"))
         XCTAssertEqual(
             sensorSource.components(
                 separatedBy: "GeekSensorTemperatureLayout.cardHeight("
             ).count - 1,
-            1
+            0
         )
         XCTAssertEqual(
             sensorSource.components(
@@ -2433,11 +2436,9 @@ final class PanelChartNormalizationTests: XCTestCase {
             GeekPanelPresentationMetrics.detailVerticalOffset(for: .sensors),
             0
         )
-        let fans = try XCTUnwrap(sensorSource.range(of: "geekHardwareControlSummaryCard"))
-        let frequency = try XCTUnwrap(
-            sensorSource.range(of: "geekFrequencyCard", range: fans.upperBound..<sensorSource.endIndex)
-        )
-        XCTAssertLessThan(fans.lowerBound, frequency.lowerBound)
+        XCTAssertFalse(sensorSource.contains("geekFrequencyCard"))
+        XCTAssertTrue(sensorSource.contains("compactFanHistoryRow"))
+        XCTAssertTrue(sensorSource.contains("GeekFanHoverDetail("))
         XCTAssertFalse(sensorSource.contains("geekSensorPowerCard"))
         XCTAssertFalse(sensorSource.contains("geekSensorElectricalCard"))
         XCTAssertFalse(sensorSource.contains("if geekHasSensorPowerData"))
@@ -2462,34 +2463,18 @@ final class PanelChartNormalizationTests: XCTestCase {
     }
 
     func testGeekDiskChartUsesTimestampedSamplesForRenderability() throws {
-        let source = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekCharts.swift"
-        )
-        let diskChart = try XCTUnwrap(
-            source.components(separatedBy: "struct GeekDiskIOChart: View {").last
-        )
-
-        XCTAssertTrue(diskChart.contains("MenuBarChartSample(date: $0.date"))
-        XCTAssertFalse(diskChart.contains("hasRenderableTrend(readValues)"))
-        XCTAssertFalse(diskChart.contains("hasRenderableTrend(writeValues)"))
-        XCTAssertEqual(
-            diskChart.components(separatedBy: "return GeekMirroredBarSeries(").count - 1,
-            1
-        )
-        XCTAssertEqual(
-            diskChart.components(
-                separatedBy: "GeekBarChartScale.throughputUpperBound("
-            ).count - 1,
-            1
-        )
-        XCTAssertTrue(diskChart.contains("GeekChartWindow.displayBuckets("))
-        XCTAssertTrue(diskChart.contains("TimeBucketAggregator.nearestFilled("))
-        XCTAssertTrue(diskChart.contains(
-            "bucket.displayValue { readValues[$0] }"
-        ))
-        XCTAssertTrue(diskChart.contains(
-            "bucket.displayValue { writeValues[$0] }"
-        ))
+        let charts = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekCharts.swift")
+        let worker = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarPreparedChart.swift")
+        let disk = try XCTUnwrap(charts.components(separatedBy: "struct GeekDiskIOChart: View {").last?
+            .components(separatedBy: "struct GeekHoverValue").first)
+        XCTAssertTrue(disk.contains("GeekPreparedDiskSummary(points: points, duration: duration)"))
+        XCTAssertTrue(disk.contains("GeekPreparedDiskFrame(points: points"))
+        XCTAssertFalse(disk.contains("GeekChartWindow.displayBuckets("))
+        XCTAssertFalse(disk.contains("points.map"))
+        XCTAssertTrue(worker.contains("MenuBarChartSample(date: $0.date"))
+        XCTAssertTrue(worker.contains("intervalStart: { points[$0].intervalStart }"))
+        XCTAssertTrue(disk.contains("prepared.reads[index]"))
+        XCTAssertTrue(disk.contains("prepared.writes[index]"))
     }
 
     func testGeekChartsUseSingleLineLegendsAndKeepStatisticsInAccessibility() throws {
@@ -2524,11 +2509,11 @@ final class PanelChartNormalizationTests: XCTestCase {
         )
         let powerChart = try XCTUnwrap(
             power.components(separatedBy: "struct GeekPowerHistoryChart: View {").last?
-                .components(separatedBy: "struct GeekFrequencyHoverDetail: View {").first
+                .components(separatedBy: "struct GeekFanHoverDetail: View {").first
         )
 
         XCTAssertTrue(lineChart.contains(".accessibilityHint(samplingWindowDescription)"))
-        XCTAssertTrue(lineChart.contains(".help(samplingWindowDescription)"))
+        XCTAssertTrue(lineChart.contains(".help(usesCPUHistoryBuckets || !showsSamplingDetails ? \"\" : samplingWindowDescription)"))
         XCTAssertTrue(lineChart.contains("GeekChartRange(rawValue: Int(duration))?.title"))
         XCTAssertTrue(lineChart.contains("style == .stackedBars ? TimeBucketAggregator.nearestFillDescription"))
         XCTAssertTrue(lineChart.contains("实测曲线；采样前、休眠和长缺口不连线。"))
@@ -2537,7 +2522,7 @@ final class PanelChartNormalizationTests: XCTestCase {
             ".accessibilityHint(TimeBucketAggregator.nearestFillDescription)"
         ))
         XCTAssertFalse(networkChart.contains(".help("))
-        XCTAssertTrue(powerChart.contains(".accessibilityHint(helpText)"))
+        XCTAssertTrue(powerChart.contains(".accessibilityHint(helpText(statistics: statistics))"))
         XCTAssertFalse(powerChart.contains(".help(helpText)"))
         XCTAssertFalse(power.contains(".help(statisticsHelpText)"))
     }

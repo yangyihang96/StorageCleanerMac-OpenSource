@@ -18,10 +18,10 @@ struct GoldenWorkflowArtwork: View {
                         let positions: [CGPoint] = [CGPoint(x: 0.135, y: 0.59), CGPoint(x: 0.50, y: 0.32), CGPoint(x: 0.50, y: 0.59), CGPoint(x: 0.50, y: 0.86), CGPoint(x: 0.866, y: 0.59)]
                         Text(isMeasuring ? L10n.text("测量中", "Measuring") : L10n.text("尚未测量", "Not measured"))
                             .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(.white.opacity(0.80))
+                            .foregroundStyle(AppAppearanceColors.ink.opacity(0.80))
                             .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
-                            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(.white.opacity(0.14)))
+                            .background(AppAppearanceColors.ink.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
+                            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(AppAppearanceColors.ink.opacity(0.14)))
                             .position(x: origin.x + side * positions[index].x, y: origin.y + side * positions[index].y)
                     }
                 } else {
@@ -30,7 +30,7 @@ struct GoldenWorkflowArtwork: View {
                         let titles = [L10n.text("Mac 文件夹", "Mac Folder"), L10n.text("预检", "Preflight"), L10n.text("复制", "Copy"), L10n.text("读取校验", "Verify"), L10n.text("外接 SSD", "External SSD")]
                         Text(titles[index])
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(AppAppearanceColors.ink.opacity(0.85))
                             .position(x: origin.x + side * xs[index], y: origin.y + side * 0.64)
                     }
                     Text(L10n.text("流程示意 · 尚未执行", "Workflow · Not started"))

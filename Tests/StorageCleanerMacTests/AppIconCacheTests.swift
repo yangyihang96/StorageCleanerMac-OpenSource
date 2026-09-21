@@ -469,9 +469,9 @@ final class AppIconCacheTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Views/CachedAppIconView.swift"
         )
         let cacheRequest = "AppIconCache.shared.loadedIcon(for: requestedPath)"
-        let beforeTask = try XCTUnwrap(cachedViewSource.components(separatedBy: ".task(id: path)").first)
+        let beforeTask = try XCTUnwrap(cachedViewSource.components(separatedBy: ".task(id:").first)
         let taskAndFollowingSource = try XCTUnwrap(
-            cachedViewSource.components(separatedBy: ".task(id: path)").last
+            cachedViewSource.components(separatedBy: ".task(id:").last
         )
 
         XCTAssertEqual(occurrences(of: cacheRequest, in: cachedViewSource), 1)
@@ -479,6 +479,58 @@ final class AppIconCacheTests: XCTestCase {
         XCTAssertEqual(occurrences(of: cacheRequest, in: taskAndFollowingSource), 1)
         XCTAssertTrue(cachedViewSource.contains("@ViewBuilder fallback: () -> Fallback"))
         XCTAssertFalse(cachedViewSource.contains(".background("))
+    }
+
+    @MainActor
+    func testCancelledSubscriberDoesNotCancelAnotherAndQueueIsBounded() async {
+        let gate = DispatchSemaphore(value: 0)
+        let probe = AppIconLoadProbe()
+        let cache = AppIconCache(capacity: 8, maximumPending: 2) { path in
+            probe.recordLoad(onMainThread: Thread.isMainThread)
+            if path == "/first" { _ = gate.wait(timeout: .now() + 5) }
+            return NSImage(size: NSSize(width: 16, height: 16))
+        }
+        let first = Task { await cache.loadedIcon(for: "/first") }
+        for _ in 0..<10_000 where probe.loadCount == 0 { await Task.yield() }
+        let shared = Task { await cache.loadedIcon(for: "/first") }
+        var tasks: [Task<AppIconCache.LoadedImage, Never>] = []
+        for index in 0..<30 {
+            tasks.append(Task { await cache.loadedIcon(for: "/queued/\(index)") })
+        }
+        for _ in 0..<100 { await Task.yield() }
+        let queued = await cache.queueCounts()
+        XCTAssertEqual(queued.active, 1)
+        XCTAssertLessThanOrEqual(queued.pending, 2)
+        first.cancel()
+        let cancelled = await first.value
+        XCTAssertNil(cancelled.image)
+        XCTAssertEqual(probe.loadCount, 1, "Cancellation must not release an active physical decoder")
+        gate.signal()
+        let other = await shared.value
+        XCTAssertNotNil(other.image, "The other subscriber still needs the shared image")
+        for task in tasks { _ = await task.value }
+        let drained = await cache.queueCounts()
+        XCTAssertEqual(drained.active, 0)
+        XCTAssertEqual(drained.pending, 0)
+        XCTAssertLessThanOrEqual(probe.loadCount, 3)
+    }
+
+    @MainActor
+    func testInvalidationAndPressurePurgeReloadOnlyWhenRequested() async {
+        let probe = AppIconLoadProbe()
+        let cache = AppIconCache(capacity: 8) { _ in
+            probe.recordLoad(onMainThread: Thread.isMainThread)
+            return NSImage(size: NSSize(width: 16, height: 16))
+        }
+        _ = await cache.loadedIcon(for: "/first")
+        await cache.invalidate(path: "/first")
+        XCTAssertEqual(probe.loadCount, 1)
+        _ = await cache.loadedIcon(for: "/first")
+        XCTAssertEqual(probe.loadCount, 2)
+        await cache.purge()
+        XCTAssertEqual(probe.loadCount, 2)
+        _ = await cache.loadedIcon(for: "/first")
+        XCTAssertEqual(probe.loadCount, 3)
     }
 
     private func source(at relativePath: String) throws -> String {

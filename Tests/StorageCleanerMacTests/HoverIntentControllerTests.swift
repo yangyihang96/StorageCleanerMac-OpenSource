@@ -40,6 +40,38 @@ final class HoverIntentControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .open(anchorID: first, panelRole: .secondary))
     }
 
+    func testImmediateOpenRemainsCancellableBeforeTheNextMainActorTurn() async {
+        let controller = HoverIntentController()
+        var opened = false
+        let request = controller.scheduleOpen(anchorID: first, panelRole: .secondary) {
+            opened = true
+        }
+        XCTAssertFalse(opened, "A reveal must not reenter the SwiftUI hover callback.")
+        controller.cancel(request)
+
+        try? await Task.sleep(for: .milliseconds(15))
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(controller.state, .closed)
+    }
+
+    func testImmediateOpenChecksTheLatestHoverCondition() async {
+        let controller = HoverIntentController()
+        var hovering = true
+        var opened = false
+        controller.scheduleOpen(
+            anchorID: first,
+            panelRole: .secondary,
+            condition: { hovering }
+        ) { opened = true }
+        hovering = false
+
+        try? await Task.sleep(for: .milliseconds(15))
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(controller.state, .closed)
+    }
+
     func testStraightMovementCrossesAnchorToPanelCorridor() {
         let source = NSRect(x: 0, y: 100, width: 40, height: 40)
         let panel = NSRect(x: 60, y: 80, width: 120, height: 80)
@@ -141,6 +173,76 @@ final class HoverIntentControllerTests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(45))
         XCTAssertFalse(opened)
         XCTAssertEqual(controller.state, .open(anchorID: first, panelRole: .secondary))
+    }
+
+    func testVerticalTransitBetweenOverviewRowsDoesNotWaitForChildCorridor() async {
+        let controller = HoverIntentController(policy: HoverIntentPolicy(
+            switchDelay: .milliseconds(5),
+            corridorGraceDuration: .seconds(1)
+        ))
+        controller.markOpen(anchorID: first, panelRole: .secondary)
+        controller.updateWindowGroupFrames([
+            NSRect(x: 100, y: 100, width: 100, height: 300),
+            NSRect(x: 0, y: 100, width: 96, height: 300)
+        ])
+        controller.recordPointer(NSPoint(x: 160, y: 380), at: 1)
+        controller.recordPointer(NSPoint(x: 160, y: 300), at: 1.1)
+        var opened = false
+        let request = controller.scheduleOpen(anchorID: second, panelRole: .secondary) {
+            opened = true
+        }
+        defer { controller.cancel(request) }
+
+        try? await Task.sleep(for: .milliseconds(60))
+
+        XCTAssertTrue(opened, "Moving vertically between rows must not wait for the adjacent child.")
+    }
+
+    func testDiagonalMovementMissingOpenChildDoesNotWaitForCorridor() async {
+        let controller = HoverIntentController(policy: HoverIntentPolicy(
+            switchDelay: .milliseconds(5),
+            corridorGraceDuration: .seconds(1)
+        ))
+        controller.markOpen(anchorID: first, panelRole: .secondary)
+        controller.updateWindowGroupFrames([
+            NSRect(x: 100, y: 100, width: 100, height: 300),
+            NSRect(x: 0, y: 100, width: 96, height: 70)
+        ])
+        controller.recordPointer(NSPoint(x: 160, y: 370), at: 1)
+        controller.recordPointer(NSPoint(x: 152, y: 310), at: 1.1)
+        var opened = false
+        let request = controller.scheduleOpen(anchorID: second, panelRole: .secondary) {
+            opened = true
+        }
+        defer { controller.cancel(request) }
+
+        try? await Task.sleep(for: .milliseconds(60))
+
+        XCTAssertTrue(opened, "A slight sideways drift that misses the child is still a row switch.")
+    }
+
+    func testDiagonalTransitTowardRightHandChildKeepsProtection() async {
+        let controller = HoverIntentController(policy: HoverIntentPolicy(
+            switchDelay: .milliseconds(5),
+            corridorGraceDuration: .milliseconds(100)
+        ))
+        controller.markOpen(anchorID: first, panelRole: .secondary)
+        controller.updateWindowGroupFrames([
+            NSRect(x: 100, y: 100, width: 100, height: 300),
+            NSRect(x: 204, y: 100, width: 96, height: 300)
+        ])
+        controller.recordPointer(NSPoint(x: 140, y: 180), at: 1)
+        controller.recordPointer(NSPoint(x: 180, y: 220), at: 1.1)
+        var opened = false
+        let request = controller.scheduleOpen(anchorID: second, panelRole: .secondary) {
+            opened = true
+        }
+        defer { controller.cancel(request) }
+
+        try? await Task.sleep(for: .milliseconds(20))
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(controller.state, .pendingSwitch(from: first, to: second))
     }
 
     func testOldCloseCannotCloseNewPanel() async {

@@ -101,6 +101,8 @@ private enum SettingsCategory: String, CaseIterable, Hashable, Identifiable {
 
 struct SettingsView: View {
     let cleanupArchitectureMode: CleanupArchitectureMode
+    var scanStore: ScanStore?
+    @State private var showsOperations = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(L10n.languageDefaultsKey) private var languageRawValue = AppLanguage.system.rawValue
@@ -111,13 +113,16 @@ struct SettingsView: View {
     @AppStorage(PanelAppearancePreferences.chartColorKey) private var panelChartColor = ""
     @AppStorage(MaintenanceReminderService.defaultsKey) private var maintenanceCadenceRawValue = MaintenanceReminderService.defaultCadence.rawValue
     @AppStorage("settings.selected-category.v1") private var selectedCategory = SettingsCategory.general
+    @AppStorage(PublicNetworkConsent.addressKey) private var allowsPublicAddress = false
+    @AppStorage(PublicNetworkConsent.countryKey) private var allowsCountryLookup = false
     @State private var scanHistorySummary = ScanHistorySummary(entries: [])
     @State private var excludedPaths: [String] = []
     @State private var exclusionNotice: SettingsNotice?
     @State private var permissionNotice: SettingsNotice?
     @State private var fullDiskAccessState = FullDiskAccessState.unknown
     @State private var notificationsAuthorized = false
-    @State private var launchAtLoginStatus = SMAppService.mainApp.status
+    @State private var launchAtLoginStatus: SMAppService.Status?
+    @State private var launchAtLoginReadTask: Task<Void, Never>?
     @State private var isChangingLaunchAtLogin = false
     @State private var launchAtLoginNotice: SettingsNotice?
     @State private var isCheckingAccess = false
@@ -133,8 +138,9 @@ struct SettingsView: View {
     @StateObject private var exclusionPanelCoordinator = AppOpenPanelCoordinator()
     @StateObject private var fanControl = FanControlCoordinator.shared
 
-    init(cleanupArchitectureMode: CleanupArchitectureMode = .v2Full) {
+    init(cleanupArchitectureMode: CleanupArchitectureMode = .v2Full, scanStore: ScanStore? = nil) {
         self.cleanupArchitectureMode = cleanupArchitectureMode
+        self.scanStore = scanStore
     }
 
     private var settingsTheme: ModuleTheme {
@@ -185,16 +191,19 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        ZStack {
-            ModuleBackground(theme: settingsTheme)
+        GeometryReader { geometry in
+            ZStack {
+                ModuleBackground(theme: settingsTheme)
 
-            NavigationSplitView {
-                settingsSidebar
-                    .navigationSplitViewColumnWidth(min: 180, ideal: 208, max: 240)
-            } detail: {
-                settingsPane(for: selectedCategory)
+                NavigationSplitView {
+                    settingsSidebar
+                        .navigationSplitViewColumnWidth(min: 180, ideal: 208, max: 240)
+                } detail: {
+                    settingsPane(for: selectedCategory)
+                }
+                .navigationSplitViewStyle(.balanced)
             }
-            .navigationSplitViewStyle(.balanced)
+            .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .frame(
             minWidth: 720,
@@ -220,6 +229,7 @@ struct SettingsView: View {
         .onChange(of: selectedCategory) { _, category in
             refresh(category: category)
         }
+        .onDisappear { launchAtLoginReadTask?.cancel() }
         .confirmationDialog(
             L10n.text("开启狂暴模式？", "Enable Maximum Cooling?"),
             isPresented: $confirmsMaximumFanMode,
@@ -269,7 +279,7 @@ struct SettingsView: View {
             .scrollContentBackground(.hidden)
 
             Divider()
-                .overlay(Color.white.opacity(0.10))
+                .overlay(AppAppearanceColors.ink.opacity(0.10))
 
             Text(runtimeInfo.versionDisplay)
                 .font(AppTypography.sidebarVersion)
@@ -277,7 +287,7 @@ struct SettingsView: View {
                 .monospacedDigit()
                 .padding(AppDesignTokens.Spacing.medium)
         }
-        .background(Color.black.opacity(0.18))
+        .background(AppAppearanceColors.adaptive(light: 0xF2F5FA, dark: .black.opacity(0.18)))
     }
 
     private func settingsPane(for category: SettingsCategory) -> some View {
@@ -298,11 +308,22 @@ struct SettingsView: View {
     @ViewBuilder
     private func settingsForm(for category: SettingsCategory) -> some View {
         if category == .accessAndSetup {
-            Form {
-                settingsSections(for: category)
+            // Columns-style Form does not supply a scrolling container on macOS.
+            // Keep permission cards and network consent reachable at minimum size.
+            ScrollView {
+                VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
+                    permissionSetupSection
+                    Form {
+                        networkPrivacySection
+                        permissionTutorialSection
+                    }
+                    .formStyle(.columns)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .scrollContentBackground(.hidden)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, AppDesignTokens.Spacing.small)
             }
-            .formStyle(.columns)
-            .scrollContentBackground(.hidden)
         } else {
             Form {
                 settingsSections(for: category)
@@ -348,10 +369,17 @@ struct SettingsView: View {
             panelAppearanceSection
             launchBehaviorSection
         case .scanAndSafety:
+            if let scanStore {
+                Section(L10n.text("可恢复操作", "Recoverable Operations")) {
+                    Button(L10n.text("查看逐项回执与恢复", "View receipts and recovery")) { showsOperations = true }
+                        .sheet(isPresented: $showsOperations) { ReversibleOperationsView(store: scanStore) }
+                }
+            }
             maintenanceReminderSection
             exclusionSection
         case .accessAndSetup:
             permissionSetupSection
+            networkPrivacySection
             permissionTutorialSection
         case .systemControl:
             fanControlSection
@@ -366,7 +394,7 @@ struct SettingsView: View {
     private func refresh(category: SettingsCategory) {
         switch category {
         case .general:
-            launchAtLoginStatus = SMAppService.mainApp.status
+            refreshLaunchAtLoginStatus()
         case .accessAndSetup:
             refreshAccessStatus()
         case .systemControl:
@@ -394,6 +422,18 @@ struct SettingsView: View {
             runtimeInfo = AppRuntimeLocationService.current()
             fanControl.refreshStatus()
         }
+    }
+
+    private var networkPrivacySection: some View {
+        Section {
+            Toggle(L10n.text("查询公网 IP", "Look up public IP"), isOn: $allowsPublicAddress)
+            Text(L10n.text("向 api.ipify.org / api6.ipify.org 发起请求；服务方可见连接 IP。默认关闭，关闭后停止查询。", "Requests api.ipify.org / api6.ipify.org; providers see your connecting IP. Off by default; disabling stops lookups."))
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+            Toggle(L10n.text("查询 IP 所属国家或地区", "Look up IP country or region"), isOn: $allowsCountryLookup)
+                .disabled(!allowsPublicAddress)
+            Text(L10n.text("额外向 api.country.is 发送查询到的公网 IP，不代表精确位置。系统权限不等于联网同意。", "Additionally sends the resolved IP to api.country.is. This is not precise location. System permissions do not grant network consent."))
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+        } header: { Text(L10n.text("联网与隐私", "Network & Privacy")) }
     }
 
     private var interfaceSection: some View {
@@ -424,7 +464,7 @@ struct SettingsView: View {
                 L10n.text("登录后自动打开存储清理助手", "Open Storage Cleaner at Login"),
                 isOn: launchAtLoginBinding
             )
-            .disabled(isChangingLaunchAtLogin)
+            .disabled(isChangingLaunchAtLogin || launchAtLoginStatus == nil)
 
             LabeledContent(
                 L10n.text("系统状态", "System Status"),
@@ -458,21 +498,15 @@ struct SettingsView: View {
 
     private var launchAtLoginBinding: Binding<Bool> {
         Binding {
-            switch launchAtLoginStatus {
-            case .enabled, .requiresApproval:
-                true
-            case .notRegistered, .notFound:
-                false
-            @unknown default:
-                false
-            }
+            launchAtLoginStatus == .enabled || launchAtLoginStatus == .requiresApproval
         } set: { shouldLaunch in
             setLaunchAtLogin(shouldLaunch)
         }
     }
 
     private var launchAtLoginStatusTitle: String {
-        switch launchAtLoginStatus {
+        guard let launchAtLoginStatus else { return L10n.text("正在读取…", "Reading…") }
+        return switch launchAtLoginStatus {
         case .enabled:
             L10n.text("已开启", "Enabled")
         case .requiresApproval:
@@ -486,8 +520,23 @@ struct SettingsView: View {
         }
     }
 
+    private func refreshLaunchAtLoginStatus() {
+        launchAtLoginReadTask?.cancel()
+        launchAtLoginReadTask = Task { @MainActor in
+            // SMAppService.status is a synchronous XPC query. In particular,
+            // never evaluate it in a State initializer when the App rebuilds
+            // its hidden Settings scene in response to monitoring updates.
+            let status = await Task.detached(priority: .utility) {
+                SMAppService.mainApp.status
+            }.value
+            guard !Task.isCancelled else { return }
+            launchAtLoginStatus = status
+        }
+    }
+
     private func setLaunchAtLogin(_ shouldLaunch: Bool) {
-        guard !isChangingLaunchAtLogin else { return }
+        guard !isChangingLaunchAtLogin, launchAtLoginStatus != nil else { return }
+        launchAtLoginReadTask?.cancel()
         isChangingLaunchAtLogin = true
         launchAtLoginNotice = nil
 
@@ -1121,8 +1170,8 @@ struct SettingsView: View {
             SettingsNoticeView(
                 notice: SettingsNotice(
                     text: L10n.text(
-                        "无需授权：辅助功能、屏幕录制、相机、麦克风、定位与自动化。联网仅用于应用更新、官网检查、测速和排行榜，不会触发额外的 macOS 权限。",
-                        "Not required: Accessibility, Screen Recording, Camera, Microphone, Location, or Automation. Internet access is used only for app updates, official-site checks, speed tests, and leaderboards, and does not require another macOS privacy grant."
+                        "无需授权：辅助功能、屏幕录制、相机、麦克风、定位与自动化。应用更新、官网检查、测速和排行榜需要联网；可选的公网 IP 和地区查询须分别同意。macOS 权限不代表同意联网查询。",
+                        "Not required: Accessibility, Screen Recording, Camera, Microphone, Location, or Automation. Updates, official-site checks, speed tests, and leaderboards use the network. Optional public-IP and region lookups require separate consent; macOS access does not grant that consent."
                     ),
                     systemImage: "checkmark.shield.fill",
                     tint: AppDesignTokens.Palette.success

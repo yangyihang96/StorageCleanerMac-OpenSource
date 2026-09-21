@@ -1160,7 +1160,7 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
     var uninstallRecommendation: AppUninstallRecommendation {
         guard status == .installed, canMoveToTrash else { return .protected }
         if isAppleApp { return .protected }
-        if isLongUnused() || uninstallRatingComparison != nil { return .candidate }
+        if isLongUnused() { return .candidate }
         if uninstallReviewScore >= 70 { return .candidate }
         if uninstallReviewScore >= 45 { return .review }
         return .keep
@@ -1229,12 +1229,7 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
             ))
         }
 
-        if let comparison = uninstallRatingComparison {
-            reasons.append(L10n.text(
-                "与 \(comparison.higherRatedAppName) 同为\(comparison.group.title)，当前 App Store 评分 \(String(format: "%.1f", comparison.rating))（\(comparison.ratingCount) 条）低于其 \(String(format: "%.1f", comparison.higherRating))（\(comparison.higherRatingCount) 条）",
-                "Same \(comparison.group.title) function as \(comparison.higherRatedAppName); its current App Store rating is \(String(format: "%.1f", comparison.rating)) (\(comparison.ratingCount)) versus \(String(format: "%.1f", comparison.higherRating)) (\(comparison.higherRatingCount))"
-            ))
-        }
+
 
         if reasons.isEmpty, totalFootprintBytes >= 1_000_000_000 {
             reasons.append(L10n.text(
@@ -1376,10 +1371,6 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
             }
         }
 
-        if uninstallRatingComparison != nil {
-            score += 42
-        }
-
         if totalFootprintBytes >= 8_000_000_000 {
             score += 22
         } else if totalFootprintBytes >= 5_000_000_000 {
@@ -1413,11 +1404,16 @@ struct InstalledAppRelatedItem: Identifiable, Hashable, Sendable {
     let path: String
     let sizeBytes: Int64
     let scanIdentity: FileIdentity?
+    // An exact bundle-ID match is only a candidate, not exclusive ownership.
+    // No production ownership verifier currently issues this evidence.
+    let verifiedExclusiveOwnerBundleID: String?
 
-    init(path: String, sizeBytes: Int64, scanIdentity: FileIdentity? = nil) {
+    init(path: String, sizeBytes: Int64, scanIdentity: FileIdentity? = nil,
+         verifiedExclusiveOwnerBundleID: String? = nil) {
         self.path = path
         self.sizeBytes = sizeBytes
         self.scanIdentity = scanIdentity
+        self.verifiedExclusiveOwnerBundleID = verifiedExclusiveOwnerBundleID
     }
 
     var id: String { path }

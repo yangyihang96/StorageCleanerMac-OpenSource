@@ -139,7 +139,7 @@ struct MacBenchmarkDashboardView: View {
                     referenceSummary
                     Text("·")
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
                     executionSummary
                 }
 
@@ -558,7 +558,7 @@ private struct MacBenchmarkProgressCard: View {
 
                 Text(MacBenchmarkPresentation.durationText(progress.elapsedSeconds))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
                     .monospacedDigit()
             }
 

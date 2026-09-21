@@ -66,7 +66,7 @@ actor SystemMemoryProbe: MemoryProbing {
         let total: UInt64
     }
 
-    private struct RunningAppIdentity: Sendable {
+    struct RunningAppIdentity: Sendable {
         let name: String?
         let bundleIdentifier: String?
         let bundlePath: String?
@@ -338,12 +338,27 @@ actor SystemMemoryProbe: MemoryProbing {
         }
     }
 
+    /// Launch Services can transiently report duplicate or terminated PIDs.
+    /// Keep one complete identity, preferring the newest known launch, rather
+    /// than trapping or combining fields from different process lifetimes.
+    nonisolated static func indexRunningApplications(
+        _ applications: [(pid_t, RunningAppIdentity)]
+    ) -> [pid_t: RunningAppIdentity] {
+        Dictionary(applications.filter { $0.0 > 0 }, uniquingKeysWith: { existing, incoming in
+            switch (existing.launchDate, incoming.launchDate) {
+            case let (old?, new?) where old > new: return existing
+            case (_?, nil): return existing
+            default: return incoming
+            }
+        })
+    }
+
     private static func processes(
         physicalBytes: UInt64,
         capturedAt: Date
     ) async -> (processes: [MemoryProcess], warnings: [MeasurementWarning]) {
         let runningApps = await MainActor.run {
-            Dictionary(uniqueKeysWithValues: NSWorkspace.shared.runningApplications.map { app in
+            indexRunningApplications(NSWorkspace.shared.runningApplications.map { app in
                 let policy: MemoryRunningApplicationActivationPolicy
                 switch app.activationPolicy {
                 case .regular: policy = .regular

@@ -151,8 +151,8 @@ struct HealthScoreHero: View {
         }
         .padding(AppDesignTokens.Spacing.large)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.12), lineWidth: 1))
+        .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(AppAppearanceColors.ink.opacity(0.12), lineWidth: 1))
         .accessibilityElement(children: .contain)
     }
 
@@ -270,7 +270,7 @@ struct HealthScoreHero: View {
                 checkedAt.formatted(date: .abbreviated, time: .shortened),
                 systemImage: "clock"
             )
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
         }
     }
 
@@ -291,7 +291,7 @@ struct HealthScoreHero: View {
                 )
             } else {
                 ZStack {
-                    Circle().stroke(.white.opacity(0.14), lineWidth: 10)
+                    Circle().stroke(AppAppearanceColors.ink.opacity(0.14), lineWidth: 10)
                     VStack(spacing: 8) {
                         Text("—").font(.system(size: 32, weight: .medium)).monospacedDigit()
                         Text(evaluation == nil ? L10n.text("尚未检查", "Not Checked") : HealthDashboardText.dataInsufficient)

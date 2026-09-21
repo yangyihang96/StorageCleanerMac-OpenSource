@@ -39,17 +39,11 @@ extension View {
     /// of the panel's previous height. A window resize must not feed back into
     /// this measurement when switching compact/full controls or the editor.
     func controlPaletteContentLayout(_ presentation: ControlPalettePresentationState) -> some View {
-        frame(width: ControlPaletteMetrics.size(
-            kind: presentation.kind,
-            fanPage: presentation.fanPage
-        ).width, alignment: .topLeading)
-        .fixedSize(horizontal: false, vertical: true)
-        .background {
-            GeometryReader { proxy in
-                Color.clear.onChange(of: proxy.size, initial: true) {
-                    presentation.reportMeasuredContentSize(proxy.size)
-                }
-            }
+        MiniWindowMeasuredPage(
+            initialSize: ControlPaletteMetrics.size(kind: presentation.kind, fanPage: presentation.fanPage),
+            reportSize: presentation.reportNaturalContentSize
+        ) {
+            self
         }
     }
 }
@@ -88,7 +82,6 @@ struct ControlPaletteRootView: View {
                     if presentation.fanPage == .curveEditor {
                         fanCurveEditor
                     } else {
-                        fanHistory
                         FanControlPaletteView(
                             presentation: presentation,
                             fanControl: fanControl,
@@ -133,27 +126,9 @@ struct ControlPaletteRootView: View {
         }
     }
 
-    private var fanHistory: some View {
-        let points = monitorState.history(within: 600).map { point in
-            presentation.selectedFanIndex.map { point.replacingFanRPM(with: point.fanRPM(at: $0)) } ?? point
-        }
-        return GeekPrecisionLineChart(
-            points: points,
-            series: [MenuBarTelemetrySeries(id: "fan-control-history", title: L10n.text("转速", "Speed"),
-                channel: .fanRPM, color: AppChartPalette.primary)],
-            valueRange: 0...max(1, (points.compactMap(\.fanRPM).max() ?? 6000) * 1.1),
-            unit: .fanRPM,
-            accessibilityLabel: L10n.text("风扇转速历史", "Fan speed history"),
-            style: .stackedBars, duration: 600, showsLegend: false,
-            showsTimelineLabels: true, showsTooltip: true
-        )
-        .frame(height: 78)
-        .padding(.bottom, 6)
-    }
-
     private var fanCurveEditor: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.cardSpacing) {
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                 Button {
                     presentation.showFanControls()
                 } label: {
@@ -251,12 +226,10 @@ struct ControlPaletteRootView: View {
     }
 
     private var paletteChartTint: Color? {
-        PanelAppearancePreferences.color(
-            from: PanelColorTheme.resolvedChartHex(
-                storedTheme: panelColorTheme,
-                backgroundHex: panelBackgroundColor,
-                customHex: panelChartColor
-            ) ?? ""
+        PanelColorTheme.chartColor(
+            storedTheme: panelColorTheme,
+            backgroundHex: panelBackgroundColor,
+            customHex: panelChartColor
         )
     }
 
@@ -319,8 +292,8 @@ struct FanControlPaletteView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.cardSpacing) {
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                 Image(systemName: AppSymbols.Monitor.sensors)
                     .foregroundStyle(AppDesignTokens.Palette.tertiary)
                 Text(L10n.text("风扇控制", "Fan Control"))
@@ -329,28 +302,24 @@ struct FanControlPaletteView: View {
             }
             .font(AdvancedPanelTypography.captionStrong)
 
-            HStack(spacing: 2) {
-                fanModeSection(.systemAutomatic, title: L10n.text("自动", "Automatic")) { EmptyView() }
-                fanModeSection(.manual, title: L10n.text("手动", "Manual")) { EmptyView() }
-                fanModeSection(.customCurve, title: L10n.text("曲线", "Curve")) { EmptyView() }
+            fanModeSection(.systemAutomatic, title: L10n.text("自动", "Automatic")) {
+                EmptyView()
             }
-            .padding(2)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
-            Divider()
-            if displayedMode == .customCurve {
+            fanModeSection(.customCurve, title: L10n.text("曲线", "Custom Curve")) {
                 curveSummary
-            } else {
+            }
+            fanModeSection(.manual, title: L10n.text("手动", "Manual")) {
                 manualControls
-                    .disabled(displayedMode != .manual)
-                    .opacity(displayedMode == .manual ? 1 : 0.55)
-                    .help(L10n.text("手动目标草稿；当前实际 RPM 位于父级传感器面板", "Manual target draft; actual RPM is shown in the parent sensor panel"))
             }
             if hasPendingChanges || isBusy || submissionFailed {
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
                     if hasPendingChanges || isBusy {
-                        HStack(spacing: 6) {
-                            Text(hasPendingChanges ? L10n.text("有待应用更改", "Unapplied Changes") : L10n.text("未修改", "Unchanged"))
-                                .font(AdvancedPanelTypography.caption).foregroundStyle(.secondary)
+                        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                            MiniWindowStatusCapsule(
+                                title: isBusy ? L10n.text("正在应用", "Applying") : L10n.text("待应用", "Pending"),
+                                tint: isBusy ? Color.accentColor : AppDesignTokens.Palette.warning,
+                                isBusy: isBusy
+                            )
                             Spacer(minLength: 0)
                             Button(L10n.text("取消", "Cancel"), action: cancelDraft)
                                 .disabled(!hasPendingChanges || isBusy)
@@ -369,7 +338,7 @@ struct FanControlPaletteView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 5) {
+            MiniWindowGroup {
                 Button { showsCapabilityDetails.toggle() } label: {
                     HStack(spacing: 5) {
                         Image(systemName: capability == .controllable ? "checkmark.shield" : "eye")
@@ -379,6 +348,8 @@ struct FanControlPaletteView: View {
                     }
                     .font(AdvancedPanelTypography.caption)
                     .foregroundStyle(.secondary)
+                    .frame(minHeight: MiniWindowStyleTokens.controlRowHeight)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(ResponsivePlainButtonStyle())
                 .help(applyDisabledReason ?? L10n.text("应用后需回读确认", "Apply requires readback confirmation"))
@@ -433,25 +404,31 @@ struct FanControlPaletteView: View {
     private func fanModeSection<Content: View>(
         _ mode: GeekFanControlMode, title: String, @ViewBuilder content: () -> Content
     ) -> some View {
-        Button { choose(mode) } label: {
-            Text(title).font(AdvancedPanelTypography.captionStrong)
-                .frame(maxWidth: .infinity).padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 5)
-                    .fill(displayedMode == mode ? Color.accentColor : .clear))
-                .foregroundStyle(displayedMode == mode ? .white : .primary)
-        }
-        .buttonStyle(ResponsivePlainButtonStyle())
-        .disabled(isBusy)
-        .accessibilityIdentifier("fan-draft-mode-" + mode.rawValue)
-        .accessibilityAddTraits(displayedMode == mode ? .isSelected : [])
-        .help(L10n.text("仅选择草稿，应用后才生效", "Draft selection only; Apply is required"))
-    }
+        MiniWindowGroup {
+            Button { choose(mode) } label: {
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                    Text(title)
+                        .font(AdvancedPanelTypography.captionStrong)
+                        .foregroundStyle(displayedMode == mode ? .primary : .secondary)
+                    Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
+                    Image(systemName: displayedMode == mode ? "checkmark.circle.fill" : "circle")
+                        .font(AdvancedPanelTypography.header)
+                        .foregroundStyle(displayedMode == mode ? Color.accentColor : Color.secondary.opacity(0.45))
+                        .accessibilityHidden(true)
+                }
+                .frame(minHeight: MiniWindowStyleTokens.controlRowHeight)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(ResponsivePlainButtonStyle())
+            .disabled(isBusy)
+            .accessibilityIdentifier("fan-draft-mode-" + mode.rawValue)
+            .accessibilityAddTraits(displayedMode == mode ? .isSelected : [])
+            .help(L10n.text("仅选择草稿，应用后才生效", "Draft selection only; Apply is required"))
 
-    private func paletteCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 5, content: content)
-            .padding(7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.045)))
+            if displayedMode == mode {
+                content()
+            }
+        }
     }
 
     @ViewBuilder private var manualControls: some View {
@@ -465,7 +442,7 @@ struct FanControlPaletteView: View {
     }
 
     private var curveSummary: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
             paletteValueRow(L10n.text("已应用曲线", "Applied Curve"), curveStore.appliedProfile?.name ?? L10n.text("尚未应用", "Not Active"))
             FanCurveCompactPreview(points: curveStore.draftProfile.points,
                 currentTemperature: currentDraftTemperature,
@@ -501,12 +478,13 @@ struct FanControlPaletteView: View {
     }
 
     private func paletteValueRow(_ title: String, _ value: String) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
             Text(title).foregroundStyle(.secondary)
             Spacer(minLength: 6)
             Text(value).monospacedDigit()
         }
         .font(AdvancedPanelTypography.caption)
+        .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
         .lineLimit(1)
         .help(title + " · " + value)
     }
@@ -688,13 +666,13 @@ private struct ControlPaletteModeRow: View {
             .frame(height: 39)
             .contentShape(Rectangle())
             .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
                     .fill(selected
                         ? controlTint.opacity(0.12)
                         : GeekVisualTokens.cardFill(for: colorScheme))
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
                     .strokeBorder(
                         GeekVisualTokens.cardBorder(
                             for: colorScheme,
@@ -734,7 +712,7 @@ struct ControlPaletteHelperStatusView: View {
     let retry: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
             HStack(spacing: 5) {
                 Image(systemName: "exclamationmark.shield")
                     .foregroundStyle(AppDesignTokens.Palette.warning)

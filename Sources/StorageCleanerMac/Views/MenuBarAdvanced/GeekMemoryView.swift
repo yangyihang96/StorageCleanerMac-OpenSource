@@ -3,7 +3,9 @@ import SwiftUI
 extension MenuBarAdvancedStatusView {
     var geekMemoryPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
-            geekMemoryHistoryHoverTarget
+            liveCard(.memory) { geekMemoryHistoryHoverTarget }
+            liveCard(.memory) { geekMemoryCompositionHoverTarget }
+            liveCard(.memoryProcesses) {
             if let result = store.memoryOptimizationResult {
                 GeekMemoryQuitResultCard(
                     result: result,
@@ -19,15 +21,13 @@ extension MenuBarAdvancedStatusView {
             if showsExtendedGeekDetails, store.memoryOptimizationResult == nil {
                 geekMemoryPagesCard
             }
+            }
             if showsExtendedGeekDetails {
-                geekMemorySwapHoverTarget
+                liveCard(.memory) { geekMemorySwapHoverTarget }
             }
         }
-        .task {
-            guard processMemorySnapshot?.topProcesses.isEmpty != false,
-                  store.canRefreshMemory else { return }
-            store.refreshMemory(priority: .utility)
-        }
+
+
     }
 
     private var geekMemoryHistoryHoverTarget: some View {
@@ -48,16 +48,40 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
+    private var geekMemoryCompositionHoverTarget: some View {
+        GeekHoverDetailTarget(
+            accessibilityLabel: L10n.text("内存组成实时占比", "Live Memory Composition"),
+            chartRangeMetric: .memory,
+            popoverSize: GeekMemoryCompositionHistoryDetail.preferredSize
+        ) {
+            MiniWindowGroup {
+                GeekMemoryCompositionRows(composition: memorySnapshot?.ringComposition)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(L10n.text("内存组成", "Memory Composition"))
+            .accessibilityValue(GeekMemoryComponent.allCases.map {
+                "\($0.title) \($0.value(in: memorySnapshot?.ringComposition, asPercent: false))"
+            }.joined(separator: ", "))
+            .accessibilityAddTraits(.isButton)
+        } detail: {
+            GeekMemoryCompositionHistoryDetail(
+                points: memoryHistory,
+                duration: geekChartDuration,
+                composition: memorySnapshot?.ringComposition
+            )
+        }
+    }
+
     private var geekMemoryRingsCard: some View {
-        GeekCombinedCard(height: 166) {
+        GeekCombinedCard(height: 174) {
             VStack(spacing: 6) {
                 HStack {
                     Label(L10n.text("内存", "Memory"), systemImage: AppSymbols.Monitor.memory)
-                        .font(.callout.weight(.medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                     Spacer(minLength: 4)
                     TimelineView(.periodic(from: .now, by: MemorySampleStatusPresentation.refreshInterval)) { timeline in
                         Text(memorySampleStatusText(at: timeline.date))
-                            .font(.caption)
+                            .font(AdvancedPanelTypography.caption)
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .help(memorySampleEvidenceText)
@@ -67,7 +91,7 @@ extension MenuBarAdvancedStatusView {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(L10n.text("内存采样", "Memory sample"))
                 .accessibilityValue(memorySampleEvidenceText)
-                HStack(spacing: 30) {
+                HStack(spacing: 40) {
                     GeekCombinedRing(
                         title: L10n.text("占用", "Used"),
                         value: memoryRingUsedPercentText,
@@ -81,7 +105,7 @@ extension MenuBarAdvancedStatusView {
                     geekMemoryPressureRing(size: GeekVisualTokens.detailMemoryGaugeSize)
                 }
                 Text(memoryUsageAmountText)
-                    .font(.callout)
+                    .font(AdvancedPanelTypography.body)
                     .monospacedDigit()
                     .help(memoryRingExplanation)
             }
@@ -91,8 +115,7 @@ extension MenuBarAdvancedStatusView {
 
     private var geekMemoryProcessesCard: some View {
         GeekCombinedCard(
-            height: showsExtendedGeekDetails ? 119 : 83,
-            verticalPadding: 4
+            height: showsExtendedGeekDetails ? 119 : 83
         ) {
             VStack(alignment: .leading, spacing: 3) {
                 ViewThatFits(in: .horizontal) {
@@ -109,7 +132,7 @@ extension MenuBarAdvancedStatusView {
                         geekMemoryLoadingIndicator
                     } else {
                         Text(L10n.text("未获得进程数据", "No process data"))
-                            .font(.footnote)
+                            .font(AdvancedPanelTypography.body)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .accessibilityLabel(L10n.text("未获得内存进程数据", "No memory process data"))
@@ -147,7 +170,7 @@ extension MenuBarAdvancedStatusView {
             "进程组 · 前\(geekMemoryTopProcesses.count)/\(geekMemoryAllProcesses.count)项",
             "Process groups · \(geekMemoryTopProcesses.count)/\(geekMemoryAllProcesses.count)"
         ))
-            .font(.callout.weight(.medium))
+            .font(AdvancedPanelTypography.captionStrong)
             .foregroundStyle(memoryTint)
             .lineLimit(1)
             .layoutPriority(1)
@@ -161,7 +184,7 @@ extension MenuBarAdvancedStatusView {
                 openApp(filter: .memory)
             }
             .buttonStyle(ResponsivePlainButtonStyle())
-            .font(.caption)
+            .font(AdvancedPanelTypography.caption)
             .accessibilityLabel(L10n.text("在主窗口只读查看全部已采样进程", "View all sampled processes read-only in the main window"))
             GeekMemoryProcessSelectionMenu(store: store, tint: memoryTint)
             GeekMemoryCleanupButton(store: store, tint: memoryTint)
@@ -170,7 +193,7 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekMemoryPagesCard: some View {
-        GeekCombinedCard(height: 42, verticalPadding: 4) {
+        GeekCombinedCard(height: 42) {
             VStack(spacing: 1) {
                 if let snapshot = memorySnapshot {
                     GeekMemoryInlineFact(
@@ -193,12 +216,12 @@ extension MenuBarAdvancedStatusView {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(L10n.text("交换内存", "Swap Memory"))
-                        .font(.callout.weight(.medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                         .foregroundStyle(memoryTint)
                         .help(geekSwapExplanation)
 
                     Text(memorySnapshot.map(swapUsageText) ?? "—")
-                        .font(.system(size: 10, weight: .regular))
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .lineLimit(1)
@@ -255,10 +278,10 @@ extension MenuBarAdvancedStatusView {
         if MiniWindowDemoData.isEnabled {
             apps = MiniWindowDemoData.memorySnapshot.appsByResidentUsage
         } else {
-            apps = store.memorySnapshot?.appsByResidentUsage ?? []
+            apps = store.menuBarPreparedMemoryApps
         }
 #else
-        apps = store.memorySnapshot?.appsByResidentUsage ?? []
+        apps = store.menuBarPreparedMemoryApps
 #endif
         return apps
     }
@@ -311,7 +334,7 @@ private struct GeekMemoryProcessSelectionMenu: View {
     let tint: Color
 
     private var selectableApps: [MemoryAppUsage] {
-        (store.memorySnapshot?.appsByResidentUsage ?? [])
+        (store.menuBarPreparedMemoryApps)
             .filter { !$0.selectableProcessIDs.isEmpty }
     }
 
@@ -359,7 +382,7 @@ private struct GeekMemoryProcessSelectionMenu: View {
                     : L10n.text("已选 \(selectedCount)", "\(selectedCount) Selected"),
                 systemImage: "checklist"
             )
-            .font(.footnote)
+            .font(AdvancedPanelTypography.body)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -430,7 +453,8 @@ private struct GeekMemoryCleanupButton: View {
             )
         }
         .buttonStyle(.bordered)
-        .controlSize(.mini)
+        .font(AdvancedPanelTypography.body)
+        .controlSize(.small)
         .tint(tint)
         .disabled(!canPrepareSelection || !store.canRequestMemoryQuitActions)
         .help(
@@ -486,16 +510,16 @@ private struct GeekMemoryQuitResultCard: View {
     let onOpenReport: () -> Void
 
     var body: some View {
-        GeekCombinedCard(height: 220, verticalPadding: 6) {
+        GeekCombinedCard(height: 220) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 7) {
                     Image(systemName: "checkmark.seal.fill")
                         .foregroundStyle(AppDesignTokens.Palette.success)
                     Text(L10n.text("退出结果", "Quit Result"))
-                        .font(.callout.weight(.semibold))
+                        .font(AdvancedPanelTypography.captionStrong)
                     Spacer(minLength: 4)
                     Text(L10n.scanSeconds(result.durationSeconds))
-                        .font(.caption)
+                        .font(AdvancedPanelTypography.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
@@ -540,17 +564,17 @@ private struct GeekMemoryQuitResultCard: View {
                     Spacer(minLength: 0)
                     VStack(alignment: .trailing, spacing: 2) {
                         Text(L10n.text("可用内存增加", "More Available"))
-                            .font(.caption2)
+                            .font(AdvancedPanelTypography.caption)
                             .foregroundStyle(.secondary)
                         Text(ByteFormat.string(result.releasedBytes))
-                            .font(.callout.weight(.semibold))
+                            .font(AdvancedPanelTypography.captionStrong)
                             .foregroundStyle(AppDesignTokens.Palette.success)
                             .monospacedDigit()
                     }
                 }
 
                 Text(result.detail)
-                    .font(.caption2)
+                    .font(AdvancedPanelTypography.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
 
@@ -601,7 +625,7 @@ private struct GeekMemoryQuitResultCard: View {
                 .foregroundStyle(tint)
                 .monospacedDigit()
         }
-        .font(.caption)
+        .font(AdvancedPanelTypography.caption)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -627,7 +651,7 @@ private struct GeekMemoryInlineFact: View {
                 .monospacedDigit()
                 .lineLimit(1)
         }
-        .font(.callout)
+        .font(AdvancedPanelTypography.body)
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
@@ -644,7 +668,7 @@ private struct GeekCompactMemoryProcessRow: View {
         Button(action: onToggle) {
             HStack(spacing: 6) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AdvancedPanelTypography.captionStrong)
                     .foregroundStyle(isSelected ? selectionTint : Color.secondary.opacity(0.55))
                     .frame(width: 12, height: 12)
                     .accessibilityHidden(true)
@@ -654,13 +678,13 @@ private struct GeekCompactMemoryProcessRow: View {
                     .frame(width: 14, height: 14)
 
                 Text(process.name)
-                    .font(.callout)
+                    .font(AdvancedPanelTypography.body)
                     .lineLimit(1)
 
                 Spacer(minLength: 4)
 
                 Text(ByteFormat.string(process.bytes))
-                    .font(.callout)
+                    .font(AdvancedPanelTypography.body)
                     .monospacedDigit()
                     .lineLimit(1)
             }
@@ -668,7 +692,7 @@ private struct GeekCompactMemoryProcessRow: View {
             .frame(minHeight: 14)
             .contentShape(Rectangle())
             .background {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
                     .fill(isSelected ? selectionTint.opacity(0.14) : .clear)
             }
         }

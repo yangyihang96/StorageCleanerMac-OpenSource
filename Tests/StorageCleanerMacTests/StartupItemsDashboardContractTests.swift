@@ -52,7 +52,7 @@ final class StartupItemsDashboardContractTests: XCTestCase {
         XCTAssertTrue(source.contains("GlassSegmentedControl("))
         XCTAssertTrue(source.contains("[.all, .loginItems, .background]"))
         XCTAssertTrue(source.contains("options: primaryCategories"))
-        XCTAssertTrue(source.contains("presentation.count(for: $0)"))
+        XCTAssertTrue(source.contains("presentation.count(for: category)"))
         XCTAssertFalse(source.contains("StartupItemsCategory.allCases"))
         XCTAssertTrue(source.contains("TaskSearchField("))
         XCTAssertTrue(source.contains("focus: $isSearchFocused"))

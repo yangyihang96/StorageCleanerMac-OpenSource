@@ -107,7 +107,7 @@ struct FanCurveEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 7 : 10) {
+        VStack(alignment: .leading, spacing: compact ? MiniWindowStyleTokens.rowSpacing : 10) {
             if !compact {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.text("风扇曲线", "Fan Curve"))
@@ -548,7 +548,7 @@ private struct FanCurvePlot: View {
             )
             let transform = FanCurvePlotTransform(plot: plot)
             ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
                     .fill(Color.secondary.opacity(0.06))
                 gridPath(in: plot)
                     .stroke(Color.secondary.opacity(0.16), lineWidth: 0.5)
@@ -675,7 +675,7 @@ private struct FanCurvePlot: View {
                 if isDragging {
                     Text("\(Int(point.temperatureCelsius.rounded()))°C · \(Int(point.fanPercentage.rounded()))%")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.95))
+                        .foregroundStyle(AppAppearanceColors.ink.opacity(0.95))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
                         .miniWindowTooltipChrome()

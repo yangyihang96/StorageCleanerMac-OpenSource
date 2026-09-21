@@ -64,7 +64,7 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertEqual(GeekPowerLayout.secondaryCardHeights.count, 4)
         XCTAssertEqual(GeekPowerLayout.secondaryContentHeight, 310)
         XCTAssertEqual(GeekPanelLayout.detailSpacing, MiniWindowStyleTokens.cardSpacing)
-        XCTAssertEqual(GeekPanelLayout.overviewPowerCardHeight, 60)
+        XCTAssertEqual(GeekPanelLayout.overviewPowerCardHeight, 64)
         XCTAssertEqual(GeekPowerLayout.displayedEnergyAppCount, 3)
         XCTAssertEqual(GeekPowerLayout.detailPreviewDuration, GeekChartRange.oneHour.duration)
         XCTAssertEqual(GeekPanelPresentationMetrics.powerDetailWidth, 264)
@@ -237,7 +237,11 @@ final class GeekPowerViewTests: XCTestCase {
         )
 
         XCTAssertTrue(selectedHistory.contains("batteryPowerHistory"))
-        XCTAssertTrue(selectedHistory.contains("duration: selectedChartRange.duration"))
+        XCTAssertFalse(selectedHistory.contains("MenuBarHistoryRetention.selected"))
+        let kernel = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerPreparationKernel.swift"), encoding: .utf8)
+        XCTAssertTrue(kernel.contains("end.addingTimeInterval(-duration)"))
         XCTAssertTrue(rawHistory.contains("return auxiliaryState.powerHistory"))
         XCTAssertTrue(hover.contains("inlineContentStore.update(hostedDetail, force: true)"))
         XCTAssertFalse(hover.contains("NSPanel("))
@@ -318,7 +322,7 @@ final class GeekPowerViewTests: XCTestCase {
         let batterylessSize = GeekPanelLayout.overviewSize(showsPowerModule: false)
 
         XCTAssertEqual(fullSize.width, MiniWindowStyleTokens.overviewSize.width)
-        XCTAssertEqual(fullSize.height, 564)
+        XCTAssertEqual(fullSize.height, 588)
         XCTAssertEqual(batterylessSize.width, fullSize.width)
         XCTAssertEqual(
             batterylessSize.height,
@@ -414,7 +418,7 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertTrue(detail.contains("Input Voltage"))
         XCTAssertTrue(detail.contains("Input Current"))
         XCTAssertTrue(detail.contains("Battery Power · Last \\(geekChartRangeTitle)"))
-        XCTAssertTrue(detail.contains("Latest On-Demand Energy Measurement"))
+        XCTAssertFalse(detail.contains("Latest On-Demand Energy Measurement"))
         XCTAssertTrue(powerPage.contains("else {\n                geekPowerAdapterCard"))
         XCTAssertTrue(powerPage.contains("Negotiated Power"))
         XCTAssertTrue(powerPage.contains("Negotiated Voltage"))

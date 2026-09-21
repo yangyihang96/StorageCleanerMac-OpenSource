@@ -62,7 +62,7 @@ struct MountedStorageVolumeSnapshot: Identifiable, Equatable, Sendable {
     let kind: MountedStorageVolumeKind
     let url: URL
     let name: String
-    let capacity: StorageCapacitySnapshot
+    let capacity: StorageCapacitySnapshot?
     let health: DiskHealthSnapshot
     let remainingLifePercent: Int?
     let temperatureCelsius: Double?
@@ -131,19 +131,16 @@ enum MountedStorageVolumeService {
             }
 
             if values.volumeIsLocal == false {
-                guard let total = values.volumeTotalCapacity,
-                      total > 0,
-                      let available = values.volumeAvailableCapacity else {
-                    return nil
-                }
-                let capacity = StorageCapacitySnapshot(
-                    totalBytes: Int64(total),
-                    availableBytes: Int64(available)
+                // A mounted WebDAV share may not expose capacity. Keep its
+                // identity visible without inventing a zero-sized disk.
+                let capacity = networkCapacity(
+                    total: values.volumeTotalCapacity,
+                    available: values.volumeAvailableCapacity
                 )
                 return MountedStorageVolumeSnapshot(
                     kind: .network,
                     url: url.standardizedFileURL,
-                    name: name,
+                    name: fallbackName.isEmpty ? name : fallbackName,
                     capacity: capacity,
                     health: networkHealthSnapshot(
                         fileSystem: values.volumeLocalizedFormatDescription,
@@ -184,6 +181,12 @@ enum MountedStorageVolumeService {
         )
     }
 
+    static func networkCapacity(total: Int?, available: Int?) -> StorageCapacitySnapshot? {
+        guard let total, total > 0, let available,
+              available >= 0, available <= total else { return nil }
+        return StorageCapacitySnapshot(totalBytes: Int64(total), availableBytes: Int64(available))
+    }
+
     static func classification(
         isLocal: Bool?,
         isInternal: Bool?,
@@ -204,7 +207,7 @@ enum MountedStorageVolumeService {
 
     private static func networkHealthSnapshot(
         fileSystem: String?,
-        capacity: StorageCapacitySnapshot
+        capacity: StorageCapacitySnapshot?
     ) -> DiskHealthSnapshot {
         DiskHealthSnapshot(
             availability: .unavailable,
@@ -213,8 +216,8 @@ enum MountedStorageVolumeService {
             isTRIMEnabled: nil,
             fileSystem: fileSystem,
             isInternal: false,
-            totalBytes: capacity.totalBytes,
-            availableBytes: capacity.availableBytes,
+            totalBytes: capacity?.totalBytes,
+            availableBytes: capacity?.availableBytes,
             summaryText: L10n.text(
                 "网络卷不提供本机 SMART 状态。",
                 "Network volumes do not expose local SMART status."

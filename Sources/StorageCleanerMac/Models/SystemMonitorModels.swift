@@ -156,7 +156,7 @@ enum GeekPanelPresentationMetrics {
             height: normalizedTertiaryDimension(
                 candidate.height,
                 fallback: tertiarySize.height,
-                maximum: tertiaryMaximumSize.height
+                maximum: .greatestFiniteMagnitude
             )
         )
     }
@@ -209,7 +209,7 @@ enum GeekPanelPresentationMetrics {
         case .network: CGSize(width: detailWidth, height: 367)
         case .sensors: CGSize(width: detailWidth, height: 414)
         case .power: CGSize(width: powerDetailWidth, height: 257)
-        // Cleanup has an adaptive action grid and remains scrollable.
+        // Initial size only; the complete action grid is measured after layout.
         case .cleanup: CGSize(width: detailWidth, height: 360)
         }
     }
@@ -219,14 +219,14 @@ enum GeekPanelPresentationMetrics {
         for section: PanelSection,
         density: PanelDensity
     ) -> CGSize {
-        let maximumSize = detailSize(for: section, density: density)
+        let initialSize = detailSize(for: section, density: density)
         guard section != .overview,
               let preferredSize,
               preferredSize.height.isFinite,
-              preferredSize.height > 0 else { return maximumSize }
+              preferredSize.height > 0 else { return initialSize }
         return CGSize(
-            width: maximumSize.width,
-            height: min(preferredSize.height.rounded(.up), maximumSize.height)
+            width: initialSize.width,
+            height: preferredSize.height.rounded(.up)
         )
     }
 

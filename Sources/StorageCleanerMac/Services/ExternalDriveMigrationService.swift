@@ -80,6 +80,7 @@ enum ExternalDriveMigrationError: LocalizedError, Equatable {
     case destinationExists
     case copyVerificationFailed
     case originalRemovalFailed
+    case applicationRemovalRequiresContentVerification
 
     var errorDescription: String? {
         switch self {
@@ -103,6 +104,8 @@ enum ExternalDriveMigrationError: LocalizedError, Equatable {
             L10n.text("复制后的项目未通过完整性检查，原件保持不变。", "The copied item did not pass verification. The original was left unchanged.")
         case .originalRemovalFailed:
             L10n.text("无法把原件移到废纸篓；已验证的副本和原件均保持不变。", "The original could not be moved to Trash. The verified copy and original were both left unchanged.")
+        case .applicationRemovalRequiresContentVerification:
+            L10n.text("应用迁移目前仅保留副本，不自动移走原件；签名身份一致不代表副本内容完全相同。", "App migration is currently copy-only. The original is kept because matching signing identities do not prove identical contents.")
         }
     }
 }
@@ -200,17 +203,29 @@ enum ExternalDriveMigrationService {
             throw ExternalDriveMigrationError.destinationExists
         }
 
-        let temporary = destinationRoot.appendingPathComponent(".storagecleaner-\(UUID().uuidString).partial")
-        var temporaryExists = false
-        defer {
-            if temporaryExists {
-                try? fileManager.removeItem(at: temporary)
-            }
+        // Own the staging directory before copyItem can create partial data.
+        // This also preserves the .app extension during bundle verification.
+        let staging = try MigrationStagingDirectory(
+            parentURL: destinationRoot,
+            fileManager: fileManager
+        )
+        let stagingReceipt: MigrationStagingReceipt?
+        do {
+            // Injected volumes belong to isolated fixture tests; production
+            // always registers staging before the first copy can write bytes.
+            stagingReceipt = trustedVolumes == nil ? try MigrationStagingReceipt(url: staging.url) : nil
+        } catch {
+            try? staging.remove()
+            throw error
         }
+        defer {
+            if let stagingReceipt { stagingReceipt.cleanup(staging) }
+            else { try? staging.remove() }
+        }
+        let temporary = staging.url.appendingPathComponent(source.lastPathComponent)
 
         let sourceSignature = try applicationSignatureIfNeeded(item, at: source)
         try fileManager.copyItem(at: source, to: temporary)
-        temporaryExists = true
         try Task.checkCancellation()
         try verifyCopy(
             item,
@@ -223,7 +238,6 @@ enum ExternalDriveMigrationService {
         )
         try Task.checkCancellation()
         try fileManager.moveItem(at: temporary, to: destination)
-        temporaryExists = false
 
         guard sourceIsUnchanged(
             source,
@@ -250,6 +264,12 @@ enum ExternalDriveMigrationService {
         trashOperation: ((URL) throws -> URL?)? = nil
     ) throws -> ExternalMigrationResult {
         try Task.checkCancellation()
+        // Matching publisher signatures do not establish identical bundle
+        // contents. Keep application migration copy-only until a bound,
+        // content-verified migration receipt is implemented.
+        guard item.kind != .application else {
+            throw ExternalDriveMigrationError.applicationRemovalRequiresContentVerification
+        }
         let volumes = trustedVolumes ?? availableVolumes()
         guard let volume = volumes.first(where: { $0.id == requestedVolume.id }),
               fileManager.fileExists(atPath: volume.url.path) else {

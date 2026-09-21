@@ -124,6 +124,7 @@ enum SystemMonitorService {
         memorySnapshot: MemorySnapshot?,
         previousNetworkSample: NetworkMonitorSample?,
         thermalSamplingInterval: TimeInterval = SystemMonitorSamplingInterval.background,
+        resolvesMissingMemorySnapshot: Bool = true,
         now: Date = Date()
     ) async -> SnapshotResult {
         await SystemMonitorSampler.shared.snapshot(
@@ -131,6 +132,7 @@ enum SystemMonitorService {
             memorySnapshot: memorySnapshot,
             previousNetworkSample: previousNetworkSample,
             thermalSamplingInterval: thermalSamplingInterval,
+            resolvesMissingMemorySnapshot: resolvesMissingMemorySnapshot,
             now: now
         )
     }
@@ -631,6 +633,7 @@ actor SystemMonitorSampler {
         memorySnapshot: MemorySnapshot?,
         previousNetworkSample: NetworkMonitorSample?,
         thermalSamplingInterval: TimeInterval = SystemMonitorSamplingInterval.background,
+        resolvesMissingMemorySnapshot: Bool = true,
         now: Date
     ) async -> SystemMonitorService.SnapshotResult {
         let (cpuUsageBreakdown, cpuCoreUsagePercent) = sampleCPUIfNeeded(enabledKinds: enabledKinds)
@@ -647,7 +650,8 @@ actor SystemMonitorSampler {
             ? SystemMonitorService.currentNetworkSample(now: now)
             : previousNetworkSample
 
-        let resolvedMemorySnapshot = enabledKinds.contains(.memoryUsage) && memorySnapshot == nil
+        let resolvedMemorySnapshot = resolvesMissingMemorySnapshot
+            && enabledKinds.contains(.memoryUsage) && memorySnapshot == nil
             ? await MemoryOptimizerService.statusSnapshot()
             : memorySnapshot
 

@@ -5,11 +5,11 @@ enum GeekPanelLayout {
     static let sectionSpacing = MiniWindowStyleTokens.cardSpacing
     static let detailSpacing = MiniWindowStyleTokens.cardSpacing
     static let overviewProcessorCardHeight: CGFloat = 94
-    static let overviewMemoryCardHeight: CGFloat = 102
+    static let overviewMemoryCardHeight: CGFloat = 122
     static let overviewDiskCardHeight: CGFloat = 78
     static let overviewNetworkCardHeight: CGFloat = 81
     static let overviewSensorsCardHeight: CGFloat = 108
-    static let overviewPowerCardHeight: CGFloat = 60
+    static let overviewPowerCardHeight: CGFloat = 64
     static let moduleMinimumWidth: CGFloat = 220
     static let metricMinimumHeight: CGFloat = 60
     static let primaryChartHeight: CGFloat = 64
@@ -45,10 +45,10 @@ enum GeekPanelLayout {
 
 enum GeekVisualTokens {
     static let cardRadius = MiniWindowStyleTokens.cardCornerRadius
-    static let cardHorizontalPadding: CGFloat = 8
-    static let cardVerticalPadding: CGFloat = 6
-    static let overviewMemoryGaugeSize: CGFloat = 64
-    static let detailMemoryGaugeSize: CGFloat = 104
+    static let cardHorizontalPadding = MiniWindowStyleTokens.cardHorizontalInset
+    static let cardVerticalPadding = MiniWindowStyleTokens.cardVerticalInset
+    static let overviewMemoryGaugeSize: CGFloat = 88
+    static let detailMemoryGaugeSize: CGFloat = 112
 
     // The 068 reference uses a roughly six-percent track at the detail scale.
     // Keep small readouts legible without changing the track for different values.
@@ -168,6 +168,29 @@ extension EnvironmentValues {
     }
 }
 
+/// Intrinsically sized control/history group, using the same border and insets
+/// as the fixed-height overview cards. Content determines its height so an
+/// expanded control, translated label or error message cannot cross its border.
+struct MiniWindowGroup<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) { self.content = content() }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
+            content
+        }
+        .font(AdvancedPanelTypography.body)
+        .padding(.horizontal, GeekVisualTokens.cardHorizontalPadding)
+        .padding(.vertical, GeekVisualTokens.cardVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .geekCardSurface(colorScheme: colorScheme, displayScale: displayScale)
+    }
+}
+
 struct GeekCombinedCard<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.displayScale) private var displayScale
@@ -176,29 +199,26 @@ struct GeekCombinedCard<Content: View>: View {
     @Environment(\.geekCombinedCardIsSelected) private var isSelected
 
     let height: CGFloat
-    let verticalPadding: CGFloat
     let content: Content
 
     init(
         height: CGFloat,
-        verticalPadding: CGFloat = GeekVisualTokens.cardVerticalPadding,
         @ViewBuilder content: () -> Content
     ) {
         self.height = height
-        self.verticalPadding = verticalPadding
         self.content = content()
     }
 
     var body: some View {
         content
             .padding(.horizontal, GeekVisualTokens.cardHorizontalPadding)
-            .padding(.vertical, verticalPadding)
-            .frame(maxWidth: .infinity, minHeight: height, maxHeight: height, alignment: .topLeading)
+            .padding(.vertical, GeekVisualTokens.cardVerticalPadding)
+            .frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)
             .background {
                 if !usesDivider {
                     Color.clear.geekCardSurface(colorScheme: colorScheme, displayScale: displayScale, isActive: isActive, isSelected: isSelected)
                 } else if isActive || isSelected {
-                    RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.10))
+                    RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius).fill(Color.accentColor.opacity(0.10))
                 }
             }
             .overlay(alignment: .bottom) {
@@ -239,6 +259,7 @@ private extension View {
             }
     }
 }
+
 
 enum GeekCombinedRingLabelPlacement {
     case aboveValue

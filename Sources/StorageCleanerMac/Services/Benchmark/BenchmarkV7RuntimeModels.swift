@@ -439,6 +439,7 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     /// cancellation/failure record may legitimately share a session ID with a
     /// prior result. New records always carry a distinct persistent identity.
     let recordID: UUID?
+    let mSeries: MSeriesResult?
     let session: BenchmarkV7Session
     let preflight: BenchmarkV7PreflightReport
     /// The non-sensitive system snapshot that accompanied this session. New
@@ -471,6 +472,7 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
 
     init(
         recordID: UUID? = UUID(),
+        mSeries: MSeriesResult? = nil,
         session: BenchmarkV7Session,
         preflight: BenchmarkV7PreflightReport,
         environment: BenchmarkEnvironmentMetadata? = nil,
@@ -489,6 +491,7 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
         failure: BenchmarkV7Failure?
     ) {
         self.recordID = recordID
+        self.mSeries = mSeries
         self.session = session
         self.preflight = preflight
         self.environment = environment
@@ -524,7 +527,8 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     }
 
     var isComplete: Bool {
-        failure == nil
+        if let mSeries { return failure == nil && isPersistable && mSeries.isCompleteCore }
+        return failure == nil
             && completedAt != nil
             && isPersistable
             && !metrics.isEmpty
@@ -557,7 +561,14 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     }
 
     var isPersistable: Bool {
-        session.isValid
+        if let mSeries {
+            return session.isValid && session.id == mSeries.sessionID
+                && session.plan == MSeriesProtocol.officialPlan && versions == MSeriesProtocol.versions
+                && mSeries.isValid && metrics.isEmpty && coreScore == nil && experienceScore == nil
+                && sustainedResult == nil
+        }
+        return session.plan.planVersion != MSeriesProtocol.plan
+            && versions.schemaVersion == BenchmarkV7VersionManifest.resultSchemaVersion && session.isValid
             && versions.isValid
             && metrics.allSatisfy(\.isValid)
             && (workloadFailure?.isValid ?? true)

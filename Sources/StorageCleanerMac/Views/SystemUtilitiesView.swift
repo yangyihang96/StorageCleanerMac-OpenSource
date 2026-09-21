@@ -319,7 +319,7 @@ struct MemoryOptimizerView: View {
             .frame(maxWidth: UtilitySizing.pageMaxWidth, maxHeight: .infinity, alignment: .topLeading)
             .animation(
                 AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-                value: store.isLoadingMemory || store.isOptimizingMemory
+                value: store.isOptimizingMemory
             )
             .animation(
                 AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
@@ -1041,7 +1041,7 @@ struct AppUninstallerView: View {
     }
 
     var body: some View {
-        if !store.hasScannedInstalledApps {
+        if !store.hasScannedInstalledApps || (store.isLoadingInstalledApps && store.installedApps.isEmpty) {
             AppUninstallScanLandingView(store: store)
         } else {
             resultContent
@@ -1071,11 +1071,10 @@ struct AppUninstallerView: View {
         } controls: {
             VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
                 if store.isLoadingInstalledApps {
-                    HStack {
-                        ProgressView().controlSize(.small)
-                        Text(L10n.text("正在刷新应用列表…", "Refreshing application list…"))
-                            .font(AppDesignTokens.Typography.secondary)
-                    }
+                    RuntimeInlineStatus(
+                        title: L10n.text("正在刷新应用列表", "Refreshing App List"),
+                        detail: L10n.text("当前保留上次扫描结果", "Previous scan results remain visible")
+                    )
                 }
                 if let coverage = store.installedAppsScanCoverage, !coverage.isComplete {
                     Label(incompleteScanText(coverage), systemImage: "exclamationmark.triangle.fill")
@@ -1551,7 +1550,9 @@ struct DuplicateFilesView: View {
 
     var body: some View {
         Group {
-            if !workspace.hasScanned {
+            if workspace.isScanning && !workspace.hasScanned {
+                duplicateRuntimePage
+            } else if !workspace.hasScanned {
                 duplicateScanHero
             } else {
                 duplicateDataPage
@@ -1820,8 +1821,8 @@ struct DuplicateFilesView: View {
                     }
                 }
                 .padding(2)
-                .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.15)))
+                .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(AppAppearanceColors.ink.opacity(0.15)))
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel(L10n.text("扫描范围", "Scan Scope"))
                 .help(duplicateScanScopeDetail)
@@ -1857,7 +1858,7 @@ struct DuplicateFilesView: View {
             .frame(maxWidth: .infinity, minHeight: GoldenLandingMetrics.locationButtonHeight)
             .foregroundStyle(theme.primaryText)
             .background(theme.accent.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.24)))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(AppAppearanceColors.ink.opacity(0.24)))
         }
         .buttonStyle(ResponsivePlainButtonStyle())
     }
@@ -1876,9 +1877,9 @@ struct DuplicateFilesView: View {
             .font(AppTypography.body)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, minHeight: 42)
-            .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))
+            .background(AppAppearanceColors.ink.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(.white.opacity(0.20), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                .strokeBorder(AppAppearanceColors.ink.opacity(0.20), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
             .fixedSize(horizontal: false, vertical: true)
             ForEach(workspace.configuredAdditionalRoots, id: \.self) { path in
                 HStack {
@@ -2118,47 +2119,63 @@ struct DuplicateFilesView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var duplicateProgressPanel: some View {
+    private var duplicateRuntimeState: RuntimeWorkflowState {
+        workspace.phase == .paused ? .paused : workspace.phase == .cancelling ? .stopping : .running
+    }
+
+    private var duplicateRuntimeTitle: String {
+        if workspace.phase == .paused { return L10n.text("重复文件扫描已暂停", "Duplicate Scan Paused") }
+        if workspace.phase == .cancelling { return L10n.text("正在停止扫描", "Stopping Scan") }
+        return switch workspace.scanProgress?.phase ?? .discovering {
+        case .discovering: L10n.text("正在查找候选文件", "Discovering Candidate Files")
+        case .fingerprinting: L10n.text("正在比对文件指纹", "Comparing File Fingerprints")
+        case .hashing: L10n.text("正在确认文件内容", "Verifying File Contents")
+        case .paused: L10n.text("重复文件扫描已暂停", "Duplicate Scan Paused")
+        case .finished: L10n.text("正在整理重复组", "Preparing Duplicate Groups")
+        }
+    }
+
+    private var duplicateRuntimePage: some View {
         let progress = workspace.scanProgress ?? .initial
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(progress.phase == .paused
-                    ? L10n.text("扫描已暂停", "Scan Paused")
-                    : L10n.text("正在后台扫描", "Scanning in Background"))
-                    .font(AppDesignTokens.Typography.inlineTitle)
-                Spacer()
-                Button {
-                    if progress.phase == .paused {
-                        store.resumeDuplicateFileScan()
-                    } else {
-                        store.pauseDuplicateFileScan()
-                    }
-                } label: {
-                    Label(
-                        progress.phase == .paused ? L10n.text("继续", "Resume") : L10n.text("暂停", "Pause"),
-                        systemImage: progress.phase == .paused ? "play.fill" : "pause.fill"
-                    )
-                }
-                .appButtonChrome(.secondary)
-                Button(role: .cancel) {
-                    store.cancelDuplicateFileScan()
-                } label: {
-                    Label(L10n.text("取消", "Cancel"), systemImage: "xmark")
-                }
-                .appButtonChrome(.secondary)
+        return FeatureRuntimePage(
+            module: .duplicates, title: duplicateRuntimeTitle, state: duplicateRuntimeState,
+            metrics: [
+                .init(title: L10n.text("已扫描文件", "Files Scanned"), value: String(progress.scannedFiles)),
+                .init(title: L10n.text("已完整比对", "Fully Verified"), value: String(progress.hashedFiles)),
+                .init(title: L10n.text("已读取内容", "Content Read"), value: ByteFormat.string(progress.hashedBytes))
+            ],
+            currentItem: progress.currentPath,
+            trustText: L10n.text("只读扫描 · 保留原件，清理前确认", "Read-only scan · Originals retained until cleanup is confirmed")
+        ) { EmptyView() } actions: { duplicateRuntimeActions }
+    }
+
+    private var duplicateRuntimeActions: some View {
+        HStack(spacing: AppDesignTokens.Spacing.small) {
+            Button {
+                if workspace.phase == .paused { store.resumeDuplicateFileScan() }
+                else { store.pauseDuplicateFileScan() }
+            } label: {
+                Label(workspace.phase == .paused ? L10n.text("继续", "Resume") : L10n.text("暂停", "Pause"),
+                      systemImage: workspace.phase == .paused ? "play.fill" : "pause.fill")
             }
+            .appButtonChrome(.secondary)
+            Button(role: .cancel) { store.cancelDuplicateFileScan() } label: {
+                Label(L10n.text("取消扫描", "Cancel Scan"), systemImage: "xmark")
+            }
+            .appButtonChrome(.secondary)
+        }
+        .disabled(workspace.phase == .cancelling)
+    }
+
+    private var duplicateProgressPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            RuntimeInlineStatus(state: duplicateRuntimeState, title: duplicateRuntimeTitle)
             duplicateProgressLabel
-            if let currentPath = progress.currentPath {
-                Text(currentPath)
-                    .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(currentPath)
-                    .accessibilityLabel(currentPath)
+            if let path = workspace.scanProgress?.currentPath {
+                Text(path).font(AppDesignTokens.Typography.metadata)
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(path)
             }
+            HStack { Spacer(); duplicateRuntimeActions }
         }
         .padding(AppDesignTokens.Spacing.large)
         .fullBleedSection()
@@ -4135,12 +4152,7 @@ private struct LoadingPanel: View {
     let title: String
 
     var body: some View {
-        AppEmptyState(
-            title: title,
-            systemImage: "arrow.triangle.2.circlepath",
-            density: .inline,
-            isLoading: true
-        )
+        RuntimeInlineStatus(title: title)
         .appMotionEntrance(distance: 5)
     }
 }

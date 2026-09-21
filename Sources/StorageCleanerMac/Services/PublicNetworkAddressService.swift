@@ -22,6 +22,10 @@ enum PublicNetworkAddressService {
     static let countryEndpoint = URL(string: "https://api.country.is")!
 
     static func snapshot(now: Date = Date()) async -> PublicNetworkAddressSnapshot {
+        guard PublicNetworkConsent.allowsAddress else {
+            return PublicNetworkAddressSnapshot(generatedAt: now, ipv4Address: nil,
+                ipv6Address: nil, ipv4CountryCode: nil, ipv6CountryCode: nil)
+        }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 2.5
         configuration.timeoutIntervalForResource = 3
@@ -29,6 +33,7 @@ enum PublicNetworkAddressService {
         configuration.httpCookieStorage = nil
         configuration.urlCache = nil
         let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
 
         async let ipv4 = fetchAddress(
             from: ipv4Endpoint,
@@ -153,10 +158,11 @@ enum PublicNetworkAddressService {
         request.setValue("text/plain", forHTTPHeaderField: "Accept")
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await BoundedHTTPSReader.data(
+                for: request, session: session, maximumBytes: 128,
+                isAllowed: { PublicNetworkConsent.allowsAddress })
             guard !Task.isCancelled,
-                  let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200,
+                  response.statusCode == 200,
                   data.count <= 128,
                   let rawValue = String(data: data, encoding: .utf8) else {
                 return nil
@@ -171,7 +177,7 @@ enum PublicNetworkAddressService {
         for address: String?,
         session: URLSession
     ) async -> String? {
-        guard let address else { return nil }
+        guard PublicNetworkConsent.allowsCountry, let address else { return nil }
         let endpoint = countryEndpoint.appendingPathComponent(address)
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
@@ -179,10 +185,11 @@ enum PublicNetworkAddressService {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await BoundedHTTPSReader.data(
+                for: request, session: session, maximumBytes: 4096,
+                isAllowed: { PublicNetworkConsent.allowsCountry })
             guard !Task.isCancelled,
-                  let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200,
+                  response.statusCode == 200,
                   data.count <= 4_096,
                   let payload = try? JSONDecoder().decode(CountryLookupResponse.self, from: data) else {
                 return nil

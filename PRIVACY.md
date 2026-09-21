@@ -16,6 +16,26 @@ Process name, bundle identifier, executable/bundle path, PID, UID, launch date, 
 
 Other app features may access the network for Sparkle update checks, explicitly requested speed tests, app-update catalog lookups, or benchmark leaderboard operations. Those are separate from memory diagnosis and should be reviewed under their own consent and trust boundaries.
 
+## Public network address and country lookup
+
+Public IP and country lookup have independent opt-in switches in Settings → Access.
+Both default to off. Disabling public IP also stops country lookup; withdrawal
+cancels active panel lookups and clears displayed external results.
+
+After public-IP consent, the network panel can request the public IPv4/IPv6 address using HTTPS requests
+to `api.ipify.org` and `api6.ipify.org`. Only with separate country-lookup consent does it send the resolved address as a
+URL path component to `api.country.is` to look up a country code. These are
+third-party network requests, not purely local device measurements. Each provider
+can observe the connecting IP address and ordinary request metadata. Country
+lookup additionally receives the queried IPv4/IPv6 address. This service uses an
+ephemeral URLSession with cookies and URL caching disabled; that does not prevent
+the providers from processing requests or keeping their own service logs.
+
+These lookups do not establish the user's precise physical location and do not
+prove VPN or firewall effectiveness. A VPN, proxy, or different IPv4/IPv6 routes
+can change the addresses returned. This repository does not establish the
+providers' retention periods; no promise of zero server logging is made.
+
 ## Benchmark leaderboard
 
 Viewing the global benchmark leaderboard performs a read-only network request. Benchmark results remain local unless the user explicitly confirms publication.

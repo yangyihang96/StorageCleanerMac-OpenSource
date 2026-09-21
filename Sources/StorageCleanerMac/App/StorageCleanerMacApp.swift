@@ -444,7 +444,7 @@ struct StorageCleanerMacApp: App {
                         }
                     }
             }
-                .id(languageRawValue + appearanceRawValue)
+                .id(languageRawValue)
                 .environment(\.locale, L10n.locale)
                 .preferredColorScheme(preferredColorScheme)
                 .onAppear {
@@ -623,8 +623,8 @@ struct StorageCleanerMacApp: App {
         }
 
         Settings {
-            SettingsView(cleanupArchitectureMode: store.cleanupFeatureConfiguration.mode)
-                .id(languageRawValue + appearanceRawValue)
+            SettingsView(cleanupArchitectureMode: store.cleanupFeatureConfiguration.mode, scanStore: store)
+                .id(languageRawValue)
                 .environment(\.locale, L10n.locale)
                 .preferredColorScheme(preferredColorScheme)
         }

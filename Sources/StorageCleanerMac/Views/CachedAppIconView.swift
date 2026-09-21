@@ -27,6 +27,7 @@ struct CachedAppIconView<Fallback: View>: View {
     let isDecorative: Bool
 
     @State private var image: NSImage?
+    @State private var iconRevision = 0
     @State private var requestState = CachedAppIconRequestState()
     private let fallback: Fallback
 
@@ -55,7 +56,12 @@ struct CachedAppIconView<Fallback: View>: View {
         }
         .frame(width: size, height: size)
         .accessibilityHidden(isDecorative)
-        .task(id: path) {
+        .onDisappear { image = nil }
+        .onReceive(NotificationCenter.default.publisher(for: .storageCleanerAppIconChanged)) { notification in
+            guard let changedPath = notification.object as? String, changedPath == path else { return }
+            iconRevision &+= 1
+        }
+        .task(id: "\(path)#\(iconRevision)") {
             let requestedPath = path
             image = nil
             let requestToken = requestState.begin(path: requestedPath)
@@ -72,4 +78,8 @@ struct CachedAppIconView<Fallback: View>: View {
             image = loadedIcon.image
         }
     }
+}
+
+extension Notification.Name {
+    static let storageCleanerAppIconChanged = Notification.Name("StorageCleanerAppIconChanged")
 }

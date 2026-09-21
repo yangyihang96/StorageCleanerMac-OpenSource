@@ -77,9 +77,22 @@ enum PanelChartSampling {
 
 }
 
+private struct PanelAutomaticRefreshPausedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var panelAutomaticRefreshPaused: Bool {
+        get { self[PanelAutomaticRefreshPausedKey.self] }
+        set { self[PanelAutomaticRefreshPausedKey.self] = newValue }
+    }
+}
+
 struct PanelChartSamplingPlaceholder: View {
+    @Environment(\.panelAutomaticRefreshPaused) private var isPaused
+
     var body: some View {
-        Text(PanelChartSampling.statusText)
+        Text(isPaused ? L10n.text("已暂停", "Paused") : PanelChartSampling.statusText)
             .font(AdvancedPanelTypography.caption)
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

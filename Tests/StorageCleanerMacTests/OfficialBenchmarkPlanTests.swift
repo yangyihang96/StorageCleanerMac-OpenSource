@@ -10,13 +10,13 @@ final class OfficialBenchmarkPlanTests: XCTestCase {
         XCTAssertEqual(official.plan.kind, .standard)
         XCTAssertEqual(
             official.categories,
-            [.cpu, .gpu, .memory, .storage, .display, .sustained]
+            [.cpu, .gpu, .memory, .storage]
         )
         XCTAssertEqual(Set(official.categories), Set(official.plan.categories))
         XCTAssertTrue(official.plan.isValid)
         XCTAssertEqual(
             official.plan.workloadVersion,
-            BenchmarkV7Plan.standard.workloadVersion
+            MSeriesProtocol.workload
         )
     }
 
@@ -64,14 +64,14 @@ final class OfficialBenchmarkPlanTests: XCTestCase {
         XCTAssertTrue(dashboard.contains("本机最佳"))
         XCTAssertTrue(dashboard.contains("历史记录"))
         XCTAssertTrue(dashboard.contains("case leaderboard"))
-        XCTAssertTrue(dashboard.contains("全球排行"))
+        XCTAssertTrue(dashboard.contains("社区提交榜"))
         XCTAssertTrue(dashboard.contains("BenchmarkV7LeaderboardSection("))
         XCTAssertTrue(dashboard.contains("Picker("))
         XCTAssertTrue(dashboard.contains("onExportHistoryRecord"))
         XCTAssertTrue(dashboard.contains("onDeleteHistoryRecord"))
         XCTAssertTrue(dashboard.contains("BenchmarkV7PerformanceSummaryView"))
         XCTAssertTrue(dashboard.contains("BenchmarkV7RunProgressView"))
-        XCTAssertTrue(dashboard.contains("DisclosureGroup(L10n.text(\"7 个阶段说明\""))
+        XCTAssertTrue(dashboard.contains("DisclosureGroup(L10n.text(\"测试项目与边界\""))
         XCTAssertTrue(dashboard.contains("BenchmarkSystemMonitor("))
         XCTAssertTrue(dashboard.contains("telemetryPoints: liveTelemetry"))
         XCTAssertFalse(dashboard.contains("FileToolLandingArtwork("))

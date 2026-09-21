@@ -57,154 +57,67 @@ struct SmartScanReadyStage: View {
 }
 
 struct ScanProgressView: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.moduleTheme) private var theme
     @ObservedObject var store: ScanStore
     let module: ReviewFilter
-    @State private var isPresented = false
 
     init(store: ScanStore, module: ReviewFilter = .overview) {
         self.store = store
         self.module = module
     }
 
-    private var progress: DiskScanProgress {
-        store.mainScanProgress ?? .starting(mode: .fallback)
-    }
-
-    private var isSmartScan: Bool {
-        module == .overview
-    }
-
-    private var isFinalizing: Bool {
-        store.scanPresentationState == .finalizing
-    }
-
     var body: some View {
-        ScrollView {
-            VStack(spacing: AppDesignTokens.Spacing.large) {
-                AppPageHeader(
-                    title: module.title,
-                    subtitle: isSmartScan
-                        ? L10n.text(
-                            "正在分析缓存、临时文件与存储占用",
-                            "Analyzing caches, temporary files, and storage usage"
-                        )
-                        : module.pageSubtitle,
-                    systemImage: module.systemImage
-                ) {
-                    MetadataPill(
-                        text: L10n.text("只读扫描", "Read-only"),
-                        systemImage: "checkmark.shield.fill",
-                        tint: AppDesignTokens.Palette.success
-                    )
-                }
-
-                if isSmartScan {
-                    SmartScanProgressDashboard(progress: progress, isFinalizing: isFinalizing)
-                } else {
-                    ModuleScanProgressHero(progress: progress, isFinalizing: isFinalizing)
-                }
-
-                scanControls
-            }
-            .padding(.horizontal, AppDesignTokens.Layout.pagePadding)
-            .padding(.top, AppDesignTokens.Layout.pagePadding)
-            .padding(.bottom, AppDesignTokens.Layout.pagePadding)
-            .frame(maxWidth: .infinity, alignment: .top)
-        }
-        .scrollIndicators(.hidden)
-        .opacity(reduceMotion || isPresented ? 1 : 0)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(
-            reduceMotion ? nil : .easeOut(duration: 0.14),
-            value: progress
+        SmartScanScanningPage(
+            progress: store.mainScanProgress ?? .starting(mode: .fallback),
+            module: module,
+            isFinalizing: store.scanPresentationState == .finalizing,
+            canCancel: store.canCancelMainScan,
+            isCancelling: store.isCancellingMainScan,
+            onCancel: store.cancelMainScan
         )
-        .task {
-            guard !reduceMotion else { return }
-            await Task.yield()
-            withAnimation(.easeOut(duration: 0.14)) {
-                isPresented = true
-            }
-        }
     }
-
-    private var scanControls: some View {
-        VStack(spacing: AppDesignTokens.Spacing.small) {
-            Text(
-                L10n.text(
-                    "扫描结果仅登记候选，不会自动删除任何文件。",
-                    "Scan results only index candidates; no files are deleted automatically."
-                )
-            )
-            .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(theme.secondaryText)
-            .multilineTextAlignment(.center)
-
-            if store.canCancelMainScan || store.isCancellingMainScan {
-                AppButton(
-                    title: store.isCancellingMainScan
-                        ? L10n.text("正在停止扫描", "Stopping Scan")
-                        : L10n.text("取消扫描", "Cancel Scan"),
-                    systemImage: "xmark.circle",
-                    isLoading: store.isCancellingMainScan,
-                    isDisabled: !store.canCancelMainScan
-                ) {
-                    store.cancelMainScan()
-                }
-            }
-        }
-        .padding(.bottom, AppDesignTokens.Spacing.small)
-    }
-
 }
 
 /// The scan-only surface is intentionally data-only: its three metrics and
 /// stage rows are all rendered from the scanner's latest published snapshot.
 /// State hosts can reuse it without creating a second scanner or history.
 struct SmartScanProgressDashboard: View {
+    @Environment(\.moduleTheme) private var theme
+    @Environment(\.windowLayoutMetrics) private var layout
     let progress: DiskScanProgress
     var isFinalizing = false
+    var isCancelling = false
 
-    private var progressFraction: CGFloat {
-        CGFloat(min(1, max(0, progress.fractionCompleted)))
-    }
-
-    private var progressText: String {
-        progress.progressKind == .determinate
-            ? "\(Int((progressFraction * 100).rounded()))%"
-            : L10n.text("准备中", "Preparing")
+    private var stageTitle: String {
+        if isCancelling { return L10n.text("正在停止扫描", "Stopping Scan") }
+        if isFinalizing { return L10n.text("正在汇总", "Preparing Results") }
+        return progress.progressKind == .indeterminate
+            ? L10n.text("准备扫描", "Preparing Scan")
+            : L10n.text("正在扫描", "Scanning")
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-            HStack(spacing: AppDesignTokens.Spacing.medium) {
-                SmartScanMetric(
-                    value: progressText,
-                    title: L10n.text("进度", "Progress")
-                )
-                SmartScanMetric(
-                    value: L10n.items(progress.discoveredItemCount),
-                    title: L10n.text("已发现项目", "Items found")
-                )
-                SmartScanMetric(
-                    value: ByteFormat.string(progress.discoveredBytes),
-                    title: L10n.text("发现大小", "Size found")
-                )
-            }
-
-            SmartScanThinProgressBar(
-                progressKind: progress.progressKind,
-                fraction: progressFraction
-            )
-
+        RuntimeActivityCard(
+            title: stageTitle,
+            subtitle: isFinalizing
+                ? L10n.text("正在生成可审阅结果", "Preparing reviewable results")
+                : progress.currentGroupTitle,
+            state: isCancelling ? .stopping : .running,
+            fraction: progress.progressKind == .determinate ? Double(progress.fractionCompleted) : nil,
+            metrics: [
+                .init(title: L10n.text("已发现", "Items Found"), value: String(progress.discoveredItemCount)),
+                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.string(progress.discoveredBytes)),
+                .init(title: L10n.text("已完成分类", "Categories Complete"),
+                      value: "\(progress.completedGroupCount) / \(progress.totalGroupCount)")
+            ],
+            currentItem: locationText
+        ) {
             ScanProgressStageList(progress: progress, isFinalizing: isFinalizing)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .layoutPriority(1)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .fullBleedSection()
+    }
+
+    private var locationText: String {
+        if isFinalizing { return L10n.text("扫描结束，正在整理结果", "Scan finished; organizing results") }
+        return progress.currentPath ?? progress.currentGroupTitle
     }
 }
 
@@ -213,61 +126,46 @@ struct SmartScanProgressDashboard: View {
 /// the throttled scanner snapshot and real cancellation capability.
 struct SmartScanScanningPage: View {
     @Environment(\.moduleTheme) private var theme
+    @Environment(\.windowLayoutMetrics) private var layout
 
     let progress: DiskScanProgress
+    var module: ReviewFilter = .overview
     var isFinalizing = false
     var canCancel = false
     var isCancelling = false
     var onCancel: (() -> Void)?
 
     var body: some View {
-        SmartScanPageShell {
+        SmartScanPageShell(fitsVisibleHeight: true) {
             AppPageHeader(
-                title: L10n.text("智能扫描", "Smart Scan"),
-                subtitle: L10n.text(
-                    "检查可清理垃圾与需要人工判断的文件",
-                    "Checking cleanup candidates and files that need review"
-                ),
-                systemImage: "magnifyingglass"
+                title: module.sidebarTitle,
+                subtitle: module.pageSubtitle,
+                systemImage: module.systemImage,
+                isHero: true
             ) {
-                headerActions
+                if layout.density == .regular {
+                    MetadataPill(text: L10n.text("只读扫描", "Read-only"),
+                        systemImage: "checkmark.shield.fill", tint: AppDesignTokens.Palette.success)
+                }
             }
         } content: {
-            SmartScanProgressDashboard(progress: progress, isFinalizing: isFinalizing)
-                .padding(.top, AppDesignTokens.Spacing.small)
-        } footer: {
-            Text(L10n.text(
-                "只读扫描 · 结果仅登记候选，不会自动删除文件",
-                "Read-only · Results only index candidates and never delete files automatically"
-            ))
-            .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(theme.secondaryText)
-            .multilineTextAlignment(.center)
-        }
-    }
-
-    @ViewBuilder
-    private var headerActions: some View {
-        Text(L10n.text("只读扫描", "Read-only"))
-            .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(AppDesignTokens.Palette.success)
-            .accessibilityLabel(L10n.text("只读扫描", "Read-only scan"))
-        if canCancel || isCancelling, let onCancel {
-            Button {
-                onCancel()
-            } label: {
-                Label(
-                    isCancelling
-                        ? L10n.text("正在停止", "Stopping")
-                        : L10n.text("取消", "Cancel"),
-                    systemImage: "xmark.circle"
-                )
+            RuntimeActivityColumns(module: module) {
+                SmartScanProgressDashboard(progress: progress, isFinalizing: isFinalizing, isCancelling: isCancelling)
             }
-            .appButtonChrome(.secondary)
-            .disabled(!canCancel)
-            .accessibilityLabel(isCancelling
-                ? L10n.text("正在停止扫描", "Stopping Scan")
-                : L10n.text("取消扫描", "Cancel Scan"))
+        } footer: {
+            RuntimeActivityFooter {
+                if canCancel || isCancelling, let onCancel {
+                    AppButton(
+                        title: isCancelling
+                            ? L10n.text("正在停止", "Stopping")
+                            : L10n.text("取消扫描", "Cancel Scan"),
+                        systemImage: "xmark.circle",
+                        isLoading: isCancelling,
+                        isDisabled: !canCancel,
+                        action: onCancel
+                    )
+                }
+            }
         }
     }
 }
@@ -281,7 +179,8 @@ private struct SmartScanMetric: View {
             Text(value)
                 .font(.system(size: 23, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
+                .help(value)
 
             Text(title)
                 .font(AppDesignTokens.Typography.metadata)
@@ -323,8 +222,8 @@ private struct ScanProgressStageList: View {
     var isFinalizing = false
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+        Group {
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(progress.groups.enumerated()), id: \.element.id) { index, group in
                     ScanProgressGroupRow(group: group)
                     if index < progress.groups.count - 1 {
@@ -333,8 +232,7 @@ private struct ScanProgressStageList: View {
                 }
             }
         }
-        .scrollIndicators(.automatic)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .top)
         .glassPanel(
             cornerRadius: AppDesignTokens.Layout.cardRadius,
             tint: AppDesignTokens.Palette.success,
@@ -449,12 +347,10 @@ private struct ModuleScanProgressRing: View {
 
     let progress: DiskScanProgress
 
+    var side: CGFloat = 124
+
     private var progressFraction: CGFloat {
-        guard progress.totalGroupCount > 0 else { return 0 }
-        return CGFloat(min(
-            1,
-            max(0, Double(progress.completedGroupCount) / Double(progress.totalGroupCount))
-        ))
+        CGFloat(min(1, max(0, progress.fractionCompleted)))
     }
 
     private var percentText: String {
@@ -466,7 +362,7 @@ private struct ModuleScanProgressRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Color.white.opacity(0.18), lineWidth: 6)
+                .stroke(AppAppearanceColors.ink.opacity(0.18), lineWidth: 6)
 
             if progress.progressKind == .determinate {
                 Circle()
@@ -486,15 +382,17 @@ private struct ModuleScanProgressRing: View {
                     .tint(theme.scanProgressColor)
             }
 
-            VStack(spacing: AppDesignTokens.Spacing.compact) {
+            if progress.progressKind == .determinate {
                 Text(percentText)
-                    .font(.system(size: 25, weight: .semibold, design: .rounded))
+                    .font(.system(size: side < 100 ? 21 : 25, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .contentTransition(.numericText())
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, side < 100 ? 8 : 12)
             }
-            .padding(.horizontal, 12)
         }
-        .frame(width: 124, height: 124)
+        .frame(width: side, height: side)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(L10n.text("扫描进度", "Scan progress"))
         .accessibilityValue(
@@ -530,18 +428,10 @@ private struct ScanProgressGroupRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if group.state == .scanning, let currentPath = group.currentPath {
-                Text(currentPath)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .monospaced()
-                    .padding(.leading, 30)
-            }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, group.state == .scanning && group.currentPath != nil ? 6 : 4)
-        .frame(minHeight: group.state == .scanning && group.currentPath != nil ? 44 : 34)
+        .padding(.vertical, 7)
+        .frame(minHeight: 38)
         .background(
             group.state == .scanning
                 ? statusTint.opacity(0.08)

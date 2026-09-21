@@ -555,8 +555,11 @@ final class MacBenchmarkHistoryRepositoryTests: XCTestCase {
     }
 
     func testTwoRepositoryInstancesDoNotLoseConcurrentRuns() async throws {
-        let first = MacBenchmarkHistoryRepository(storageURL: storageURL)
-        let second = MacBenchmarkHistoryRepository(storageURL: storageURL)
+        // This batch verifies atomicity across repository instances. Allow its
+        // 24 queued writes to finish under load; dedicated tests below verify
+        // the short lock deadline, cancellation, and failure recovery.
+        let first = MacBenchmarkHistoryRepository(storageURL: storageURL, fileLockTimeout: .seconds(5))
+        let second = MacBenchmarkHistoryRepository(storageURL: storageURL, fileLockTimeout: .seconds(5))
         let base = Date(timeIntervalSince1970: 1_700_000_000)
 
         try await withThrowingTaskGroup(of: Void.self) { group in

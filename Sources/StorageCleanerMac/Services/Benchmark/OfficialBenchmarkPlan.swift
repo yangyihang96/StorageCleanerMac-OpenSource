@@ -9,7 +9,10 @@ struct OfficialBenchmarkPlan: Equatable, Sendable {
     let plan: BenchmarkV7Plan
     let categories: [BenchmarkV7Category]
 
-    static let current = Self(
+    static let current = Self(plan: MSeriesProtocol.officialPlan,
+                              categories: BenchmarkV7Category.corePerformance)
+
+    static let legacyV9 = Self(
         plan: BenchmarkV7Plan(
             kind: .standard,
             planVersion: BenchmarkV7Plan.standard.planVersion,
@@ -47,14 +50,18 @@ extension BenchmarkV7Result {
     /// Only a complete, validated official session may replace the visible
     /// latest result or become a ranking candidate.
     var isCurrentOfficialResult: Bool {
-        matchesCurrentOfficialPlan
-            && failure == nil
-            && completedAt != nil
-            && coreScore != nil
-            && experienceScore != nil
-            && sustainedResult?.reachedTargetDuration == true
-            && !metrics.isEmpty
-            && metrics.allSatisfy(\.isValid)
+        guard let mSeries else { return false }
+        return matchesCurrentOfficialPlan && failure == nil && isPersistable && mSeries.isCompleteCore
+    }
+
+    /// Frozen legacy archive contract. This is not eligibility for a new upload.
+    var isLegacyArchiveEligible: Bool {
+        mSeries == nil && OfficialBenchmarkPlan.legacyV9.matches(plan: session.plan, categories: session.categories)
+            && versions == BenchmarkV7ReferenceCatalog.versions(for: OfficialBenchmarkPlan.legacyV9.plan)
+            && failure == nil && completedAt != nil && coreScore != nil && experienceScore != nil
+            && sustainedResult?.reachedTargetDuration == true && !metrics.isEmpty
+            && metrics.allSatisfy(\.isValid) && confidence != nil
+            && preflight.powerSource == .acPower && !preflight.lowPowerModeEnabled && preflight.thermalState == .nominal
     }
 
     var isCurrentLocalBestEligible: Bool {
@@ -65,8 +72,7 @@ extension BenchmarkV7Result {
     }
 
     var isCurrentOfficialRankingEligible: Bool {
-        // All confidence ratings are publishable by owner decision; a missing
-        // rating still cannot be labeled honestly on the public board.
-        isCurrentLocalBestEligible && confidence != nil
+        // No production reference or deployed new server contract exists yet.
+        false
     }
 }

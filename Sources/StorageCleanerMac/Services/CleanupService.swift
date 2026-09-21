@@ -118,6 +118,35 @@ struct TrashRestoreSummary: Equatable, Sendable {
     var failedCount: Int { failed.count }
 }
 
+struct PartialTrashOperationError: LocalizedError, Sendable {
+    let report: CleanReport
+    var errorDescription: String? {
+        L10n.text("清理未全部完成：已移动 \(report.summary.movedItemCount) 条路径，请在可恢复操作中查看逐项结果。",
+                  "Cleanup was not fully completed: \(report.summary.movedItemCount) paths moved. Review individual results in Recoverable Operations.")
+    }
+}
+
+extension CleanReport {
+    /// Convert verified receipts without re-capturing a potentially replaced
+    /// Trash entry under the same pathname.
+    var legacyTrashRecords: [TrashMoveRecord] {
+        restorableReceipts.compactMap { receipt in
+            guard let identity = receipt.movedIdentity,
+                  let birth = identity.creationTimeNanoseconds else { return nil }
+            let kind: UInt16
+            switch identity.entryKind {
+            case .regularFile: kind = UInt16(S_IFREG)
+            case .directory: kind = UInt16(S_IFDIR)
+            default: return nil
+            }
+            return TrashMoveRecord(originalPath: receipt.originalPath, resultingItemURL: receipt.resultingItemURL,
+                itemIdentity: TrashItemIdentity(deviceID: identity.deviceID, fileID: identity.inode,
+                    objectType: kind, birthTimeSeconds: birth / 1_000_000_000,
+                    birthTimeNanoseconds: birth % 1_000_000_000), movedAt: receipt.movedAt)
+        }
+    }
+}
+
 enum CleanupService {
     enum SystemSettingsDestination {
         case storage
@@ -164,18 +193,57 @@ enum CleanupService {
         allowedPaths: Set<String>,
         excludedPaths: [String] = ScanExclusionService.excludedPaths()
     ) throws -> [TrashMoveRecord] {
-        try moveToTrash(
-            item,
-            allowedPaths: allowedPaths,
-            excludedPaths: excludedPaths
-        ) { originalURL in
+        // Reject ineligible requests before even registering an operation.
+        guard item.canMoveToTrash else { throw CleanupServiceError.notAllowed(item.path) }
+        let allowed = Set(allowedPaths.map(PathSafety.lexicalPath))
+        for raw in item.trashPaths {
+            let path = PathSafety.lexicalPath(raw)
+            guard !raw.split(separator: "/").contains(".."), allowed.contains(path),
+                  !ScanExclusionService.intersectsExcludedTree(path, excludedPaths: excludedPaths) else {
+                throw CleanupServiceError.notAllowed(raw)
+            }
+            guard PathSafety.isLexicallyInsideHome(path) else { throw CleanupServiceError.outsideAllowedRoots(raw) }
+            guard !PathSafety.containsSymbolicLinkComponent(in: path) else { throw CleanupServiceError.notAllowed(raw) }
+        }
+        let report = moveToTrashRecorded(item, allowedPaths: allowedPaths, excludedPaths: excludedPaths) { originalURL in
             var resultingURL: NSURL?
             try FileManager.default.trashItem(
                 at: originalURL,
                 resultingItemURL: &resultingURL
             )
-            return resultingURL as URL?
+            guard let target = resultingURL as URL? else { throw CleanupMoveError.invalidResult }
+            return target
         }
+        guard report.outcome == .completed else { throw PartialTrashOperationError(report: report) }
+        return report.legacyTrashRecords
+    }
+
+    static func moveToTrashRecorded(
+        _ item: StorageItem, allowedPaths: Set<String>, excludedPaths: [String],
+        trashItemOperation: (URL) throws -> URL,
+        persist: (CleanReport, [String: FileIdentity]) throws -> Void = {
+            try CleanupReportJournal.live.checkpoint($0, expectedIdentities: $1)
+        }
+    ) -> CleanReport {
+        let reader = FoundationReadOnlyFileSystem()
+        let allowed = Set(allowedPaths.map(PathSafety.lexicalPath))
+        let paths = item.trashPaths.isEmpty ? [item.path] : item.trashPaths
+        let entries = paths.map { raw in
+            let path = PathSafety.lexicalPath(raw)
+            let snapshot = try? reader.snapshot(at: URL(fileURLWithPath: path))
+            return RecordedTrashOperation.Item(path: path, bytes: snapshot?.logicalSizeBytes ?? 0,
+                identity: snapshot?.identity)
+        }
+        return RecordedTrashOperation.run(items: entries, ruleID: "cleanup.legacy-paths.v1", validate: { entry in
+            let path = entry.path
+            guard item.canMoveToTrash, path == PathSafety.lexicalPath(path), allowed.contains(path),
+                  !paths.contains(where: { $0.split(separator: "/").contains("..") }),
+                  !ScanExclusionService.intersectsExcludedTree(path, excludedPaths: excludedPaths),
+                  PathSafety.isLexicallyInsideHome(path), PathSafety.isInsideHome(path),
+                  !PathSafety.containsSymbolicLinkComponent(in: path) else {
+                throw CleanupServiceError.notAllowed(path)
+            }
+        }, move: trashItemOperation, metadata: reader, persist: persist)
     }
 
     @discardableResult

@@ -206,6 +206,226 @@ final class SafeCleanupLayoutTests: XCTestCase {
         }
     }
 
+    func testResizingDetailColumnKeepsScopeReadableAndShortPageScrollable() async throws {
+        // Actual detail-column sizes, after subtracting the sidebar/titlebar.
+        // Resize the same host through both breakpoints and back to wide.
+        let sizes = [
+            CGSize(width: 1024, height: 734),
+            CGSize(width: 604, height: 490),
+            CGSize(width: 473, height: 360),
+            CGSize(width: 1072, height: 360),
+            CGSize(width: 473, height: 734),
+            CGSize(width: 1024, height: 734)
+        ]
+        let host = makeConceptLandingHost(contentSize: sizes[0], responsive: true)
+        defer { host.close() }
+        let required: Set<String> = [
+            LayoutProbeID.pageViewport,
+            LayoutProbeID.landingCanvas, LayoutProbeID.landingContent,
+            LayoutProbeID.landingHeader, LayoutProbeID.landingFooter,
+            LayoutProbeID.landingActionButton
+        ]
+        for size in sizes {
+            host.resize(to: size)
+            let frames = try await host.waitForFrames(required: required)
+            let canvas = try frame(LayoutProbeID.landingCanvas, in: frames)
+            let panel = try frame(LayoutProbeID.landingContent, in: frames)
+            let header = try frame(LayoutProbeID.landingHeader, in: frames)
+            let footer = try frame(LayoutProbeID.landingFooter, in: frames)
+            let action = try frame(LayoutProbeID.landingActionButton, in: frames)
+            XCTAssertGreaterThanOrEqual(panel.height, 210, sizeDescription(size))
+            XCTAssertTrue(canvas.contains(panel), sizeDescription(size))
+            XCTAssertTrue(canvas.contains(footer), sizeDescription(size))
+            XCTAssertTrue(panel.contains(action), sizeDescription(size))
+            XCTAssertLessThanOrEqual(header.maxY, panel.minY + 1, sizeDescription(size))
+            XCTAssertLessThanOrEqual(panel.maxY, footer.minY + 1, sizeDescription(size))
+            for index in 0..<3 {
+                let card = try frame(LayoutProbeID.landingScopeCard(index), in: frames)
+                XCTAssertTrue(panel.contains(card), sizeDescription(size))
+            }
+            if size.height < 520 {
+                let revision = host.recorder.revision
+                try host.scrollPageToBottom()
+                let scrolled = try await host.waitForFrames(required: required, afterRevision: revision)
+                let visibleFooter = try frame(LayoutProbeID.landingFooter, in: scrolled)
+                let viewport = try frame(LayoutProbeID.pageViewport, in: scrolled)
+                XCTAssertLessThanOrEqual(visibleFooter.maxY, viewport.maxY + 1, sizeDescription(size))
+                XCTAssertGreaterThanOrEqual(visibleFooter.minY, viewport.minY, sizeDescription(size))
+            }
+        }
+    }
+
+    func testRuntimeStatesKeepPanelsAndLongPathsStableAcrossWindowSizes() async throws {
+        let sizes = [CGSize(width: 1024, height: 734), CGSize(width: 604, height: 490), CGSize(width: 473, height: 360)]
+        let required: Set<String> = [LayoutProbeID.smartScanHeader, LayoutProbeID.runtimePanel,
+            LayoutProbeID.runtimeLocation, LayoutProbeID.runtimeViewport, LayoutProbeID.pageViewport, LayoutProbeID.smartScanFooter]
+        for module in [ReviewFilter.overview, .green, .devCaches] {
+            let fixture = RuntimeLayoutFixture()
+            let theme = ModuleThemeCatalog.theme(for: module)
+            let root = AdaptivePageViewport {
+                ZStack {
+                    ModuleBackground(theme: theme)
+                    RuntimeLayoutFixtureView(fixture: fixture, module: module)
+                }
+                .environment(\.moduleTheme, theme)
+            }
+            let host = AppKitLayoutHost(rootView: root, contentSize: sizes[0])
+            defer { host.close() }
+            for size in sizes {
+                host.resize(to: size)
+                var baseline: [String: CGRect]?
+                for (index, scenario) in [DebugScanPresentationScenario.preparing, .multiStage, .stageFailed, .completed, .long].enumerated() {
+                    var progress = scenario.progress
+                    if index == 1 {
+                        progress.currentPath = "/Users/demo/" + String(repeating: "一个非常长的扫描目录/", count: 20) + "cache.db"
+                    }
+                    fixture.progress = progress
+                    fixture.isFinalizing = index == 3
+                    fixture.isCancelling = index == 4
+                    let frames = try await host.waitForFrames(required: required)
+                    let panel = try frame(LayoutProbeID.runtimePanel, in: frames)
+                    let location = try frame(LayoutProbeID.runtimeLocation, in: frames)
+                    let header = try frame(LayoutProbeID.smartScanHeader, in: frames)
+                    let footer = try frame(LayoutProbeID.smartScanFooter, in: frames)
+                    let iconSide = size.height < 560 ? 64 : GoldenLandingMetrics.headerIconSide(for: module.systemImage)
+                    XCTAssertGreaterThanOrEqual(header.height, iconSide + 2 * AppDesignTokens.Spacing.medium)
+                    XCTAssertTrue(panel.contains(location), "\(module) / \(scenario) / \(size)")
+                    XCTAssertEqual(location.height, 20, accuracy: 1)
+                    XCTAssertLessThanOrEqual(header.maxY, panel.minY + 1)
+                    let viewport = try frame(LayoutProbeID.runtimeViewport, in: frames)
+                    XCTAssertLessThanOrEqual(viewport.maxY, footer.minY + 1)
+                    XCTAssertLessThanOrEqual(header.maxY, viewport.minY + 1)
+                    XCTAssertGreaterThan(viewport.height, 80)
+                    XCTAssertLessThanOrEqual(footer.maxY, try frame(LayoutProbeID.pageViewport, in: frames).maxY + 1)
+                    // Main-window cards grow with real stage rows inside one clipped
+                    // viewport; width, origin and the separate footer remain stable.
+                    if let baseline {
+                        let initial = try frame(LayoutProbeID.runtimePanel, in: baseline)
+                        XCTAssertEqual(panel.width, initial.width, accuracy: 1)
+                        XCTAssertEqual(panel.minX, initial.minX, accuracy: 1)
+                        XCTAssertEqual(panel.minY, initial.minY, accuracy: 3)
+                        XCTAssertEqual(footer, try frame(LayoutProbeID.smartScanFooter, in: baseline))
+                    } else { baseline = frames }
+                    try host.captureRuntimeFixtureIfRequested(name: "\(module.rawValue)-\(Int(size.width))x\(Int(size.height))-\(scenario.rawValue).png")
+                }
+            }
+        }
+    }
+
+    /// Full production execution and report pages, with inert callbacks and
+    /// controlled reports. This proves layout, never a cleanup on user files.
+    func testCleanupExecutionAndTerminalPagesKeepActionsInTheViewport() async throws {
+        let store = makeSmartScanContext(scanGate: LayoutCleanupScanGate()).scanStore
+        let theme = ReviewFilter.green.moduleTheme
+        let progress = CleanupExecutionProgress(planID: CleanPlanID(), processedItemCount: 8,
+            totalItemCount: 12, movedItemCount: 6, skippedItemCount: 1, failedItemCount: 1, currentRuleID: "fixture.cache")
+        var pages: [(String, AnyView)] = [
+            ("preflight", AnyView(SmartScanCleanupProgressPage(store: store, progress: nil, isPreflight: true))),
+            ("executing", AnyView(SmartScanCleanupProgressPage(store: store, progress: progress, onCancel: {}))),
+            ("verifying", AnyView(SmartScanCleanupProgressPage(store: store, progress: progress, isVerifying: true))),
+            ("stopping", AnyView(SmartScanCleanupProgressPage(store: store, progress: progress, isCancelling: true, onCancel: {})))
+        ]
+        for outcome in [CleanReportOutcome.completed, .partiallyCompleted, .cancelled, .failed] {
+            let moved = outcome == .failed ? 0 : 6
+            let report = CleanReport(id: UUID(), planID: CleanPlanID(), sessionID: ScanSessionID(),
+                rulesVersion: "layout-fixture", disposition: .trash, scanWasPartial: false,
+                startedAt: Date(), completedAt: Date(), outcome: outcome, items: [],
+                summary: CleanReportSummary(requestedItemCount: 6, movedItemCount: moved,
+                    skippedItemCount: outcome == .partiallyCompleted ? 1 : 0,
+                    failedItemCount: outcome == .failed ? 6 : 0,
+                    notProcessedItemCount: outcome == .cancelled ? 2 : 0,
+                    unverifiedMoveCount: 0, plannedBytes: 8_000_000_000,
+                    movedToRecoverableLocationBytes: Int64(moved) * 1_000_000_000,
+                    reclaimableAfterEmptyingTrashBytes: Int64(moved) * 1_000_000_000,
+                    permanentlyFreedBytes: 0, availableSpaceDeltaBytes: nil))
+            pages.append((outcome.rawValue, AnyView(SmartScanCleanupCompletedPage(store: store, report: report, onDone: {}))))
+        }
+        for scheme in [ColorScheme.dark, .light] {
+            for (name, page) in pages {
+                let root = AdaptivePageViewport {
+                    ZStack { ModuleBackground(theme: theme); page }
+                        .environment(\.moduleTheme, theme).preferredColorScheme(scheme)
+                }
+                let host = AppKitLayoutHost(rootView: root, contentSize: CGSize(width: 1024, height: 734))
+                defer { host.close() }
+                for size in [CGSize(width: 1024, height: 734), CGSize(width: 604, height: 490), CGSize(width: 473, height: 360)] {
+                    host.resize(to: size)
+                    let frames = try await host.waitForFrames(required: [LayoutProbeID.runtimePanel,
+                        LayoutProbeID.runtimeViewport, LayoutProbeID.smartScanHeader,
+                        LayoutProbeID.smartScanFooter, LayoutProbeID.pageViewport])
+                    let viewport = try frame(LayoutProbeID.pageViewport, in: frames)
+                    let footer = try frame(LayoutProbeID.smartScanFooter, in: frames)
+                    XCTAssertLessThanOrEqual(footer.maxY, viewport.maxY + 1, "\(name) / \(size)")
+                    XCTAssertGreaterThanOrEqual(footer.minY, viewport.minY, "\(name) / \(size)")
+                    XCTAssertLessThanOrEqual(try frame(LayoutProbeID.runtimeViewport, in: frames).maxY, footer.minY + 1)
+                    XCTAssertLessThanOrEqual(try frame(LayoutProbeID.runtimePanel, in: frames).maxX, viewport.maxX + 1)
+                    try host.captureRuntimeFixtureIfRequested(name: "cleanup-\(name)-\(scheme)-\(Int(size.width))x\(Int(size.height)).png")
+                }
+            }
+        }
+    }
+
+    func testFullUpdatePagesRenderEverySupportedStateWithoutRunningUpdates() async throws {
+        let store = makeSmartScanContext(scanGate: LayoutCleanupScanGate()).scanStore
+        let theme = ReviewFilter.updater.moduleTheme
+        for scenario in DebugAppUpdatePresentationFixture.Scenario.allCases {
+            store.installDebugAppUpdatePresentationFixture(scenario)
+            let root = AdaptivePageViewport {
+                ZStack(alignment: .top) { ModuleBackground(theme: theme); AppUpdaterView(store: store) }
+                    .environment(\.moduleTheme, theme).preferredColorScheme(.dark)
+            }
+            let host = AppKitLayoutHost(rootView: root, contentSize: CGSize(width: 1024, height: 734))
+            defer { host.close() }
+            for size in [CGSize(width: 1024, height: 734), CGSize(width: 604, height: 490)] {
+                host.resize(to: size)
+                var required: Set<String> = [LayoutProbeID.pageViewport]
+                if scenario == .managing { required.insert("appUpdateManager.footer") }
+                let frames = try await host.waitForFrames(required: required)
+                if scenario == .managing {
+                    let footer = try frame("appUpdateManager.footer", in: frames)
+                    let viewport = try frame(LayoutProbeID.pageViewport, in: frames)
+                    XCTAssertLessThanOrEqual(footer.maxY, viewport.maxY + 1)
+                    XCTAssertGreaterThanOrEqual(footer.minY, viewport.minY)
+                }
+                XCTAssertFalse(store.canRequestOneClickAppUpdates)
+                XCTAssertFalse(store.canRefreshAppUpdates)
+                try host.captureRuntimeFixtureIfRequested(name: "updater-\(scenario.rawValue)-\(Int(size.width))x\(Int(size.height)).png")
+            }
+        }
+    }
+
+    func testCancelledUpdateScanKeepsRuntimeLayoutAndActionsReachable() async throws {
+        let theme = ReviewFilter.updater.moduleTheme
+        let root = AdaptivePageViewport {
+            ZStack {
+                ModuleBackground(theme: theme)
+                AppUpdateScanCancelledPage(canScan: true, onScan: {}, onBack: {})
+            }
+            .environment(\.moduleTheme, theme)
+        }
+        let host = AppKitLayoutHost(rootView: root, contentSize: CGSize(width: 1024, height: 734))
+        defer { host.close() }
+        let required: Set<String> = [LayoutProbeID.runtimePanel, LayoutProbeID.runtimeViewport, LayoutProbeID.smartScanHeader, LayoutProbeID.smartScanFooter, LayoutProbeID.pageViewport]
+        for size in [CGSize(width: 1024, height: 734), CGSize(width: 604, height: 490), CGSize(width: 473, height: 360)] {
+            host.resize(to: size)
+            let frames = try await host.waitForFrames(required: required)
+            let panel = try frame(LayoutProbeID.runtimePanel, in: frames)
+            XCTAssertLessThanOrEqual(try frame(LayoutProbeID.smartScanHeader, in: frames).maxY, panel.minY)
+            XCTAssertLessThanOrEqual(try frame(LayoutProbeID.runtimeViewport, in: frames).maxY, try frame(LayoutProbeID.smartScanFooter, in: frames).minY)
+            XCTAssertLessThanOrEqual(try frame(LayoutProbeID.smartScanFooter, in: frames).maxY, try frame(LayoutProbeID.pageViewport, in: frames).maxY)
+            try host.captureRuntimeFixtureIfRequested(name: "updater-cancelled-\(Int(size.width))x\(Int(size.height)).png")
+            if size.height < 520 {
+                let revision = host.recorder.revision
+                try host.scrollPageToBottom()
+                let scrolled = try await host.waitForFrames(required: required, afterRevision: revision)
+                let footer = try frame(LayoutProbeID.smartScanFooter, in: scrolled)
+                let viewport = try frame(LayoutProbeID.pageViewport, in: scrolled)
+                XCTAssertLessThanOrEqual(footer.maxY, viewport.maxY + 1)
+                XCTAssertGreaterThanOrEqual(footer.minY, viewport.minY)
+            }
+        }
+    }
+
     func testSmartScanOneButtonIdleAndActivePagesKeepWindowStable() async throws {
         let size = CGSize(width: 980, height: 680)
         let scanGate = LayoutCleanupScanGate()
@@ -245,6 +465,25 @@ final class SafeCleanupLayoutTests: XCTestCase {
                 actual: frames,
                 tolerance: 1
             )
+        }
+
+        let riskIDs = [CleanupRisk.safe, .reviewOnly, .protected].map(LayoutProbeID.cleanupRiskSummary)
+        for resultSize in [CGSize(width: 1280, height: 740), CGSize(width: 820, height: 520), CGSize(width: 677, height: 390)] {
+            let revision = host.recorder.revision
+            host.resize(to: resultSize)
+            let frames = try await host.waitForFrames(required: Set(riskIDs + [LayoutProbeID.smartScanContent]), afterRevision: revision)
+            let content = try frame(LayoutProbeID.smartScanContent, in: frames)
+            let cards = try riskIDs.map { try frame($0, in: frames) }
+            for card in cards {
+                XCTAssertGreaterThanOrEqual(card.minX, content.minX - 1)
+                XCTAssertLessThanOrEqual(card.maxX, content.maxX + 1)
+            }
+            if resultSize.width == 1280 {
+                XCTAssertEqual(cards[0].minX, content.minX, accuracy: 1)
+                XCTAssertEqual(cards[2].maxX, content.maxX, accuracy: 1)
+                XCTAssertEqual(cards[0].width, cards[2].width, accuracy: 1)
+            }
+            try host.captureRuntimeFixtureIfRequested(name: "results-\(Int(resultSize.width))x\(Int(resultSize.height)).png")
         }
     }
 
@@ -379,7 +618,7 @@ final class SafeCleanupLayoutTests: XCTestCase {
         return AppKitLayoutHost(rootView: content, contentSize: contentSize)
     }
 
-    private func makeConceptLandingHost(contentSize: CGSize) -> AppKitLayoutHost {
+    private func makeConceptLandingHost(contentSize: CGSize, responsive: Bool = false) -> AppKitLayoutHost {
         _ = NSApplication.shared
         let theme = ModuleThemeCatalog.theme(for: .protection)
         let content = ZStack {
@@ -405,9 +644,11 @@ final class SafeCleanupLayoutTests: XCTestCase {
         }
         .environment(\.locale, Locale(identifier: "zh-Hans"))
         .environment(\.moduleTheme, theme)
-        .environment(\.windowLayoutMetrics, WindowLayoutMetrics(contentSize: contentSize))
 
-        return AppKitLayoutHost(rootView: content, contentSize: contentSize)
+        let root = responsive ? AnyView(AdaptivePageViewport { content }) : AnyView(
+            content.environment(\.windowLayoutMetrics, WindowLayoutMetrics(contentSize: contentSize))
+        )
+        return AppKitLayoutHost(rootView: root, contentSize: contentSize)
     }
 
     private func assertWorkspaceTopIsInsideContent(
@@ -627,6 +868,24 @@ final class SafeCleanupLayoutTests: XCTestCase {
 }
 
 @MainActor
+private final class RuntimeLayoutFixture: ObservableObject {
+    @Published var progress = DebugScanPresentationScenario.preparing.progress
+    @Published var isFinalizing = false
+    @Published var isCancelling = false
+}
+
+private struct RuntimeLayoutFixtureView: View {
+    @ObservedObject var fixture: RuntimeLayoutFixture
+    let module: ReviewFilter
+
+    var body: some View {
+        SmartScanScanningPage(progress: fixture.progress, module: module,
+            isFinalizing: fixture.isFinalizing, canCancel: !fixture.isCancelling,
+            isCancelling: fixture.isCancelling, onCancel: {})
+    }
+}
+
+@MainActor
 private final class AppKitLayoutHost {
     let recorder = LayoutFrameRecorder()
     let window: NSWindow
@@ -658,12 +917,53 @@ private final class AppKitLayoutHost {
         window.contentView?.layoutSubtreeIfNeeded()
     }
 
+    func captureRuntimeFixtureIfRequested(name: String) throws {
+        guard let path = ProcessInfo.processInfo.environment["STORAGE_CLEANER_RUNTIME_SNAPSHOT_DIR"] else { return }
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let view = hostingController.view
+        view.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        try data.write(to: directory.appendingPathComponent(name))
+    }
+
     func show() {
         window.center()
         window.orderFront(nil)
         window.contentView?.needsLayout = true
         window.contentView?.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
+    }
+
+    func resize(to size: CGSize) {
+        window.setContentSize(size)
+        window.contentView?.needsLayout = true
+        window.contentView?.layoutSubtreeIfNeeded()
+        if let scroll = pageScrollView() {
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+    }
+
+    func scrollPageToBottom() throws {
+        let scroll = try XCTUnwrap(pageScrollView())
+        let document = try XCTUnwrap(scroll.documentView)
+        XCTAssertGreaterThan(document.bounds.height, scroll.contentView.bounds.height)
+        scroll.contentView.scroll(to: NSPoint(
+            x: 0,
+            y: max(0, document.bounds.height - scroll.contentView.bounds.height)
+        ))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    private func pageScrollView() -> NSScrollView? {
+        func find(in view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView { return scroll }
+            return view.subviews.lazy.compactMap { find(in: $0) }.first
+        }
+        return window.contentView.flatMap { find(in: $0) }
     }
 
     func waitForFrames(

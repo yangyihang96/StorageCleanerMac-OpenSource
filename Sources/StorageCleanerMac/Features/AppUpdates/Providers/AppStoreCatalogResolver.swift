@@ -12,10 +12,9 @@ struct URLSessionAppStoreCatalogHTTPClient: AppStoreCatalogHTTPClient {
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else {
-            throw AppStoreCatalogError.invalidResponse
-        }
+        let (data, response) = try await BoundedHTTPSReader.data(
+            for: request, session: session, maximumBytes: 2 * 1024 * 1024
+        )
         return (data, response)
     }
 }

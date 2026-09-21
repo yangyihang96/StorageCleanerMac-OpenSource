@@ -4,6 +4,16 @@ struct AppUninstallScanLandingView: View {
     @ObservedObject var store: ScanStore
 
     var body: some View {
+        if store.isLoadingInstalledApps {
+            FeatureRuntimePage(module: .uninstall,
+                title: L10n.text("正在读取应用信息", "Reading Application Information"),
+                subtitle: L10n.text("正在检查应用大小及可确认的关联文件", "Checking app sizes and attributable related files"),
+                trustText: L10n.text("只读扫描 · 卸载前确认", "Read-only scan · Confirm before uninstalling")) {
+                EmptyView()
+            } actions: {
+                EmptyView()
+            }
+        } else {
         FeatureLandingPageShell(
             title: L10n.text("卸载", "Uninstall"),
             subtitle: ReviewFilter.uninstall.pageSubtitle,
@@ -26,6 +36,7 @@ struct AppUninstallScanLandingView: View {
             ),
             action: startScan
         )
+        }
     }
 
     private func startScan() {

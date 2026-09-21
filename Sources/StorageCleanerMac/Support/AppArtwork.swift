@@ -85,7 +85,9 @@ enum AppArtwork {
         dockIconTransitionTask?.cancel()
 
         guard let startImage = renderedDockIcon,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              !ProcessInfo.processInfo.isLowPowerModeEnabled,
+              NSApp.isActive else {
             renderedDockIcon = targetImage
             NSApp.applicationIconImage = targetImage
             dockIconTransitionTask = nil
@@ -97,7 +99,8 @@ enum AppArtwork {
             for step in 1...totalSteps {
                 try? await Task.sleep(for: .milliseconds(16))
                 guard !Task.isCancelled else { return }
-                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    || ProcessInfo.processInfo.isLowPowerModeEnabled || !NSApp.isActive {
                     renderedDockIcon = targetImage
                     NSApp.applicationIconImage = targetImage
                     dockIconTransitionTask = nil

@@ -12,7 +12,6 @@ struct ContentView: View {
     private let heavyWorkActivityStore: HeavyWorkActivityStore
     @ObservedObject private var navigationState: AppNavigationState
     @AppStorage(L10n.languageDefaultsKey) private var languageRawValue = AppLanguage.system.rawValue
-    @AppStorage(L10n.appearanceDefaultsKey) private var appearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(FirstLaunchOnboardingPolicy.completionDefaultsKey)
     private var didCompleteFirstLaunchOnboarding = false
     @SceneStorage("selectedFilter.v2") private var selectedFilterRaw = ReviewFilter.overview.rawValue
@@ -112,7 +111,7 @@ struct ContentView: View {
             \.startupItemsKeyboardActions,
             startupItemsKeyboardActions
         )
-        .id(languageRawValue + appearanceRawValue)
+        .id(languageRawValue)
         .task {
             await Task.yield()
             await store.loadPersistedHistoryIfNeeded()
@@ -125,7 +124,8 @@ struct ContentView: View {
             await MainWindowSnapshotPipeline.runIfRequested(
                 navigationState: navigationState,
                 browserPrivacyStore: browserPrivacyStore,
-                store: store
+                store: store,
+                healthStore: computerHealthStore
             )
         }
 #endif
@@ -831,19 +831,17 @@ private struct DetailRouterView: View {
                     store: store,
                     filter: filter
                 )
+            } else if let session = cleanupSessionForCurrentFilter {
+                // This page already owns its header, results and action bar.
+                // Wrapping it in another workspace repeats the module title.
+                CleanupScanResultsView(store: store, filter: filter, session: session)
             } else {
                 ReviewWorkspaceShell(
                     filter: filter,
                     headerActions: { EmptyView() }
                 ) {
                     Group {
-                        if let session = cleanupSessionForCurrentFilter {
-                            CleanupScanResultsView(
-                                store: store,
-                                filter: filter,
-                                session: session
-                            )
-                        } else if store.result != nil {
+                        if store.result != nil {
                             ItemListView(store: store, filter: filter)
                         }
                     }
@@ -1345,7 +1343,7 @@ private struct SafeCleanupScopeButton: View {
                 LinearGradient(
                     colors: isSelected
                         ? [tint.opacity(isHovered ? 0.22 : 0.17), tint.opacity(0.08)]
-                        : [Color.white.opacity(isHovered ? 0.085 : 0.055), Color.white.opacity(0.025)],
+                        : [AppAppearanceColors.ink.opacity(isHovered ? 0.085 : 0.055), AppAppearanceColors.ink.opacity(0.025)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 ),
@@ -1362,8 +1360,8 @@ private struct SafeCleanupScopeButton: View {
                 .strokeBorder(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(isSelected ? 0.30 : 0.16),
-                            isSelected ? tint.opacity(0.72) : Color.white.opacity(0.08),
+                            AppAppearanceColors.ink.opacity(isSelected ? 0.30 : 0.16),
+                            isSelected ? tint.opacity(0.72) : AppAppearanceColors.ink.opacity(0.08),
                             Color.black.opacity(0.22),
                         ],
                         startPoint: .topLeading,

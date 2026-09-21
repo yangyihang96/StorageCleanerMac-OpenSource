@@ -15,8 +15,8 @@ struct PerformanceBenchmarkWorkspaceView: View {
         DashboardPage(
             title: L10n.text("性能测试", "Performance Benchmark"),
             subtitle: L10n.text(
-                "一键评估 CPU、GPU、内存、存储与显示性能",
-                "One tap evaluates CPU, GPU, memory, storage, and display performance"
+                "一键测量 CPU、GPU、内存与存储性能",
+                "One tap measures CPU, GPU, memory, and storage performance"
             ),
             systemImage: "speedometer"
         ) {
@@ -35,7 +35,7 @@ struct PerformanceBenchmarkWorkspaceView: View {
         } content: {
             BenchmarkV7DashboardView(
                 state: benchmarkStore.v7State,
-                latestResult: benchmarkStore.latestOfficialV7Result,
+                latestResult: benchmarkStore.v7LatestResult,
                 history: benchmarkStore.v7History,
                 localBestResult: benchmarkStore.localBestOfficialV7Result,
                 localBestResultsByCategory: benchmarkStore.localBestOfficialV7ResultsByCategory,
@@ -88,8 +88,8 @@ struct PerformanceBenchmarkWorkspaceView: View {
             Text(L10n.text("测试说明", "About this test"))
                 .font(AppDesignTokens.Typography.cardTitle)
             Text(L10n.text(
-                "自动完成 CPU、GPU、内存、存储、显示体验和持续性能检查，约 \(durationText(TimeInterval(OfficialBenchmarkPlan.current.plan.expectedMaximumDurationSeconds)))。",
-                "CPU, GPU, memory, storage, display, and a sustained check run automatically in about \(durationText(TimeInterval(OfficialBenchmarkPlan.current.plan.expectedMaximumDurationSeconds)))."
+                "自动完成 CPU、GPU、内存与存储的 18 项 Core 测量，预计不超过 \(durationText(TimeInterval(OfficialBenchmarkPlan.current.plan.expectedMaximumDurationSeconds)))。扩展项目的实现状态单独显示。",
+                "18 CPU, GPU, memory and storage Core measurements run automatically, estimated up to \(durationText(TimeInterval(OfficialBenchmarkPlan.current.plan.expectedMaximumDurationSeconds))). Extension implementation status is reported separately."
             ))
             Text(L10n.text(
                 "结果默认只保存在本机；全球排行需在对应页面确认后才上传匿名字段。",

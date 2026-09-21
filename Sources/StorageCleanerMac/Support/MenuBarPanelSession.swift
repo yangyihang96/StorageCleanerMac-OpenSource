@@ -26,6 +26,7 @@ final class GeekPanelCoordinator: ObservableObject {
     @Published private(set) var route: GeekPanelRoute {
         didSet {
             guard oldValue != route else { return }
+            MenuBarPresentationTrace.begin("presentation", event: NSApp.currentEvent)
             PerformanceTelemetry.panelInput("route", target: String(describing: route))
         }
     }
@@ -715,7 +716,12 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             detailSize: detailSize,
             detailTopOffset: detailTopOffset,
             tertiarySize: tertiaryColumnSize,
-            sourceOffset: tertiarySourceOffset,
+            sourceOffset: tertiarySourceOffset.map { offset in
+                offset * MiniWindowPageFit.scale(
+                    content: detailSize,
+                    available: CGSize(width: detailSize.width, height: max(1, visibleFrame.height - 16))
+                )
+            },
             overviewSize: overviewSize
         )
         let secondaryCascade = MenuBarPanelPlacement.cascade(
@@ -976,6 +982,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         removeObservers()
         controlPaletteCoordinator?.dismiss()
         panel.orderOut(nil)
+        MenuBarPresentationTrace.discardPendingDraws()
         if persistsGeometry {
             geometryStore.save(frame: persistableFrame, for: density)
         }
@@ -1000,6 +1007,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         controlPaletteCoordinator?.teardown()
 
         panel.orderOut(nil)
+        MenuBarPresentationTrace.discardPendingDraws()
         if persistsGeometry {
             geometryStore.save(frame: persistableFrame, for: density)
         }
@@ -1089,6 +1097,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 
 #if DEBUG || STORAGE_CLEANER_BETA
     private func scheduleDebugSnapshotsIfRequested() {
+        guard MiniWindowDemoData.isCapturingMenuBarPanelSnapshots else { return }
         let prefix = MiniWindowDemoData.menuBarPanelSnapshotCaptureArgumentPrefix
         let capturesPower = MiniWindowDemoData.isCapturingPowerMenuBarPanelSnapshots
         let requestedScenario = MiniWindowDemoData.capturedMenuBarPanelScenario(
@@ -1110,8 +1119,32 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             try? await Task.sleep(for: .seconds(2))
             guard let self, !isTornDown else { return }
 
+            defer {
+                MiniWindowDemoData.finishMenuBarPanelSnapshots()
+                panelCoordinator?.reset()
+            }
+
             if let requestedScenario {
                 await captureDebugSnapshotScenario(requestedScenario, in: directory)
+                return
+            }
+
+            if ProcessInfo.processInfo.arguments.contains("--capture-menu-bar-live-audit"),
+               !MiniWindowDemoData.isEnabled {
+                // Only select and render live monitoring pages. Control actions,
+                // process termination and demo fixtures are never entered here.
+                for section in [PanelSection.processor, .memory, .disk, .network, .sensors, .power] {
+                    panelCoordinator?.reset()
+                    panelCoordinator?.selectModule(section)
+                    guard await waitForDebugAttachedLayout(childCount: 1, section: section) else { continue }
+                    await captureDebugSnapshot(named: "live-\(section.rawValue)-secondary.png", in: directory)
+                    if let detail = section.tertiaryDetail {
+                        panelCoordinator?.presentHistory(.builtIn(detail.rawValue), pinned: true)
+                        if await waitForDebugAttachedLayout(childCount: 2, section: section) {
+                            await captureDebugSnapshot(named: "live-\(section.rawValue)-history.png", in: directory)
+                        }
+                    }
+                }
                 return
             }
 
@@ -1272,12 +1305,40 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
                         to: directory.appendingPathComponent(name),
                         options: .atomic
                     )
+                    writeDebugPageLayout(named: name, in: directory, rootView: view)
                     return
                 }
             }
             guard attempt < 9 else { return }
             try? await Task.sleep(for: .milliseconds(100))
         }
+    }
+
+    private func writeDebugPageLayout(named name: String, in directory: URL, rootView: NSView) {
+        func scrollViewCount(_ view: NSView) -> Int {
+            (view is NSScrollView ? 1 : 0) + view.subviews.reduce(0) { $0 + scrollViewCount($1) }
+        }
+        func sizeRecord(_ size: CGSize) -> [String: CGFloat] {
+            ["width": size.width, "height": size.height]
+        }
+        let naturalDetail = GeekPanelPresentationMetrics.normalizedDetailSize(
+            detailColumnSize, for: geekSection, density: density)
+        let naturalSizes = [naturalDetail, tertiaryColumnSize]
+        let pages: [[String: Any]] = (attachedCascadeLayout?.childFrames ?? []).enumerated().map { index, frame in
+            let natural = naturalSizes[min(index, naturalSizes.count - 1)]
+            return ["level": index + 2, "naturalSize": sizeRecord(natural),
+                    "visibleSize": sizeRecord(frame.size),
+                    "scale": MiniWindowPageFit.scale(content: natural, available: frame.size)]
+        }
+        let record: [String: Any] = [
+            "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown",
+            "mode": MiniWindowDemoData.isEnabled ? "FIXTURE" : "LIVE",
+            "section": geekSection.rawValue,
+            "scrollViewCount": scrollViewCount(rootView),
+            "pages": pages,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: directory.appendingPathComponent(name).deletingPathExtension().appendingPathExtension("json"), options: .atomic)
     }
 
     static func debugSnapshotHasVisiblePixels(_ bitmap: NSBitmapImageRep) -> Bool {
@@ -1664,6 +1725,10 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 
     private func applicationDidDeactivate() {
 #if DEBUG || STORAGE_CLEANER_BETA
+        // Explicit screenshot sessions must finish even if the inspection
+        // tool takes focus. The capture flag never substitutes fixture data;
+        // ordinary live launches retain their dismissal behavior.
+        if MiniWindowDemoData.isCapturingMenuBarPanelSnapshots { return }
         PerformanceTelemetry.logger.notice("MenuBar lifecycle: application-deactivated menuTracking=\(!self.trackingMenus.isEmpty)")
 #endif
         guard trackingMenus.isEmpty else {

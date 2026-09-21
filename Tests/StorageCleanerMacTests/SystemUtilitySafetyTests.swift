@@ -165,7 +165,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUninstallRejectsAPathReplacedAfterScanning() async throws {
-        let root = try makeTemporaryDirectory()
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let appURL = root
             .appendingPathComponent("Setapp", isDirectory: true)
@@ -184,6 +186,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
         )
         let scanned = try XCTUnwrap(result.apps.first)
         XCTAssertNotNil(scanned.scanIdentity)
+        XCTAssertTrue(UninstallCandidatePathPolicy.isSafeComponent(scanned.bundleIdentifier))
+        XCTAssertEqual(scanned.scanIdentity, AppUninstallService.uninstallFileIdentity(at: scanned.path))
         XCTAssertNoThrow(try AppUninstallService.validateCurrentApplicationIdentity(scanned))
 
         try FileManager.default.removeItem(at: appURL)
@@ -537,7 +541,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertNotNil(app.uninstallSuggestionReason)
     }
 
-    func testAppUninstallSuggestsOnlyReliablyLowerRatedSimilarApp() throws {
+    func testAppStoreRatingsRemainReferenceAndDoNotDriveUninstall() throws {
         let chrome = makeInstalledApp(
             name: "Chrome",
             bundleIdentifier: "com.google.Chrome",
@@ -594,9 +598,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
         let enrichedFirefox = try XCTUnwrap(enriched.first { $0.name == "Firefox" })
         let enrichedBrave = try XCTUnwrap(enriched.first { $0.name == "Brave" })
 
-        XCTAssertEqual(enrichedChrome.uninstallRecommendation, .candidate)
+        XCTAssertEqual(enrichedChrome.uninstallRecommendation, .keep)
         XCTAssertNotNil(enrichedChrome.uninstallRatingComparison)
-        XCTAssertTrue(enrichedChrome.uninstallSuggestionReason?.contains("Firefox") == true)
+        XCTAssertNil(enrichedChrome.uninstallSuggestionReason)
         XCTAssertNil(enrichedFirefox.uninstallRatingComparison)
         XCTAssertEqual(enrichedFirefox.uninstallRecommendation, .keep)
         XCTAssertNil(enrichedBrave.uninstallRatingComparison)
@@ -2504,7 +2508,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             versionFile.components(separatedBy: "DEFAULT_APP_BUILD=").count - 1,
             1
         )
-        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=1.9.13"))
+        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=1.10.1"))
         XCTAssertNotNil(
             versionFile.range(
                 of: #"(?m)^DEFAULT_APP_BUILD=\d{12}$"#,

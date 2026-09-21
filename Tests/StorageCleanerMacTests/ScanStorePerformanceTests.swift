@@ -83,6 +83,105 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertFalse(coordinator.isRefreshInFlight)
     }
 
+    func testSlowMemoryReadDoesNotBlockLiveCPUAndNetworkAndRemainsSingleFlight() async {
+        let snapshot = makeMemorySnapshot(generatedAt: Date(), topProcesses: [])
+        let probe = SuspendedMenuMemoryProbe(snapshot: snapshot)
+        let store = ScanStore(menuBarMemoryStatusProvider: { await probe.sample() })
+        store.refreshMenuBarLiveStatus()
+        await waitForLiveSnapshot(store)
+        XCTAssertNotNil(store.menuBarMonitorState.snapshot)
+        XCTAssertNil(store.menuBarDisplayMemorySnapshot)
+        let firstDate = store.menuBarMonitorState.snapshot?.generatedAt
+        store.refreshMenuBarLiveStatus()
+        await waitForLiveSnapshot(store, newerThan: firstDate)
+        XCTAssertNotEqual(store.menuBarMonitorState.snapshot?.generatedAt, firstDate)
+        let calls = await probe.callCount
+        XCTAssertEqual(calls, 1, "A slow memory query must not accumulate more queries")
+        await probe.release()
+        for _ in 0..<200 where store.menuBarDisplayMemorySnapshot == nil {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(store.menuBarDisplayMemorySnapshot?.generatedAt, snapshot.generatedAt)
+        XCTAssertNil(store.memorySnapshot, "Status reads must preserve the separate process snapshot")
+    }
+
+    func testPauseDiscardsAnOutstandingMemoryStatusRead() async {
+        let probe = SuspendedMenuMemoryProbe(snapshot: makeMemorySnapshot(generatedAt: Date(), topProcesses: []))
+        let store = ScanStore(menuBarMemoryStatusProvider: { await probe.sample() })
+        store.refreshMenuBarLiveStatus()
+        await waitForLiveSnapshot(store)
+        store.toggleMenuBarRefreshPaused()
+        await probe.release()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(store.menuBarDisplayMemorySnapshot)
+        store.toggleMenuBarRefreshPaused()
+        for _ in 0..<200 where store.menuBarDisplayMemorySnapshot == nil {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(store.menuBarDisplayMemorySnapshot)
+    }
+
+    func testLiveMemoryProcessesCoalesceRefreshAndPreserveASelectionMadeDuringRead() async {
+        let snapshot = makeMemorySnapshot(generatedAt: Date(), topProcesses: [])
+        let probe = SuspendedMenuMemoryProbe(snapshot: snapshot)
+        let store = ScanStore(menuBarMemoryProcessProvider: { await probe.sample() })
+        let consumer = attachProcessConsumer(to: store)
+        defer { store.menuBarAuxiliaryMonitorState.unregisterConsumer(consumer) }
+        store.refreshMenuBarMemoryProcesses()
+        store.refreshMenuBarMemoryProcesses()
+        for _ in 0..<200 {
+            if await probe.callCount > 0 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let calls = await probe.callCount
+        XCTAssertEqual(calls, 1)
+        XCTAssertFalse(store.isLoadingMemory, "Background reads must not disable process actions")
+        store.selectedMemoryProcessIDs = [987]
+        await probe.release()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.selectedMemoryProcessIDs, [987])
+        XCTAssertNil(store.memorySnapshot, "A late result must not replace the list the user is selecting")
+        store.selectedMemoryProcessIDs = []
+        store.refreshMenuBarMemoryProcesses()
+        for _ in 0..<200 where store.memorySnapshot == nil {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(store.memorySnapshot)
+        store.refreshMenuBarMemoryProcesses(now: snapshot.generatedAt.addingTimeInterval(4.9))
+        let finalCalls = await probe.callCount
+        XCTAssertEqual(finalCalls, 2, "A current process reading must be reused for five seconds")
+    }
+
+    func testClosingMemoryPageDiscardsPendingProcessRead() async {
+        let probe = SuspendedMenuMemoryProbe(snapshot: makeMemorySnapshot(generatedAt: Date(), topProcesses: []))
+        let store = ScanStore(menuBarMemoryProcessProvider: { await probe.sample() })
+        let consumer = attachProcessConsumer(to: store)
+        defer { store.menuBarAuxiliaryMonitorState.unregisterConsumer(consumer) }
+        store.refreshMenuBarMemoryProcesses()
+        store.cancelMenuBarMemoryProcessRefresh()
+        await probe.release()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(store.memorySnapshot)
+    }
+
+    private func attachProcessConsumer(to store: ScanStore) -> UUID {
+        let consumer = UUID()
+        store.menuBarAuxiliaryMonitorState.registerConsumer(consumer, demand: .init(
+            needsProcessorTelemetry: false, needsDiskIOSampling: false,
+            needsNetworkInterface: false, needsPublicNetworkAddress: false,
+            needsNetworkProcesses: false
+        ), paused: false)
+        return consumer
+    }
+
+    private func waitForLiveSnapshot(_ store: ScanStore, newerThan previous: Date? = nil) async {
+        for _ in 0..<200 {
+            if let current = store.menuBarMonitorState.snapshot?.generatedAt, current != previous { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Live CPU/network readings waited for the blocked memory query")
+    }
+
     func testMenuMemoryCadenceToleratesPublishJitterWithoutRepeatedEarlyReads() {
         let now = Date(timeIntervalSince1970: 1_000)
         for interval in [1.0, 2.0, 5.0] {
@@ -264,7 +363,7 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertEqual(source.components(separatedBy: "memorySnapshot = snapshot").count - 1, 1)
         XCTAssertEqual(
             source.components(separatedBy: "as: .primaryAndMenuFromRefresh").count - 1,
-            3
+            4
         )
         XCTAssertTrue(source.contains("let currentMemorySnapshot = menuBarDisplayMemorySnapshot"))
         XCTAssertTrue(source.contains("current: memorySnapshot"))
@@ -648,5 +747,29 @@ private actor CancellationAwareMenuSnapshotProbe {
             await Task.yield()
         }
         return started
+    }
+}
+
+private actor SuspendedMenuMemoryProbe {
+    let snapshot: MemorySnapshot
+    private(set) var callCount = 0
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(snapshot: MemorySnapshot) { self.snapshot = snapshot }
+
+    func sample() async -> MemorySnapshot {
+        callCount += 1
+        if !released {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        return snapshot
+    }
+
+    func release() {
+        released = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
     }
 }

@@ -843,12 +843,8 @@ final class NetworkCompatibilitySpeedTestServiceTests: XCTestCase {
                     : task.countOfBytesSent
             },
             shutdownGraceSeconds: shutdownGraceSeconds,
-            sessionInvalidator: { session in
-                if let sessionInvalidationController {
-                    sessionInvalidationController.requestInvalidation(for: session)
-                } else {
-                    session.invalidateAndCancel()
-                }
+            sessionInvalidator: sessionInvalidationController.map { controller in
+                { @Sendable session in controller.requestInvalidation(for: session) }
             },
             uploadProgressObservationForTesting: { task in
                 reportsUploadProgress && task.originalRequest?.httpMethod == "POST"
@@ -1129,7 +1125,7 @@ private final class ControlledCompatibilitySessionInvalidator: @unchecked Sendab
             return false
         }
         if passThrough {
-            session.invalidateAndCancel()
+            session.finishTasksAndInvalidate()
         }
     }
 
@@ -1140,7 +1136,7 @@ private final class ControlledCompatibilitySessionInvalidator: @unchecked Sendab
             pendingSession = nil
             return session
         }
-        session?.invalidateAndCancel()
+        session?.finishTasksAndInvalidate()
     }
 
     @discardableResult

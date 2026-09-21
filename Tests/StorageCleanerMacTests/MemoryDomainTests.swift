@@ -2,6 +2,61 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class MemoryDomainTests: XCTestCase {
+    func testMemoryCompositionPercentagesReuseRecordedBytesAndChangeIndependently() throws {
+        let first = MenuBarTelemetryPoint(memorySnapshot: makeSnapshot(
+            available: .available(2_000), wired: .available(3_000), compressed: .available(1_000)
+        ))
+        let second = MenuBarTelemetryPoint(memorySnapshot: makeSnapshot(
+            available: .available(2_000), wired: .available(2_000), compressed: .available(1_000)
+        ))
+        let restored = try JSONDecoder().decode(MenuBarTelemetryPoint.self, from: JSONEncoder().encode(first))
+        let channels: [MenuBarTelemetryChannel] = [
+            .memoryAppPercent, .memoryWiredPercent, .memoryCompressedPercent, .memoryFreePercent,
+        ]
+        let values = try channels.map { try XCTUnwrap($0.value(in: restored)) }
+        for (actual, expected) in zip(values, [25.0, 37.5, 12.5, 25.0]) {
+            XCTAssertEqual(actual, expected, accuracy: 0.000_001)
+        }
+        XCTAssertEqual(values.reduce(0, +), 100, accuracy: 0.000_001)
+        XCTAssertEqual(restored.memoryComposition, first.memoryComposition)
+        XCTAssertEqual(first.memory, second.memory)
+        XCTAssertEqual(try XCTUnwrap(MenuBarTelemetryChannel.memoryAppPercent.value(in: second)), 37.5, accuracy: 0.000_001)
+        XCTAssertEqual(try XCTUnwrap(MenuBarTelemetryChannel.memoryWiredPercent.value(in: second)), 25, accuracy: 0.000_001)
+        let larger = MenuBarTelemetryPoint(memorySnapshot: makeSnapshot(
+            physical: .available(16_000), available: .available(4_000),
+            wired: .available(6_000), compressed: .available(2_000)
+        ))
+        XCTAssertEqual(channels.compactMap { $0.value(in: larger) }, values)
+    }
+
+    func testMemoryCompositionHistoryRejectsMissingOverflowAndImpossibleSamples() {
+        func sample(physical: UInt64?, app: UInt64?, wired: UInt64?, compressed: UInt64?) -> MenuBarTelemetryPoint {
+            MenuBarTelemetryPoint(date: Date(), cpuTotal: nil, cpuUser: nil, cpuSystem: nil,
+                gpu: nil, memory: nil, memoryAppOrOtherBytes: app, memoryWiredBytes: wired,
+                memoryPhysicalBytes: physical, compressedMemoryBytes: compressed,
+                chipTemperature: nil, fanRPM: nil, downBytesPerSecond: nil, upBytesPerSecond: nil)
+        }
+        let invalid = [
+            sample(physical: nil, app: 50, wired: 10, compressed: 5),
+            sample(physical: 0, app: 0, wired: 0, compressed: 0),
+            sample(physical: 100, app: 50, wired: 10, compressed: nil),
+            sample(physical: 100, app: nil, wired: 10, compressed: 5),
+            sample(physical: 100, app: 90, wired: 10, compressed: 5),
+            sample(physical: .max, app: .max, wired: 1, compressed: 1),
+        ]
+        for point in invalid {
+            XCTAssertNil(point.memoryComposition)
+            for channel in [MenuBarTelemetryChannel.memoryAppPercent, .memoryWiredPercent, .memoryCompressedPercent, .memoryFreePercent] {
+                XCTAssertNil(channel.value(in: point))
+            }
+        }
+        let free = sample(physical: 100, app: 0, wired: 0, compressed: 0)
+        XCTAssertEqual(MenuBarTelemetryChannel.memoryFreePercent.value(in: free), 100)
+        XCTAssertEqual(MenuBarTelemetryChannel.memoryAppPercent.value(in: free), 0)
+        let full = sample(physical: 100, app: 80, wired: 10, compressed: 10)
+        XCTAssertEqual(MenuBarTelemetryChannel.memoryFreePercent.value(in: full), 0)
+    }
+
     func testPressureClassificationPrioritizesCriticalSignals() {
         XCTAssertEqual(
             MemoryPressurePolicy.classify(

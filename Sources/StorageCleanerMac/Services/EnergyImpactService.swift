@@ -89,15 +89,18 @@ enum EnergyImpactService {
     }
 
     private static func processListOutput() async -> String {
-        await Task.detached(priority: .utility) {
-            captureProcessList()
-        }.value
+        guard !Task.isCancelled else { return "" }
+        let worker = Task.detached(priority: .utility) { captureProcessList() }
+        return await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: { worker.cancel() }
     }
 
     /// `ps` is deliberately fixed here rather than routed through a shell.
     /// The shared process-group runner is intended for commands that may own
     /// descendants; macOS can reject that setup for this short-lived binary.
     private static func captureProcessList() -> String {
+        guard !Task.isCancelled else { return "" }
         let fileManager = FileManager.default
         let outputDirectory = fileManager.temporaryDirectory
             .appendingPathComponent("StorageCleanerMac-EnergyPS-\(UUID().uuidString)", isDirectory: true)
@@ -125,12 +128,28 @@ enum EnergyImpactService {
 
             let didTerminate = DispatchSemaphore(value: 0)
             process.terminationHandler = { _ in didTerminate.signal() }
+            guard !Task.isCancelled else { return "" }
             try process.run()
-            guard didTerminate.wait(timeout: .now() + 3) == .success else {
-                process.terminate()
-                _ = didTerminate.wait(timeout: .now() + 1)
+            let childIdentity = Shell.directChildIdentity(for: process.processIdentifier)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            var completed = false
+            while !Task.isCancelled, ContinuousClock.now < deadline {
+                if didTerminate.wait(timeout: .now() + 0.05) == .success {
+                    completed = true
+                    break
+                }
+            }
+            if !completed {
+                // This is our own fixed, short-lived ps child, never another
+                // application. Keep the worker occupied until it really exits.
+                if process.isRunning { Shell.signalDirectChild(childIdentity, signal: SIGTERM) }
+                if didTerminate.wait(timeout: .now() + 1) != .success, process.isRunning {
+                    Shell.signalDirectChild(childIdentity, signal: SIGKILL)
+                }
+                process.waitUntilExit()
                 return ""
             }
+            guard !Task.isCancelled else { return "" }
 
             try? standardOutput.synchronize()
             try? standardError.synchronize()
@@ -143,12 +162,53 @@ enum EnergyImpactService {
         }
     }
 
+    struct MenuBarCounterFrame: Sendable {
+        let sampledAt: Date
+        let uptime: TimeInterval
+        let rows: [EnergyProcessRow]
+        let counters: [Int32: EnergyResourceUsage]
+    }
+
+    /// One read per interval. The menu does not restart a 1.2-second measurement
+    /// on each refresh; its previous counter frame is the next baseline.
+    static func menuBarCounterFrame() async -> MenuBarCounterFrame? {
+        let output = await processListOutput()
+        guard !Task.isCancelled, !output.isEmpty else { return nil }
+        let rows = processRows(fromPSOutput: output)
+        let counters = resourceUsagesByPID(for: rows.map(\.pid))
+        guard !rows.isEmpty, !counters.isEmpty else { return nil }
+        return MenuBarCounterFrame(sampledAt: Date(), uptime: ProcessInfo.processInfo.systemUptime,
+                                   rows: rows, counters: counters)
+    }
+
+    static func menuBarSnapshot(previous: MenuBarCounterFrame, current: MenuBarCounterFrame) -> EnergyImpactSnapshot? {
+        let elapsed = current.uptime - previous.uptime
+        guard elapsed > 0, elapsed.isFinite else { return nil }
+        // New/reused PIDs and reset counters need another baseline, not a
+        // fabricated zero or ps's lifetime CPU average.
+        let rows = current.rows.filter { row in
+            guard let before = previous.counters[row.pid], let after = current.counters[row.pid] else { return false }
+            return before.processStartMach == after.processStartMach
+                && after.cpuTimeMach >= before.cpuTimeMach
+                && after.diskReadBytes >= before.diskReadBytes
+                && after.diskWrittenBytes >= before.diskWrittenBytes
+                && after.energyNanojoules >= before.energyNanojoules
+        }
+        guard !rows.isEmpty else { return nil }
+        return makeSnapshot(startedAt: current.sampledAt,
+                            applicationProcesses: applicationProcesses(from: rows),
+                            firstResourceSamples: previous.counters,
+                            latestResourceSamples: current.counters,
+                            measuredSampleSeconds: elapsed, sampledAt: current.sampledAt)
+    }
+
     private static func makeSnapshot(
         startedAt: Date,
         applicationProcesses: [PreparedEnergyProcess],
         firstResourceSamples: [Int32: EnergyResourceUsage],
         latestResourceSamples: [Int32: EnergyResourceUsage],
-        measuredSampleSeconds: TimeInterval
+        measuredSampleSeconds: TimeInterval,
+        sampledAt: Date? = nil
     ) -> EnergyImpactSnapshot {
         let resourceSamples = latestResourceSamples.isEmpty ? firstResourceSamples : latestResourceSamples
         let hasEnergyCounters = resourceSamples.values.contains { $0.energyNanojoules > 0 }
@@ -179,7 +239,7 @@ enum EnergyImpactService {
         let estimatedSupplementEnergyWh = apps.reduce(0) { $0 + $1.estimatedSupplementEnergyWh }
 
         return EnergyImpactSnapshot(
-            generatedAt: Date(),
+            generatedAt: sampledAt ?? Date(),
             scanSeconds: Date().timeIntervalSince(startedAt),
             sampleSeconds: firstResourceSamples.isEmpty ? 0 : measuredSampleSeconds,
             uptimeSeconds: uptimeSeconds,

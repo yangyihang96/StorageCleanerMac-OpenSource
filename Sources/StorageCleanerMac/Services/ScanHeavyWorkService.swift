@@ -6,6 +6,9 @@ struct ScanBulkTrashResult: Sendable {
     let movedItemIDs: Set<String>
     let moveRecords: [TrashMoveRecord]
     let failedTitles: [String]
+    var reports: [CleanReport] = []
+    var notProcessedPaths: [String] = []
+    var cancelled: Bool = false
 }
 
 struct ScanHeavyWorkCleanupPendingError: LocalizedError, @unchecked Sendable {
@@ -46,9 +49,12 @@ struct ScanHeavyWorkService: Sendable {
                 }.value
             },
             moveToTrash: @escaping @Sendable (StorageItem, Set<String>) async throws -> [TrashMoveRecord] = { item, allowedPaths in
-                try await Task.detached(priority: .userInitiated) {
+                let worker = Task.detached(priority: .userInitiated) {
                     try CleanupService.moveToTrash(item, allowedPaths: allowedPaths)
-                }.value
+                }
+                return try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
             },
             emptyTrash: @escaping @Sendable () async throws -> TrashSummary = {
                 try await Task.detached(priority: .userInitiated) {
@@ -132,17 +138,35 @@ struct ScanHeavyWorkService: Sendable {
         var movedItemIDs = Set<String>()
         var moveRecords = [TrashMoveRecord]()
         var failedTitles = [String]()
+        var reports = [CleanReport]()
+        var notProcessedPaths = [String]()
+        var cancelled = false
 
-        for item in items {
-            try Task.checkCancellation()
+        for (index, item) in items.enumerated() {
+            if Task.isCancelled {
+                cancelled = true
+                notProcessedPaths = items[index...].flatMap(\.trashPaths)
+                break
+            }
             try await coordinator.requireValid(lease, owner: .cleanup)
             do {
                 let records = try await operations.moveToTrash(item, allowedPaths)
                 movedItems.append(item)
                 movedItemIDs.insert(item.id)
                 moveRecords.append(contentsOf: records)
+            } catch let partial as PartialTrashOperationError {
+                reports.append(partial.report)
+                moveRecords.append(contentsOf: partial.report.legacyTrashRecords)
+                failedTitles.append(item.title)
+                if partial.report.outcome == .cancelled {
+                    cancelled = true
+                    notProcessedPaths = items.dropFirst(index + 1).flatMap(\.trashPaths)
+                    break
+                }
             } catch is CancellationError {
-                throw CancellationError()
+                cancelled = true
+                notProcessedPaths = items[index...].flatMap(\.trashPaths)
+                break
             } catch let error as HeavyWorkCoordinator.Error {
                 throw error
             } catch {
@@ -154,7 +178,8 @@ struct ScanHeavyWorkService: Sendable {
             movedItems: movedItems,
             movedItemIDs: movedItemIDs,
             moveRecords: moveRecords,
-            failedTitles: failedTitles
+            failedTitles: failedTitles, reports: reports,
+            notProcessedPaths: notProcessedPaths, cancelled: cancelled
         )
     }
 

@@ -38,7 +38,7 @@ enum HoverPresentationState: Equatable, Sendable {
 }
 
 struct HoverIntentPolicy: Equatable, Sendable {
-    var initialOpenDelay: Duration = .milliseconds(8)
+    var initialOpenDelay: Duration = .zero
     var switchDelay: Duration = .zero
     var ordinaryCloseDelay: Duration = .milliseconds(260)
     var corridorGraceDuration: Duration = .milliseconds(320)
@@ -124,6 +124,8 @@ final class SmallWindowAnchorNSView: NSView {
     var onSnapshotChanged: ((NSRect, NSWindow) -> Void)?
     private var trackingArea: NSTrackingArea?
     private var lastReportedRect: NSRect?
+    private weak var lastReportedWindow: NSWindow?
+    private var isSnapshotReportScheduled = false
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -166,12 +168,32 @@ final class SmallWindowAnchorNSView: NSView {
     }
 
     private func reportSnapshotIfNeeded() {
+        guard window != nil else {
+            lastReportedRect = nil
+            lastReportedWindow = nil
+            return
+        }
+        guard !isSnapshotReportScheduled else { return }
+        isSnapshotReportScheduled = true
+        // AppKit invokes these callbacks inside SwiftUI layout. Publishing the
+        // resulting cascade geometry there reenters the current view update.
+        // Coalesce that pass and read the latest attached frame on delivery.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            isSnapshotReportScheduled = false
+            publishSnapshotIfNeeded()
+        }
+    }
+
+    private func publishSnapshotIfNeeded() {
         guard let window else { return }
         let rectInWindow = convert(bounds, to: nil)
         let screenRect = window.convertToScreen(rectInWindow)
         guard screenRect.isUsableWindowAnchor,
-              lastReportedRect?.isApproximatelyEqual(to: screenRect) != true else { return }
+              lastReportedWindow !== window
+                || lastReportedRect?.isApproximatelyEqual(to: screenRect) != true else { return }
         lastReportedRect = screenRect
+        lastReportedWindow = window
         onSnapshotChanged?(screenRect, window)
     }
 }
@@ -342,20 +364,18 @@ final class HoverIntentController {
         } else {
             PerformanceTelemetry.signposter.emitEvent("HoverOpenScheduled")
         }
-        let isCrossingTowardOpenChild = isSwitch
-            && pointerSamples.last.map { sample in
-                windowGroupFrames.first?.contains(sample.point) == true
-                    && windowGroupFrames.dropFirst().contains {
-                        pointerDirection(toward: $0) == .toward
-                    }
-            } == true
+        let isCrossingTowardOpenChild = isSwitch && isMovingTowardOpenChild()
         let resolvedDelay = delay
             ?? (isCrossingTowardOpenChild
                 ? policy.corridorGraceDuration
                 : isSwitch ? policy.switchDelay : policy.initialOpenDelay)
         pendingTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: resolvedDelay)
+                // Retain one cancellable main-actor turn without routing an
+                // immediate reveal through the sleep scheduler.
+                if resolvedDelay > .zero {
+                    try await Task.sleep(for: resolvedDelay)
+                }
             } catch {
                 return
             }
@@ -444,6 +464,37 @@ final class HoverIntentController {
 
     func updateWindowGroupFrames(_ frames: [NSRect]) {
         windowGroupFrames = frames.filter(\.isUsableWindowAnchor)
+    }
+
+    private func isMovingTowardOpenChild() -> Bool {
+        guard let source = windowGroupFrames.first,
+              let first = pointerSamples.first,
+              let last = pointerSamples.last,
+              first.timestamp < last.timestamp,
+              source.contains(last.point) else { return false }
+        let dx = last.point.x - first.point.x
+        let dy = last.point.y - first.point.y
+        guard abs(dx) >= 2 else { return false }
+
+        return windowGroupFrames.dropFirst().contains { destination in
+            guard pointerDirection(toward: destination) == .toward else { return false }
+            let entryX: CGFloat
+            if destination.maxX <= source.minX, dx < 0 {
+                entryX = destination.maxX
+            } else if destination.minX >= source.maxX, dx > 0 {
+                entryX = destination.minX
+            } else {
+                return false
+            }
+            // Being closer to the child's center is not enough: vertical row
+            // changes and slight horizontal drift also satisfy that test.
+            // Protect only a trajectory that actually enters its near edge.
+            let travel = (entryX - last.point.x) / dx
+            let entryY = last.point.y + dy * travel
+            return travel >= 0 && entryY.isFinite
+                && entryY >= destination.minY - policy.corridorPadding
+                && entryY <= destination.maxY + policy.corridorPadding
+        }
     }
 
     func pointerDirection(toward destination: NSRect) -> PointerDirection {

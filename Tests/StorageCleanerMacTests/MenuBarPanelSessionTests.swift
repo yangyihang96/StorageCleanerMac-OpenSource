@@ -5,6 +5,39 @@ import XCTest
 
 @MainActor
 final class MenuBarPanelSessionTests: XCTestCase {
+    func testAnchorGeometryPublishesAfterLayoutUsingOnlyTheLatestFrame() async {
+        let panel = makePanel()
+        defer { panel.close() }
+        let anchor = SmallWindowAnchorNSView(frame: NSRect(x: 0, y: 0, width: 40, height: 20))
+        var reported: [NSRect] = []
+        anchor.onSnapshotChanged = { rect, _ in reported.append(rect) }
+        panel.contentView?.addSubview(anchor)
+        anchor.frame.origin.x = 12
+        anchor.layout()
+        anchor.frame.origin.x = 24
+        anchor.layout()
+
+        XCTAssertTrue(reported.isEmpty, "A layout callback must not reenter SwiftUI state publication")
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(reported, [panel.convertToScreen(anchor.convert(anchor.bounds, to: nil))])
+    }
+
+    func testDetachedAnchorDoesNotPublishItsQueuedGeometry() async {
+        let panel = makePanel()
+        defer { panel.close() }
+        let anchor = SmallWindowAnchorNSView(frame: NSRect(x: 0, y: 0, width: 40, height: 20))
+        var reports = 0
+        anchor.onSnapshotChanged = { _, _ in reports += 1 }
+        panel.contentView?.addSubview(anchor)
+        anchor.removeFromSuperview()
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(reports, 0, "A removed hover target must not reposition a later menu")
+    }
+
     func testUnpinnedMenuPanelStillAppearsAboveOrdinaryAppWindows() {
         let panel = makePanel()
         defer { panel.close() }

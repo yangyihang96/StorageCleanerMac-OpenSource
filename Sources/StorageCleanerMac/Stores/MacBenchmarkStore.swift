@@ -181,9 +181,7 @@ final class MacBenchmarkStore: ObservableObject {
     /// A result from an older workload, scoring, or reference-set revision
     /// stays in history for inspection, but is never mixed into a best score.
     var currentV7ScoringVersion: String {
-        BenchmarkV7ReferenceCatalog.versions(
-            for: OfficialBenchmarkPlan.current.plan
-        ).scoringVersion
+        MSeriesProtocol.scoring
     }
 
     var currentComparableOfficialV7History: [BenchmarkV7Result] {
@@ -369,7 +367,7 @@ final class MacBenchmarkStore: ObservableObject {
         startV7(
             plan: official.plan,
             categories: official.categories,
-            targetDirectory: DiskBenchmarkKernel.defaultRootDirectory
+            targetDirectory: MSeriesProtocol.temporaryRoot
         )
     }
 
@@ -898,6 +896,7 @@ final class MacBenchmarkStore: ObservableObject {
             }
         }
         return BenchmarkV7Result(
+            mSeries: result.mSeries,
             session: result.session,
             preflight: result.preflight,
             environment: result.environment,
@@ -927,6 +926,7 @@ final class MacBenchmarkStore: ObservableObject {
         failure: BenchmarkV7Failure
     ) -> BenchmarkV7Result {
         BenchmarkV7Result(
+            mSeries: result.mSeries,
             session: result.session,
             preflight: result.preflight,
             environment: result.environment,

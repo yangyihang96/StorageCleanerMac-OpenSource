@@ -3,6 +3,17 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class DiskAndCapacityHealthTests: XCTestCase {
+    func testNetworkCapacityKeepsUnavailableSeparateFromFullDisk() {
+        XCTAssertNil(MountedStorageVolumeService.networkCapacity(total: nil, available: nil))
+        XCTAssertNil(MountedStorageVolumeService.networkCapacity(total: 0, available: 0))
+        XCTAssertNil(MountedStorageVolumeService.networkCapacity(total: 100, available: -1))
+        XCTAssertNil(MountedStorageVolumeService.networkCapacity(total: 100, available: 101))
+        let full = MountedStorageVolumeService.networkCapacity(total: 100, available: 0)
+        XCTAssertEqual(full?.totalBytes, 100)
+        XCTAssertEqual(full?.availableBytes, 0)
+        XCTAssertEqual(MountedStorageVolumeService.networkCapacity(total: 100, available: 25)?.availableBytes, 25)
+    }
+
     func testMountedVolumeClassificationSeparatesNetworkAndPhysicalExternalDisks() {
         XCTAssertEqual(
             MountedStorageVolumeService.classification(

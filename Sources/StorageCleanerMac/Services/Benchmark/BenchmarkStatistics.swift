@@ -281,7 +281,10 @@ enum BenchmarkStatistics {
         let lower = sortedSamples[lowerIndex]
         let upper = sortedSamples[upperIndex]
         let interpolated = lower + ((upper - lower) * fraction)
-        guard interpolated.isFinite, interpolated > 0 else {
+        // Internal percentile inputs include absolute deviations, where zero
+        // is valid. Public measurement inputs remain strictly positive in
+        // validatedSorted(_:); do not weaken that separate validation.
+        guard interpolated.isFinite, interpolated >= 0 else {
             throw BenchmarkStatisticsError.invalidSample
         }
         return interpolated

@@ -45,21 +45,21 @@ extension MenuBarAdvancedStatusView {
 
     var geekDiskPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
+            liveCard(.capacity) {
+                VStack(spacing: GeekPanelLayout.detailSpacing) {
             geekDiskVolumeList
             if !geekNetworkDiskVolumes.isEmpty {
                 geekNetworkDiskSection
             }
-            geekDiskIOHoverTarget
+                }
+            }
+            liveCard(.diskIO) { geekDiskIOHoverTarget }
             if showsExtendedGeekDetails {
-                geekDiskProcessCard
+                liveCard(.energyProcesses) { geekDiskProcessCard }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
-        .task {
-            guard showsExtendedGeekDetails,
-                  geekShouldRefreshOnDemandSnapshot else { return }
-            store.refreshEnergyImpact(priority: .utility)
-        }
+
     }
 
     private var geekDiskIOHoverTarget: some View {
@@ -85,17 +85,13 @@ extension MenuBarAdvancedStatusView {
                     GeekDiskLoadingRow()
                 }
             } else {
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: GeekPanelLayout.detailSpacing) {
-                        ForEach(Array(geekDiskVolumes.enumerated()), id: \.element.id) {
-                            index,
-                            volume in
-                            geekDiskVolumeHoverTarget(index: index, volume: volume)
-                        }
+                VStack(spacing: GeekPanelLayout.detailSpacing) {
+                    ForEach(Array(geekDiskVolumes.enumerated()), id: \.element.id) {
+                        index,
+                        volume in
+                        geekDiskVolumeHoverTarget(index: index, volume: volume)
                     }
                 }
-                .scrollIndicators(geekDiskVolumes.count > 3 ? .visible : .hidden)
-                .frame(height: geekDiskVolumeListHeight)
             }
         }
     }
@@ -109,7 +105,8 @@ extension MenuBarAdvancedStatusView {
                 "\(volume.name) 磁盘卷三级详情",
                 "\(volume.name) Disk Volume Deep Detail"
             ),
-            popoverSize: GeekHoverDetailMetrics.volumeSize,
+            popoverSize: volume.isNetwork && volume.capacity == nil
+                ? CGSize(width: 220, height: 100) : GeekHoverDetailMetrics.volumeSize,
             sourceOffset: CGFloat(index) * (42 + GeekPanelLayout.detailSpacing)
         ) {
             GeekDiskVolumeSummary(volume: volume)
@@ -120,15 +117,10 @@ extension MenuBarAdvancedStatusView {
                 status: volume.healthText,
                 temperature: volume.temperature,
                 healthCheckedAt: volume.healthCheckedAt,
-                showsHealthTimestamp: !volume.isNetwork
+                showsHealthTimestamp: !volume.isNetwork,
+                isNetwork: volume.isNetwork
             )
         }
-    }
-
-    private var geekDiskVolumeListHeight: CGFloat {
-        let visibleRowCount = min(max(geekDiskVolumes.count, 1), 3)
-        return CGFloat(visibleRowCount) * 42
-            + CGFloat(max(0, visibleRowCount - 1)) * GeekPanelLayout.detailSpacing
     }
 
     private var geekNetworkDiskSection: some View {
@@ -137,12 +129,14 @@ extension MenuBarAdvancedStatusView {
                 L10n.text("网络硬盘", "Network Drives"),
                 systemImage: AppSymbols.Panel.networkGlobe
             )
-            .font(.caption.weight(.medium))
+            .font(AdvancedPanelTypography.captionStrong)
             .foregroundStyle(storageTint)
             .padding(.horizontal, 2)
 
-            ForEach(geekNetworkDiskVolumes) { volume in
-                GeekDiskVolumeSummary(volume: volume)
+            VStack(spacing: GeekPanelLayout.detailSpacing) {
+                ForEach(Array(geekNetworkDiskVolumes.enumerated()), id: \.element.id) { index, volume in
+                    geekDiskVolumeHoverTarget(index: index, volume: volume)
+                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -268,11 +262,11 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekDiskProcessCard: some View {
-        GeekCombinedCard(height: 110, verticalPadding: 4) {
+        GeekCombinedCard(height: 110) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(L10n.text("进程", "PROCESSES"))
-                        .font(.callout.weight(.medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                         .foregroundStyle(storageTint)
                         .lineLimit(1)
                         .help(L10n.text(
@@ -283,15 +277,15 @@ extension MenuBarAdvancedStatusView {
 
                     Spacer(minLength: 4)
                     Text(geekOnDemandSnapshotStatusText)
-                        .font(.caption2)
+                        .font(AdvancedPanelTypography.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Text(L10n.text("读", "R"))
-                        .font(.footnote)
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(storageTint)
                         .frame(width: 54, alignment: .trailing)
                     Text(L10n.text("写", "W"))
-                        .font(.footnote)
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(storageTint)
                         .frame(width: 54, alignment: .trailing)
                 }
@@ -319,16 +313,10 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekDiskApps: [EnergyImpactApp] {
-        Array(
-            geekEnergyApps
-                .sorted {
-                    let lhsBytes = $0.diskReadBytesPerSecond + $0.diskWriteBytesPerSecond
-                    let rhsBytes = $1.diskReadBytesPerSecond + $1.diskWriteBytesPerSecond
-                    if lhsBytes != rhsBytes { return lhsBytes > rhsBytes }
-                    return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                }
-                .prefix(5)
-        )
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled { return geekEnergyApps }
+#endif
+        return store.menuBarPreparedProcesses?.disk ?? []
     }
 
     private var geekDiskReadPeakText: String {
@@ -349,7 +337,7 @@ extension MenuBarAdvancedStatusView {
 struct GeekDiskVolumePresentation: Identifiable, Equatable {
     let id: String
     let name: String
-    let capacity: StorageCapacitySnapshot
+    let capacity: StorageCapacitySnapshot?
     let healthText: String
     let smartStatus: DiskSMARTStatus
     let temperature: String?
@@ -395,7 +383,8 @@ private struct GeekDiskVolumeSummary: View {
     let volume: GeekDiskVolumePresentation
 
     private var capacityTint: Color {
-        switch volume.capacity.pressure {
+        guard let capacity = volume.capacity else { return .secondary }
+        return switch capacity.pressure {
         case .normal:
             AppChartPalette.primary
         case .attention:
@@ -432,14 +421,16 @@ private struct GeekDiskVolumeSummary: View {
 
                 VStack(alignment: .leading, spacing: 0) {
                     Text(volume.name)
-                        .font(.callout.weight(.medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                         .lineLimit(1)
 
-                    Text(L10n.text(
-                        "\(volume.capacity.userUsedPercent)% 已用 · \(ByteFormat.storageString(volume.capacity.userAvailableBytes)) 可用",
-                        "\(volume.capacity.userUsedPercent)% used · \(ByteFormat.storageString(volume.capacity.userAvailableBytes)) available"
-                    ))
-                    .font(.footnote)
+                    Text(volume.capacity.map { capacity in
+                        L10n.text(
+                            "\(capacity.userUsedPercent)% 已用 · \(ByteFormat.storageString(capacity.userAvailableBytes)) 可用",
+                            "\(capacity.userUsedPercent)% used · \(ByteFormat.storageString(capacity.userAvailableBytes)) available"
+                        )
+                    } ?? L10n.text("容量 —", "Capacity —"))
+                    .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
@@ -459,14 +450,14 @@ private struct GeekDiskVolumeSummary: View {
                             .frame(width: 7, height: 7)
                     }
                     Text(volume.healthText)
-                        .font(.caption2)
+                        .font(AdvancedPanelTypography.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .lineLimit(1)
                     }
                     if !volume.isNetwork {
                         Text(GeekDiskHealthTimestamp.ageText(volume.healthCheckedAt))
-                            .font(.caption2)
+                            .font(AdvancedPanelTypography.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -502,7 +493,7 @@ private struct GeekDiskLiveMetric: View {
                     .fill(color)
                     .frame(width: 8, height: 8)
                 Text(title)
-                    .font(.callout)
+                    .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.secondary)
             }
         }
@@ -518,11 +509,11 @@ private struct GeekDiskInlineMetric: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(title)
-                .font(.footnote)
+                .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Text(value)
-                .font(.footnote.weight(.medium))
+                .font(AdvancedPanelTypography.captionStrong)
                 .monospacedDigit()
                 .lineLimit(1)
         }
@@ -541,19 +532,19 @@ private struct GeekDiskProcessRow: View {
                 .frame(width: 14, height: 14)
 
             Text(app.name)
-                .font(.callout)
+                .font(AdvancedPanelTypography.body)
                 .lineLimit(1)
 
             Spacer(minLength: 3)
 
             Text(ByteFormat.string(app.diskReadBytesPerSecond))
-                .font(.callout)
+                .font(AdvancedPanelTypography.body)
                 .monospacedDigit()
                 .lineLimit(1)
                 .frame(width: 54, alignment: .trailing)
 
             Text(ByteFormat.string(app.diskWriteBytesPerSecond))
-                .font(.callout)
+                .font(AdvancedPanelTypography.body)
                 .monospacedDigit()
                 .lineLimit(1)
                 .frame(width: 54, alignment: .trailing)

@@ -5,9 +5,9 @@ import SwiftUI
 /// The scanner and its state stay owned by the feature Store. This view only
 /// Initial-state composition; result pages keep their own complete data lists.
 struct FileToolLandingPage<Accessory: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.moduleTheme) private var theme
     @Environment(\.windowLayoutMetrics) private var layout
-    @Environment(\.colorScheme) private var colorScheme
 
     let title: String
     let subtitle: String
@@ -19,6 +19,7 @@ struct FileToolLandingPage<Accessory: View>: View {
     let status: ScanStatusPresentation
     let isLoading: Bool
     let isActionDisabled: Bool
+    let allowsActionWhileLoading: Bool
     let trustText: String
     let action: () -> Void
     private let accessory: Accessory
@@ -34,6 +35,7 @@ struct FileToolLandingPage<Accessory: View>: View {
         status: ScanStatusPresentation,
         isLoading: Bool = false,
         isActionDisabled: Bool = false,
+        allowsActionWhileLoading: Bool = false,
         trustText: String,
         action: @escaping () -> Void,
         @ViewBuilder accessory: () -> Accessory
@@ -48,6 +50,7 @@ struct FileToolLandingPage<Accessory: View>: View {
         self.status = status
         self.isLoading = isLoading
         self.isActionDisabled = isActionDisabled
+        self.allowsActionWhileLoading = allowsActionWhileLoading
         self.trustText = trustText
         self.action = action
         self.accessory = accessory()
@@ -60,7 +63,7 @@ struct FileToolLandingPage<Accessory: View>: View {
                 && systemImage == AppSymbols.Navigation.fileAnalysis
             let innerInset = layout.density == .compact ? CGFloat(12) : GoldenLandingMetrics.innerInset
             let availableWidth = max(0, proxy.size.width - innerInset * 2)
-            let hasArtworkColumn = availableWidth >= 620 && !isLoading
+            let hasArtworkColumn = availableWidth >= 340 + 260 + profile.columnSpacing
             let actionWidth = hasArtworkColumn
                 ? max(340, min(isFileAnalysis ? 540 : 570, availableWidth * profile.actionFraction))
                 : availableWidth
@@ -68,18 +71,12 @@ struct FileToolLandingPage<Accessory: View>: View {
             VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.large) {
                 HStack(alignment: .top, spacing: profile.columnSpacing) {
                     VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-                        AppPageHeader(title: title, subtitle: subtitle, systemImage: systemImage, isHero: true) {
-                            if isLoading {
-                                FileToolLandingArtwork(systemImage: systemImage, tint: theme.accent,
-                                    featureGroup: theme.featureGroup, workflowIsActive: true)
-                                    .frame(width: 96, height: 96).accessibilityHidden(true)
-                            }
-                        }
+                        AppPageHeader(title: title, subtitle: subtitle, systemImage: systemImage, isHero: true) { EmptyView() }
 #if DEBUG
                         .layoutProbe(LayoutProbeID.landingHeader)
 #endif
-                        configurationPanel
-                            .frame(maxHeight: isLoading ? .infinity : 390)
+                        configurationPanel(availableWidth: actionWidth)
+                            .frame(maxHeight: 390)
                     }
                     .frame(width: actionWidth)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -99,9 +96,9 @@ struct FileToolLandingPage<Accessory: View>: View {
                         }
                         .frame(
                             maxWidth: .infinity,
-                            maxHeight: .infinity
+                            maxHeight: layout.isShort ? 260 : .infinity
                         )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: layout.isShort ? .top : .center)
                         .allowsHitTesting(false)
 #if DEBUG
                         .layoutProbe(LayoutProbeID.landingArtwork)
@@ -120,22 +117,24 @@ struct FileToolLandingPage<Accessory: View>: View {
                     RoundedRectangle(cornerRadius: AppDesignTokens.Radius.modulePanel)
                         .fill(theme.accent.opacity(0.018))
                         .overlay(RoundedRectangle(cornerRadius: AppDesignTokens.Radius.modulePanel)
-                            .strokeBorder(.white.opacity(0.09), lineWidth: 0.75))
+                            .strokeBorder(AppAppearanceColors.ink.opacity(0.09), lineWidth: 0.75))
                 }
             }
+#if DEBUG
+            .layoutProbe(LayoutProbeID.landingCanvas)
+#endif
         }
         .padding(.horizontal, GoldenLandingMetrics.outerInset)
         .padding(.top, layout.isShort ? 0 : 6)
         .padding(.bottom, GoldenLandingMetrics.outerInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .tint(theme.accent)
-        .environment(\.colorScheme, theme.isImmersive ? .dark : colorScheme)
 #if DEBUG
         .layoutProbe(LayoutProbeID.landingRoot)
 #endif
     }
 
-    private var configurationPanel: some View {
+    private func configurationPanel(availableWidth: CGFloat) -> some View {
         ContentPanel {
             VStack(alignment: .leading, spacing: 10) {
                 ScrollView {
@@ -144,8 +143,10 @@ struct FileToolLandingPage<Accessory: View>: View {
                             Label(configurationTitle ?? defaultConfigurationTitle, systemImage: "slider.horizontal.3")
                                 .font(.system(size: 17, weight: .medium))
                                 .foregroundStyle(theme.primaryText)
-                            Divider().overlay(.white.opacity(0.06))
-                            if showsBuiltInScopeGrid { builtInScopeGrid }
+                            Divider().overlay(AppAppearanceColors.ink.opacity(0.06))
+                            if showsBuiltInScopeGrid {
+                                builtInScopeGrid(availableWidth: availableWidth - (layout.isShort ? 28 : 32))
+                            }
                             if configurationTitle != nil { accessory }
                         }
                         if !actionDetail.isEmpty {
@@ -174,7 +175,7 @@ struct FileToolLandingPage<Accessory: View>: View {
         Button(action: action) {
             HStack(spacing: 0) {
                 Group {
-                    if isLoading { ProgressView().controlSize(.small) }
+                    if isLoading && !allowsActionWhileLoading { ProgressView().controlSize(.small) }
                     else {
                         Image(systemName: actionSystemImage)
                             .font(.system(size: layout.isShort ? 23 : 29, weight: .medium))
@@ -196,7 +197,7 @@ struct FileToolLandingPage<Accessory: View>: View {
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(.white)
             .background(
-                LinearGradient(colors: [theme.accent, theme.accent.opacity(0.58)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                LinearGradient(colors: theme.actionGradient(for: colorScheme), startPoint: .topLeading, endPoint: .bottomTrailing),
                 in: RoundedRectangle(cornerRadius: AppDesignTokens.Radius.modulePanel, style: .continuous)
             )
             .overlay {
@@ -205,19 +206,23 @@ struct FileToolLandingPage<Accessory: View>: View {
             }
         }
         .buttonStyle(ResponsivePlainButtonStyle())
-        .disabled(isActionDisabled || isLoading)
+        .disabled(isActionDisabled || (isLoading && !allowsActionWhileLoading))
         .accessibilityLabel(actionTitle)
 #if DEBUG
         .layoutProbe(LayoutProbeID.landingActionButton)
 #endif
     }
 
-    private var builtInScopeGrid: some View {
+    private func builtInScopeGrid(availableWidth: CGFloat) -> some View {
         let nodes = builtInScopeNodes
         let isUpdateSourceList = systemImage == ReviewFilter.updater.systemImage
         let isApplicationScope = systemImage == ReviewFilter.uninstall.systemImage
         let usesInlineNodes = isUpdateSourceList || isApplicationScope
-        let columnCount = isUpdateSourceList ? 1 : (isApplicationScope ? 2 : (nodes.count == 3 ? 3 : min(4, max(1, nodes.count))))
+        let preferredColumns = isUpdateSourceList ? 1 : (isApplicationScope ? 2 : min(4, max(1, nodes.count)))
+        let minimumNodeWidth: CGFloat = usesInlineNodes ? 148 : 92
+        let spacing = AppDesignTokens.Spacing.small
+        let fittingColumns = max(1, Int((availableWidth + spacing) / (minimumNodeWidth + spacing)))
+        let columnCount = min(preferredColumns, fittingColumns)
         return LazyVGrid(
             columns: Array(
                 repeating: GridItem(.flexible(), spacing: AppDesignTokens.Spacing.small),
@@ -401,8 +406,7 @@ struct FileToolLandingArtwork: View {
                         .resizable()
                         .scaledToFit()
                         .frame(width: proxy.size.width, height: proxy.size.height)
-                        // Non-data artwork only. Screen compositing removes the black asset backdrop.
-                        .blendMode(.screen)
+                        .modifier(LandingArtworkCompositing())
                 } else if systemImage == ReviewFilter.uninstall.systemImage, !isCompact,
                           theme.isImmersive, let image = GoldenLandingAsset.uninstall.image {
                     GoldenLandingArtwork(image: image)
@@ -660,7 +664,7 @@ struct FileToolLandingArtwork: View {
                 Image(systemName: node.systemImage)
                     .symbolRenderingMode(.hierarchical)
                     .font(.system(size: isCompact ? 17 : 28, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.94))
+                    .foregroundStyle(AppAppearanceColors.ink.opacity(0.94))
             }
             .frame(width: isCompact ? 44 : 90, height: isCompact ? 44 : 90)
             .shadow(color: node.tint.opacity(0.24), radius: 12)
@@ -668,7 +672,7 @@ struct FileToolLandingArtwork: View {
             if !isCompact {
                 Text(node.title)
                     .font(AppDesignTokens.Typography.metadata.weight(.medium))
-                    .foregroundStyle(Color.white.opacity(0.78))
+                    .foregroundStyle(AppAppearanceColors.secondaryText)
                     .fixedSize(horizontal: true, vertical: false)
             }
         }
@@ -927,9 +931,9 @@ private struct HealthConceptArtwork: View {
                 VStack(spacing: 8) {
                     Text(L10n.text("尚未测量", "Not measured"))
                         .font(AppDesignTokens.Typography.cardTitle)
-                        .foregroundStyle(.white.opacity(0.84))
+                        .foregroundStyle(AppAppearanceColors.ink.opacity(0.84))
                     Capsule()
-                        .fill(Color.white.opacity(0.88))
+                        .fill(AppAppearanceColors.ink.opacity(0.88))
                         .frame(width: 38, height: 5)
                 }
                 .position(center)
@@ -955,7 +959,7 @@ private struct HealthSatellite: View {
             .font(.system(size: 38, weight: .semibold))
             .foregroundStyle(tint)
             .frame(width: 90, height: 90)
-            .background(Color.black.opacity(0.34), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(AppAppearanceColors.illustrationTile, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(tint.opacity(0.58), lineWidth: 1)
@@ -1034,11 +1038,11 @@ private struct EnergyNode: View {
                 .font(.system(size: 34, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 78, height: 78)
-                .background(Color.black.opacity(0.30), in: Circle())
+                .background(AppAppearanceColors.adaptive(light: 0xFFFFFF, dark: .black.opacity(0.30)), in: Circle())
                 .overlay { Circle().strokeBorder(tint.opacity(0.55), lineWidth: 1) }
             Text(L10n.text("尚未测量", "Not measured"))
                 .font(AppDesignTokens.Typography.caption)
-                .foregroundStyle(.white.opacity(0.58))
+                .foregroundStyle(AppAppearanceColors.tertiaryText)
         }
     }
 }
@@ -1057,31 +1061,27 @@ private struct FileAnalysisDirectoryArtwork: View {
             .foregroundStyle(tint)
             .frame(maxWidth: .infinity, alignment: .leading)
             Divider()
-            GeometryReader { proxy in
-                let side = min(proxy.size.width, proxy.size.height) * 0.87
-                ZStack {
-                    // Neutral, unsegmented tracks denote an empty chart, never byte proportions.
-                    ForEach([CGFloat(0.56), 0.72, 0.88, 1], id: \.self) { scale in
-                        Circle().stroke(.white.opacity(0.06), lineWidth: side * 0.058)
-                            .frame(width: side * scale, height: side * scale)
-                    }
-                    VStack(spacing: 14) {
-                        Image(systemName: "folder.fill")
-                            .font(.system(size: side * 0.17, weight: .regular))
-                            .foregroundStyle(LinearGradient(colors: [.cyan, .blue], startPoint: .top, endPoint: .bottom))
-                        Text(L10n.text("尚未分析", "Not analyzed"))
-                            .font(AppDesignTokens.Typography.compactLabel)
-                            .foregroundStyle(.secondary)
-                    }
+            VStack(spacing: 14) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 64, weight: .regular))
+                    .foregroundStyle(LinearGradient(colors: [.cyan, .blue], startPoint: .top, endPoint: .bottom))
+                HStack(spacing: 12) {
+                    Image(systemName: "square.grid.2x2")
+                    Text(L10n.text("矩形图", "Blocks"))
+                    Divider().frame(height: 18)
+                    Image(systemName: "rectangle.split.3x1")
+                    Text(L10n.text("分栏", "Columns"))
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .font(AppDesignTokens.Typography.compactLabel)
+                .foregroundStyle(.secondary)
             }
-            Text(L10n.text("分析后按实际容量展开", "Analyze to show measured sizes"))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Text(L10n.text("按目录浏览文件与容量", "Browse folders and measured sizes"))
                 .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
         }
         .padding(22)
-        .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.12)))
+        .background(AppAppearanceColors.ink.opacity(0.025), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
         .padding(.vertical, 28)
     }
 }

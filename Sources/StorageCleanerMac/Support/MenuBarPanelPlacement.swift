@@ -131,7 +131,7 @@ enum MenuBarPanelPlacement {
         let normalizedChildSizes = childSizes.map { size in
             NSSize(
                 width: max(0, size.width),
-                height: max(0, size.height)
+                height: min(max(0, size.height), max(0, bounds.height))
             )
         }
         let normalizedTopOffsets = normalizedChildSizes.indices.map { index in

@@ -7,7 +7,7 @@ enum GeekSensorTemperatureLayout {
     static let gridColumnSpacing: CGFloat = 10
     static let gaugeSpacing: CGFloat = 24
     static let miniRingSize: CGFloat = 14
-    static let fontSize: CGFloat = 12
+    static let fontSize: CGFloat = 11
 
     static func cardHeight(rowCount: Int) -> CGFloat {
         chromeHeight + CGFloat(max(0, rowCount)) * rowHeight
@@ -45,6 +45,8 @@ enum GeekSensorPageAvailability: Equatable {
 extension MenuBarAdvancedStatusView {
     var geekSensorsPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
+            liveCard(.sensors) {
+                VStack(spacing: GeekPanelLayout.detailSpacing) {
             switch geekSensorPageAvailability {
             case .sampling:
                 geekSensorStatusCard(PanelChartSampling.statusText)
@@ -67,12 +69,11 @@ extension MenuBarAdvancedStatusView {
                 }
             }
 
-            geekHardwareControlSummaryCard
+                }
+            }
+            liveCard(.controls) { geekHardwareControlSummaryCard }
                 .id(GeekHardwareDetailFocus.power)
 
-            if showsExtendedGeekDetails, !geekFrequencyClusters.isEmpty {
-                geekFrequencyCard
-            }
         }
     }
 
@@ -227,7 +228,7 @@ extension MenuBarAdvancedStatusView {
     /// the attached control palette, so interacting with monitoring UI can
     /// never change the hardware state.
     private var geekHardwareControlSummaryCard: some View {
-        GeekCombinedCard(height: geekFanControlCardHeight, verticalPadding: 5) {
+        GeekCombinedCard(height: geekFanControlCardHeight) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(L10n.text("风扇", "FANS"))
@@ -270,34 +271,6 @@ extension MenuBarAdvancedStatusView {
                     }
                 }
 
-                Divider().opacity(0.34)
-
-                // The single entry into fan control: a pinned palette with
-                // the mode toggles, sliders and the curve editor.
-                ControlPaletteHoverAnchor(
-                    kind: .fan,
-                    accessibilityLabel: L10n.text("打开风扇控制", "Open Fan Controls")
-                ) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .accessibilityHidden(true)
-                        Text(L10n.text("风扇控制", "Fan Control"))
-                            .foregroundStyle(.primary)
-                        Spacer(minLength: 6)
-                        Text(geekFanModeOrCapabilityTitle)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Image(systemName: AppSymbols.Panel.disclosure)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .accessibilityHidden(true)
-                    }
-                    .font(AdvancedPanelTypography.caption)
-                    .frame(height: 22)
-                }
-
                 if geekFanThermallyProtected {
                     Text(L10n.text("热保护中", "Thermal protection"))
                         .font(AdvancedPanelTypography.caption)
@@ -314,29 +287,49 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekFanControlCardHeight: CGFloat {
-        // Vertical padding + header + monitoring rows + divider + control
-        // entry + status line + stack spacing.
-        let monitoringRows = CGFloat(max(1, min(2, geekFanTelemetry.readings.count))) * 24
-        return 10 + 18 + monitoringRows + 1 + 22 + 18 + (geekFanThermallyProtected ? 17 : 0)
+        let rows = max(1, min(2, geekFanTelemetry.readings.count))
+        let itemCount = 1 + rows + (geekFanThermallyProtected ? 1 : 0)
+        return 10 + 18 + CGFloat(rows) * 24
+            + CGFloat(itemCount - 1) * 4 + (geekFanThermallyProtected ? 17 : 0)
     }
 
     private func compactFanHistoryRow(_ reading: SystemFanReading) -> some View {
-        ControlPaletteHoverAnchor(
-            kind: .fan,
-            accessibilityLabel: L10n.text("\(reading.displayName)转速与控制", "\(reading.displayName) History and Controls"),
-            selectedFanIndex: reading.index
-        ) {
-            HStack(spacing: 6) {
-                Text(reading.displayName).foregroundStyle(.secondary)
-                Spacer(minLength: 6)
-                Text(reading.displayRPM).foregroundStyle(.primary).monospacedDigit().lineLimit(1)
-                Image(systemName: AppSymbols.Panel.disclosure)
-                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
+        HStack(spacing: 6) {
+            GeekHoverDetailTarget(
+                accessibilityLabel: L10n.text("\(reading.displayName)转速历史", "\(reading.displayName) Speed History"),
+                chartRangeMetric: .fan,
+                popoverSize: GeekSensorPowerHoverDetailMetrics.sensorHistorySize
+            ) {
+                HStack(spacing: 6) {
+                    Text(reading.displayName).foregroundStyle(.secondary)
+                    Spacer(minLength: 6)
+                    Text(reading.displayRPM).foregroundStyle(.primary).monospacedDigit().lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, minHeight: 24)
+            } detail: {
+                GeekFanHoverDetail(
+                    points: geekChartHistory,
+                    duration: geekChartDuration,
+                    currentValue: reading.displayRPM,
+                    readings: geekFanTelemetry.readings,
+                    valueRange: 0...fanTrendMaximum,
+                    selectedFanIndex: reading.index
+                )
             }
-            .font(AdvancedPanelTypography.caption)
-            .frame(height: 24)
+            ControlPaletteHoverAnchor(
+                kind: .fan,
+                accessibilityLabel: L10n.text("\(reading.displayName)风扇控制", "\(reading.displayName) Fan Control"),
+                selectedFanIndex: reading.index
+            ) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(AdvancedPanelTypography.captionStrong)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 26, height: 24)
+                    .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius))
+            }
         }
+        .font(AdvancedPanelTypography.caption)
+        .frame(height: 24)
     }
 
     private var helperSummaryTint: Color {
@@ -376,36 +369,6 @@ extension MenuBarAdvancedStatusView {
             fanControl.openApprovalSettings()
         case .enabled, .connectionInterrupted, .signatureRejected:
             Task { await fanControl.refreshConnection() }
-        }
-    }
-
-    private var geekFrequencyCard: some View {
-        GeekHoverDetailTarget(
-            accessibilityLabel: L10n.text("CPU 频率三级详情", "CPU Frequency Deep Detail"),
-            popoverSize: GeekSensorPowerHoverDetailMetrics.compactSamplingSize
-        ) {
-            GeekCombinedCard(
-                height: GeekSensorTemperatureLayout.cardHeight(
-                    rowCount: geekFrequencyClusters.count
-                )
-            ) {
-                VStack(alignment: .leading, spacing: 0) {
-                    geekSensorHeader(
-                        L10n.text("CPU 频率", "CPU FREQUENCY"),
-                        emphasized: false
-                    )
-
-                    ForEach(geekFrequencyClusters, id: \.identifier) { cluster in
-                        GeekTelemetryRow(
-                            title: processorClusterTitle(cluster),
-                            value: cluster.frequencyMHz.map(processorFrequencyText) ?? "--",
-                            tint: processorClusterTint(cluster)
-                        )
-                    }
-                }
-            }
-        } detail: {
-            GeekFrequencyHoverDetail(clusters: geekFrequencyClusters)
         }
     }
 
@@ -462,12 +425,7 @@ extension MenuBarAdvancedStatusView {
             hasSensorData: geekHasSensorGaugeData
                 || !geekDisplayedTemperatures.isEmpty
                 || !geekFanReadings.isEmpty
-                || !geekFrequencyClusters.isEmpty
         )
-    }
-
-    private var geekFrequencyClusters: [CPUPerformanceStateService.ClusterReading] {
-        processorTelemetry?.clusters.filter { $0.frequencyMHz != nil } ?? []
     }
 
     var geekFanTelemetry: FanTelemetryState {
@@ -653,8 +611,6 @@ extension MenuBarAdvancedStatusView {
                 .font(.system(size: GeekSensorTemperatureLayout.fontSize, weight: .regular))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .allowsTightening(true)
-                .minimumScaleFactor(0.82)
 
             Spacer(minLength: 2)
 

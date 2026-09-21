@@ -113,6 +113,8 @@ struct MenuBarDeviceStatusSnapshot: Equatable, Sendable {
 @MainActor
 enum MenuBarDeviceStatusDrawing {
     static let size = NSSize(width: 28, height: 24)
+    private static let ringStart: CGFloat = 210
+    private static let ringSweep: CGFloat = 240
 
     static func image(
         for snapshot: MenuBarDeviceStatusSnapshot,
@@ -142,9 +144,9 @@ enum MenuBarDeviceStatusDrawing {
         let track = snapshot.showsMemoryRing
             ? memoryColor.withAlphaComponent(dark ? 0.25 : 0.2)
             : NSColor(srgbRed: 0.98, green: 0.88, blue: 0.55, alpha: dark ? 0.32 : 0.55)
-        arc(center: center, radius: 9.4, end: 0, color: track)
+        arc(center: center, radius: 9.4, end: ringStart - ringSweep, color: track)
         if let percent = snapshot.ringPercent, percent > 0 {
-            arc(center: center, radius: 9.4, end: 180 - 180 * CGFloat(percent) / 100,
+            arc(center: center, radius: 9.4, end: ringStart - ringSweep * CGFloat(percent) / 100,
                 color: snapshot.showsMemoryRing ? memoryColor : batteryColor(snapshot.batteryTint, dark: dark))
         }
 
@@ -159,7 +161,7 @@ enum MenuBarDeviceStatusDrawing {
                                  withAttributes: attributes)
 
         for index in 0..<3 {
-            let angle = CGFloat(225 + index * 45) * .pi / 180
+            let angle = CGFloat(250 + index * 20) * .pi / 180
             let point = NSPoint(x: center.x + 9.3 * cos(angle), y: center.y + 9.3 * sin(angle))
             let dot = NSBezierPath(ovalIn: NSRect(x: point.x - 1.25, y: point.y - 1.25,
                                                  width: 2.5, height: 2.5))
@@ -205,7 +207,7 @@ enum MenuBarDeviceStatusDrawing {
         path.lineWidth = 2
         path.lineCapStyle = .round
         path.appendArc(withCenter: center, radius: radius,
-                       startAngle: 180, endAngle: end, clockwise: true)
+                       startAngle: ringStart, endAngle: end, clockwise: true)
         path.stroke()
     }
 }

@@ -8,7 +8,6 @@ enum LargeFilesViewMode {
 
 enum StorageAnalysisDisplayMode: String, CaseIterable, Hashable, Identifiable {
     case visualMap
-    case sunburstMap
     case columnBrowser
 
     var id: String { rawValue }
@@ -17,8 +16,6 @@ enum StorageAnalysisDisplayMode: String, CaseIterable, Hashable, Identifiable {
         switch self {
         case .visualMap:
             L10n.text("矩形图", "Blocks")
-        case .sunburstMap:
-            L10n.text("旭日图", "Sunburst")
         case .columnBrowser:
             L10n.text("分栏", "Columns")
         }
@@ -34,6 +31,7 @@ struct LargeFilesView: View {
     @State private var pendingMigration: ExternalMigrationItem?
     @State private var pendingOriginalRemoval: PendingOriginalRemoval?
     @State private var migratingItemID: String?
+    @State private var migrationActivity: (title: String, detail: String)?
     @State private var completedMigrations: [String: ExternalMigrationCompletion] = [:]
     @State private var migrationNotice: ExternalMigrationNotice?
     @State private var isRefreshingVolumes = false
@@ -148,7 +146,7 @@ struct LargeFilesView: View {
                 Divider()
 
                 switch analysisSurface {
-                case .visualMap, .sunburstMap, .columnBrowser:
+                case .visualMap, .columnBrowser:
                     LargeFileStorageMap(
                         workspace: workspace,
                         displayMode: analysisSurface
@@ -437,6 +435,9 @@ struct LargeFilesView: View {
                 }
             }
 
+            if let migrationActivity {
+                RuntimeInlineStatus(title: migrationActivity.title, detail: migrationActivity.detail)
+            }
             if let migrationNotice {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: migrationNotice.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
@@ -523,8 +524,8 @@ struct LargeFilesView: View {
         guard let selectedVolume else { return "" }
         if item.kind == .application {
             return L10n.text(
-                "将“\(item.title)”复制到 \(selectedVolume.name) 并验证 App 身份和代码签名。本步骤不会处理原 App；请先完全退出该 App。",
-                "Copy “\(item.title)” to \(selectedVolume.name) and verify its identity and code signature. This step does not change the original app. Quit it first."
+                "将“\(item.title)”复制到 \(selectedVolume.name) 并验证 App 身份和代码签名。应用迁移仅复制并保留原件，不提供移除原 App；请先完全退出该 App。",
+                "Copy “\(item.title)” to \(selectedVolume.name) and verify its identity and code signature. App migration is copy-only and keeps the original. Original-app removal is unavailable. Quit it first."
             )
         }
         return L10n.text(
@@ -587,6 +588,10 @@ struct LargeFilesView: View {
         pendingMigration = nil
         migrationNotice = nil
         migratingItemID = item.id
+        migrationActivity = (
+            L10n.text("正在复制并验证", "Copying and Verifying"),
+            "\(item.title) → \(selectedVolume.name)"
+        )
 
         Task {
             do {
@@ -606,11 +611,13 @@ struct LargeFilesView: View {
                     isError: false,
                     destinationURL: result.destinationURL
                 )
-                pendingOriginalRemoval = PendingOriginalRemoval(
-                    item: item,
-                    destinationURL: result.destinationURL,
-                    volume: selectedVolume
-                )
+                if item.kind != .application {
+                    pendingOriginalRemoval = PendingOriginalRemoval(
+                        item: item,
+                        destinationURL: result.destinationURL,
+                        volume: selectedVolume
+                    )
+                }
                 if item.kind == .application {
                     store.refreshInstalledApps(priority: .utility)
                 }
@@ -623,14 +630,19 @@ struct LargeFilesView: View {
                 )
             }
             migratingItemID = nil
+            migrationActivity = nil
         }
     }
 
     private func moveOriginalToTrash(_ pending: PendingOriginalRemoval) {
-        guard migratingItemID == nil else { return }
+        guard migratingItemID == nil, pending.item.kind != .application else { return }
         pendingOriginalRemoval = nil
         migrationNotice = nil
         migratingItemID = pending.item.id
+        migrationActivity = (
+            L10n.text("正在核验副本并处理原件", "Verifying Copy and Handling Original"),
+            pending.item.title
+        )
 
         Task {
             do {
@@ -666,6 +678,7 @@ struct LargeFilesView: View {
                 )
             }
             migratingItemID = nil
+            migrationActivity = nil
         }
     }
 
@@ -752,6 +765,10 @@ struct LargeFilesScanLandingView: View {
     }
 
     var body: some View {
+        Group {
+        if isLoading {
+            runtimePage
+        } else {
         FileToolLandingPage(
             title: route.sidebarTitle,
             subtitle: route.pageSubtitle,
@@ -776,10 +793,9 @@ struct LargeFilesScanLandingView: View {
                     migrationConfiguration
                 }
 
-                if isLoading {
-                    scanProgressView
-                }
             }
+        }
+        }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
@@ -909,8 +925,8 @@ struct LargeFilesScanLandingView: View {
             Text(title).font(AppDesignTokens.Typography.metadata)
         }
         .frame(maxWidth: .infinity, minHeight: 63)
-        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.14)))
+        .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(AppAppearanceColors.ink.opacity(0.14)))
     }
 
     private var migrationConfiguration: some View {
@@ -959,7 +975,7 @@ struct LargeFilesScanLandingView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
         .padding(8)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+        .background(AppAppearanceColors.ink.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var migrationDestinationMenu: some View {
@@ -990,7 +1006,7 @@ struct LargeFilesScanLandingView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
         .padding(8)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+        .background(AppAppearanceColors.ink.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var selectedVolume: ExternalStorageVolume? {
@@ -1026,47 +1042,46 @@ struct LargeFilesScanLandingView: View {
         isRefreshingVolumes = false
     }
 
-    private var scanProgressView: some View {
-        HStack(alignment: .center, spacing: AppDesignTokens.Spacing.medium) {
-            scanProgressDetails
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .layoutPriority(1)
-            cancelScanButton
-        }
-        .frame(maxWidth: 420)
-    }
-
-    private var scanProgressDetails: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if mode == .migration, let progress = workspace.progress {
-                ProgressView(value: progress.fractionCompleted)
-                    .tint(AppDesignTokens.Palette.storage)
-                    .frame(maxWidth: 280)
-                Text(L10n.text(
-                    "已发现 \(progress.discoveredItemCount) 项 · \(ByteFormat.string(progress.discoveredBytes))",
-                    "\(progress.discoveredItemCount) items · \(ByteFormat.string(progress.discoveredBytes)) discovered"
-                ))
-                    .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            } else if let progress = workspace.storageAnalysisProgress {
-                HStack(spacing: AppDesignTokens.Spacing.small) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(L10n.text(
-                        "已读取 \(progress.inspectedItemCount) 项 · 已测量 \(ByteFormat.storageString(progress.measuredBytes))",
-                        "\(progress.inspectedItemCount) items · \(ByteFormat.storageString(progress.measuredBytes)) measured"
-                    ))
-                        .font(AppDesignTokens.Typography.compactLabel)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+    private var runtimePage: some View {
+        let phase = mode == .migration ? workspace.phase : workspace.storageAnalysisPhase
+        let state: RuntimeWorkflowState = phase == .paused ? .paused : phase == .cancelling ? .stopping : .running
+        let readingApplications = mode == .migration && workspace.migrationKind == .application
+        return FeatureRuntimePage(
+            module: route,
+            title: readingApplications
+                ? L10n.text("正在读取可搬移应用", "Reading Movable Applications")
+                : mode == .migration
+                    ? L10n.text("正在扫描可搬移文件", "Scanning Movable Files")
+                    : L10n.text("正在分析磁盘空间", "Analyzing Disk Space"),
+            state: state,
+            fraction: mode == .migration && !readingApplications ? workspace.progress.flatMap {
+                $0.progressKind == .determinate ? Double($0.fractionCompleted) : nil
+            } : nil,
+            metrics: runtimeMetrics,
+            currentItem: mode == .migration ? workspace.progress?.currentPath : workspace.storageAnalysisProgress?.currentPath,
+            trustText: trustText
+        ) {
+            EmptyView()
+        } actions: {
+            if !readingApplications {
+                cancelScanButton.disabled(state == .stopping)
             }
         }
+    }
+
+    private var runtimeMetrics: [RuntimeWorkflowMetric] {
+        if mode == .migration {
+            guard workspace.migrationKind != .application, let progress = workspace.progress else { return [] }
+            return [
+                .init(title: L10n.text("已发现", "Items Found"), value: L10n.items(progress.discoveredItemCount)),
+                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.string(progress.discoveredBytes))
+            ]
+        }
+        guard let progress = workspace.storageAnalysisProgress else { return [] }
+        return [
+            .init(title: L10n.text("已读取", "Items Read"), value: L10n.items(progress.inspectedItemCount)),
+            .init(title: L10n.text("已测量大小", "Measured Size"), value: ByteFormat.storageString(progress.measuredBytes))
+        ]
     }
 
     private var cancelScanButton: some View {
@@ -1278,13 +1293,9 @@ private struct ExternalAppMigrationRow: View {
                     ExternalDriveMigrationService.reveal(completedMigration.destinationURL)
                 }
                 .appButtonChrome(.secondary)
-                if !completedMigration.didMoveSourceToTrash {
-                    Button(L10n.text("处理原件", "Handle Original")) {
-                        onHandleOriginal(completedMigration)
-                    }
-                    .appButtonChrome(.secondary)
-                    .disabled(isDisabled)
-                }
+                Text(L10n.text("原 App 已保留", "Original app kept"))
+                    .font(AppDesignTokens.Typography.metadata)
+                    .foregroundStyle(.secondary)
             } else {
                 Button {
                     onMigrate()

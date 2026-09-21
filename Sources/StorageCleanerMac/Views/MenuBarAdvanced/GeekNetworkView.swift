@@ -3,7 +3,9 @@ import SwiftUI
 extension MenuBarAdvancedStatusView {
     var geekNetworkPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
-            geekNetworkTrend
+            liveCard(.network) { geekNetworkTrend }
+            liveCard(.networkInterface) {
+                VStack(spacing: GeekPanelLayout.detailSpacing) {
             if let tunnel = networkTopologySnapshot?.activeVPNTunnel {
                 GeekVPNDisclosure(tunnel: tunnel, refresh: refreshPanelData)
             }
@@ -11,6 +13,8 @@ extension MenuBarAdvancedStatusView {
             geekNetworkPublicAddress
             geekNetworkLocalAddresses
             geekNetworkProcessCard
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .top)
     }
@@ -94,7 +98,7 @@ extension MenuBarAdvancedStatusView {
             ipv6Address: publicNetworkAddressSnapshot?.ipv6Address,
             ipv4CountryCode: publicNetworkAddressSnapshot?.ipv4CountryCode,
             ipv6CountryCode: publicNetworkAddressSnapshot?.ipv6CountryCode,
-            isLoading: isRefreshingPublicNetworkAddress,
+            isLoading: !store.isMenuBarRefreshPaused && isRefreshingPublicNetworkAddress,
             unavailableText: L10n.text("暂不可用", "Unavailable")
         )
         .accessibilityHint(L10n.text(
@@ -110,7 +114,7 @@ extension MenuBarAdvancedStatusView {
             ipv6Address: geekPhysicalIPv6Address,
             ipv4CountryCode: nil,
             ipv6CountryCode: nil,
-            isLoading: networkTopologySnapshot == nil && networkInterfaceSnapshot == nil,
+            isLoading: !store.isMenuBarRefreshPaused && networkTopologySnapshot == nil && networkInterfaceSnapshot == nil,
             unavailableText: "—"
         )
     }
@@ -144,7 +148,7 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekNetworkProcessCard: some View {
-        GeekCombinedCard(height: geekNetworkProcessCardHeight, verticalPadding: 5) {
+        GeekCombinedCard(height: geekNetworkProcessCardHeight) {
             VStack(spacing: 1) {
                 GeekNetworkProcessHeader()
                 geekNetworkProcessRows
@@ -167,15 +171,15 @@ extension MenuBarAdvancedStatusView {
             }
         } else {
             HStack(spacing: 5) {
-                if networkProcessSamplingState == .sampling
-                    || networkProcessSamplingState == .idle {
+                if !store.isMenuBarRefreshPaused && (networkProcessSamplingState == .sampling
+                    || networkProcessSamplingState == .idle) {
                     ProgressView()
                         .controlSize(.mini)
                         .accessibilityHidden(true)
                 }
                 Text(geekNetworkProcessStatusText)
             }
-            .font(.system(size: 10, weight: .regular))
+            .font(AdvancedPanelTypography.body)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
             .accessibilityLabel(geekNetworkProcessStatusAccessibilityText)
@@ -189,7 +193,8 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekNetworkProcessStatusText: String {
-        switch networkProcessSamplingState {
+        if store.isMenuBarRefreshPaused { return L10n.text("已暂停", "Paused") }
+        return switch networkProcessSamplingState {
         case .sampling:
             L10n.text("正在采样…", "Sampling…")
         case .unavailable:
@@ -202,7 +207,8 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekNetworkProcessStatusAccessibilityText: String {
-        switch networkProcessSamplingState {
+        if store.isMenuBarRefreshPaused { return L10n.text("自动刷新已暂停", "Automatic refresh paused") }
+        return switch networkProcessSamplingState {
         case .sampling:
             L10n.text("正在采样逐进程网络流量", "Sampling per-process network transfer")
         case .unavailable:
@@ -216,7 +222,9 @@ extension MenuBarAdvancedStatusView {
 
     private var geekPhysicalNetworkTitle: String {
         guard networkTopologySnapshot != nil || networkInterfaceSnapshot != nil else {
-            return L10n.text("正在读取物理网络…", "Reading physical network…")
+            return store.isMenuBarRefreshPaused
+                ? L10n.text("已暂停", "Paused")
+                : L10n.text("正在读取物理网络…", "Reading physical network…")
         }
         switch geekConnectionSnapshot.connectionKind {
         case .wifi:
@@ -316,7 +324,7 @@ private struct GeekNetworkProcessHeader: View {
                 .frame(width: 48, alignment: .trailing)
                 .accessibilityLabel(L10n.text("下载速率", "Download rate"))
         }
-        .font(.system(size: 10, weight: .medium))
+        .font(AdvancedPanelTypography.captionStrong)
         .frame(height: 14)
     }
 }
@@ -331,7 +339,7 @@ private struct GeekNetworkProcessRow: View {
                 .frame(width: 16, height: 16)
 
             Text(process.name)
-                .font(.system(size: 10, weight: .regular))
+                .font(AdvancedPanelTypography.body)
                 .lineLimit(1)
 
             Spacer(minLength: 3)
@@ -342,7 +350,7 @@ private struct GeekNetworkProcessRow: View {
             Text(ByteFormat.string(process.downloadBytesPerSecond))
                 .frame(width: 48, alignment: .trailing)
         }
-        .font(.system(size: 10, weight: .regular))
+        .font(AdvancedPanelTypography.body)
         .monospacedDigit()
         .frame(height: 16)
         .help(L10n.text(
@@ -374,7 +382,7 @@ private struct GeekNetworkPeakAndTotalValue: View {
                 .foregroundStyle(.tertiary)
             Text(total)
         }
-        .font(.system(size: 10, weight: .regular))
+        .font(AdvancedPanelTypography.body)
         .monospacedDigit()
         .lineLimit(1)
         .frame(maxWidth: .infinity)
@@ -397,10 +405,10 @@ private struct GeekNetworkAddressCard: View {
     }
 
     var body: some View {
-        GeekCombinedCard(height: showsIPv6 ? 57 : 39, verticalPadding: 5) {
+        GeekCombinedCard(height: showsIPv6 ? 59 : 41) {
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(AdvancedPanelTypography.captionStrong)
                     .foregroundStyle(Color.accentColor)
                     .lineLimit(1)
 
@@ -439,7 +447,7 @@ private struct GeekNetworkAddressLine: View {
 
     var body: some View {
         Text(value)
-            .font(.system(size: 12, weight: .regular))
+            .font(AdvancedPanelTypography.body)
             .monospacedDigit()
             .lineLimit(1)
             .truncationMode(.middle)
@@ -458,22 +466,22 @@ private struct GeekNetworkTopologyRow: View {
     var showsDisclosure = false
 
     var body: some View {
-        GeekCombinedCard(height: 31, verticalPadding: 2) {
+        GeekCombinedCard(height: 39) {
             HStack(spacing: 6) {
                 Image(systemName: symbol)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(AdvancedPanelTypography.captionStrong)
                     .foregroundStyle(tint)
                     .frame(width: 15)
                     .accessibilityHidden(true)
 
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(AdvancedPanelTypography.captionStrong)
                     .lineLimit(1)
 
                 Spacer(minLength: 4)
 
                 Text(detail)
-                    .font(.system(size: 10, weight: .regular))
+                    .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -597,7 +605,7 @@ struct GeekVPNHoverDetail: View {
     }
 
     private var statusCard: some View {
-        GeekCombinedCard(height: 46, verticalPadding: 5) {
+        GeekCombinedCard(height: 46) {
             HStack(spacing: 7) {
                 Image(systemName: "lock.shield")
                     .font(.system(size: 15, weight: .medium))
@@ -606,17 +614,17 @@ struct GeekVPNHoverDetail: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(tunnel.displayName)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                         .lineLimit(1)
                     Text(vpnStatusText(tunnel.status))
-                        .font(.system(size: 10, weight: .regular))
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(vpnStatusTint(tunnel.status))
                 }
 
                 Spacer(minLength: 4)
 
                 Text(tunnel.protocolKind.displayName)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(AdvancedPanelTypography.captionStrong)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -624,7 +632,7 @@ struct GeekVPNHoverDetail: View {
     }
 
     private var tunnelCard: some View {
-        GeekCombinedCard(height: tunnelCardHeight, verticalPadding: 5) {
+        GeekCombinedCard(height: tunnelCardHeight) {
             VStack(spacing: 1) {
                 GeekNetworkTertiaryHeader(title: L10n.text("VPN 详情", "VPN Details"))
                 GeekNetworkCompactRow(title: L10n.text("协议", "Protocol"), value: tunnel.protocolKind.displayName)
@@ -705,10 +713,10 @@ struct GeekVPNHoverDetail: View {
     }
 
     private var managementCard: some View {
-        GeekCombinedCard(height: 64, verticalPadding: 5) {
+        GeekCombinedCard(height: 64) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(managementDescription)
-                    .font(.system(size: 10, weight: .regular))
+                    .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
 
@@ -731,7 +739,7 @@ struct GeekVPNHoverDetail: View {
 
                 if let actionMessage {
                     Text(actionMessage)
-                        .font(.system(size: 9, weight: .regular))
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -889,7 +897,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     var body: some View {
-        ScrollView(.vertical) {
+        Group {
             VStack(spacing: GeekPanelLayout.detailSpacing) {
                 interfaceCard
                 if connection.wifi != nil,
@@ -905,8 +913,8 @@ struct GeekNetworkTertiaryView: View {
             }
             .padding(contentPadding)
         }
-        .scrollIndicators(.automatic)
-        .frame(width: Self.referenceSize.width, height: Self.referenceSize.height, alignment: .top)
+        .frame(width: Self.referenceSize.width, alignment: .top)
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .contain)
         .onAppear {
             wiFiPowerControl.synchronize(confirmedPower: snapshot?.isWiFiPoweredOn)
@@ -920,7 +928,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     private var interfaceCard: some View {
-        GeekCombinedCard(height: connection.isVPNActive ? 91 : 76, verticalPadding: 5) {
+        GeekCombinedCard(height: connection.isVPNActive ? 91 : 76) {
             VStack(spacing: 1) {
                 GeekNetworkTertiaryHeader(title: L10n.text("网络接口", "Interface"))
                 GeekNetworkCompactRow(title: L10n.text("类型", "Type"), value: connectionTypeText)
@@ -943,7 +951,7 @@ struct GeekNetworkTertiaryView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
-        .font(.system(size: 12, weight: .regular))
+        .font(AdvancedPanelTypography.body)
     }
 
     private var hardwareAddressLine: some View {
@@ -971,7 +979,7 @@ struct GeekNetworkTertiaryView: View {
                     revealsHardwareAddress.toggle()
                 }
                 .buttonStyle(ResponsivePlainButtonStyle())
-                .font(.system(size: 10, weight: .medium))
+                .font(AdvancedPanelTypography.captionStrong)
                 .fixedSize()
                 .accessibilityLabel(revealsHardwareAddress
                     ? L10n.text("隐藏 MAC 地址", "Hide MAC address")
@@ -982,7 +990,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     private var wiFiCard: some View {
-        GeekCombinedCard(height: 146, verticalPadding: 5) {
+        GeekCombinedCard(height: 146) {
             VStack(spacing: 1) {
                 ViewThatFits(in: .horizontal) {
                     wiFiHeader
@@ -1027,7 +1035,7 @@ struct GeekNetworkTertiaryView: View {
     private var wiFiHeaderStatus: some View {
         HStack(spacing: 8) {
             Text(wiFiPowerStatusText)
-                .font(.system(size: 9, weight: .medium))
+                .font(AdvancedPanelTypography.captionStrong)
                 .foregroundStyle(wiFiPowerStatusTint)
                 .lineLimit(1)
                 .help(wiFiPowerHelpText)
@@ -1041,7 +1049,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     private var ethernetCard: some View {
-        GeekCombinedCard(height: 91, verticalPadding: 5) {
+        GeekCombinedCard(height: 91) {
             VStack(spacing: 1) {
                 GeekNetworkTertiaryHeader(title: L10n.text("有线网络", "Ethernet"))
                 GeekNetworkCompactRow(
@@ -1071,7 +1079,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     private var ipAddressCard: some View {
-        GeekCombinedCard(height: addressCardHeight, verticalPadding: 5) {
+        GeekCombinedCard(height: addressCardHeight) {
             VStack(alignment: .leading, spacing: 1) {
                 GeekNetworkTertiaryHeader(title: L10n.text("本地 IP 地址", "IP Addresses"))
                 ForEach(Array(addressRows.enumerated()), id: \.offset) { _, row in
@@ -1083,7 +1091,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     private var ipv4Card: some View {
-        GeekCombinedCard(height: configurationCardHeight(ipv4Rows), verticalPadding: 5) {
+        GeekCombinedCard(height: configurationCardHeight(ipv4Rows)) {
             VStack(alignment: .leading, spacing: 1) {
                 GeekNetworkTertiaryHeader(title: "IPv4")
                 ForEach(Array(ipv4Rows.enumerated()), id: \.offset) { _, row in
@@ -1094,7 +1102,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     private var ipv6Card: some View {
-        GeekCombinedCard(height: configurationCardHeight(ipv6Rows), verticalPadding: 5) {
+        GeekCombinedCard(height: configurationCardHeight(ipv6Rows)) {
             VStack(alignment: .leading, spacing: 1) {
                 GeekNetworkTertiaryHeader(title: "IPv6")
                 ForEach(Array(ipv6Rows.enumerated()), id: \.offset) { _, row in
@@ -1257,7 +1265,7 @@ private struct GeekNetworkTertiaryHeader: View {
 
     var body: some View {
         Text(title)
-            .font(.system(size: 12, weight: .medium))
+            .font(AdvancedPanelTypography.captionStrong)
             .foregroundStyle(Color.accentColor)
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1273,13 +1281,13 @@ private struct GeekNetworkInspectorAddressRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if !title.isEmpty {
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(AdvancedPanelTypography.captionStrong)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: title.isEmpty ? 0 : 4)
             Text(value)
-                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .font(AdvancedPanelTypography.body.monospaced())
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -1308,7 +1316,7 @@ private struct GeekNetworkCompactRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .font(.system(size: 12, weight: .regular))
+        .font(AdvancedPanelTypography.body)
         .help(value)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(title), \(value)")
@@ -1348,7 +1356,7 @@ private struct GeekWiFiPowerControl: View {
                 }
             } else {
                 Text("—")
-                    .font(.caption)
+                    .font(AdvancedPanelTypography.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel(L10n.text(
                         "Wi-Fi 控制不可用",

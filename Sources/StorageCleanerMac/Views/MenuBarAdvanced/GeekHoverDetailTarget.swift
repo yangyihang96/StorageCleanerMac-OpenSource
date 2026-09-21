@@ -4,25 +4,10 @@ typealias GeekPanelHoverActivityHandler = @MainActor @Sendable (UUID, Bool) -> V
 typealias GeekInlineTertiaryEventHandler = @MainActor @Sendable (GeekInlineTertiaryEvent) -> Bool
 typealias GeekTertiaryHoverHandler = @MainActor @Sendable (Bool) -> Void
 
-@MainActor
-final class GeekInlineTertiaryContentStore: ObservableObject {
-    @Published private(set) var content = AnyView(EmptyView())
-    let identity = UUID()
-    private(set) var lastPublishedAt: Date?
-
-    func update(_ content: AnyView, now: Date = Date(), force: Bool = false) {
-        guard GeekInlineTertiaryContentRefreshPolicy.shouldPublish(
-            lastPublishedAt: lastPublishedAt,
-            now: now,
-            force: force
-        ) else { return }
-        self.content = content
-        lastPublishedAt = now
-    }
-}
-
 enum GeekInlineTertiaryContentRefreshPolicy {
-    static let minimumInterval: TimeInterval = 0.9
+    // Coalesce updates within a short display budget, without holding a new
+    // reading for almost an entire sampling interval.
+    static let minimumInterval = MenuBarPerformancePolicy.contentCoalescingInterval
     private static let comparisonEpsilon: TimeInterval = 0.000_001
 
     static func shouldPublish(
@@ -146,6 +131,7 @@ struct GeekHoverDetailTarget<Target: View, Detail: View>: View {
     @Environment(\.geekInlineTertiaryActiveRequestID) private var activeInlineRequestID
     @Environment(\.geekChartRangeSelection) private var chartRangeSelection
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.menuBarChartContext) private var chartContext
 
     let accessibilityLabel: String
     let chartRangeMetric: GeekChartRangeMetric?
@@ -153,7 +139,7 @@ struct GeekHoverDetailTarget<Target: View, Detail: View>: View {
     let sourceOffset: CGFloat?
     let usesCardActiveBorder: Bool
     private let target: Target
-    private let detail: Detail
+    private let detail: () -> Detail
 
     @State private var isTargetHovered = false
     @State private var isDetailHovered = false
@@ -175,7 +161,7 @@ struct GeekHoverDetailTarget<Target: View, Detail: View>: View {
         sourceOffset: CGFloat? = nil,
         usesCardActiveBorder: Bool = false,
         @ViewBuilder target: () -> Target,
-        @ViewBuilder detail: () -> Detail
+        @ViewBuilder detail: @escaping () -> Detail
     ) {
         self.accessibilityLabel = accessibilityLabel
         self.chartRangeMetric = chartRangeMetric
@@ -183,7 +169,7 @@ struct GeekHoverDetailTarget<Target: View, Detail: View>: View {
         self.sourceOffset = sourceOffset
         self.usesCardActiveBorder = usesCardActiveBorder
         self.target = target()
-        self.detail = detail()
+        self.detail = detail
         _inlineContentStore = State(initialValue: GeekInlineTertiaryContentStore())
     }
 
@@ -401,7 +387,8 @@ struct GeekHoverDetailTarget<Target: View, Detail: View>: View {
 
     private var hostedDetail: AnyView {
         AnyView(
-            detail
+            detail()
+                .environment(\.menuBarChartContext, chartContext)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .onContinuousHover { phase in
                     switch phase {
@@ -441,28 +428,10 @@ private struct GeekInlineTertiaryContentReporter: NSViewRepresentable {
         NSView(frame: .zero)
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
     func updateNSView(_ nsView: NSView, context: Context) {
         let now = Date()
-        guard context.coordinator.shouldQueue(now: now) else { return }
         Task { @MainActor in
             store.update(content, now: now)
-        }
-    }
-
-    final class Coordinator {
-        private var lastQueuedAt: Date?
-
-        func shouldQueue(now: Date) -> Bool {
-            guard GeekInlineTertiaryContentRefreshPolicy.shouldPublish(
-                lastPublishedAt: lastQueuedAt,
-                now: now
-            ) else { return false }
-            lastQueuedAt = now
-            return true
         }
     }
 }
@@ -499,10 +468,6 @@ struct GeekNetworkHistoryHoverDetail: View {
     var body: some View {
         GeekHoverDetailCanvas(
             title: L10n.text("网络活动", "Network Activity"),
-            trailing: L10n.text(
-                "最近 \(Int(duration.rounded())) 秒",
-                "Last \(Int(duration.rounded())) Seconds"
-            ),
             showsRangePicker: true
         ) {
             GeekPrecisionNetworkChart(
@@ -513,7 +478,7 @@ struct GeekNetworkHistoryHoverDetail: View {
                 ),
                 duration: duration,
                 showsLegend: false,
-                showsTimelineLabels: true,
+                showsTimelineLabels: false,
                 showsTooltip: true,
                 horizontalInset: 2
             )
@@ -544,7 +509,7 @@ struct GeekProcessorActivityHoverDetail: View {
 
     var body: some View {
         GeekHoverDetailCanvas(
-            title: L10n.text("处理器活动 · 时间历史", "Processor · Time History"),
+            title: "",
             showsRangePicker: true
         ) {
             GeekPrecisionLineChart(
@@ -571,22 +536,14 @@ struct GeekProcessorActivityHoverDetail: View {
                 ),
                 style: .stackedBars,
                 duration: duration,
-                showsTimelineLabels: true,
+                showsLegend: false,
+                showsTimelineLabels: false,
                 showsTooltip: true,
                 horizontalInset: 2,
                 showsValueLabels: true,
                 cpuSamplingInterval: samplingInterval
             )
             .frame(height: 154)
-
-            GeekHistoryStatisticsRow(points: points, channel: .cpuTotal, unit: .percent)
-            GeekHistoryCoverageRow(points: points, channel: .cpuTotal, duration: duration)
-
-            // Live figures already appear in the parent; keep the third tier
-            // focused on the plot. Aggregation semantics remain discoverable.
-            Text(L10n.text("固定柱槽 · 时长加权均值 / 峰值", "Fixed slots · Time-weighted mean / peak"))
-                .font(.caption2).foregroundStyle(.secondary)
-                .help(L10n.text("每柱覆盖所选范围的一段时间；CPU 增量按其测量区间分配。缺测不延展，浅色帽线保留峰值。切换时间范围不改变采样频率。", "Each column covers part of the selected range. CPU deltas are assigned to their measured intervals; gaps are not extended. Pale caps retain peaks. Range selection does not change polling."))
         }
     }
 }
@@ -621,14 +578,13 @@ struct GeekGPUHoverDetail: View {
                     accessibilityLabel: L10n.text("GPU 活动时间柱状图", "GPU activity time bars"),
                     style: .stackedBars,
                     duration: duration,
-                    showsTimelineLabels: true,
+                    showsTimelineLabels: false,
                     showsTooltip: true,
                     horizontalInset: 2,
-                    showsValueLabels: true
+                    showsValueLabels: true,
+                    showsSamplingDetails: false
                 )
                 .frame(height: 154)
-                GeekHistoryStatisticsRow(points: points, channel: .gpu, unit: .percent)
-                GeekHistoryCoverageRow(points: points, channel: .gpu, duration: duration)
             } else {
                 GeekHoverUnavailableState(
                     text: L10n.text("此机型当前未提供可读取的 GPU 使用率", "GPU utilization is not readable on this Mac")
@@ -646,10 +602,6 @@ struct GeekGPUHoverDetail: View {
                     title: L10n.text("温度", "Temperature"),
                     value: temperatureValue ?? "--",
                     color: AppChartPalette.thermal
-                )
-                GeekHoverValueRow(
-                    title: L10n.text("频率 / FPS", "Frequency / FPS"),
-                    value: "-- / --"
                 )
             }
         }
@@ -689,7 +641,7 @@ struct GeekProcessorUsageHoverDetail: View {
             )
             .frame(height: 94)
             Text(L10n.text("全机 0–100% · 区间平均", "Whole Mac 0–100% · Interval means"))
-                .font(.caption2)
+                .font(AdvancedPanelTypography.caption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -728,7 +680,6 @@ struct GeekMemoryHistoryHoverDetail: View {
     var body: some View {
         GeekHoverDetailCanvas(
             title: L10n.text("内存组成", "Memory Composition"),
-            trailing: currentValue,
             showsRangePicker: true,
             spacing: 4
         ) {
@@ -744,50 +695,17 @@ struct GeekMemoryHistoryHoverDetail: View {
                 accessibilityLabel: L10n.text("真实内存组成历史：应用及其他、有线内存、压缩，三者互不重复", "Measured memory composition: non-overlapping App & Other, Wired, Compressed"),
                 style: .stackedBars,
                 duration: duration,
-                showsTimelineLabels: true,
+                showsTimelineLabels: false,
                 showsTooltip: true,
                 horizontalInset: 2,
-                showsValueLabels: true
+                showsValueLabels: true,
+                showsSamplingDetails: false
             )
             .frame(height: 174)
-            HStack {
-                Text(L10n.text("占用", "Used"))
-                Text(currentValue).monospacedDigit()
-                Spacer(minLength: 4)
-                Text(pressure).foregroundStyle(.secondary)
-            }.font(.caption)
-            GeekHistoryStatisticsRow(points: points, channel: .memory, unit: .percent)
-            GeekHistoryCoverageRow(points: points, channel: .memoryAppOrOtherBytes, duration: duration)
-            memoryBytesChart(channel: .swapUsedBytes, title: L10n.text("交换 · 单独计量", "Swap · Separate"), color: AppDesignTokens.Palette.diagnostic)
-        }
-    }
-
-    private func memoryBytesChart(channel: MenuBarTelemetryChannel, title: String, color: Color) -> some View {
-        let values = points.compactMap { channel.value(in: $0) }
-        let maximum = max(1, values.filter(\.isFinite).max() ?? 1)
-        return VStack(spacing: 1) {
-            HStack {
-                Label(title, systemImage: "square.fill")
-                    .foregroundStyle(color)
-                Spacer(minLength: 4)
-                Text(points.last.flatMap { channel.value(in: $0) }.map { GeekChartUnit.bytes.formatted($0) } ?? "—")
-                    .monospacedDigit()
-            }
-            .font(.caption)
-            GeekPrecisionLineChart(
-                points: points,
-                series: [MenuBarTelemetrySeries(id: title, title: title, channel: channel, color: color)],
-                valueRange: 0...maximum,
-                unit: .bytes,
-                accessibilityLabel: title,
-                style: .stackedBars,
-                duration: duration,
-                showsLegend: false,
-                showsTooltip: true,
-                horizontalInset: 2,
-                showsValueLabels: true
+            GeekHoverValueRow(
+                title: L10n.text("已用内存", "Used Memory"),
+                value: snapshot?.measuredUsedBytes.map { GeekChartUnit.bytes.formatted(Double($0)) } ?? "—"
             )
-            .frame(height: 50)
         }
     }
 }
@@ -819,10 +737,6 @@ struct GeekSwapHoverDetail: View {
                     )
                 }
 
-                GeekHoverValueRow(
-                    title: L10n.text("历史趋势", "History Trend"),
-                    value: L10n.text("尚未采集", "Not Collected")
-                )
             } else {
                 GeekHoverUnavailableState(text: L10n.text("正在读取交换使用情况", "Reading swap usage"))
             }
@@ -837,6 +751,7 @@ struct GeekDiskVolumeHoverDetail: View {
     let temperature: String?
     var healthCheckedAt: Date? = nil
     var showsHealthTimestamp = true
+    var isNetwork = false
 
     var body: some View {
         GeekHoverDetailCanvas(title: volumeName.isEmpty ? L10n.text("系统磁盘", "System Disk") : volumeName) {
@@ -859,7 +774,7 @@ struct GeekDiskVolumeHoverDetail: View {
                     value: ByteFormat.storageString(snapshot.reclaimableEstimateBytes)
                 )
 
-                GeekHoverValueRow(title: L10n.text("SSD 状态", "SSD Status"), value: status)
+                GeekHoverValueRow(title: isNetwork ? L10n.text("连接", "Connection") : L10n.text("SSD 状态", "SSD Status"), value: status)
                 if showsHealthTimestamp {
                     GeekHoverValueRow(
                         title: L10n.text("健康读取", "Health read"),
@@ -868,10 +783,12 @@ struct GeekDiskVolumeHoverDetail: View {
                     .help(GeekDiskHealthTimestamp.detailText(healthCheckedAt))
                     .accessibilityValue(GeekDiskHealthTimestamp.detailText(healthCheckedAt))
                 }
-                GeekHoverValueRow(
-                    title: L10n.text("温度", "Temperature"),
-                    value: temperature ?? L10n.text("未采集", "Not Collected")
-                )
+                if let temperature {
+                    GeekHoverValueRow(title: L10n.text("温度", "Temperature"), value: temperature)
+                }
+            } else if isNetwork {
+                GeekHoverValueRow(title: L10n.text("连接", "Connection"), value: status)
+                GeekHoverValueRow(title: L10n.text("容量", "Capacity"), value: "—")
             } else {
                 GeekHoverUnavailableState(text: L10n.text("正在读取磁盘容量", "Reading disk capacity"))
             }
@@ -988,12 +905,12 @@ private struct GeekDiskCapacityValue: View {
                     .frame(width: 7, height: 7)
                     .accessibilityHidden(true)
                 Text(title)
-                    .font(.system(size: 10.5, weight: .regular))
+                    .font(AdvancedPanelTypography.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Text(value)
-                .font(.system(size: 12.5, weight: .medium))
+                .font(AdvancedPanelTypography.value)
                 .monospacedDigit()
                 .lineLimit(1)
         }
@@ -1009,17 +926,13 @@ struct GeekDiskIOHoverDetail: View {
     var body: some View {
         GeekHoverDetailCanvas(
             title: L10n.text("磁盘 I/O", "Disk I/O"),
-            trailing: L10n.text(
-                "最近 \(Int(duration.rounded())) 秒",
-                "Last \(Int(duration.rounded())) Seconds"
-            ),
             showsRangePicker: true
         ) {
             GeekDiskIOChart(
                 points: points,
                 accessibilityLabel: L10n.text("磁盘读取与写入趋势", "Disk read and write trend"),
                 duration: duration,
-                showsTimelineLabels: true,
+                showsTimelineLabels: false,
                 showsTooltip: true,
                 horizontalInset: 2
             )
@@ -1060,7 +973,7 @@ struct GeekHistoryStatisticsRow: View {
             Spacer(minLength: 0)
             readout(L10n.text("峰值", "Peak"), value: stats?.maximum)
         }
-        .font(.system(size: 11))
+        .font(AdvancedPanelTypography.body)
         .monospacedDigit()
     }
 
@@ -1138,15 +1051,15 @@ struct TimeRangeSelector: View {
                     .font(.system(size: 7, weight: .semibold))
                     .accessibilityHidden(true)
             }
-            .font(.system(size: 11, weight: .medium))
+            .font(AdvancedPanelTypography.captionStrong)
             .foregroundStyle(appearance == .dark ? Color.white.opacity(0.92) : .primary)
             .lineLimit(1)
             .padding(.horizontal, 3)
             .padding(.vertical, 2)
             .frame(minWidth: 28, minHeight: 22)
-            .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous))
             .background {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
                     .fill(Color.primary.opacity(isHovered && isEnabled ? 0.06 : 0))
             }
         }
@@ -1193,14 +1106,14 @@ struct GeekHoverDetailCanvas<Content: View>: View {
         VStack(alignment: .leading, spacing: spacing) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
-                    .font(.callout.weight(.semibold))
+                    .font(AdvancedPanelTypography.captionStrong)
                     .monospacedDigit()
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 if showsRangePicker {
                     if let trailing {
                         Text(trailing)
-                            .font(.footnote)
+                            .font(AdvancedPanelTypography.body)
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .lineLimit(1)
@@ -1215,7 +1128,7 @@ struct GeekHoverDetailCanvas<Content: View>: View {
                     )
                 } else if let trailing {
                     Text(trailing)
-                        .font(.footnote)
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .lineLimit(1)
@@ -1246,7 +1159,7 @@ struct GeekHoverValueRow: View {
     let value: String
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
             Text(title)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -1255,7 +1168,8 @@ struct GeekHoverValueRow: View {
                 .monospacedDigit()
                 .lineLimit(1)
         }
-        .font(.footnote)
+        .font(AdvancedPanelTypography.body)
+        .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
         .accessibilityElement(children: .combine)
     }
 }
@@ -1276,7 +1190,7 @@ struct GeekHoverLegendValue: View {
             Text(value)
                 .monospacedDigit()
         }
-        .font(.footnote)
+        .font(AdvancedPanelTypography.body)
         .lineLimit(1)
         .accessibilityElement(children: .combine)
     }
@@ -1293,7 +1207,7 @@ struct GeekHoverLargeValue: View {
                 .monospacedDigit()
                 .lineLimit(1)
             Text(title)
-                .font(.caption)
+                .font(AdvancedPanelTypography.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -1310,7 +1224,7 @@ struct GeekHoverUnavailableState: View {
             Image(systemName: "waveform.path.ecg")
                 .foregroundStyle(.secondary)
             Text(text)
-                .font(.footnote)
+                .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }

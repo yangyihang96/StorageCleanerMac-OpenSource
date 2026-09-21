@@ -100,7 +100,7 @@ private struct GlassPanelModifier: ViewModifier {
 
     private var borderColor: Color {
         let base = colorSchemeContrast == .increased
-            ? (moduleTheme.isImmersive ? Color.white : Color.primary)
+            ? (moduleTheme.isImmersive ? AppAppearanceColors.ink : Color.primary)
             : (tint ?? moduleTheme.accent)
         return base.opacity(borderOpacity)
     }

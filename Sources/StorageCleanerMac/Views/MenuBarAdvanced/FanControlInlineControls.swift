@@ -155,11 +155,14 @@ struct FanSyncToggleRow: View {
             guard !isDisabled else { return }
             draft.setSynchronized(!draft.synchronizesFans)
         } label: {
-            HStack(spacing: 7) {
-                Image(systemName: draft.synchronizesFans ? "checkmark.square.fill" : "square")
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                 Text(L10n.text("同步所有风扇", "Synchronize All Fans"))
-                Spacer(minLength: 0)
+                Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
+                Image(systemName: draft.synchronizesFans ? "checkmark" : "minus")
+                    .foregroundStyle(draft.synchronizesFans ? Color.accentColor : Color.secondary)
+                    .accessibilityHidden(true)
             }
+            .frame(minHeight: MiniWindowStyleTokens.controlRowHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(ResponsivePlainButtonStyle())
@@ -197,33 +200,28 @@ struct FanManualSliderList: View {
         let readings = telemetry.readings.filter { fanID == nil || $0.index == fanID }
         let minimum = FanCurveEditor.targetRPM(percentage: 0, fanReadings: readings)
         let maximum = FanCurveEditor.targetRPM(percentage: 100, fanReadings: readings)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Text(title)
-                Spacer(minLength: 4)
-                if !compact { Text(Self.actualRPM(fanID: fanID, telemetry: telemetry).map {
-                    L10n.text("实际 ", "Actual ") + SystemFanSpeedFormat.string($0)
-                } ?? L10n.text("实际 —", "Actual —"))
-                    .monospacedDigit().foregroundStyle(.secondary) }
-            }
-            HStack(spacing: 5) {
-                Text(fanID == nil && telemetry.fanCount > 1
-                    ? L10n.text("平均目标", "Average Target")
-                    : L10n.text("目标转速", "Target Speed"))
-                Spacer(minLength: 4)
-                if let target = draft.targetRPM(fanID: fanID, telemetry: telemetry) {
-                    TextField("", value: Binding(
-                        get: { draft.targetRPM(fanID: fanID, telemetry: telemetry) ?? target },
-                        set: { guard !isDisabled else { return }; draft.setTargetRPM($0, fanID: fanID, telemetry: telemetry) }
-                    ), format: .number.grouping(.never))
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 62)
-                    .disabled(isDisabled)
-                    .accessibilityLabel(title + L10n.text("草稿目标 RPM", " Draft Target RPM"))
-                    Text("rpm")
+        return VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                Text(title).lineLimit(1)
+                Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
+                if compact {
+                    Text(draft.percentage(for: fanID).map { "\(Int($0.rounded()))%" } ?? "—")
+                        .monospacedDigit()
                 } else {
-                    Text("—")
+                    Text(Self.actualRPM(fanID: fanID, telemetry: telemetry).map {
+                        L10n.text("实际 ", "Actual ") + SystemFanSpeedFormat.string($0)
+                    } ?? L10n.text("实际 —", "Actual —"))
+                        .monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
+            if !compact {
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                    Text(fanID == nil && telemetry.fanCount > 1
+                        ? L10n.text("平均目标", "Average Target")
+                        : L10n.text("目标转速", "Target Speed"))
+                    Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
+                    targetRPMField(fanID: fanID, title: title)
                 }
             }
             if let minimum, let maximum, let percentage = draft.percentage(for: fanID) {
@@ -231,15 +229,18 @@ struct FanManualSliderList: View {
                     get: { draft.percentage(for: fanID) ?? percentage },
                     set: { guard !isDisabled else { return }; draft.setPercentage($0, fanID: fanID) }
                 ), isDisabled: isDisabled) { _ in }
-                HStack {
-                    Text(SystemFanSpeedFormat.string(minimum))
-                    Spacer(minLength: 4)
-                    Text(SystemFanSpeedFormat.string(maximum))
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                    Text(compact ? "\(minimum)" : SystemFanSpeedFormat.string(minimum))
+                    Spacer(minLength: 0)
+                    if compact { targetRPMField(fanID: fanID, title: title) }
+                    Spacer(minLength: 0)
+                    Text(compact ? "\(maximum)" : SystemFanSpeedFormat.string(maximum))
                 }
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .help(L10n.text("硬件读取量程；0% 对应最低转速，不代表停转。", "Reported hardware range; 0% means minimum speed, not stopped."))
                 if fanID == nil && !compact {
-                    HStack(spacing: 4) {
+                    HStack(spacing: MiniWindowStyleTokens.rowSpacing) {
                         ForEach([25.0, 50.0, 75.0, 100.0], id: \.self) { preset in
                             Button("\(Int(preset))%") {
                                 guard !isDisabled else { return }
@@ -256,8 +257,29 @@ struct FanManualSliderList: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .font(AdvancedPanelTypography.caption)
+        .font(AdvancedPanelTypography.body)
         .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder private func targetRPMField(fanID: Int?, title: String) -> some View {
+        if let target = draft.targetRPM(fanID: fanID, telemetry: telemetry) {
+            HStack(spacing: MiniWindowStyleTokens.rowSpacing) {
+                TextField("", value: Binding(
+                    get: { draft.targetRPM(fanID: fanID, telemetry: telemetry) ?? target },
+                    set: { guard !isDisabled else { return }; draft.setTargetRPM($0, fanID: fanID, telemetry: telemetry) }
+                ), format: .number.grouping(.never))
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 62)
+                .disabled(isDisabled)
+                .accessibilityLabel(title + L10n.text("草稿目标 RPM", " Draft Target RPM"))
+                Text("rpm").lineLimit(1).fixedSize()
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .foregroundStyle(.primary)
+        } else {
+            Text("—")
+        }
     }
 
     static func actualRPM(fanID: Int?, telemetry: FanTelemetryState) -> Int? {

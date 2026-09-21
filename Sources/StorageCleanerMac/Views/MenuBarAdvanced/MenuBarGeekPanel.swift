@@ -26,7 +26,12 @@ enum GeekOnDemandSnapshotFreshnessState: Equatable {
 }
 
 enum GeekOnDemandSnapshotFreshness {
+    static let refreshInterval = MenuBarPerformancePolicy.visibleProcessInterval
     static let staleAfter: TimeInterval = 5 * 60
+
+    static func shouldRefresh(startedAt: Date?, now: Date = Date()) -> Bool {
+        startedAt.map { now.timeIntervalSince($0) >= refreshInterval - 0.05 } ?? true
+    }
 
     static func state(
         generatedAt: Date?,
@@ -57,12 +62,26 @@ enum GeekOnDemandSnapshotFreshness {
 }
 
 extension MenuBarAdvancedStatusView {
-    @ViewBuilder
-    var geekDetailPage: some View {
+    // An overview opening must not instantiate the metadata for all detail
+    // pages. Erase only at this navigation boundary; card identity stays stable.
+    var geekDetailPage: AnyView {
         if selectedSection == .overview {
-            geekOverviewPage
+            return AnyView(geekOverviewPage)
         } else {
-            geekSelectedDetailPage
+            return AnyView(geekSelectedDetailPage)
+        }
+    }
+
+    private var requestedGeekPage: AnyView {
+        switch selectedSection {
+        case .overview: return AnyView(EmptyView())
+        case .processor: return AnyView(geekProcessorPage)
+        case .memory: return AnyView(geekMemoryPage)
+        case .disk: return AnyView(geekDiskPage)
+        case .network: return AnyView(geekNetworkPage)
+        case .sensors: return AnyView(geekSensorsPage)
+        case .power: return AnyView(geekPowerPage)
+        case .cleanup: return AnyView(geekCleanupPage)
         }
     }
 
@@ -76,11 +95,6 @@ extension MenuBarAdvancedStatusView {
             set: { if !$0 { panelSettingsState.cancelGeekEditor() } }
         ), attachmentAnchor: .rect(.bounds), arrowEdge: .leading) {
             GeekDashboardEditor(state: panelSettingsState)
-        }
-        .task {
-            guard !hasPrefetchedGeekDetails else { return }
-            hasPrefetchedGeekDetails = true
-            prefetchGeekDetailSnapshots()
         }
         .onAppear {
             synchronizeGeekOverviewPresentation()
@@ -114,81 +128,52 @@ extension MenuBarAdvancedStatusView {
         MenuBarStatusController.shared.setGeekPanelOverviewSize(size)
     }
 
-    /// Prime the two existing on-demand snapshots while the pointer is still
-    /// on the overview. This keeps CPU and memory process rows ready when the
-    /// attached detail opens without introducing another sampler or timer.
-    private func prefetchGeekDetailSnapshots() {
-#if DEBUG || STORAGE_CLEANER_BETA
-        guard !MiniWindowDemoData.isEnabled else { return }
-#endif
-        guard !store.isMenuBarRefreshPaused else { return }
-
-        if processMemorySnapshot?.topProcesses.isEmpty != false,
-           store.canRefreshMemory {
-            store.refreshMemory(priority: .utility)
-        }
-
-        if showsExtendedGeekDetails, geekShouldRefreshOnDemandSnapshot {
-            store.refreshEnergyImpact(priority: .utility)
-        }
-    }
 
     var geekSelectedDetailPage: some View {
         let measuredSection = selectedSection
         let measuredDensity = presentation
+        // Measure every row; the attached shell grows to this complete page.
         return Group {
-            switch selectedSection {
-            case .overview:
-                EmptyView()
-            case .processor:
-                geekProcessorPage
-            case .memory:
-                geekMemoryPage
-            case .disk:
-                geekDiskPage
-            case .network:
-                geekNetworkPage
-            case .sensors:
-                geekSensorsPage
-            case .power:
-                geekPowerPage
-            case .cleanup:
-                geekCleanupPage
+            VStack(spacing: GeekPanelLayout.detailSpacing) {
+                if store.isMenuBarRefreshPaused {
+                    MiniWindowPausedSamplingRow()
+                }
+                requestedGeekPage.id(selectedSection)
             }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .padding(.vertical, GeekPanelLayout.contentPadding)
-        .padding(.horizontal, GeekPanelLayout.contentPadding)
-        .background {
-            GeometryReader { proxy in
-                Color.clear.preference(
-                    key: GeekDetailContentSizeKey.self,
-                    value: GeekDetailContentMeasurement(
-                        section: measuredSection,
-                        density: measuredDensity,
-                        size: proxy.size
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, GeekPanelLayout.contentPadding)
+            .padding(.horizontal, GeekPanelLayout.contentPadding)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: GeekDetailContentSizeKey.self,
+                        value: GeekDetailContentMeasurement(
+                            section: measuredSection,
+                            density: measuredDensity,
+                            size: proxy.size
+                        )
                     )
-                )
+                }
+            }
+            .coordinateSpace(name: GeekTertiarySourceCoordinateSpace.name)
+            .onPreferenceChange(GeekDetailContentSizeKey.self) { measurement in
+                Task { @MainActor in
+                    guard let measurement else { return }
+                    updateMeasuredDetailContentSize(
+                        measurement.size,
+                        for: measurement.section,
+                        density: measurement.density
+                    )
+                }
             }
         }
-        .coordinateSpace(name: GeekTertiarySourceCoordinateSpace.name)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onPreferenceChange(GeekDetailContentSizeKey.self) { measurement in
-            Task { @MainActor in
-                guard let measurement else { return }
-                updateMeasuredDetailContentSize(
-                    measurement.size,
-                    for: measurement.section,
-                    density: measurement.density
-                )
-            }
-        }
     }
 
     var geekCanvas: some View {
         VStack(spacing: GeekPanelLayout.sectionSpacing) {
             ForEach(geekVisibleOverviewModules) { module in
-                geekOverviewModule(module)
+                liveCard(overviewCardDomain(module)) { geekOverviewModule(module) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -211,6 +196,17 @@ extension MenuBarAdvancedStatusView {
             case .memoryBreakdown, .fans, .systemLoad, .cleanupSummary:
                 return false
             }
+        }
+    }
+
+    private func overviewCardDomain(_ module: GeekDashboardModule) -> MenuBarCardDomain {
+        switch module {
+        case .coreMetrics, .memoryBreakdown: .memory
+        case .processorGraphics, .systemLoad: .cpu
+        case .network: .network
+        case .disk, .cleanupSummary: .capacity
+        case .sensors, .fans: .sensors
+        case .power: .battery
         }
     }
 
@@ -266,27 +262,23 @@ extension MenuBarAdvancedStatusView {
     var geekProcessorCard: some View {
         GeekCombinedCard(height: GeekPanelLayout.overviewProcessorCardHeight) {
             VStack(spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    AppSymbolIcon(
-                        systemImage: AppSymbols.Monitor.processor,
-                        role: .inline,
-                        tint: processorTint,
-                        isDecorative: true
-                    )
-
-                    Text("CPU")
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(processorTint)
+                HStack(alignment: .center, spacing: 6) {
+                    Label {
+                        Text("CPU").foregroundStyle(.primary)
+                    } icon: {
+                        Image(systemName: AppSymbols.Monitor.processor).foregroundStyle(processorTint)
+                    }
+                    .font(AdvancedPanelTypography.header)
 
                     Text(percentText(cpuChartHistory.last?.cpuTotal))
-                        .font(.callout)
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(.primary)
                         .monospacedDigit()
                         .lineLimit(1)
 
                     Spacer(minLength: 6)
                     // Reserve the independent time menu's hit area above the card.
-                    Color.clear.frame(width: 88, height: 22)
+                    Color.clear.frame(width: 88, height: 16)
                         .accessibilityHidden(true)
                 }
 
@@ -334,7 +326,7 @@ extension MenuBarAdvancedStatusView {
                     )
                     Spacer(minLength: 0)
                     Text("0–100%")
-                        .font(.caption2)
+                        .font(AdvancedPanelTypography.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .help(L10n.text("固定利用率量程；悬停可查看估算信息与实测峰值", "Fixed utilization scale; hover for estimates and observed peaks"))
@@ -380,18 +372,11 @@ extension MenuBarAdvancedStatusView {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
                     Label(L10n.text("内存", "Memory"), systemImage: AppSymbols.Monitor.memory)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(AdvancedPanelTypography.header)
                     Spacer(minLength: 4)
-                    TimelineView(.periodic(from: .now, by: MemorySampleStatusPresentation.refreshInterval)) { timeline in
-                        Text(memorySampleStatusText(at: timeline.date))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .help(memorySampleEvidenceText)
-                            .accessibilityHint(memorySampleEvidenceText)
-                    }
+
                 }
-                HStack(spacing: 8) {
+                HStack(spacing: 36) {
                     GeekCombinedRing(
                         title: L10n.text("占用", "Used"),
                         value: memoryRingUsedPercentText,
@@ -399,33 +384,13 @@ extension MenuBarAdvancedStatusView {
                         tint: AppChartPalette.memory,
                         size: GeekVisualTokens.overviewMemoryGaugeSize,
                         segments: memoryRingSegments,
-                        fixedValueFontSize: 19
+                        fixedValueFontSize: 24
                     )
-                    VStack(spacing: 2) {
-                        Text(L10n.text("已用 / 总量", "Used / Total"))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                        Text(memoryUsedAmountText)
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .lineLimit(1)
-                        Text("/ " + memoryTotalAmountText)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(L10n.text("已用内存 / 物理总量", "Used memory / physical total"))
-                    .accessibilityValue(memoryUsageAmountText)
                     geekMemoryPressureRing(size: GeekVisualTokens.overviewMemoryGaugeSize)
                 }
+                .frame(maxWidth: .infinity)
             }
-            .help(memoryRingExplanation + L10n.text(
-                " 占用弧长为已用/物理总量；压力为本应用评估的等级状态环，不代表压力百分比。完整历史见内存详情。",
-                " Usage arc is used/physical total. Pressure is an app-assessed grade shown as a status ring, not a pressure percentage. Full history is in memory details."
-            ) + " · " + (memorySnapshot.map { PanelTimestampFormat.display($0.generatedAt) } ?? "—"))
+
         }
     }
 
@@ -434,20 +399,17 @@ extension MenuBarAdvancedStatusView {
     }
 
     func geekMemoryPressureRing(size: CGFloat) -> some View {
-        GeekCombinedRing(
-            title: L10n.text("压力评估", "Pressure grade"),
-            value: memoryPressureDisplayText,
-            progress: nil,
+        let percent = memorySnapshot?.pressureEstimatePercent
+        return GeekCombinedRing(
+            title: L10n.text("压力评估", "Pressure estimate"),
+            value: percent.map { "\($0)%" } ?? "—",
+            progress: percent.map { Double($0) / 100 },
             tint: memoryTint,
             size: size,
-            fixedValueFontSize: size >= 90 ? 20 : 13,
-            strokeWidth: GeekVisualTokens.gaugeStrokeWidth(size: size),
-            isStatusOnly: memorySnapshot?.reportablePressureLevel != nil
+            fixedValueFontSize: size >= 90 ? 28 : 24,
+            strokeWidth: GeekVisualTokens.gaugeStrokeWidth(size: size)
         )
-        .help(memoryPressureTitle + " · " + memoryPressureHeadroomText + L10n.text(
-            "。根据系统压力余量、可用内存、压缩及交换评估等级；环不表示百分比。",
-            ". Grade assessed from system pressure headroom, available memory, compression and swap; the ring is not a percentage."
-        ))
+        .help(L10n.text("压力估算：100% − 系统压力余量", "Pressure estimate: 100% minus system pressure headroom"))
     }
 
     var geekNetworkCard: some View {
@@ -458,7 +420,7 @@ extension MenuBarAdvancedStatusView {
                     } icon: {
                         Image(systemName: AppSymbols.Monitor.network).foregroundStyle(resolvedDownloadTint)
                     }
-                .font(.system(size: 12, weight: .medium))
+                .font(AdvancedPanelTypography.header)
 
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -508,7 +470,7 @@ extension MenuBarAdvancedStatusView {
                         )
 
                         Text(volumeName)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(AdvancedPanelTypography.header)
                             .lineLimit(1)
 
                         Spacer(minLength: 4)
@@ -518,7 +480,7 @@ extension MenuBarAdvancedStatusView {
                                 Circle().fill(geekPrimaryDiskHealthTint).frame(width: 5, height: 5)
                                 Text(L10n.text("健康 \(health)", "Health \(health)"))
                             }
-                            .font(.system(size: 10))
+                            .font(AdvancedPanelTypography.caption)
                             .monospacedDigit()
                             .help(GeekDiskHealthTimestamp.detailText(GeekDiskHealthTimestamp.checkedAt(
                                 snapshot: computerHealthStore.snapshot?.disk,
@@ -526,7 +488,7 @@ extension MenuBarAdvancedStatusView {
                             )))
                         } else {
                             Text(L10n.text("已用 \(storagePercentText)", "\(storagePercentText) used"))
-                                .font(.system(size: 10))
+                                .font(AdvancedPanelTypography.caption)
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                         }
@@ -536,7 +498,7 @@ extension MenuBarAdvancedStatusView {
                         "\(ByteFormat.storageString(storageSnapshot.userAvailableBytes)) 可用",
                         "\(ByteFormat.storageString(storageSnapshot.userAvailableBytes)) free"
                     ))
-                    .font(.callout)
+                    .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.primary)
                     .monospacedDigit()
                     .lineLimit(1)
@@ -558,7 +520,7 @@ extension MenuBarAdvancedStatusView {
                         transaction.animation = nil
                     }
                     Text(L10n.text("总容量 \(ByteFormat.storageString(storageSnapshot.totalBytes))", "Total \(ByteFormat.storageString(storageSnapshot.totalBytes))"))
-                        .font(.system(size: 11))
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .lineLimit(1)
@@ -583,7 +545,7 @@ extension MenuBarAdvancedStatusView {
             GeekCombinedCard(height: GeekPanelLayout.overviewSensorsCardHeight) {
                 VStack(alignment: .leading, spacing: 4) {
                     Label(L10n.text("传感器", "Sensors"), systemImage: AppSymbols.Monitor.sensors)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(AdvancedPanelTypography.header)
                     HStack(spacing: 16) {
                         Button { selectGeekHardwareDetail(.monitoring) } label: {
                             GeekCombinedRing(
@@ -695,8 +657,7 @@ extension MenuBarAdvancedStatusView {
     private var geekBatterySummaryCard: some View {
         let charge = batterySnapshot?.chargePercent.map { Double($0) / 100 }
         return GeekCombinedCard(
-            height: GeekPanelLayout.overviewPowerCardHeight,
-            verticalPadding: 4
+            height: GeekPanelLayout.overviewPowerCardHeight
         ) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .center, spacing: 5) {
@@ -707,7 +668,7 @@ extension MenuBarAdvancedStatusView {
                             Image(systemName: AppSymbols.Monitor.battery)
                                 .foregroundStyle(AppDesignTokens.Palette.caution)
                         }
-                        .font(.system(size: 11, weight: .medium))
+                        .font(AdvancedPanelTypography.captionStrong)
                         Text(batterySnapshot?.chargePercent.map { "\($0)%" } ?? "--")
                             .font(.system(size: 18, weight: .regular))
                             .monospacedDigit()
@@ -716,7 +677,7 @@ extension MenuBarAdvancedStatusView {
                     Spacer(minLength: 4)
 
                     Text(geekOverviewPowerSourceAndModeTitle)
-                        .font(.system(size: 11, weight: .regular))
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(.primary)
                         .monospacedDigit()
                         .lineLimit(2)
@@ -745,10 +706,9 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekAppPowerSummaryCard: some View {
-        let snapshot = store.energyImpactSnapshot
+        let snapshot = store.menuBarPreparedProcesses?.snapshot
         return GeekCombinedCard(
-            height: GeekPanelLayout.overviewPowerCardHeight,
-            verticalPadding: 2
+            height: GeekPanelLayout.overviewPowerCardHeight
         ) {
             HStack(spacing: 8) {
                 GeekCombinedRing(
@@ -762,13 +722,13 @@ extension MenuBarAdvancedStatusView {
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(L10n.text("App 功耗", "APP POWER"))
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AdvancedPanelTypography.captionStrong)
                             .foregroundStyle(.secondary)
 
                         Spacer(minLength: 4)
 
                         Text(snapshot?.source ?? L10n.text("采样中", "Sampling"))
-                            .font(.system(size: 10, weight: .regular))
+                            .font(AdvancedPanelTypography.body)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -776,7 +736,7 @@ extension MenuBarAdvancedStatusView {
                     Text(snapshot.map {
                         L10n.text("\($0.activeAppCount) 个活跃 App", "\($0.activeAppCount) active apps")
                     } ?? L10n.text("正在测量 App 能耗", "Measuring app energy"))
-                    .font(.system(size: 10, weight: .regular))
+                    .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 }
@@ -792,8 +752,7 @@ extension MenuBarAdvancedStatusView {
 
     private var geekAdapterSummaryCard: some View {
         GeekCombinedCard(
-            height: GeekPanelLayout.overviewPowerCardHeight,
-            verticalPadding: 2
+            height: GeekPanelLayout.overviewPowerCardHeight
         ) {
             HStack(spacing: 8) {
                 GeekCombinedRing(
@@ -809,19 +768,19 @@ extension MenuBarAdvancedStatusView {
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(L10n.text("电源适配器", "Power Adapter").uppercased())
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AdvancedPanelTypography.captionStrong)
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 4)
                         Text(geekOverviewPowerModeText
                             ?? batteryElectricalSnapshot?.adapterName
                             ?? L10n.text("已连接", "Connected"))
-                            .font(.system(size: 10, weight: .regular))
+                            .font(AdvancedPanelTypography.body)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
 
                     Text(geekOverviewAdapterElectricalText)
-                        .font(.system(size: 10, weight: .regular))
+                        .font(AdvancedPanelTypography.body)
                         .foregroundStyle(.primary)
                         .monospacedDigit()
                         .lineLimit(1)
@@ -1314,23 +1273,10 @@ extension MenuBarAdvancedStatusView {
     }
 
     var geekEnergyApps: [EnergyImpactApp] {
-        var apps = store.energyImpactSnapshot?.apps ?? []
 #if DEBUG || STORAGE_CLEANER_BETA
-        if MiniWindowDemoData.isEnabled {
-            apps = MiniWindowDemoData.energyApps
-        }
+        if MiniWindowDemoData.isEnabled { return MiniWindowDemoData.energyApps }
 #endif
-        return Array(
-            apps
-                .filter { $0.isApplication && $0.isSignificantCurrentEnergy }
-                .sorted {
-                    if $0.currentPowerWatts != $1.currentPowerWatts {
-                        return $0.currentPowerWatts > $1.currentPowerWatts
-                    }
-                    return $0.cpuPercent > $1.cpuPercent
-                }
-                .prefix(5)
-        )
+        return store.menuBarPreparedProcesses?.energy ?? []
     }
 
     var geekShouldRefreshOnDemandSnapshot: Bool {
@@ -1339,14 +1285,16 @@ extension MenuBarAdvancedStatusView {
 #endif
         return !store.isMenuBarRefreshPaused
             && store.canRefreshEnergyImpact
-            && GeekOnDemandSnapshotFreshness.state(
-                generatedAt: store.energyImpactSnapshot?.generatedAt
-            ) != .current
+            && GeekOnDemandSnapshotFreshness.shouldRefresh(
+                startedAt: (store.menuBarPreparedProcesses?.snapshot).map {
+                    $0.generatedAt.addingTimeInterval(-max(0, $0.scanSeconds))
+                }
+            )
     }
 
     var geekOnDemandSnapshotStatusText: String {
         GeekOnDemandSnapshotFreshness.statusText(
-            generatedAt: store.energyImpactSnapshot?.generatedAt
+            generatedAt: store.menuBarPreparedProcesses?.snapshot.generatedAt
         )
     }
 
@@ -1420,7 +1368,7 @@ struct GeekLiveNetworkValue: View {
                     .frame(width: 9, height: 9)
 
                 Text(title)
-                    .font(.system(size: 11, weight: .regular))
+                    .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }

@@ -216,6 +216,7 @@ actor SafeCleanupExecutor {
     private let runningApplicationChecker: any CleanupRunningApplicationChecking
     private let capacityReader: any CleanupCapacityReading
     private let coordinator: HeavyWorkCoordinator
+    private let persistReport: @Sendable (CleanReport, [String: FileIdentity]) throws -> Void
     private var consumedPlanIDs = Set<CleanPlanID>()
 
     init(
@@ -226,7 +227,8 @@ actor SafeCleanupExecutor {
         runningApplicationChecker: any CleanupRunningApplicationChecking =
             FoundationCleanupRunningApplicationChecker(),
         capacityReader: any CleanupCapacityReading = FoundationCleanupCapacityReader(),
-        coordinator: HeavyWorkCoordinator
+        coordinator: HeavyWorkCoordinator,
+        persistReport: @escaping @Sendable (CleanReport, [String: FileIdentity]) throws -> Void = { _, _ in }
     ) {
         self.metadataReader = metadataReader
         self.contentDigestReader = contentDigestReader
@@ -235,6 +237,7 @@ actor SafeCleanupExecutor {
         self.runningApplicationChecker = runningApplicationChecker
         self.capacityReader = capacityReader
         self.coordinator = coordinator
+        self.persistReport = persistReport
     }
 
     func preflight(
@@ -323,6 +326,20 @@ actor SafeCleanupExecutor {
         let capacityBefore = await capacityReader.availableCapacity(at: context.userHomeURL)
         var reportItems = [CleanReportItem]()
         var cancelled = false
+        var persistenceFailed = false
+
+        let identities = Dictionary(plan.items.map {
+            ($0.sourceURL.path, $0.expectedSnapshot.identity)
+        }, uniquingKeysWith: { first, _ in first })
+        // Register the immutable intent before any destructive operation.
+        do {
+            try persistReport(makeReport(plan: plan, startedAt: startedAt,
+                items: plan.items.map { reportItem(for: $0, outcome: .notProcessed) },
+                cancelled: false, availableSpaceDeltaBytes: nil), identities)
+        } catch {
+            await coordinator.release(lease)
+            return terminalFailureReport(plan: plan, startedAt: startedAt, code: .persistenceFailed)
+        }
 
         await progress(progressSnapshot(plan: plan, items: reportItems, currentRuleID: nil))
         for (index, item) in plan.items.enumerated() {
@@ -373,8 +390,39 @@ actor SafeCleanupExecutor {
                 continue
             }
 
+            // Preflight may await app checks or expensive content verification.
+            // Honour cancellation received during those checks before any move.
+            if Task.isCancelled {
+                cancelled = true
+                reportItems.append(contentsOf: plan.items[index...].map {
+                    reportItem(for: $0, outcome: .notProcessed)
+                })
+                break
+            }
+
+            // If a crash occurs during the system call, retain its identity and
+            // explicitly mark the outcome unknown; never replay this intent.
             do {
+                let pending = reportItems + [reportItem(for: item, outcome: .failed(
+                    CleanFailure(code: .moveOutcomeUnknown, detailCode: "interrupted-move-needs-verification")
+                ))] + plan.items.dropFirst(index + 1).map { reportItem(for: $0, outcome: .notProcessed) }
+                try persistReport(makeReport(plan: plan, startedAt: startedAt, items: pending,
+                    cancelled: false, availableSpaceDeltaBytes: nil), identities)
+            } catch {
+                reportItems.append(reportItem(for: item, outcome: .failed(
+                    CleanFailure(code: .persistenceFailed, detailCode: "intent-write-failed")
+                )))
+                reportItems.append(contentsOf: plan.items.dropFirst(index + 1).map {
+                    reportItem(for: $0, outcome: .notProcessed)
+                })
+                break
+            }
+            var invokedMove = false
+            do {
+                try await coordinator.requireValid(lease, owner: .cleanup)
+                try Task.checkCancellation()
                 let resultingURL: URL
+                invokedMove = true
                 switch plan.disposition {
                 case .trash:
                     resultingURL = try await mover.moveToTrash(item.sourceURL)
@@ -404,11 +452,33 @@ actor SafeCleanupExecutor {
                     movedAt: Date()
                 )
                 reportItems.append(reportItem(for: item, outcome: .moved(receipt)))
+            } catch is CancellationError {
+                cancelled = true
+                reportItems.append(reportItem(for: item, outcome: invokedMove
+                    ? .failed(CleanFailure(code: .moveOutcomeUnknown, detailCode: "cancelled-during-move"))
+                    : .notProcessed))
             } catch {
                 reportItems.append(reportItem(
                     for: item,
-                    outcome: .failed(cleanFailure(for: error, disposition: plan.disposition))
+                    outcome: .failed(invokedMove
+                        ? CleanFailure(code: .moveOutcomeUnknown, detailCode: "move-threw-needs-verification")
+                        : cleanFailure(for: error, disposition: plan.disposition))
                 ))
+            }
+            do {
+                let checkpointItems = reportItems + plan.items.dropFirst(index + 1).map {
+                    reportItem(for: $0, outcome: .notProcessed)
+                }
+                try persistReport(makeReport(plan: plan, startedAt: startedAt, items: checkpointItems,
+                    cancelled: cancelled, availableSpaceDeltaBytes: nil), identities)
+            } catch {
+                persistenceFailed = true
+                // Preserve all real movement receipts in memory and stop. The
+                // durable in-flight intent remains available after a restart.
+                reportItems.append(contentsOf: plan.items.dropFirst(index + 1).map {
+                    reportItem(for: $0, outcome: .notProcessed)
+                })
+                break
             }
             await progress(progressSnapshot(
                 plan: plan,
@@ -418,13 +488,23 @@ actor SafeCleanupExecutor {
         }
 
         let capacityAfter = await capacityReader.availableCapacity(at: context.userHomeURL)
-        let report = makeReport(
+        var report = makeReport(
             plan: plan,
             startedAt: startedAt,
             items: reportItems,
             cancelled: cancelled,
             availableSpaceDeltaBytes: capacityDelta(before: capacityBefore, after: capacityAfter)
         )
+        // A failed final write cannot erase already persisted per-item receipts.
+        if persistenceFailed {
+            report.persistenceFailure = "result-write-failed"
+            report.outcome = report.summary.movedItemCount > 0 ? .partiallyCompleted : .failed
+        }
+        do { try persistReport(report, identities) }
+        catch {
+            report.persistenceFailure = "final-write-failed"
+            report.outcome = report.summary.movedItemCount > 0 ? .partiallyCompleted : .failed
+        }
         await coordinator.release(lease)
         return report
     }
@@ -919,6 +999,9 @@ actor SafeCleanupExecutor {
         for error: Error,
         disposition: CleanupDisposition
     ) -> CleanFailure {
+        if let moveError = error as? CleanupMoveError, case .invalidResult = moveError {
+            return CleanFailure(code: .moveOutcomeUnknown, detailCode: "destination-url-unavailable")
+        }
         let nsError = error as NSError
         let detailCode: String?
         switch nsError.code {
@@ -1050,7 +1133,8 @@ actor CleanupRecoveryService {
         receipts: [CleanupMoveReceipt],
         userHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         trashURL: URL = CleanupService.userTrashURL(),
-        quarantineRootURL: URL = CleanupQuarantineLocation.defaultURL
+        quarantineRootURL: URL = CleanupQuarantineLocation.defaultURL,
+        allowedApplicationPaths: Set<String> = []
     ) async -> CleanupRecoveryReport {
         var results = [CleanupRecoveryItem]()
         for receipt in receipts {
@@ -1061,17 +1145,20 @@ actor CleanupRecoveryService {
                 receipt,
                 userHomeURL: userHomeURL,
                 trashURL: trashURL,
-                quarantineRootURL: quarantineRootURL
+                quarantineRootURL: quarantineRootURL,
+                allowedApplicationPaths: allowedApplicationPaths
             ))
         }
         return CleanupRecoveryReport(completedAt: Date(), items: results)
     }
 
-    private func restoreOne(
+    func restoreOne(
         _ receipt: CleanupMoveReceipt,
         userHomeURL: URL,
         trashURL: URL,
-        quarantineRootURL: URL
+        quarantineRootURL: URL,
+        allowedApplicationPaths: Set<String>,
+        beforeMove: @Sendable () async throws -> Void = {}
     ) async -> CleanupRecoveryItem {
         let fallback = CleanupRecoveryItem(
             id: UUID(),
@@ -1087,6 +1174,12 @@ actor CleanupRecoveryService {
         let homePath = PathSafety.lexicalPath(userHomeURL.path)
         let sourceRoot = receipt.disposition == .trash ? trashURL : quarantineRootURL
         let sourceRootPath = PathSafety.lexicalPath(sourceRoot.path)
+        let restoringApplication = allowedApplicationPaths.contains(receipt.originalPath)
+            && receipt.originalPath == PathSafety.lexicalPath(receipt.originalPath)
+            && receipt.originalPath.hasPrefix("/Applications/")
+            && destinationURL.pathExtension == "app"
+            && movedIdentity.entryKind == .directory
+        let destinationRoot = restoringApplication ? "/Applications" : homePath
         guard sourceURL.isFileURL,
               destinationURL.isFileURL,
               PathSafety.isContained(
@@ -1096,7 +1189,7 @@ actor CleanupRecoveryService {
               ),
               PathSafety.isContained(
                 destinationURL.path,
-                in: homePath,
+                in: destinationRoot,
                 resolvingSymlinks: false
               ),
               !PathSafety.isContained(
@@ -1151,7 +1244,7 @@ actor CleanupRecoveryService {
               !parent.hasSymbolicLinkComponent,
               PathSafety.isContained(
                 parent.standardizedPath,
-                in: homePath,
+                in: destinationRoot,
                 resolvingSymlinks: true
               ) else {
             return CleanupRecoveryItem(
@@ -1161,7 +1254,11 @@ actor CleanupRecoveryService {
             )
         }
 
+        var invoked = false
         do {
+            try Task.checkCancellation()
+            try await beforeMove()
+            try Task.checkCancellation()
             let immediateSource = try metadataReader.snapshot(at: sourceURL)
             guard !immediateSource.hasSymbolicLinkComponent,
                   immediateSource.identity == movedIdentity else {
@@ -1181,13 +1278,14 @@ actor CleanupRecoveryService {
             } catch CleanupFileSystemError.vanished {
                 // Expected immediately before the non-overwriting move.
             }
-            try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+            invoked = true
+            try ExclusiveRecoveryMove.perform(source: sourceURL, destination: destinationURL, expectedIdentity: movedIdentity)
             let restored = try metadataReader.snapshot(at: destinationURL)
-            guard restored.identity == movedIdentity else {
+            guard restored.identity == movedIdentity, !restored.hasSymbolicLinkComponent else {
                 return CleanupRecoveryItem(
                     id: UUID(),
                     originalPath: receipt.originalPath,
-                    outcome: .identityChanged
+                    outcome: .outcomeUnknown
                 )
             }
             return CleanupRecoveryItem(
@@ -1195,8 +1293,12 @@ actor CleanupRecoveryService {
                 originalPath: receipt.originalPath,
                 outcome: .restored
             )
+        } catch is CancellationError {
+            return CleanupRecoveryItem(id: fallback.id, originalPath: receipt.originalPath,
+                                       outcome: invoked ? .outcomeUnknown : .notProcessed)
         } catch {
-            return fallback
+            return CleanupRecoveryItem(id: fallback.id, originalPath: receipt.originalPath,
+                                       outcome: invoked ? .outcomeUnknown : .failed)
         }
     }
 }

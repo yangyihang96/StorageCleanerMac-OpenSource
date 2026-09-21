@@ -6,7 +6,7 @@ final class BenchmarkV7ReferenceCatalogTests: XCTestCase {
     func testProductionV9VersionAndDurationContractIsFrozen() {
         let plan = BenchmarkV7Plan.standard
         let versions = BenchmarkV7ReferenceCatalog.versions(for: plan)
-        let official = OfficialBenchmarkPlan.current
+        let official = OfficialBenchmarkPlan.legacyV9
 
         XCTAssertEqual(plan.planVersion, "benchmark-standard-plan-v9")
         XCTAssertEqual(plan.workloadVersion, "benchmark-standard-v9")

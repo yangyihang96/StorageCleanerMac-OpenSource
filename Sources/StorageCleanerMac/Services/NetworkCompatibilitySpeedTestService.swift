@@ -286,9 +286,7 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
             $0.countOfBytesSent
         },
         shutdownGraceSeconds: TimeInterval = 1,
-        sessionInvalidator: @escaping @Sendable (URLSession) -> Void = {
-            $0.invalidateAndCancel()
-        },
+        sessionInvalidator: (@Sendable (URLSession) -> Void)? = nil,
         uploadProgressObservationForTesting: (@Sendable (URLSessionTask) -> Bool)? = nil
     ) {
         self.meter = meter
@@ -303,7 +301,7 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
         self.shutdownGraceSeconds = shutdownGraceSeconds.isFinite
             ? min(Self.maximumShutdownGraceSeconds, max(0, shutdownGraceSeconds))
             : 1
-        self.sessionInvalidator = sessionInvalidator
+        self.sessionInvalidator = sessionInvalidator ?? { $0.finishTasksAndInvalidate() }
         self.uploadProgressObservationForTesting = uploadProgressObservationForTesting
     }
 
@@ -412,6 +410,10 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
             session: session,
             delegate: delegate
         )
+        // cancelAll has cancelled each task. finishTasksAndInvalidate delivers
+        // invalidation after their completion callbacks, so it is a drain
+        // barrier. invalidateAndCancel may invalidate immediately and cannot
+        // be used as evidence that it is safe to release the heavy-work lease.
         sessionInvalidator(session)
         guard await delegate.waitUntilSessionInvalidated(
             timeoutSeconds: shutdownGraceSeconds

@@ -11,13 +11,11 @@ struct LargeFileStorageMap: View {
     @State private var selectedEntryID: String?
     @State private var selectedMapEntry: StorageTreemapEntry?
     @State private var quickLookURL: URL?
-    @State private var hoveredSegmentID: String?
     @State private var hoveredMapEntry: StorageTreemapEntry?
     @State private var searchQuery = ""
     @State private var entryFilter = StorageMapEntryFilter.all
     @State private var entrySort = StorageMapEntrySort.sizeDescending
     @State private var compactShowsMap = false
-    @State private var sunburstSegments: [StorageSunburstLayout.Segment] = []
     @FocusState private var isMapFocused: Bool
 
     private var currentSnapshot: StorageMapDirectorySnapshot? {
@@ -81,7 +79,7 @@ struct LargeFileStorageMap: View {
 
             Group {
                 switch displayMode {
-                case .visualMap, .sunburstMap:
+                case .visualMap:
                     visualBrowser
                 case .columnBrowser:
                     columnBrowser
@@ -103,13 +101,9 @@ struct LargeFileStorageMap: View {
         .onChange(of: workspace.storageMapNavigation.map(\.path)) { _, _ in
             selectedEntryID = nil
             selectedMapEntry = nil
-            hoveredSegmentID = nil
             hoveredMapEntry = nil
             searchQuery = ""
             entryFilter = .all
-        }
-        .onChange(of: currentSnapshot, initial: true) { _, _ in
-            sunburstSegments = workspace.storageMapSunburstSegments
         }
         .animation(
             AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
@@ -501,11 +495,7 @@ struct LargeFileStorageMap: View {
         VStack(spacing: 0) {
             mapHeader
             Divider()
-            if displayMode == .sunburstMap {
-                mapCanvas
-            } else {
-                rectangularMapCanvas
-            }
+            rectangularMapCanvas
             if !visibleCategories.isEmpty {
                 Divider()
                 categoryLegend
@@ -661,171 +651,11 @@ struct LargeFileStorageMap: View {
         }
     }
 
-    private var mapCanvas: some View {
-        GeometryReader { proxy in
-            let radius = max(0, min(proxy.size.width, proxy.size.height) / 2 - 14)
-            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
-            let hovered = sunburstSegments.first { $0.id == hoveredSegmentID }
-            ZStack {
-                Color.primary.opacity(0.018)
-                ForEach(sunburstSegments) { segment in
-                    let shape = StorageSunburstSector(
-                        start: segment.start, end: segment.end,
-                        innerRadius: radius * segment.innerRadiusFraction,
-                        outerRadius: radius * segment.outerRadiusFraction
-                    )
-                    shape
-                        .fill(tint(for: segment.entry).gradient)
-                        .overlay(shape.stroke(Color.black.opacity(0.4), lineWidth: 1.5))
-                        .overlay(shape.stroke(
-                            selectedEntryID == segment.entry.id ? Color.primary :
-                                hoveredSegmentID == segment.id ? Color.primary.opacity(0.6) : .clear,
-                            lineWidth: selectedEntryID == segment.entry.id ? 3 : 2
-                        ))
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
-                VStack(spacing: 4) {
-                    Image(systemName: hovered?.entry.canDescend == false ? "doc" : "folder.fill")
-                        .foregroundStyle(AppDesignTokens.Palette.storage)
-                    Text(hovered?.entry.title ?? selectedEntry?.title ?? currentSnapshot?.title ?? "")
-                        .font(AppDesignTokens.Typography.compactLabel)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if radius >= 150 {
-                    Text(hovered.map { StorageTreemapPresentation.displaySize(for: $0.entry) }
-                        ?? selectedEntry.map { StorageTreemapPresentation.displaySize(for: $0) }
-                        ?? currentSnapshot.map { StorageTreemapPresentation.displaySize(for: summaryEntry($0)) } ?? "")
-                        .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                    if let hovered {
-                        Text(String(format: "%.1f%%", hovered.share * 100))
-                            .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    }
-                }
-                .multilineTextAlignment(.center)
-                .frame(width: radius * 0.48)
-                .position(center)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-
-                if sunburstSegments.isEmpty, !workspace.storageMapBrowsePhase.isLoading {
-                    storageMapEmptyState(
-                        title: L10n.text("没有可绘制的空间占用", "No Measurable Usage"),
-                        systemImage: "chart.pie"
-                    )
-                }
-            }
-            .contentShape(Rectangle())
-            .onContinuousHover { phase in
-                switch phase {
-                case let .active(point):
-                    hoveredSegmentID = StorageSunburstLayout.segment(
-                        at: point, center: center, radius: radius, in: sunburstSegments
-                    )?.id
-                case .ended:
-                    hoveredSegmentID = nil
-                }
-            }
-            .onTapGesture(count: 2, coordinateSpace: .local) { point in
-                guard !workspace.storageMapBrowsePhase.isLoading,
-                      let segment = StorageSunburstLayout.segment(
-                        at: point, center: center, radius: radius, in: sunburstSegments
-                      ) else { return }
-                activate(segment.entry, fromLevel: currentLevelIndex)
-            }
-            .onTapGesture(coordinateSpace: .local) { point in
-                guard !workspace.storageMapBrowsePhase.isLoading,
-                      let segment = StorageSunburstLayout.segment(
-                        at: point, center: center, radius: radius, in: sunburstSegments
-                      ) else { return }
-                select(segment.entry)
-                isMapFocused = true
-            }
-            .focusable()
-            .focused($isMapFocused)
-            .onKeyPress(.leftArrow) { moveMapSelection(by: -1) }
-            .onKeyPress(.upArrow) { moveMapSelection(by: -1) }
-            .onKeyPress(.rightArrow) { moveMapSelection(by: 1) }
-            .onKeyPress(.downArrow) { moveMapSelection(by: 1) }
-            .onKeyPress(.return) {
-                guard let selectedEntry, !workspace.storageMapBrowsePhase.isLoading else { return .ignored }
-                activate(selectedEntry, fromLevel: currentLevelIndex)
-                return .handled
-            }
-            .onKeyPress(.space) {
-                guard let selectedEntry, !selectedEntry.isDirectory, !selectedEntry.path.isEmpty else { return .ignored }
-                quickLookURL = URL(fileURLWithPath: selectedEntry.path)
-                return .handled
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(L10n.text("按目录与字节数绘制的旭日图", "Directory sunburst by measured bytes"))
-            .accessibilityValue(mapSelectionAccessibilityValue)
-            .accessibilityHint(L10n.text(
-                "单击选择，双击打开；方向键选择，回车打开，空格预览文件。百分比以当前目录总容量为分母。",
-                "Click to select, double-click to open. Arrow keys select, Return opens, and Space previews files. Percentages use the current directory total."
-            ))
-            .accessibilityChildren {
-                ForEach(sunburstSegments) { segment in
-                    if segment.entry.role == .content {
-                        Button {
-                            activate(segment.entry, fromLevel: currentLevelIndex)
-                        } label: {
-                            Text(segment.entry.title)
-                        }
-                        .accessibilityValue("\(StorageTreemapPresentation.displaySize(for: segment.entry)) · \(String(format: "%.1f%%", segment.share * 100))")
-                        .accessibilityAddTraits(selectedEntryID == segment.entry.id ? .isSelected : [])
-                        .accessibilityAction(named: Text(L10n.text("选择", "Select"))) {
-                            guard !workspace.storageMapBrowsePhase.isLoading else { return }
-                            select(segment.entry)
-                            isMapFocused = true
-                        }
-                        .accessibilityHint(mapEntryAccessibilityHint(segment.entry))
-                        .disabled(workspace.storageMapBrowsePhase.isLoading)
-                    } else {
-                        Text("\(segment.entry.title) · \(StorageTreemapPresentation.displaySize(for: segment.entry))")
-                    }
-                }
-            }
-            .overlay {
-                if case let .loading(_, title, _, _) = workspace.storageMapBrowsePhase {
-                    loadingOverlay(title: title)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
-    }
-
     private var mapSelectionAccessibilityValue: String {
         guard let selectedEntry else {
             return L10n.text("未选择目录或文件", "No folder or file selected")
         }
         return "\(selectedEntry.title) · \(StorageTreemapPresentation.displaySize(for: selectedEntry)) · \(selectedEntry.path)"
-    }
-
-    private func mapEntryAccessibilityHint(_ entry: StorageTreemapEntry) -> String {
-        if entry.canDescend {
-            return L10n.text("打开文件夹；也可使用选择动作查看此项", "Open folder; use the Select action to inspect this item")
-        }
-        if !entry.isDirectory, !entry.path.isEmpty {
-            return L10n.text("预览文件；也可使用选择动作查看此项", "Preview file; use the Select action to inspect this item")
-        }
-        return L10n.text("可选择并查看已测容量，无法继续打开", "Select to inspect measured size; this item cannot be opened")
-    }
-
-    private func moveMapSelection(by offset: Int) -> KeyPress.Result {
-        guard !workspace.storageMapBrowsePhase.isLoading else { return .ignored }
-        let entries = sunburstSegments.map(\.entry).filter { $0.role == .content }
-        guard !entries.isEmpty else { return .ignored }
-        let current = entries.firstIndex { $0.id == selectedEntryID }
-        let next = current.map { min(max(0, $0 + offset), entries.count - 1) }
-            ?? (offset > 0 ? 0 : entries.count - 1)
-        select(entries[next])
-        return .handled
     }
 
     private var columnBrowser: some View {
@@ -1486,21 +1316,5 @@ private struct StorageMapEntryRow: View {
             components.append(L10n.items(childCount))
         }
         return components.joined(separator: " · ")
-    }
-}
-
-private struct StorageSunburstSector: Shape {
-    let start: Double
-    let end: Double
-    let innerRadius: Double
-    let outerRadius: Double
-
-    func path(in rect: CGRect) -> Path {
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        var path = Path()
-        path.addArc(center: center, radius: outerRadius, startAngle: .radians(start), endAngle: .radians(end), clockwise: false)
-        path.addArc(center: center, radius: innerRadius, startAngle: .radians(end), endAngle: .radians(start), clockwise: true)
-        path.closeSubpath()
-        return path
     }
 }

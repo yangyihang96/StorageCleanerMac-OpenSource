@@ -49,7 +49,7 @@ struct URLSessionMacBenchmarkLeaderboardTransport: MacBenchmarkLeaderboardTransp
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await session.data(for: request)
+        try await BoundedHTTPSReader.data(for: request, session: session, maximumBytes: 512 * 1024)
     }
 }
 

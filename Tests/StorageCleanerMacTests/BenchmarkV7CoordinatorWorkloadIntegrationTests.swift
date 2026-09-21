@@ -516,7 +516,7 @@ final class BenchmarkV7CoordinatorWorkloadIntegrationTests: XCTestCase {
             environmentProvider: FixedEnvironmentProvider()
         )
         let recorder = V7StateRecorder()
-        let official = OfficialBenchmarkPlan.current
+        let official = OfficialBenchmarkPlan.legacyV9
 
         let result = await coordinator.run(
             plan: official.plan,

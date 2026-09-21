@@ -3,6 +3,7 @@ import SwiftUI
 
 enum LayoutProbeID {
     static let contentLayout = "safe-clean.content-layout"
+    static let pageViewport = "page.viewport"
     static let workspace = "safe-clean.workspace"
     static let picker = "safe-clean.picker"
     static let privacy = "safe-clean.privacy"
@@ -13,7 +14,15 @@ enum LayoutProbeID {
     static let smartScanContent = "smart-scan.content"
     static let smartScanFooter = "smart-scan.footer"
     static let smartScanSidebar = "smart-scan.sidebar"
+    static let runtimePanel = "runtime.panel"
+    static let runtimeArtwork = "runtime.artwork"
+    static let runtimeLocation = "runtime.location"
+    static let runtimeViewport = "runtime.viewport"
+    static func cleanupRiskSummary(_ risk: CleanupRisk) -> String {
+        "cleanup.risk-summary.\(risk.rawValue)"
+    }
     static let landingRoot = "concept-landing.root"
+    static let landingCanvas = "concept-landing.canvas"
     static let landingContent = "concept-landing.content"
     static let landingHeader = "concept-landing.header"
     static let landingHeaderIcon = "concept-landing.header-icon"

@@ -84,6 +84,7 @@ extension PanelDensity {
 }
 
 struct MenuBarAdvancedStatusView: View {
+    @State private var historyDemandID = UUID()
     let store: ScanStore
     let computerHealthStore: ComputerHealthStore
     let monitorState: MenuBarMonitorState
@@ -185,17 +186,21 @@ struct MenuBarAdvancedStatusView: View {
     }
 
     var memoryHistory: [MenuBarTelemetryPoint] {
-        monitorState.memoryHistory(
-            within: selectedChartRange.duration,
-            referenceDate: historyReferenceDate
-        )
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled { return monitorState.memoryHistory(within: selectedChartRange.duration, referenceDate: historyReferenceDate) }
+#endif
+        return monitorState.displayHistory(within: selectedChartRange.duration, memory: true)
     }
 
     private func telemetryHistory(for range: GeekChartRange) -> [MenuBarTelemetryPoint] {
-        monitorState.history(
-            within: range.duration,
-            referenceDate: historyReferenceDate
-        )
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled { return monitorState.history(within: range.duration, referenceDate: historyReferenceDate) }
+#endif
+        return monitorState.displayHistory(within: range.duration)
+    }
+
+    private var displayHistoryDurations: Set<TimeInterval> {
+        [selectedChartRange.duration, cpuChartRange.duration, networkChartRange.duration]
     }
 
     var showsExtendedGeekDetails: Bool {
@@ -379,21 +384,9 @@ struct MenuBarAdvancedStatusView: View {
 #else
         points = auxiliaryState.nativeDiskIOHistory
 #endif
-        return MenuBarHistoryRetention.selected(
-            points,
-            duration: selectedChartRange.duration,
-            date: \.date,
-            referenceDate: historyReferenceDate
-        )
+        return points
     }
-    var powerHistory: [MenuBarPowerHistoryPoint] {
-        MenuBarHistoryRetention.selected(
-            batteryPowerHistory,
-            duration: selectedChartRange.duration,
-            date: \.date,
-            referenceDate: historyReferenceDate
-        )
-    }
+    var powerHistory: [MenuBarPowerHistoryPoint] { batteryPowerHistory }
 
     /// Raw shared battery history. The compact preview and the tertiary
     /// historical chart intentionally apply their own ranges to this source.
@@ -460,7 +453,15 @@ struct MenuBarAdvancedStatusView: View {
         ) {
             panelSurface
         }
+        .background {
+            if MenuBarPresentationTrace.enabled {
+                MenuBarPresentationProbe(key: "presentation")
+            }
+        }
+        .environment(\.menuBarChartContext, MenuBarChartContext(
+            page: selectedSection.rawValue, revision: MenuBarDisplayRevision(sampledAt: nil, version: 0)))
         .environment(\.menuBarCascadeDirection, panelSettingsState.cascadeDirection)
+        .environment(\.panelAutomaticRefreshPaused, store.isMenuBarRefreshPaused)
         .environment(\.geekPanelHoverCoordinator, panelCoordinator)
         .environment(
             \.geekPanelHoverEnvelopeActive,
@@ -491,6 +492,9 @@ struct MenuBarAdvancedStatusView: View {
                 presentation: presentation,
                 selectedSection: selectedSection
             )
+        }
+        .task(id: displayHistoryDurations) {
+            monitorState.updateDisplayHistoryConsumer(historyDemandID, durations: displayHistoryDurations)
         }
         .onAppear {
             isChartPanelVisible = true
@@ -575,6 +579,7 @@ struct MenuBarAdvancedStatusView: View {
             reconcileGeekPanelDismissal()
         }
         .onDisappear {
+            monitorState.updateDisplayHistoryConsumer(historyDemandID, durations: [])
             isChartPanelVisible = false
             resetTertiaryHoverState()
             cancelGeekPanelDismissal()
@@ -584,6 +589,7 @@ struct MenuBarAdvancedStatusView: View {
             NotificationCenter.default.publisher(
                 for: Notification.Name.NSProcessInfoPowerStateDidChange
             )
+            .receive(on: DispatchQueue.main)
         ) { _ in
             isChartLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
         }
@@ -591,6 +597,7 @@ struct MenuBarAdvancedStatusView: View {
             NotificationCenter.default.publisher(
                 for: ProcessInfo.thermalStateDidChangeNotification
             )
+            .receive(on: DispatchQueue.main)
         ) { _ in
             chartThermalState = ProcessInfo.processInfo.thermalState
         }
@@ -598,6 +605,7 @@ struct MenuBarAdvancedStatusView: View {
             NSWorkspace.shared.notificationCenter.publisher(
                 for: NSWorkspace.screensDidSleepNotification
             )
+            .receive(on: DispatchQueue.main)
         ) { _ in
             isChartDisplayAwake = false
         }
@@ -605,6 +613,7 @@ struct MenuBarAdvancedStatusView: View {
             NSWorkspace.shared.notificationCenter.publisher(
                 for: NSWorkspace.screensDidWakeNotification
             )
+            .receive(on: DispatchQueue.main)
         ) { _ in
             isChartDisplayAwake = true
         }
@@ -814,6 +823,15 @@ struct MenuBarAdvancedStatusView: View {
         let accessibilityLabel: String
 
         switch scenario {
+        case .memoryComposition:
+            content = AnyView(GeekMemoryCompositionHistoryDetail(
+                points: memoryHistory,
+                duration: geekChartDuration,
+                composition: memorySnapshot?.ringComposition
+            ))
+            preferredSize = GeekMemoryCompositionHistoryDetail.preferredSize
+            chartMetric = .memory
+            accessibilityLabel = L10n.text("内存组成占比", "Memory Composition")
         case .gpuActivityHistory:
             content = AnyView(GeekGPUHoverDetail(
                 points: geekChartHistory,
@@ -985,15 +1003,6 @@ struct MenuBarAdvancedStatusView: View {
             preferredSize = GeekSensorPowerHoverDetailMetrics.sensorHistorySize
             chartMetric = .temperature
             accessibilityLabel = L10n.text("CPU 温度历史", "CPU Temperature History")
-        case .sensorCPUFrequencyInspector:
-            content = AnyView(GeekFrequencyHoverDetail(
-                clusters: processorTelemetry?.clusters.filter {
-                    $0.frequencyMHz != nil
-                } ?? []
-            ))
-            preferredSize = GeekSensorPowerHoverDetailMetrics.compactSamplingSize
-            chartMetric = nil
-            accessibilityLabel = L10n.text("CPU 频率", "CPU Frequency")
         case .sensorFanSpeedHistory:
             let readings = geekFanTelemetry.readings
             content = AnyView(GeekFanHoverDetail(
@@ -1146,6 +1155,9 @@ struct MenuBarAdvancedStatusView: View {
 
     @ViewBuilder
     private var liveCurrentContent: some View {
+        if presentation.usesGeekLayout {
+            currentContent
+        } else {
         switch selectedSection {
         case .overview:
             MenuBarObservedObjectBoundary(model: store) {
@@ -1214,29 +1226,21 @@ struct MenuBarAdvancedStatusView: View {
                 }
             }
         }
-    }
-
-    @ViewBuilder
-    private var liveGeekOverview: some View {
-        MenuBarObservedObjectBoundary(model: store) {
-            MenuBarObservedObjectBoundary(model: monitorState) {
-                MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                    MenuBarObservedObjectBoundary(model: computerHealthStore) {
-                        MenuBarObservedObjectBoundary(model: fanControl) {
-                            geekOverviewPage
-                        }
-                    }
-                }
-            }
         }
     }
 
     @ViewBuilder
-    private var currentContent: some View {
+    private var liveGeekOverview: some View {
+        liveCard(.availability) { geekOverviewPage }
+    }
+
+    // Keep the legacy presentation's large generic type out of the live
+    // panel's host metadata. Only the requested presentation is constructed.
+    private var currentContent: AnyView {
         if presentation.usesGeekLayout {
-            geekDetailPage
+            return AnyView(geekDetailPage)
         } else {
-            detailPage
+            return AnyView(detailPage)
         }
     }
 
@@ -1316,6 +1320,7 @@ private struct MenuBarAdvancedSamplingCoordinator: View {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
+                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
                 auxiliaryState.registerConsumer(
                     consumerID,
                     demand: demand,
@@ -1339,6 +1344,7 @@ private struct MenuBarAdvancedSamplingCoordinator: View {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
+                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
                 auxiliaryState.updateConsumer(consumerID, demand: demand)
                 if selectedSection == .sensors {
                     store.refreshMenuBarMonitor()
@@ -1360,12 +1366,24 @@ private struct MenuBarAdvancedSamplingCoordinator: View {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
+                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
+                auxiliaryState.setPaused(store.isMenuBarRefreshPaused)
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
+                .receive(on: DispatchQueue.main)) { _ in
+                store.updateMenuBarProcessConsumer(consumerID, section: nil)
+                auxiliaryState.setPaused(true)
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+                .receive(on: DispatchQueue.main)) { _ in
+                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
                 auxiliaryState.setPaused(store.isMenuBarRefreshPaused)
             }
             .onDisappear {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
+                store.updateMenuBarProcessConsumer(consumerID, section: nil)
                 auxiliaryState.unregisterConsumer(consumerID)
             }
     }

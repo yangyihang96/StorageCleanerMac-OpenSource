@@ -204,6 +204,22 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
         upBytesPerSecond = nil
     }
 
+    /// Recover the same non-overlapping composition from recorded bytes. No
+    /// new history fields are needed; older complete samples remain usable.
+    var memoryComposition: MemoryRingComposition? {
+        guard let physical = memoryPhysicalBytes, physical > 0,
+              let app = memoryAppOrOtherBytes,
+              let wired = memoryWiredBytes,
+              let compressed = compressedMemoryBytes else { return nil }
+        let subtotal = app.addingReportingOverflow(wired)
+        let used = subtotal.partialValue.addingReportingOverflow(compressed)
+        guard !subtotal.overflow, !used.overflow, used.partialValue <= physical else { return nil }
+        return MemoryRingComposition(
+            physicalBytes: physical, availableBytes: physical - used.partialValue,
+            wiredBytes: wired, compressedBytes: compressed
+        )
+    }
+
     func fanRPM(at index: Int) -> Double? {
         guard index >= 0,
               let reading = fanReadings?.first(where: { $0.index == index }) else {
@@ -302,6 +318,10 @@ enum MenuBarTelemetryChannel: String, CaseIterable, Equatable, Sendable {
     case memoryAppOrOtherBytes
     case memoryWiredBytes
     case compressedMemoryBytes
+    case memoryAppPercent
+    case memoryWiredPercent
+    case memoryCompressedPercent
+    case memoryFreePercent
     case swapUsedBytes
     case chipTemperature
     case gpuTemperature
@@ -341,6 +361,14 @@ enum MenuBarTelemetryChannel: String, CaseIterable, Equatable, Sendable {
             point.memoryWiredBytes.map { Double($0) }
         case .compressedMemoryBytes:
             point.compressedMemoryBytes.map { Double($0) }
+        case .memoryAppPercent:
+            point.memoryComposition.map { $0.appOrOtherRatio * 100 }
+        case .memoryWiredPercent:
+            point.memoryComposition.map { $0.wiredRatio * 100 }
+        case .memoryCompressedPercent:
+            point.memoryComposition.map { $0.compressedRatio * 100 }
+        case .memoryFreePercent:
+            point.memoryComposition.map { $0.availableRatio * 100 }
         case .swapUsedBytes:
             point.swapUsedBytes.map { Double($0) }
         case .chipTemperature:

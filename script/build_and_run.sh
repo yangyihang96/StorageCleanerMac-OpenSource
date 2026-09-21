@@ -59,6 +59,13 @@ SWIFT_BUILD_JOBS="${SWIFT_BUILD_JOBS:-2}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 BUILD_CONFIGURATION="debug"
 BUILD_CONFIGURATION_NAME="Debug"
+if [ "$MODE" = "--bundle-only" ] || [ "$MODE" = "bundle" ]; then
+  case "${BUNDLE_CONFIGURATION:-debug}" in
+    debug) ;;
+    release) BUILD_CONFIGURATION="release"; BUILD_CONFIGURATION_NAME="Release" ;;
+    *) echo "bundle configuration must be debug or release" >&2; exit 2 ;;
+  esac
+fi
 SWIFT_BUILD_DIR_OVERRIDE="${SWIFT_BUILD_DIR:-}"
 DIST_DIR_OVERRIDE="${DIST_DIR:-}"
 BETA_DIST_DIR_OVERRIDE="${BETA_DIST_DIR:-}"
@@ -307,12 +314,21 @@ if [ "$BETA_MODE" -eq 1 ] && [ "$BETA_INSTALL" -eq 1 ]; then
   STORAGE_CLEANER_VERIFY_BUNDLE=0 "$ROOT_DIR/script/verify.sh"
 fi
 
+"$ROOT_DIR/script/verify_menu_bar_performance.sh"
+
 prepare_swift_build_dir "$SWIFT_BUILD_DIR"
 swift_build_args=(
   -c "$BUILD_CONFIGURATION"
   --scratch-path "$SWIFT_BUILD_DIR"
   --jobs "$SWIFT_BUILD_JOBS"
   -Xswiftc -disable-batch-mode
+  # Swift 6.4's driver can emit SDK=deployment-target despite compiling
+  # against Xcode's selected SDK. Supply the actual SDK version at link time;
+  # do not patch LC_BUILD_VERSION after linking or weaken the verification.
+  -Xlinker -platform_version
+  -Xlinker macos
+  -Xlinker "$MIN_SYSTEM_VERSION"
+  -Xlinker "$BUILD_SDK_VERSION"
 )
 if [ "$BETA_MODE" -eq 1 ]; then
   swift_build_args+=(

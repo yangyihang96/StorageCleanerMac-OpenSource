@@ -1348,6 +1348,18 @@ enum Shell {
         return nil
     }
 
+    /// For short-lived Foundation Process children that cannot use a process
+    /// group. Reuse the same BSD birth/parent checks before every signal.
+    static func directChildIdentity(for processID: pid_t) -> ProcessIdentity? {
+        guard let parent = processIdentity(for: getpid()) else { return nil }
+        return childProcessIdentity(for: processID, parent: parent)
+    }
+
+    static func signalDirectChild(_ identity: ProcessIdentity?, signal: Int32) {
+        guard let identity, directChildIdentity(for: identity.processID) == identity else { return }
+        _ = Darwin.kill(identity.processID, signal)
+    }
+
     private static func processIdentity(for processID: pid_t) -> ProcessIdentity? {
         processGroupWitness(for: processID)?.identity
     }

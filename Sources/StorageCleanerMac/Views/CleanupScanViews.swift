@@ -7,7 +7,7 @@ struct CleanupScanOverviewView: View {
     var body: some View {
         CleanupScanResultsView(
             store: store,
-            filter: .green,
+            filter: .overview,
             session: session
         )
         .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
@@ -258,6 +258,28 @@ struct CleanupScanResultsView: View {
                                 proxy.scrollTo(risk.rawValue, anchor: .top)
                             }
                         }
+                        if let outcomeNotice {
+                            Button {
+                                isSecondaryDetailsExpanded = true
+                                proxy.scrollTo("scan-coverage-details", anchor: .top)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "exclamationmark.circle")
+                                    Text(outcomeNotice)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "chevron.right")
+                                }
+                                .font(AppDesignTokens.Typography.metadata)
+                                .foregroundStyle(AppDesignTokens.Palette.warning)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .glassPanel(cornerRadius: AppDesignTokens.Layout.cardRadius,
+                                    tint: AppDesignTokens.Palette.warning, prominence: .quiet)
+                            }
+                            .buttonStyle(ResponsivePlainButtonStyle())
+                            .help(resultDetailedSummary)
+                        }
                         if filter == .devCaches {
                             DeveloperCleanupThresholdControl(
                                 store: store,
@@ -307,6 +329,7 @@ struct CleanupScanResultsView: View {
                                 )
                         )
                         secondaryDetailsSection
+                            .id("scan-coverage-details")
                     }
                     .padding(.top, AppDesignTokens.Spacing.small)
                     .padding(.bottom, AppDesignTokens.Spacing.medium)
@@ -320,17 +343,11 @@ struct CleanupScanResultsView: View {
 
     private var resultHeader: some View {
         AppPageHeader(
-            title: filter == .devCaches
-                ? filter.sidebarTitle
-                : L10n.text("智能扫描", "Smart Scan"),
+            title: filter.sidebarTitle,
             subtitle: resultHeaderSubtitle,
-            systemImage: filter == .devCaches ? filter.systemImage : "magnifyingglass"
+            systemImage: filter.systemImage,
+            isHero: true
         ) {
-            Text(selectionHeaderSummary)
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .accessibilityLabel(selectionHeaderSummary)
             Button {
                 store.startScanRespectingAccessGuide()
             } label: {
@@ -343,6 +360,17 @@ struct CleanupScanResultsView: View {
     }
 
     private var resultHeaderSubtitle: String {
+        switch session.outcome {
+        case .complete:
+            L10n.text("扫描完成 · 请审阅结果", "Scan complete · Review results")
+        case .partial:
+            L10n.text("扫描结束 · 部分结果可供审阅", "Scan finished · Partial results available")
+        case .cancelled:
+            L10n.text("扫描已取消 · 保留已完成结果", "Scan cancelled · Completed results kept")
+        }
+    }
+
+    private var resultDetailedSummary: String {
         let advisorySuffix = advisoryReviewCandidates.isEmpty
             ? ""
             : L10n.text(
@@ -389,12 +417,17 @@ struct CleanupScanResultsView: View {
     private func riskSummary(
         onSelect: @escaping (CleanupRisk) -> Void
     ) -> some View {
-        HStack(spacing: layout.cardSpacing) {
-            ForEach(
-                [CleanupRisk.safe, .reviewOnly, .protected],
-                id: \.rawValue
-            ) { risk in
-                riskSummaryButton(risk: risk, action: { onSelect(risk) })
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: layout.cardSpacing) {
+                ForEach([CleanupRisk.safe, .reviewOnly, .protected], id: \.rawValue) { risk in
+                    riskSummaryButton(risk: risk, action: { onSelect(risk) })
+                        .frame(minWidth: 200)
+                }
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: layout.cardSpacing)], spacing: layout.cardSpacing) {
+                ForEach([CleanupRisk.safe, .reviewOnly, .protected], id: \.rawValue) { risk in
+                    riskSummaryButton(risk: risk, action: { onSelect(risk) })
+                }
             }
         }
     }
@@ -407,24 +440,31 @@ struct CleanupScanResultsView: View {
         let count = decisionCount(for: risk)
         let selection = riskSelectionSummary(risk: risk)
         return Button(action: action) {
-            HStack(spacing: AppDesignTokens.Spacing.small) {
-                Image(systemName: CleanupRiskPresentation.systemImage(risk))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(tint)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(riskTitle(risk))
-                        .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    Text("\(count) · \(riskValueText(risk))")
-                        .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Image(systemName: CleanupRiskPresentation.systemImage(risk))
+                        .symbolRenderingMode(.hierarchical)
+                        .font(.system(size: 22))
+                        .foregroundStyle(tint)
+                        .frame(width: 40, height: 40)
+                        .background(tint.opacity(0.12), in: Circle())
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(riskTitle(risk))
+                            .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                        Text(riskValueText(risk))
+                            .font(.system(size: 23, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .help(riskValueText(risk))
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 4)
-                Text(selection)
+                Text("\(count) · \(selection)")
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(tint)
+                    .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(AppDesignTokens.Layout.compactPadding)
             .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
@@ -445,6 +485,9 @@ struct CleanupScanResultsView: View {
             }
         }
         .buttonStyle(ResponsivePlainButtonStyle())
+#if DEBUG
+        .layoutProbe(LayoutProbeID.cleanupRiskSummary(risk))
+#endif
         .accessibilityLabel(L10n.text(
             "\(riskTitle(risk))，\(count) 项，\(riskValueText(risk))，\(selection)",
             "\(riskTitle(risk)), \(count) items, \(riskValueText(risk)), \(selection)"
@@ -1143,8 +1186,8 @@ struct CleanupScanResultsView: View {
                     Text(L10n.text("查看磁盘与扫描详情", "View Disk and Scan Details"))
                         .font(AppDesignTokens.Typography.inlineTitle)
                     Text(L10n.text(
-                        "磁盘容量、Top 5、扫描覆盖和技术建议",
-                        "Disk capacity, Top 5, scan coverage, and technical guidance"
+                        "容量、扫描覆盖与处理建议",
+                        "Capacity, scan coverage, and recommendations"
                     ))
                     .font(AppDesignTokens.Typography.metadata)
                     .foregroundStyle(.secondary)

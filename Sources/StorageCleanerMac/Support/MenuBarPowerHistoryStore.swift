@@ -36,26 +36,26 @@ struct MetricHistorySnapshot: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decode(Int.self, forKey: .version)
         telemetry = try container.decodeIfPresent(
-            [MenuBarTelemetryPoint].self,
+            BoundedMonitoringArray<MenuBarTelemetryPoint>.self,
             forKey: .telemetry
-        ) ?? []
+        )?.values ?? []
         memoryTelemetry = try container.decodeIfPresent(
-            [MenuBarTelemetryPoint].self,
+            BoundedMonitoringArray<MenuBarTelemetryPoint>.self,
             forKey: .memoryTelemetry
-        ) ?? telemetry.filter {
+        )?.values ?? telemetry.filter {
             $0.memory != nil
                 || $0.memoryPressure != nil
                 || $0.compressedMemoryBytes != nil
                 || $0.swapUsedBytes != nil
         }
         diskIO = try container.decodeIfPresent(
-            [NativeDiskIOPoint].self,
+            BoundedMonitoringArray<NativeDiskIOPoint>.self,
             forKey: .diskIO
-        ) ?? []
+        )?.values ?? []
         power = try container.decodeIfPresent(
-            [MenuBarPowerHistoryPoint].self,
+            BoundedMonitoringArray<MenuBarPowerHistoryPoint>.self,
             forKey: .power
-        ) ?? []
+        )?.values ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -70,6 +70,8 @@ struct MetricHistorySnapshot: Codable, Equatable, Sendable {
 
 enum MetricHistoryStoreError: Error, Equatable {
     case fileTooLarge
+    case preservedUnreadableHistory
+    case retryDeferred
 }
 
 /// One serial persistence boundary for every menu-bar history series.
@@ -102,34 +104,50 @@ actor MetricHistoryStore {
     private var cached = MetricHistorySnapshot.empty
     private var isLoaded = false
     private var isDirty = false
-    private var lastSavedAt: Date?
+    private var revision: UInt64 = 0
+    private var persistedRevision: UInt64 = 0
+    private var latestMutationAt = Date.distantPast
+    private var saveTask: Task<Void, Never>?
+    private(set) var saveSchedule = MonitoringSaveSchedule()
+    private(set) var loadFailure: String?
+    private var lastPersistenceError: (any Error)?
+    private let write: @Sendable (Data, URL) throws -> Void
 
     init(
         url: URL,
         legacyPowerURL: URL? = nil,
-        maximumFileSize: Int = MetricHistoryStore.maximumFileSize
+        maximumFileSize: Int = MetricHistoryStore.maximumFileSize,
+        write: @escaping @Sendable (Data, URL) throws -> Void = { data, url in
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+        }
     ) {
         self.url = url
         self.legacyPowerURL = legacyPowerURL
-        self.maximumFileSize = maximumFileSize
+        self.maximumFileSize = max(1, min(maximumFileSize, Self.maximumFileSize))
+        self.write = write
     }
 
     func load(now: Date = Date()) -> MetricHistorySnapshot {
         guard !isLoaded else { return cached }
         isLoaded = true
 
-        if FileManager.default.fileExists(atPath: url.path) {
-            guard let data = try? Data(contentsOf: url),
-                  data.count <= maximumFileSize,
-                  let decoded = try? JSONDecoder().decode(
-                      MetricHistorySnapshot.self,
-                      from: data
-                  ),
-                  decoded.version == MetricHistorySnapshot.currentVersion else {
-                cached = .empty
+        do {
+            if let data = try BoundedMonitoringFile.read(url, maximumBytes: maximumFileSize) {
+                let decoded = try JSONDecoder().decode(MetricHistorySnapshot.self, from: data)
+                guard decoded.version == MetricHistorySnapshot.currentVersion,
+                      (decoded.telemetry + decoded.memoryTelemetry).allSatisfy({
+                          ($0.temperatureReadings?.count ?? 0) <= 64 && ($0.fanReadings?.count ?? 0) <= 64
+                      }) else {
+                    throw MonitoringFileError.invalidStructure
+                }
+                cached = Self.sanitized(decoded, now: now)
                 return cached
             }
-            cached = Self.sanitized(decoded, now: now)
+        } catch {
+            // Preserve the original byte-for-byte. New observations stay in the
+            // bounded live buffer; never replace an unreadable file with empty data.
+            loadFailure = String(describing: error)
             return cached
         }
 
@@ -137,8 +155,7 @@ actor MetricHistoryStore {
         let legacyPower = MenuBarPowerHistoryStore.load(from: legacyPowerURL, now: now)
         guard !legacyPower.isEmpty else { return cached }
         cached.power = legacyPower
-        isDirty = true
-        try? persist(now: now)
+        markDirtyAndPersistIfNeeded(now: now)
         return cached
     }
 
@@ -173,37 +190,73 @@ actor MetricHistoryStore {
         markDirtyAndPersistIfNeeded(now: now)
     }
 
-    func flush(now: Date = Date()) throws {
+    func flush(now: Date = Date()) async throws {
         _ = load(now: now)
-        guard isDirty else { return }
-        try persist(now: now)
+        let requestedRevision = revision
+        while isDirty && persistedRevision < requestedRevision {
+            guard loadFailure == nil else { throw MetricHistoryStoreError.preservedUnreadableHistory }
+            if let saveTask {
+                await saveTask.value
+                if let lastPersistenceError { throw lastPersistenceError }
+            } else if let task = scheduleSave(now: now, force: true) {
+                await task.value
+                if let lastPersistenceError { throw lastPersistenceError }
+            } else {
+                throw lastPersistenceError ?? MetricHistoryStoreError.retryDeferred
+            }
+        }
     }
 
     private func markDirtyAndPersistIfNeeded(now: Date) {
         isDirty = true
-        guard lastSavedAt.map({ now.timeIntervalSince($0) >= Self.saveInterval })
-            ?? true else { return }
-        try? persist(now: now)
+        revision &+= 1
+        latestMutationAt = now
+        _ = scheduleSave(now: now, force: false)
     }
 
-    private func persist(now: Date) throws {
-        var document = Self.persistable(cached, longRangeBucket: 5 * 60)
-        var data = try JSONEncoder().encode(document)
-        if data.count > maximumFileSize {
-            document = Self.persistable(cached, longRangeBucket: 30 * 60)
-            data = try JSONEncoder().encode(document)
+    /// The actor continues accepting bounded retained history while ONE worker
+    /// encodes/writes an immutable snapshot. Cached history is also the latest
+    /// pending state; there is no queue of full documents or write tasks.
+    private func scheduleSave(now: Date, force: Bool) -> Task<Void, Never>? {
+        guard saveTask == nil, loadFailure == nil,
+              saveSchedule.begin(at: now, interval: Self.saveInterval, force: force) else { return nil }
+        let snapshot = cached
+        let savedRevision = revision
+        let limit = maximumFileSize
+        let destination = url
+        let write = self.write
+        let worker = Task.detached(priority: .utility) {
+            var document = Self.persistable(snapshot, longRangeBucket: 5 * 60)
+            var data = try JSONEncoder().encode(document)
+            if data.count > limit {
+                document = Self.persistable(snapshot, longRangeBucket: 30 * 60)
+                data = try JSONEncoder().encode(document)
+            }
+            guard data.count <= limit else { throw MetricHistoryStoreError.fileTooLarge }
+            try write(data, destination)
         }
-        guard data.count <= maximumFileSize else {
-            throw MetricHistoryStoreError.fileTooLarge
+        let task = Task {
+            let result = await worker.result
+            // Use the newest observed clock value to prevent a slow write from
+            // immediately replaying a backlog of historical save deadlines.
+            let completedAt = max(now, latestMutationAt)
+            switch result {
+            case .success:
+                persistedRevision = savedRevision
+                isDirty = revision != savedRevision
+                saveSchedule.succeeded(at: completedAt)
+                lastPersistenceError = nil
+            case .failure(let error):
+                saveSchedule.failed(at: completedAt)
+                lastPersistenceError = error
+            }
+            saveTask = nil
         }
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try data.write(to: url, options: .atomic)
-        isDirty = false
-        lastSavedAt = now
+        saveTask = task
+        return task
     }
+
+    var isSaveInFlight: Bool { saveTask != nil }
 
     private static func sanitized(
         _ snapshot: MetricHistorySnapshot,
@@ -414,11 +467,11 @@ enum MenuBarPowerHistoryStore {
     }
 
     static func load(from url: URL, now: Date = Date()) -> [MenuBarPowerHistoryPoint] {
-        guard let data = try? Data(contentsOf: url),
+        guard let data = try? BoundedMonitoringFile.read(url, maximumBytes: MetricHistoryStore.maximumFileSize),
               let decoded = try? JSONDecoder().decode(
-                  [MenuBarPowerHistoryPoint].self,
+                  BoundedMonitoringArray<MenuBarPowerHistoryPoint>.self,
                   from: data
-              ) else { return [] }
+              ).values else { return [] }
 
         let cutoff = now.addingTimeInterval(-MenuBarHistoryRetention.duration)
         let futureLimit = now.addingTimeInterval(5 * 60)

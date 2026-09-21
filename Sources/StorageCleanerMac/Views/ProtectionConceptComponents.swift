@@ -47,14 +47,14 @@ struct PrivacyConceptArtwork: View {
                     Image(systemName: "checklist")
                         .font(.system(size: 24, weight: .light))
                         .frame(width: 42, height: 42)
-                        .background(.white.opacity(0.08), in: Circle())
+                        .background(AppAppearanceColors.ink.opacity(0.08), in: Circle())
                     Text(L10n.text("扫描后选择记录", "Select records after scanning"))
                         .font(AppTypography.cardTitle)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(18)
-                .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.12)))
+                .background(AppAppearanceColors.ink.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
                 .padding(.horizontal, 16)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -97,8 +97,8 @@ struct HealthCheckScopeCards: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, minHeight: layout.isShort ? 174 : 216, alignment: .top)
-                .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.white.opacity(0.12)))
+                .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
             }
         }
     }

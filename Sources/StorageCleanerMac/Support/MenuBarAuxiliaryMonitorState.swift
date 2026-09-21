@@ -227,7 +227,10 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
 
     private var consumers: [UUID: MenuBarAuxiliaryMonitorDemand] = [:]
     private var isPaused = false
-    private var localDataRefreshTask: Task<Void, Never>?
+    var onBatterySample: ((BatteryPowerSnapshot?, NativeBatteryElectricalSnapshot?) -> Void)?
+    private var batteryRefreshTask: Task<Void, Never>?
+    private var storageRefreshTask: Task<Void, Never>?
+    private var networkInterfaceRefreshTask: Task<Void, Never>?
     private var localDataGeneration = 0
     private var storageVolumesRefreshedAt: Date?
     private var processorTelemetryTask: Task<Void, Never>?
@@ -237,6 +240,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private var backgroundDiskRefreshTask: Task<Void, Never>?
     private var backgroundDiskRefreshGeneration = 0
     private var backgroundDiskRefreshedAt: Date?
+    private let publicNetworkConsentProvider: @Sendable () -> Bool
+    private var privacySubscription: AnyCancellable?
+    private var lastNetworkConsent = [PublicNetworkConsent.allowsAddress, PublicNetworkConsent.allowsCountry]
     private var publicNetworkAddressTask: Task<Void, Never>?
     private var publicNetworkAddressGeneration = 0
     private var pendingPublicNetworkSignature: String?
@@ -286,6 +292,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         publicNetworkAddressProvider: @escaping PublicNetworkAddressProvider = {
             await PublicNetworkAddressService.snapshot()
         },
+        publicNetworkConsentProvider: @escaping @Sendable () -> Bool = { PublicNetworkConsent.allowsAddress },
         networkProcessProvider: @escaping NetworkProcessProvider = {
             NativeNetworkProcessService.snapshot(
                 cancellationCheck: { Task.isCancelled }
@@ -300,6 +307,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         self.storageVolumeProvider = storageVolumeProvider
         self.batterySnapshotProvider = batterySnapshotProvider
         self.publicNetworkAddressProvider = publicNetworkAddressProvider
+        self.publicNetworkConsentProvider = publicNetworkConsentProvider
         self.networkProcessProvider = networkProcessProvider
         self.metricHistoryStore = metricHistoryStore
         self.powerHistoryURL = powerHistoryURL
@@ -310,6 +318,20 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
             self?.refreshFromPowerSourceNotification()
         }
         batteryPowerSourceObserver?.start()
+        privacySubscription = NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .sink { @Sendable [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let consent = [PublicNetworkConsent.allowsAddress, PublicNetworkConsent.allowsCountry]
+                    guard consent != self.lastNetworkConsent else { return }
+                    self.lastNetworkConsent = consent
+                    self.cancelPublicNetworkAddressRefresh()
+                    self.publicNetworkData = MenuBarPublicNetworkData()
+                    if PublicNetworkConsent.allowsAddress {
+                        self.refreshPublicNetworkAddressIfReady(force: true)
+                    }
+                }
+            }
     }
 
     func restoreHistory(_ snapshot: MetricHistorySnapshot) {
@@ -370,7 +392,6 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         if paused {
             statusWiFiGeneration &+= 1
             statusWiFiTask?.cancel()
-            statusWiFiTask = nil
             cancelLocalDataRefresh()
             cancelProcessorTelemetryRefresh()
             stopNativeDiskIOSampling()
@@ -411,7 +432,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     func refreshBackgroundBatteryHistory(force: Bool = false) {
         guard !isPaused,
               consumers.isEmpty,
-              localDataRefreshTask == nil else { return }
+              batteryRefreshTask == nil else { return }
 
         let now = Date()
         guard force
@@ -419,27 +440,39 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
                 now.timeIntervalSince($0) >= Self.batteryHistorySamplingInterval
             }) != false else { return }
 
-        localDataGeneration &+= 1
+        refreshBattery(allowsNoConsumers: true)
+    }
+
+    private var hasPendingLocalReads: Bool {
+        batteryRefreshTask != nil || storageRefreshTask != nil || networkInterfaceRefreshTask != nil
+    }
+
+    private func refreshBattery(allowsNoConsumers: Bool = false) {
+        guard batteryRefreshTask == nil else { return }
         let generation = localDataGeneration
-        var refreshingData = localData
-        refreshingData.isRefreshing = true
-        localData = refreshingData
         let provider = batterySnapshotProvider
         let availabilityProvider = batteryAvailabilityProvider
         let previousAvailability = internalBatteryAvailability
-        localDataRefreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+        batteryRefreshTask = Task { @MainActor [weak self] in
             let resolvedBattery = await Task.detached(priority: .utility) {
                 (provider(), previousAvailability == .unknown ? availabilityProvider() : previousAvailability)
             }.value
-            guard canPublishLocalData(generation, allowsNoConsumers: true) else { return }
+            guard let self else { return }
+            batteryRefreshTask = nil
+            guard canPublishLocalData(generation, allowsNoConsumers: allowsNoConsumers) else {
+                if !isPaused, !consumers.isEmpty { refreshLocalData() }
+                return
+            }
+            // Merge into the latest state: a slow volume read must neither hold
+            // a battery sample nor overwrite a newer battery/network result.
             var nextLocalData = localData
             recordBatterySample(resolvedBattery.0, availability: resolvedBattery.1, in: &nextLocalData)
-            guard generation == localDataGeneration else { return }
-            nextLocalData.isRefreshing = false
+            nextLocalData.isRefreshing = hasPendingLocalReads
             localData = nextLocalData
-            localDataRefreshTask = nil
         }
+        var refreshingData = localData
+        refreshingData.isRefreshing = true
+        localData = refreshingData
     }
 
     /// The menu-bar agent already owns the primary refresh cadence. Reusing it
@@ -464,8 +497,10 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
             let current = await Task.detached(priority: .utility) {
                 counterProvider()
             }.value
-            guard let self,
-                  !Task.isCancelled,
+            guard let self else { return }
+            backgroundDiskRefreshTask = nil
+            if !isPaused, combinedDemand.needsDiskIOSampling { startNativeDiskIOSampling() }
+            guard !Task.isCancelled,
                   generation == backgroundDiskRefreshGeneration,
                   !isPaused,
                   consumers.isEmpty,
@@ -512,10 +547,10 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         let provider = statusWiFiProvider
         statusWiFiTask = Task { @MainActor [weak self] in
             let snapshot = await Task.detached(priority: .utility) { provider(now) }.value
-            guard let self, !Task.isCancelled, !isPaused,
-                  generation == statusWiFiGeneration else { return }
-            statusWiFiSnapshot = snapshot
+            guard let self else { return }
             statusWiFiTask = nil
+            guard !Task.isCancelled, !isPaused, generation == statusWiFiGeneration else { return }
+            statusWiFiSnapshot = snapshot
         }
     }
 
@@ -601,7 +636,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
               networkProcessTask == nil else { return }
 
         let now = Date()
-        let refreshInterval: TimeInterval = 5
+        let refreshInterval = MenuBarPerformancePolicy.visibleProcessInterval
         guard force || networkProcessData.lastAttemptAt.map({
             now.timeIntervalSince($0) >= refreshInterval
         }) != false else { return }
@@ -624,13 +659,15 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
                 samplingTask.cancel()
             }
 
-            guard let self,
-                  !Task.isCancelled,
+            guard let self else { return }
+            networkProcessTask = nil
+            guard !Task.isCancelled,
                   generation == networkProcessGeneration,
                   !isPaused,
-                  combinedDemand.needsNetworkProcesses else { return }
-
-            networkProcessTask = nil
+                  combinedDemand.needsNetworkProcesses else {
+                if !isPaused, combinedDemand.needsNetworkProcesses { refreshNetworkProcesses(force: true) }
+                return
+            }
             networkProcessData = MenuBarNetworkProcessData(
                 snapshot: snapshot,
                 lastAttemptAt: now,
@@ -642,7 +679,6 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private func cancelNetworkProcessRefresh() {
         networkProcessGeneration &+= 1
         networkProcessTask?.cancel()
-        networkProcessTask = nil
         if networkProcessData.samplingState == .sampling {
             var nextData = networkProcessData
             nextData.samplingState = nextData.snapshot == nil ? .idle : .available
@@ -654,7 +690,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         force: Bool = false,
         networkSignature: String? = nil
     ) {
-        guard !isPaused,
+        guard publicNetworkConsentProvider(), !isPaused,
               combinedDemand.needsPublicNetworkAddress else { return }
 
         if publicNetworkAddressTask != nil {
@@ -767,11 +803,11 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         let generation = processorTelemetryGeneration
         processorTelemetryTask = Task { @MainActor [weak self] in
             let dynamicSnapshot = await CPUPerformanceStateService.currentSnapshot()
-            guard let self,
-                  !Task.isCancelled,
+            guard let self else { return }
+            processorTelemetryTask = nil
+            guard !Task.isCancelled,
                   generation == processorTelemetryGeneration else { return }
             let resolvedSnapshot = dynamicSnapshot ?? CPUPerformanceStateService.staticSnapshot()
-            processorTelemetryTask = nil
             guard !isPaused, combinedDemand.needsProcessorTelemetry else { return }
             processorData = MenuBarProcessorMonitorData(
                 telemetry: resolvedSnapshot,
@@ -783,23 +819,30 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private func cancelProcessorTelemetryRefresh() {
         processorTelemetryGeneration &+= 1
         processorTelemetryTask?.cancel()
-        processorTelemetryTask = nil
     }
 
     private func startNativeDiskIOSampling() {
         guard !isPaused,
               combinedDemand.needsDiskIOSampling,
-              nativeDiskIOSamplingTask == nil else { return }
+              nativeDiskIOSamplingTask == nil,
+              backgroundDiskRefreshTask == nil else { return }
 
         nativeDiskIOGeneration &+= 1
         let generation = nativeDiskIOGeneration
         let counterProvider = diskCounterProvider
         nativeDiskIOSamplingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                nativeDiskIOSamplingTask = nil
+                if generation != nativeDiskIOGeneration, !isPaused, combinedDemand.needsDiskIOSampling {
+                    startNativeDiskIOSampling()
+                }
+            }
+            guard !Task.isCancelled else { return }
             var previous = await Task.detached(priority: .utility) {
                 counterProvider()
             }.value
-            guard let self,
-                  !Task.isCancelled,
+            guard !Task.isCancelled,
                   generation == nativeDiskIOGeneration else { return }
             var initialDiskData = diskData
             initialDiskData.counters = previous
@@ -863,13 +906,11 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private func stopNativeDiskIOSampling() {
         nativeDiskIOGeneration &+= 1
         nativeDiskIOSamplingTask?.cancel()
-        nativeDiskIOSamplingTask = nil
     }
 
     private func cancelBackgroundDiskRefresh() {
         backgroundDiskRefreshGeneration &+= 1
         backgroundDiskRefreshTask?.cancel()
-        backgroundDiskRefreshTask = nil
     }
 
     private func refreshLocalData(
@@ -878,9 +919,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         networkOnly: Bool = false,
         refreshesPublicAddressOnNetworkChange: Bool = true
     ) {
-        guard !isPaused,
-              !consumers.isEmpty,
-              localDataRefreshTask == nil else { return }
+        guard !isPaused, !consumers.isEmpty else { return }
 
         let now = Date()
         let needsStorageCapacity = !networkOnly && (force
@@ -905,29 +944,25 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
                 || networkInterfaceRefreshedAt.map { now.timeIntervalSince($0) >= 60 } != false)
         guard needsStorage || needsBattery || needsNetworkInterface else { return }
 
-        localDataGeneration &+= 1
         let generation = localDataGeneration
-        var refreshingData = localData
-        refreshingData.isRefreshing = true
-        localData = refreshingData
-        localDataRefreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            var nextLocalData = localData
-            var networkSignatureToRefresh: String?
-
-            if needsStorage {
-                let storageVolumeProvider = needsStorageVolumes ? storageVolumeProvider : nil
+        if needsStorage, storageRefreshTask == nil {
+            let volumeProvider = needsStorageVolumes ? storageVolumeProvider : nil
+            storageRefreshTask = Task { @MainActor [weak self] in
                 let resolvedStorage = await Task.detached(priority: .utility) {
                     let rootURL = URL(fileURLWithPath: "/", isDirectory: true)
                     return (
                         StorageCapacityService.snapshot(),
-                        (try? rootURL.resourceValues(
-                            forKeys: [.volumeNameKey]
-                        ).volumeName),
-                        storageVolumeProvider?()
+                        (try? rootURL.resourceValues(forKeys: [.volumeNameKey]).volumeName),
+                        volumeProvider?()
                     )
                 }.value
-                guard canPublishLocalData(generation) else { return }
+                guard let self else { return }
+                storageRefreshTask = nil
+                guard canPublishLocalData(generation) else {
+                    if !isPaused, !consumers.isEmpty { refreshLocalData() }
+                    return
+                }
+                var nextLocalData = localData
                 nextLocalData.storageSnapshot = resolvedStorage.0
                 if let volumes = resolvedStorage.2 {
                     nextLocalData.externalStorageVolumes = volumes.external
@@ -938,50 +973,52 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
                 if let resolvedName = resolvedStorage.1, !resolvedName.isEmpty {
                     nextLocalData.volumeName = resolvedName
                 }
+                nextLocalData.isRefreshing = hasPendingLocalReads
+                localData = nextLocalData
             }
+        }
 
-            if needsBattery {
-                let provider = batterySnapshotProvider
-                let availabilityProvider = batteryAvailabilityProvider
-                let previousAvailability = internalBatteryAvailability
-                let resolvedBattery = await Task.detached(priority: .utility) {
-                    (provider(), previousAvailability == .unknown ? availabilityProvider() : previousAvailability)
-                }.value
-                guard canPublishLocalData(generation) else { return }
-                recordBatterySample(resolvedBattery.0, availability: resolvedBattery.1, in: &nextLocalData)
-            }
+        if needsBattery {
+            refreshBattery()
+        }
 
-            if needsNetworkInterface {
+        if needsNetworkInterface, networkInterfaceRefreshTask == nil {
+            networkInterfaceRefreshTask = Task { @MainActor [weak self] in
                 let resolvedNetwork = await Task.detached(priority: .utility) {
                     (
                         NativeNetworkInterfaceService.snapshot(),
                         NativeNetworkInterfaceService.topologySnapshot()
                     )
                 }.value
-                guard canPublishLocalData(generation) else { return }
+                guard let self else { return }
+                networkInterfaceRefreshTask = nil
+                guard canPublishLocalData(generation) else {
+                    if !isPaused, !consumers.isEmpty { refreshLocalData() }
+                    return
+                }
                 let previousSignature = localData.networkTopologySnapshot?.networkSignature
                 PerformanceTelemetry.signposter.emitEvent("SnapshotRefresh")
+                var nextLocalData = localData
                 nextLocalData.networkInterfaceSnapshot = resolvedNetwork.0
                 nextLocalData.networkTopologySnapshot = resolvedNetwork.1
                 nextLocalData.networkInterfaceRefreshedAt = Date()
+                nextLocalData.isRefreshing = hasPendingLocalReads
+                localData = nextLocalData
                 if previousSignature != resolvedNetwork.1.networkSignature {
                     PerformanceTelemetry.signposter.emitEvent("ActiveInterfaceChanged")
                     if refreshesPublicAddressOnNetworkChange {
-                        networkSignatureToRefresh = resolvedNetwork.1.networkSignature
+                        refreshPublicNetworkAddress(
+                            force: false,
+                            networkSignature: resolvedNetwork.1.networkSignature
+                        )
                     }
                 }
             }
-
-            guard generation == localDataGeneration else { return }
-            nextLocalData.isRefreshing = false
-            localData = nextLocalData
-            localDataRefreshTask = nil
-            if let networkSignatureToRefresh {
-                refreshPublicNetworkAddress(
-                    force: false,
-                    networkSignature: networkSignatureToRefresh
-                )
-            }
+        }
+        if hasPendingLocalReads, !localData.isRefreshing {
+            var refreshingData = localData
+            refreshingData.isRefreshing = true
+            localData = refreshingData
         }
     }
 
@@ -1001,6 +1038,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
             for: resolvedBattery.0
         )
         data.batteryRefreshedAt = Date()
+        onBatterySample?(resolvedBattery.0, resolvedBattery.1)
         let timestamp = resolvedBattery.1?.generatedAt ?? Date()
         let monotonicTimestamp = Duration.nanoseconds(
             Int64(ProcessInfo.processInfo.systemUptime * 1_000_000_000)
@@ -1080,8 +1118,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
 
     private func cancelLocalDataRefresh() {
         localDataGeneration &+= 1
-        localDataRefreshTask?.cancel()
-        localDataRefreshTask = nil
+        batteryRefreshTask?.cancel()
+        storageRefreshTask?.cancel()
+        networkInterfaceRefreshTask?.cancel()
         if localData.isRefreshing {
             var nextLocalData = localData
             nextLocalData.isRefreshing = false

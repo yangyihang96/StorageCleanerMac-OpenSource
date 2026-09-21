@@ -68,7 +68,7 @@ final class BenchmarkV7RuntimeTests: XCTestCase {
     }
 
     func testFullStandardCompletionRequiresFinitePositiveScoresButCustomStaysRawOnly() throws {
-        let official = OfficialBenchmarkPlan.current
+        let official = OfficialBenchmarkPlan.legacyV9
         let metric = try Self.metric()
         let validCore = BenchmarkV7CoreScore(categoryScores: [:], overallScore: 6_000)
         let validExperience = BenchmarkV7ExperienceScore(

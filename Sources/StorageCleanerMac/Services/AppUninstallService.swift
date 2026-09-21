@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Darwin
 import os
@@ -33,6 +34,7 @@ struct AppUninstallTrashResult: Equatable, Sendable {
     let movedRelatedItems: [InstalledAppRelatedItem]
     let skippedRelatedPaths: [String]
     let failedRelatedPaths: [String]
+    var report: CleanReport? = nil
 
     var movedRelatedBytes: Int64 {
         movedRelatedItems.reduce(0) { $0 + $1.sizeBytes }
@@ -410,77 +412,59 @@ enum AppUninstallService {
 
         try validateCurrentApplicationIdentity(app)
 
-        var resultingURL: NSURL?
-        try FileManager.default.trashItem(
-            at: URL(fileURLWithPath: app.path),
-            resultingItemURL: &resultingURL
-        )
-        guard !FileManager.default.fileExists(atPath: app.path) else {
-            throw AppUninstallError.moveNotVerified(app.path)
-        }
-
+        guard let identity = app.scanIdentity else { throw AppUninstallError.identityChanged(app.path) }
+        let report = RecordedTrashOperation.run(
+            items: [.init(path: app.path, bytes: app.sizeBytes, identity: identity)],
+            ruleID: "uninstall.application.v1", validate: { _ in
+                try validateCurrentApplicationIdentity(app)
+            })
         return AppUninstallTrashResult(
-            movedAppBytes: app.sizeBytes,
-            movedRelatedItems: [],
-            skippedRelatedPaths: [],
-            failedRelatedPaths: []
-        )
+            movedAppBytes: report.summary.movedToRecoverableLocationBytes,
+            movedRelatedItems: [], skippedRelatedPaths: [], failedRelatedPaths: [], report: report)
     }
 
     static func moveRelatedItemsToTrash(for app: InstalledAppItem) -> AppUninstallTrashResult {
-        let appPath = PathSafety.normalizedPath(app.path)
-        var movedRelatedItems = [InstalledAppRelatedItem]()
-        var skippedRelatedPaths = [String]()
-        var failedRelatedPaths = [String]()
-
-        for item in app.relatedItems {
-            let path = PathSafety.normalizedPath(item.path)
-            guard path != appPath, !path.hasPrefix(appPath + "/"), isSafeRelatedPath(path) else {
-                skippedRelatedPaths.append(item.path)
-                continue
-            }
-            guard FileManager.default.fileExists(atPath: path) else {
-                skippedRelatedPaths.append(item.path)
-                continue
-            }
-
-            guard let currentIdentity = uninstallFileIdentity(at: path),
-                  currentIdentity.entryKind != .symbolicLink,
-                  item.scanIdentity.map({ $0 == currentIdentity }) ?? true else {
-                failedRelatedPaths.append(item.path)
-                continue
-            }
-
-            do {
-                var resultingURL: NSURL?
-                try FileManager.default.trashItem(
-                    at: URL(fileURLWithPath: path),
-                    resultingItemURL: &resultingURL
-                )
-                guard !FileManager.default.fileExists(atPath: path) else {
-                    failedRelatedPaths.append(item.path)
-                    continue
-                }
-                movedRelatedItems.append(item)
-            } catch {
-                failedRelatedPaths.append(item.path)
-            }
+        let appPath = PathSafety.lexicalPath(app.path)
+        let candidates = app.relatedItems.filter { item in
+            item.verifiedExclusiveOwnerBundleID == app.bundleIdentifier && item.scanIdentity != nil
         }
-
-        return AppUninstallTrashResult(
-            movedAppBytes: 0,
-            movedRelatedItems: movedRelatedItems,
-            skippedRelatedPaths: skippedRelatedPaths,
-            failedRelatedPaths: failedRelatedPaths
-        )
+        let skipped = app.relatedItems.filter { item in !candidates.contains(where: { $0.path == item.path }) }.map(\.path)
+        guard !candidates.isEmpty else {
+            return AppUninstallTrashResult(movedAppBytes: 0, movedRelatedItems: [],
+                skippedRelatedPaths: skipped, failedRelatedPaths: [])
+        }
+        let report = RecordedTrashOperation.run(items: candidates.map {
+            .init(path: $0.path, bytes: $0.sizeBytes, identity: $0.scanIdentity)
+        }, ruleID: "uninstall.related.v1", validate: { item in
+            let path = item.path
+            guard UninstallCandidatePathPolicy.isSafeComponent(app.bundleIdentifier),
+                  NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).isEmpty,
+                  path == PathSafety.lexicalPath(path), !PathSafety.containsSymbolicLinkComponent(in: path),
+                  path != appPath, !path.hasPrefix(appPath + "/"), isSafeRelatedPath(path),
+                  candidates.contains(where: { $0.path == path && $0.verifiedExclusiveOwnerBundleID == app.bundleIdentifier }) else {
+                throw AppUninstallError.identityChanged(path)
+            }
+        })
+        let movedPaths = Set(report.items.compactMap { row -> String? in
+            if case .moved = row.outcome { return row.sourcePath }; return nil
+        })
+        return AppUninstallTrashResult(movedAppBytes: 0,
+            movedRelatedItems: candidates.filter { movedPaths.contains($0.path) }, skippedRelatedPaths: skipped,
+            failedRelatedPaths: candidates.filter { !movedPaths.contains($0.path) }.map(\.path), report: report)
     }
 
     static func validateCurrentApplicationIdentity(_ app: InstalledAppItem) throws {
-        guard let currentIdentity = uninstallFileIdentity(at: app.path),
+        try Task.checkCancellation()
+        guard UninstallCandidatePathPolicy.isSafeComponent(app.bundleIdentifier),
+              app.path == PathSafety.lexicalPath(app.path),
+              !PathSafety.containsSymbolicLinkComponent(in: app.path),
+              NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).isEmpty,
+              let currentIdentity = uninstallFileIdentity(at: app.path),
               currentIdentity.entryKind == .directory else {
             throw AppUninstallError.identityChanged(app.path)
         }
-        if let scanIdentity = app.scanIdentity, scanIdentity != currentIdentity {
+        guard let scanIdentity = app.scanIdentity,
+              scanIdentity == currentIdentity else {
             throw AppUninstallError.identityChanged(app.path)
         }
 
@@ -495,20 +479,9 @@ enum AppUninstallService {
     }
 
     static func uninstallFileIdentity(at path: String) -> FileIdentity? {
-        var metadata = stat()
-        guard path.withCString({ Darwin.lstat($0, &metadata) }) == 0 else { return nil }
-        let kind: FileEntryKind = switch metadata.st_mode & S_IFMT {
-        case S_IFREG: .regularFile
-        case S_IFDIR: .directory
-        case S_IFLNK: .symbolicLink
-        default: .other
-        }
-        return FileIdentity(
-            deviceID: UInt64(metadata.st_dev),
-            inode: UInt64(metadata.st_ino),
-            entryKind: kind,
-            creationTimeNanoseconds: nil
-        )
+        // Scanner, mutation journal and recovery must use the same identity
+        // contract, including birth time (inode reuse is not the same object).
+        try? FoundationReadOnlyFileSystem().aggregateSnapshot(at: URL(fileURLWithPath: path)).identity
     }
 
     static func isSafeRelatedPath(_ path: String) -> Bool {
@@ -1023,25 +996,17 @@ enum AppUninstallService {
         return cleanedDescription(output)
     }
 
-    private static func relatedPaths(appName: String, bundleIdentifier: String) -> [String] {
-        let home = NSHomeDirectory()
-        var paths = [
-            "\(home)/Library/Application Support/\(appName)",
-            "\(home)/Library/Caches/\(appName)",
-            "\(home)/Library/Preferences/\(appName).plist"
-        ]
-
-        if !bundleIdentifier.isEmpty {
-            paths.append(contentsOf: [
-                "\(home)/Library/Application Support/\(bundleIdentifier)",
-                "\(home)/Library/Caches/\(bundleIdentifier)",
-                "\(home)/Library/Preferences/\(bundleIdentifier).plist",
-                "\(home)/Library/Containers/\(bundleIdentifier)",
-                "\(home)/Library/Group Containers/\(bundleIdentifier)"
-            ])
+    private static func relatedPaths(appName _: String, bundleIdentifier: String) -> [String] {
+        // A display name is not an ownership claim. Shared app-group containers
+        // also require entitlement/other-owner evidence not available here.
+        // Keep them out of this destructive candidate list.
+        UninstallCandidatePathPolicy.candidateURLs(
+            bundleIdentifier: bundleIdentifier,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        ).map(\.path).filter {
+            FileManager.default.fileExists(atPath: $0)
+                && !PathSafety.containsSymbolicLinkComponent(in: $0)
         }
-
-        return paths.filter { FileManager.default.fileExists(atPath: $0) }
     }
 
     private static func relatedItems(

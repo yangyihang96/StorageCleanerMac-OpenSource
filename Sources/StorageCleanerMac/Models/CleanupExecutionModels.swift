@@ -684,6 +684,8 @@ struct CleanupMoveReceipt: Codable, Equatable, Sendable {
 }
 
 enum CleanFailureCode: String, Codable, Sendable {
+    case persistenceFailed
+    case moveOutcomeUnknown
     case trashMoveRejected
     case trashMoveFailed
     case quarantineMoveFailed
@@ -745,16 +747,26 @@ struct CleanReport: Identifiable, Codable, Equatable, Sendable {
     let scanWasPartial: Bool
     let startedAt: Date
     let completedAt: Date
-    let outcome: CleanReportOutcome
+    var outcome: CleanReportOutcome
     let items: [CleanReportItem]
     let summary: CleanReportSummary
+    var persistenceFailure: String? = nil
+    /// Restore attempts stay with the original receipt; successful rows are never erased.
+    var recoveryAttempts: [CleanupRecoveryReport]? = nil
 
     var restorableReceipts: [CleanupMoveReceipt] {
         items.compactMap {
-            guard case let .moved(receipt) = $0.outcome, receipt.isRestorable else {
+            guard case let .moved(receipt) = $0.outcome, receipt.isRestorable,
+                  !recoveryBlocksRetry(of: receipt.originalPath) else {
                 return nil
             }
             return receipt
+        }
+    }
+
+    func recoveryBlocksRetry(of path: String) -> Bool {
+        (recoveryAttempts ?? []).flatMap(\.items).contains {
+            $0.originalPath == path && ($0.outcome == .restored || $0.outcome == .outcomeUnknown)
         }
     }
 }
@@ -782,6 +794,8 @@ enum CleanupWorkflowState: Equatable, Sendable {
 }
 
 enum CleanupRecoveryItemOutcome: String, Codable, Sendable {
+    case notProcessed
+    case outcomeUnknown
     case restored
     case conflict
     case missing
@@ -790,15 +804,17 @@ enum CleanupRecoveryItemOutcome: String, Codable, Sendable {
     case failed
 }
 
-struct CleanupRecoveryItem: Identifiable, Codable, Sendable {
+struct CleanupRecoveryItem: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     let originalPath: String
     let outcome: CleanupRecoveryItemOutcome
 }
 
-struct CleanupRecoveryReport: Codable, Sendable {
+struct CleanupRecoveryReport: Codable, Equatable, Sendable {
     let completedAt: Date
     let items: [CleanupRecoveryItem]
+    var attemptID: UUID? = nil
+    var persistenceFailure: String? = nil
 
     var restoredCount: Int {
         items.filter { $0.outcome == .restored }.count

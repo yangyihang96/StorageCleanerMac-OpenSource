@@ -304,14 +304,16 @@ final class BatteryPresentationTests: XCTestCase {
             ),
             encoding: .utf8
         )
+        let kernel = try String(contentsOf: root.appendingPathComponent(
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerPreparationKernel.swift"), encoding: .utf8)
         XCTAssertTrue(details.contains("enum PowerConnectionTimeline"))
-        XCTAssertTrue(details.contains("GeekChartWindow.displayBuckets("))
+        XCTAssertTrue(kernel.contains("GeekChartWindow.displayBuckets("))
         XCTAssertGreaterThanOrEqual(
             details.components(separatedBy: "preparedBatteryBuckets(").count - 1,
             5
         )
         XCTAssertTrue(details.contains("date: prepared.bucket.end"))
-        XCTAssertTrue(details.contains(
+        XCTAssertTrue(kernel.contains(
             "isEstimated: buckets[index].isEstimated || payloads[index].isEstimated\n                    || chargingStates[index].isEstimated\n                    || powerSources[index].isEstimated"
         ))
         XCTAssertTrue(details.contains("isEstimated: hoveredPoint.isEstimated"))
