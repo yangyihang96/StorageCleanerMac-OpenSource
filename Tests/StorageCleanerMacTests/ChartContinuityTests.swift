@@ -76,7 +76,7 @@ final class ChartContinuityTests: XCTestCase {
     }
 
     func testKnownSleepOverridesShortGapEstimatesAndCounterCoverage() {
-        let history = MenuBarSamplingGaps()
+        let history = MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self))
         history.begin(.sleep, at: origin.addingTimeInterval(2.2))
         history.end(.sleep, at: origin.addingTimeInterval(2.8))
         let dates = (0...6).map { origin.addingTimeInterval(Double($0)) }
@@ -92,9 +92,9 @@ final class ChartContinuityTests: XCTestCase {
     }
 
     func testPauseBoundariesPersistAndAnOpenPausePreventsBridging() throws {
-        let name = "StorageCleanerMac.ChartGaps.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let name = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: name))
+        defer { TestPreferenceDomain.cleanup(suiteName: name) }
         let history = MenuBarSamplingGaps(defaults: defaults)
         history.begin(.paused, at: origin)
         XCTAssertTrue(MenuBarSamplingGaps.crosses(history.intervals(at: origin.addingTimeInterval(10)),

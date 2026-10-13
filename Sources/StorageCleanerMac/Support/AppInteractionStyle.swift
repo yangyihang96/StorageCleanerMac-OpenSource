@@ -7,50 +7,27 @@ enum AppMotionPolicy {
 }
 
 enum AppMotionTokens {
-    // Keep motion quiet and predictable across the app. Controls use the
-    // short interaction curve; navigation and state changes share one system-
-    // like ease rather than introducing page-specific springs or bounce.
-    private static let interaction = Animation.easeOut(duration: 0.15)
+    // Compatibility names for existing views. D53 maps them onto the UI 2.0
+    // tokens in `AppMotion` so one curve set drives the whole window.
     private static let state = Animation.easeInOut(duration: 0.20)
-    private static let page = Animation.easeInOut(duration: 0.22)
 
-    static let press = interaction
-    static let hover = interaction
-    static let navigation = page
+    static let press = AppMotion.press
+    static let hover = AppMotion.hover
+    static let navigation = AppMotion.emphasized
     static let reveal = Animation.timingCurve(0.22, 0.74, 0.24, 1, duration: 0.34)
     static let stateChange = state
     static let feedback = state
     static let progress = Animation.easeInOut(duration: 0.28)
-    static let reduced = Animation.easeOut(duration: 0.12)
+    /// Reduce Motion: a 0.2 s fade (UI-V2-SPEC §3.1). The transitions these
+    /// drive are opacity-only in that mode, so nothing moves.
+    static let reduced = AppMotion.reducedFade
 
     static func resolved(_ animation: Animation, reduceMotion: Bool) -> Animation {
         reduceMotion ? reduced : animation
     }
 
     static func pageTransition(reduceMotion: Bool) -> AnyTransition {
-        guard !reduceMotion else { return .opacity }
-        return .asymmetric(
-            insertion: .modifier(
-                active: AppPageTransitionModifier(
-                    opacity: 0,
-                    verticalOffset: 8
-                ),
-                identity: AppPageTransitionModifier(
-                    opacity: 1,
-                    verticalOffset: 0
-                )
-            ),
-            removal: .modifier(
-                active: AppPageTransitionModifier(
-                    opacity: 0,
-                    verticalOffset: -4
-                ),
-                identity: AppPageTransitionModifier(
-                    opacity: 1,
-                    verticalOffset: 0
-                )
-            )
-        )
+        AppMotion.pageTransition(reduceMotion: reduceMotion)
     }
 
     static func stateTransition(reduceMotion: Bool, edge: Edge = .top) -> AnyTransition {
@@ -59,17 +36,6 @@ enum AppMotionTokens {
 
     static func listTransition(reduceMotion: Bool) -> AnyTransition {
         .opacity
-    }
-}
-
-private struct AppPageTransitionModifier: ViewModifier {
-    let opacity: Double
-    let verticalOffset: CGFloat
-
-    func body(content: Content) -> some View {
-        content
-            .opacity(opacity)
-            .offset(y: verticalOffset)
     }
 }
 
@@ -174,10 +140,10 @@ private struct AppSelectableRowSurfaceModifier: ViewModifier {
 
     private var rowBackground: Color {
         guard isSelected else { return AppDesignTokens.Palette.secondaryBackground }
-        let opacity = colorSchemeContrast == .increased
-            ? (colorScheme == .dark ? 0.38 : 0.24)
-            : (colorScheme == .dark ? 0.28 : 0.16)
-        return AppDesignTokens.Palette.selection.opacity(opacity)
+        if colorScheme == .light {
+            return AppAppearanceColors.selectedScopeSurface
+        }
+        return AppAppearanceColors.selectedSurface
     }
 
     private var borderColor: Color {
@@ -185,7 +151,14 @@ private struct AppSelectableRowSurfaceModifier: ViewModifier {
             return AppDesignTokens.Palette.focus
         }
         if isSelected {
-            return AppDesignTokens.Palette.selection.opacity(0.70)
+            if colorScheme == .light {
+                return AppAppearanceColors.controlAccent.opacity(
+                    colorSchemeContrast == .increased ? 0.90 : 0.55
+                )
+            }
+            return AppAppearanceColors.controlAccent.opacity(
+                colorSchemeContrast == .increased ? 0.90 : 0.70
+            )
         }
         return AppDesignTokens.Palette.separator.opacity(0.55)
     }

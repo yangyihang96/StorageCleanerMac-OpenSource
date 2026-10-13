@@ -886,7 +886,8 @@ final class NetworkSpeedTestServiceTests: XCTestCase {
     func testSuccessfulResultReachesRootHealthStoreWithoutHealthViewObserver() async {
         let testedAt = testedAt
         let healthStore = ComputerHealthStore(
-            probe: ScriptedNetworkBridgeHealthProbe()
+            probe: ScriptedNetworkBridgeHealthProbe(),
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
         let runner = ScriptedNetworkQualityRunner(steps: [
             .output(.success(stdout: stableJSONFixture()))

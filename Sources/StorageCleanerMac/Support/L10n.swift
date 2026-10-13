@@ -182,6 +182,11 @@ enum L10n {
         return count == 1 ? "1 item" : "\(count) items"
     }
 
+    /// 英文计数的单复数："1 file" / "2 files"。中文文案直接写在 `text(_:_:)` 里。
+    static func englishCount(_ count: Int, _ singular: String, _ plural: String) -> String {
+        "\(count) " + (count == 1 ? singular : plural)
+    }
+
     static func itemBytes(_ count: Int, _ bytes: String) -> String {
         usesChinese ? "\(count) 项 · \(bytes)" : "\(items(count)) · \(bytes)"
     }
@@ -213,10 +218,6 @@ enum L10n {
 
     static func scanSeconds(_ seconds: TimeInterval) -> String {
         usesChinese ? "扫描 \(String(format: "%.1f", seconds)) 秒" : "Scanned in \(String(format: "%.1f", seconds)) sec"
-    }
-
-    static func countTierDetail(count: Int, detail: String) -> String {
-        usesChinese ? "\(count) 项 · \(detail)" : "\(items(count)) · \(detail)"
     }
 
     static func lastScan(_ time: String) -> String {

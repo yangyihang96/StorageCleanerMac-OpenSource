@@ -1,10 +1,13 @@
 import SwiftUI
 
 enum GeekSensorPowerHoverDetailMetrics {
-    static let sensorHistorySize = GeekHoverDetailMetrics.historySize
+    // The sensor inspector has a two-row header and can show a second value
+    // row. Keep one stable size while history is gathering so neither the
+    // chart nor the time selector is clipped by the compact loading shell.
+    static let sensorHistorySize = CGSize(width: MiniWindowStyleTokens.historyWidth, height: 250)
     static let compactSamplingSize = GeekHoverDetailMetrics.compactSize
     static let batterySize = CGSize(width: 220, height: 196)
-    static let batteryHistorySize = CGSize(width: MiniWindowStyleTokens.compactHistoryWidth, height: 196)
+    static let batteryHistorySize = GeekHoverDetailMetrics.compactHistorySize
     static let energyModeSize = CGSize(width: 170, height: 167)
 
     static func energyModeSize(groupCount: Int) -> CGSize {
@@ -36,9 +39,9 @@ enum GeekSensorPowerHoverDetailMetrics {
 }
 
 enum GeekBatteryChartPalette {
-    static let externalPower = AppDesignTokens.Palette.information
-    static let battery = AppDesignTokens.Palette.sensitive
-    static let health = AppDesignTokens.Palette.batteryHealth
+    static let externalPower = MiniWindowColorPalette.blue
+    static let battery = MiniWindowColorPalette.pink
+    static let health = MiniWindowColorPalette.pink
     static let unknown = Color.secondary
 }
 
@@ -131,60 +134,110 @@ struct GeekSensorMetricHoverDetail: View {
     let duration: TimeInterval
     var secondaryTitle: String?
     var secondaryValue: String?
+    /// D57: extra current readings (the CPU row's hottest and average core).
+    var detailRows: [GeekSensorReadoutDetailRow] = []
+    /// D57: e.g. "依据键名推断" for zones named from SMC keys alone.
+    var note: String?
 
+    /// The history still draws the previous window (`MenuBarDisplayedHistory.isUpdating`).
+    var isUpdating = false
+
+    /// Statistics are prepared off the view body (once per history revision),
+    /// never recomputed for every hover render.
     var body: some View {
+        let points = self.points
+        let channel = self.channel
+        return MenuBarChartPreparation(kind: "sensor-hover-summary", first: points.first?.date,
+            last: points.last?.date, count: points.count, configuration: channel?.rawValue ?? "none",
+            cost: 256, build: {
+                channel.flatMap { GeekCompressedHistoryProjection.telemetryStatistics(points, channel: $0) }
+            }) { statistics in detailBody(statistics: statistics) }
+    }
+
+    private func detailBody(statistics: GeekSeriesStatistics?) -> some View {
         GeekHoverDetailCanvas(
             title: title,
             trailing: currentValue,
-            showsRangePicker: true
+            showsRangePicker: channel != nil,
+            stacksRangePicker: true
         ) {
-            if hasRenderableHistory, let channel {
-                GeekPrecisionLineChart(
-                    points: points,
-                    series: [
-                        MenuBarTelemetrySeries(
-                            id: "sensor-hover-\(channel.rawValue)",
-                            title: title,
-                            channel: channel,
-                            color: tint
-                        )
-                    ],
-                    valueRange: valueRange,
-                    unit: unit,
-                    accessibilityLabel: L10n.text(
-                        "\(title)最近 \(Int(duration.rounded())) 秒趋势",
-                        "\(title) trend over the last \(Int(duration.rounded())) seconds"
-                    ),
-                    style: .stackedBars,
-                    duration: duration,
-                    showsLegend: false,
-                    showsTimelineLabels: false,
-                    showsTooltip: true,
-                    horizontalInset: 2,
-                    showsSamplingDetails: false
-                )
-                .frame(height: hasSecondaryDetail ? 148 : 172)
-            } else {
+            if let channel {
+                // The axis row is also under the sampling placeholder, so the
+                // shell keeps its height when the first renderable history
+                // arrives.
                 Group {
-                    if channel == nil {
-                        GeekHoverUnavailableState(
-                            text: L10n.text("此项目暂无历史数据", "History is unavailable for this item")
+                    if hasRenderableHistory {
+                        GeekPrecisionLineChart(
+                            points: points,
+                            series: [
+                                MenuBarTelemetrySeries(
+                                    id: "sensor-hover-\(channel.rawValue)",
+                                    title: title,
+                                    channel: channel,
+                                    color: tint
+                                )
+                            ],
+                            valueRange: valueRange,
+                            unit: unit,
+                            accessibilityLabel: L10n.text(
+                                "\(title)最近 \(Int(duration.rounded())) 秒趋势",
+                                "\(title) trend over the last \(Int(duration.rounded())) seconds"
+                            ),
+                            style: .stackedBars,
+                            duration: duration,
+                            showsLegend: false,
+                            showsTimelineLabels: false,
+                            showsTooltip: true,
+                            horizontalInset: 2,
+                            showsSamplingDetails: false
                         )
+                        // The series color is the ring's color (`tint`); a
+                        // chart theme must not repaint only the history.
+                        .environment(\.panelChartAccentColor, nil)
                     } else {
                         PanelChartSamplingPlaceholder()
                     }
                 }
-                .frame(height: hasSecondaryDetail ? 76 : 94)
+                .geekHistoryAxis(GeekHistoryAxisFooter(
+                    duration: duration,
+                    valueRange: GeekHistoryAxisFooter.rangeText(valueRange, unit: unit),
+                    isUpdating: isUpdating
+                ))
+            } else {
+                GeekHoverUnavailableState(
+                    text: L10n.text("此项目暂无历史数据", "History is unavailable for this item")
+                )
+                .frame(height: MiniWindowStyleTokens.historyPlotHeight)
             }
 
             if let secondaryTitle,
                let secondaryValue {
                 GeekHoverValueRow(title: secondaryTitle, value: secondaryValue)
             }
+            ForEach(detailRows) { row in
+                GeekHoverValueRow(title: row.title, value: row.value)
+            }
+            if let note {
+                Text(note)
+                    .font(AdvancedPanelTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
-        .accessibilityValue(accessibilitySummary)
+        .accessibilityValue(accessibilitySummary(statistics: statistics))
+    }
+
+    /// The popover for this detail: the sensor history size plus one row
+    /// per extra reading and the note.
+    static func popoverSize(extraRowCount: Int, hasNote: Bool) -> CGSize {
+        let base = GeekSensorPowerHoverDetailMetrics.sensorHistorySize
+        return CGSize(
+            width: base.width,
+            height: base.height + CGFloat(max(0, extraRowCount)) * 18 + (hasNote ? 18 : 0)
+        )
     }
 
     private var values: [Double] {
@@ -194,10 +247,7 @@ struct GeekSensorMetricHoverDetail: View {
 
     private var hasRenderableHistory: Bool {
         values.count >= PanelChartSampling.minimumRenderableSampleCount
-    }
-
-    private var statistics: GeekSeriesStatistics? {
-        GeekSeriesStatistics(values: values)
+            || channel.map { GeekCompressedHistoryProjection.hasTrend(points, channel: $0) } == true
     }
 
     private var hasSecondaryDetail: Bool {
@@ -211,7 +261,7 @@ struct GeekSensorMetricHoverDetail: View {
         )
     }
 
-    private var statisticsHelpText: String {
+    private func statisticsHelpText(_ statistics: GeekSeriesStatistics?) -> String {
         guard let statistics else { return PanelChartSampling.statusText }
         return L10n.text(
             "\(title)：当前 \(unit.formatted(statistics.current, compact: true))，最低 / 平均 / 最高 \(statisticsText(statistics))",
@@ -219,9 +269,9 @@ struct GeekSensorMetricHoverDetail: View {
         )
     }
 
-    private var accessibilitySummary: String {
+    private func accessibilitySummary(statistics: GeekSeriesStatistics?) -> String {
         if statistics != nil {
-            return statisticsHelpText
+            return statisticsHelpText(statistics)
         }
         return channel == nil
             ? L10n.text("当前 \(currentValue)，历史未采集", "Current \(currentValue); history not collected")
@@ -256,7 +306,7 @@ enum GeekPowerHistoryMetric: Sendable {
     func formatted(_ value: Double) -> String {
         switch self {
         case .charge: String(format: "%.0f%%", value)
-        case .batteryPower: String(format: "%+.2f W", value)
+        case .batteryPower: HardwareReadingText.signedWatts(value)
         }
     }
 
@@ -417,7 +467,8 @@ struct GeekPowerHistoryChart: View {
     var body: some View {
         let kernel = preparationKernel
         return MenuBarChartPreparation(kind: "power-summary", first: points.first?.date, last: points.last?.date,
-            count: points.count, configuration: "\(metric):\(duration)", cost: 512,
+            count: points.count, configuration: "\(metric):\(duration)",
+            shape: "\(metric)", cost: 512,
             build: { kernel.statistics }) { statistics in
             chartBody(statistics: statistics)
         }
@@ -470,6 +521,8 @@ struct GeekPowerHistoryChart: View {
                               height: max(1, proxy.size.height - (timeline ? 20 : 4) - rail))
             MenuBarChartPreparation(kind: "power-frame", first: points.first?.date, last: points.last?.date,
                 count: points.count, configuration: "\(metric):\(duration):\(plot):\(displayScale)",
+                shape: "\(metric):\(plot):\(displayScale)",
+                window: duration,
                 clockRevision: floor(referenceDate.timeIntervalSince1970), cost: max(1024, points.count * 320),
                 build: { GeekPreparedPowerFrame(kernel: kernel, plot: plot, reference: referenceDate) }) { frame in
                     preparedChartContent(frame, referenceDate: referenceDate)
@@ -486,12 +539,13 @@ struct GeekPowerHistoryChart: View {
     @ViewBuilder
     private func renderChartContent(referenceDate: Date) -> some View {
         let livePoints = usablePoints(endingAt: referenceDate)
-        let liveSamples = livePoints.map {
-            MenuBarChartSample(date: $0.date, value: $0.value)
-        }
+        let hasRenderableTrend = activeFrame?.hasRenderableTrend
+            ?? PanelChartSampling.hasRenderableTrend(livePoints.map {
+                MenuBarChartSample(date: $0.date, value: $0.value)
+            })
 
         Group {
-            if !PanelChartSampling.hasRenderableTrend(liveSamples) {
+            if !hasRenderableTrend {
                 PanelChartSamplingPlaceholder()
             } else {
                 GeometryReader { proxy in
@@ -568,11 +622,14 @@ struct GeekPowerHistoryChart: View {
             content.onContinuousHover { phase in
                 switch phase {
                 case let .active(location):
+                    MenuBarPresentationTrace.beginInput("hover", label: "hover.power")
                     hoverLocation = location
                 case .ended:
                     hoverLocation = nil
                 }
             }
+            .menuBarPresentationProbe("hover", revision: MenuBarPresentationProbe.revision(hoverLocation))
+            .menuBarScriptHover("hover.power", enabled: true) { hoverLocation = $0 }
         } else {
             content
         }
@@ -605,7 +662,7 @@ struct GeekPowerHistoryChart: View {
 
     private var chartColor: Color {
         metric == .charge
-            ? GeekBatteryChartPalette.externalPower
+            ? tint
             : (panelChartAccentColor ?? tint)
     }
 
@@ -795,7 +852,7 @@ struct GeekPowerHistoryChart: View {
             }
             context.fill(
                 Path(roundedRect: segment, cornerRadius: min(2, rail.height / 2)),
-                with: .color(GeekBatteryChartPalette.externalPower)
+                with: .color(tint)
             )
             if segment.width >= 14 {
                 drawLightningBolt(context: &context, in: segment)
@@ -926,7 +983,7 @@ struct GeekPowerHistoryChart: View {
         guard metric == .charge else { return chartColor }
         switch point.powerSource ?? .unknown {
         case .acPower:
-            return GeekBatteryChartPalette.externalPower
+            return tint
         case .batteryPower:
             return chargingTint ?? GeekBatteryChartPalette.battery
         case .unknown:
@@ -938,6 +995,7 @@ struct GeekPowerHistoryChart: View {
         [
             accessibilitySummary(statistics: statistics),
             metric.meaningText,
+            GeekCompressedHistoryProjection.help,
             TimeBucketAggregator.nearestFillDescription,
         ]
             .compactMap { $0 }
@@ -956,6 +1014,8 @@ struct GeekPowerHistoryChart: View {
 }
 
 struct GeekFanHoverDetail: View {
+    @Environment(\.panelMetricColors) private var metricColors
+    @Environment(\.panelChartAccentColor) private var panelChartAccentColor
     let points: [MenuBarTelemetryPoint]
     let duration: TimeInterval
     let currentValue: String
@@ -963,45 +1023,64 @@ struct GeekFanHoverDetail: View {
     let valueRange: ClosedRange<Double>
     let selectedFanIndex: Int?
 
+    /// The history still draws the previous window (`MenuBarDisplayedHistory.isUpdating`).
+    var isUpdating = false
+
+    /// The fan channel carries the selected fan's speed (`chartPoints`), so
+    /// the series id names the fan: each fan and the average get their own
+    /// prepared frame.
+    static func chartSeries(selectedFanIndex: Int?, title: String, color: Color) -> [MenuBarTelemetrySeries] {
+        [MenuBarTelemetrySeries(
+            id: selectedFanIndex.map { "fan-hover-\($0)" } ?? "fan-hover-average",
+            title: title,
+            channel: .fanRPM,
+            color: color
+        )]
+    }
+
     var body: some View {
         GeekHoverDetailCanvas(
             title: chartTitle,
             trailing: currentValue,
             showsRangePicker: true
         ) {
-            if hasHistory {
-                GeekPrecisionLineChart(
-                    points: chartPoints,
-                    series: [
-                        MenuBarTelemetrySeries(
-                            id: "fan-hover",
-                            title: chartTitle,
-                            channel: .fanRPM,
-                            color: AppDesignTokens.Palette.tertiary
-                        )
-                    ],
-                    valueRange: valueRange,
-                    unit: .fanRPM,
-                    accessibilityLabel: chartTitle + L10n.text("转速趋势", " speed trend"),
-                    style: .stackedBars,
-                    duration: duration,
-                    showsLegend: false,
-                    showsTimelineLabels: false,
-                    showsTooltip: true,
-                    horizontalInset: 2,
-                    showsSamplingDetails: false
-                )
-                .frame(height: selectedFanIndex == nil ? 130 : 120)
-            } else {
-                PanelChartSamplingPlaceholder()
-                    .frame(height: selectedFanIndex == nil ? 58 : 44)
+            Group {
+                if hasHistory {
+                    GeekPrecisionLineChart(
+                        points: chartPoints,
+                        // The fan rings' color exit.
+                        series: Self.chartSeries(selectedFanIndex: selectedFanIndex, title: chartTitle, color: resolvedTint),
+                        valueRange: valueRange,
+                        unit: .fanRPM,
+                        accessibilityLabel: chartTitle + L10n.text("转速趋势", " speed trend"),
+                        style: .stackedBars,
+                        duration: duration,
+                        showsLegend: false,
+                        showsTimelineLabels: false,
+                        showsTooltip: true,
+                        horizontalInset: 2,
+                        showsSamplingDetails: false
+                    )
+                    .environment(\.panelChartAccentColor, nil)
+                } else {
+                    PanelChartSamplingPlaceholder()
+                }
             }
+            // Also under the sampling placeholder: no height jump when data arrives.
+            .geekHistoryAxis(GeekHistoryAxisFooter(
+                duration: duration,
+                valueRange: GeekHistoryAxisFooter.rangeText(valueRange, unit: .fanRPM),
+                isUpdating: isUpdating
+            ))
 
             if selectedFanIndex != nil {
                 Divider().opacity(0.4)
-                HStack(alignment: .top, spacing: 8) {
-                    rangeColumn(L10n.text("最低", "Minimum"), value: rangeValues[0])
-                    rangeColumn(L10n.text("最高", "Maximum"), value: rangeValues[1])
+                // The hardware range, named so: the axis row's vertical scale
+                // above is rounded from the visible readings (fanTrendMaximum),
+                // so "纵轴 0–2,500 rpm" beside a 4,000 rpm maximum is expected.
+                HStack(alignment: .top, spacing: MiniWindowStyleTokens.columnSpacing) {
+                    rangeColumn(L10n.text("硬件最低", "Hardware Min"), value: rangeValues[0])
+                    rangeColumn(L10n.text("硬件最高", "Hardware Max"), value: rangeValues[1])
                     rangeColumn(L10n.text("目标", "Target"), value: rangeValues[2])
                 }
                 .help(L10n.text(
@@ -1019,6 +1098,11 @@ struct GeekFanHoverDetail: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(chartTitle)
+    }
+
+    /// The fan rings' color exit (overview and sensors page).
+    private var resolvedTint: Color {
+        metricColors.sensorGraph(chartAccent: panelChartAccentColor)
     }
 
     private var chartTitle: String {
@@ -1082,6 +1166,7 @@ struct GeekFanHoverDetail: View {
 }
 
 struct GeekBatteryElectricalHoverDetail: View {
+    @Environment(\.miniWindowPageProvidesInset) private var pageProvidesInset
     let electrical: NativeBatteryElectricalSnapshot?
     let cycleCount: Int?
     let condition: String?
@@ -1118,7 +1203,7 @@ struct GeekBatteryElectricalHoverDetail: View {
     }
 
     var body: some View {
-        VStack(spacing: 7) {
+        VStack(spacing: MiniWindowStyleTokens.cardSpacing) {
             GeekHoverDetailGroup(title: L10n.text("电池", "Battery")) {
                 GeekBatteryCompactValueGrid(rows: batteryRows)
             }
@@ -1129,13 +1214,25 @@ struct GeekBatteryElectricalHoverDetail: View {
                 }
             }
 
+            if !usbPowerOutRows.isEmpty {
+                GeekHoverDetailGroup(title: L10n.text("USB-C 对外供电", "USB-C Power Out")) {
+                    GeekBatteryCompactValueGrid(rows: usbPowerOutRows)
+                }
+            }
+
+            if !cellRows.isEmpty {
+                GeekHoverDetailGroup(title: L10n.text("电芯电压", "Cell Voltages")) {
+                    GeekBatteryCompactValueGrid(rows: cellRows)
+                }
+            }
+
             if !healthRows.isEmpty {
                 GeekHoverDetailGroup(title: L10n.text("健康", "Health")) {
                     GeekBatteryCompactValueGrid(rows: healthRows)
                 }
             }
         }
-        .padding(GeekPanelLayout.contentPadding)
+        .padding(pageProvidesInset ? 0 : GeekPanelLayout.contentPadding)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
@@ -1172,11 +1269,23 @@ struct GeekBatteryElectricalHoverDetail: View {
         }
         if let chargeTargetPercent {
             rows.append((
-                L10n.text("目标电量", "Target Charge"),
+                L10n.text("实际充电上限", "Effective Charge Limit"),
                 "\(chargeTargetPercent)%"
             ))
         }
         return rows
+    }
+
+    /// D57: power this Mac supplies through its USB-C ports.
+    private var usbPowerOutRows: [(String, String)] {
+        guard let electrical else { return [] }
+        return GeekBatteryHoverReadings.usbPowerOutRows(electrical.usbPowerOut)
+    }
+
+    /// D57: the cells' live voltages (`BC1V`…).
+    private var cellRows: [(String, String)] {
+        guard let electrical else { return [] }
+        return GeekBatteryHoverReadings.cellRows(electrical.cellVoltages)
     }
 
     private var healthRows: [(String, String)] {
@@ -1187,10 +1296,12 @@ struct GeekBatteryElectricalHoverDetail: View {
         if let cycleCount {
             rows.append((L10n.text("循环次数", "Cycles"), String(cycleCount)))
         }
-        if let temperature = electrical?.temperatureCelsius {
+        // D57: SMC `TB0T`/`B0AT` (macOS 27.2's AppleSmartBattery has no
+        // temperature); "本机不支持" or "读数无效" when there is no value.
+        if let electrical {
             rows.append((
                 L10n.text("电池温度", "Battery Temperature"),
-                String(format: "%.1f°C", temperature)
+                HardwareReadingText.detail(electrical.temperatureReading, format: HardwareReadingText.celsius)
             ))
         }
         return rows
@@ -1201,13 +1312,49 @@ struct GeekBatteryElectricalHoverDetail: View {
     }
 }
 
+/// D57: the battery hover's third-level readings under the no-value rule.
+enum GeekBatteryHoverReadings {
+    /// One row per cell, or one "本机不支持" row without cell keys.
+    static func cellRows(_ cells: [HardwareReading<Double>]) -> [(String, String)] {
+        guard !cells.isEmpty else {
+            return [(L10n.text("电芯电压", "Cell Voltage"), HardwareReadingText.unsupported)]
+        }
+        return cells.enumerated().map { index, reading in
+            (
+                L10n.text("电芯 \(index + 1)", "Cell \(index + 1)"),
+                HardwareReadingText.detail(reading) { String(format: "%.3f V", $0) }
+            )
+        }
+    }
+
+    /// The ports supplying power ("端口 2"); one zero row when none is.
+    static func usbPowerOutRows(_ reading: HardwareReading<[USBPowerOutPort]>) -> [(String, String)] {
+        let title = L10n.text("对外供电", "Power Out")
+        switch reading {
+        case .unsupported:
+            return [(title, HardwareReadingText.unsupported)]
+        case .invalid:
+            return [(title, HardwareReadingText.invalid)]
+        case let .value(ports):
+            let active = ports.filter { $0.watts >= 0.005 }
+            guard !active.isEmpty else { return [(title, HardwareReadingText.watts(0))] }
+            return active.map { port in
+                (
+                    port.portIndex.map { L10n.text("端口 \($0)", "Port \($0)") } ?? title,
+                    HardwareReadingText.watts(port.watts)
+                )
+            }
+        }
+    }
+}
+
 private struct GeekBatteryCompactValueGrid: View {
     let rows: [(String, String)]
 
     var body: some View {
         VStack(spacing: 1) {
             ForEach(Array(stride(from: 0, to: rows.count, by: 2)), id: \.self) { index in
-                HStack(spacing: 7) {
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                     GeekBatteryCompactValueRow(title: rows[index].0, value: rows[index].1)
                     if rows.indices.contains(index + 1) {
                         GeekBatteryCompactValueRow(title: rows[index + 1].0, value: rows[index + 1].1)
@@ -1261,7 +1408,7 @@ struct GeekBatteryHistoryHoverDetail: View {
                 showsTimelineLabels: false,
                 showsTooltip: true
             )
-            .frame(height: 154)
+            .geekHistoryAxis(GeekHistoryAxisFooter(duration: chartRangeSelection.range.duration, valueRange: "0–100%"))
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L10n.text("电池", "Battery"))
@@ -1308,6 +1455,7 @@ struct GeekEnergyModeHoverDetail: View {
     let adapterPowerWatts: Double?
     let adjustmentState: BatteryPowerModeAdjustmentState
     var controlsEnabled = true
+    var chargeLimitControlsEnabled = true
     let onChargeToFull: () async -> BatteryFullChargeResult
     let onSetChargeTarget: (BatteryChargeTarget) async -> BatteryChargeTargetUpdateResult
     let onOpenBatterySettings: () -> Void
@@ -1318,6 +1466,8 @@ struct GeekEnergyModeHoverDetail: View {
             if showsChargeTargetSetting {
                 GeekChargeTargetSetting(
                     showsFullChargeAction: showsFullChargeAction,
+                    powerSource: powerSource,
+                    controlsEnabled: chargeLimitControlsEnabled,
                     chargeLimitState: chargeLimitState,
                     chargeToFull: onChargeToFull,
                     setChargeTarget: onSetChargeTarget,
@@ -1358,44 +1508,57 @@ struct GeekEnergyModeHoverDetail: View {
 
 private struct GeekChargeTargetSetting: View {
     let showsFullChargeAction: Bool
+    let powerSource: BatteryPowerSource
+    let controlsEnabled: Bool
     let chargeLimitState: BatteryChargeLimitState?
     let chargeToFull: () async -> BatteryFullChargeResult
     let setChargeTarget: (BatteryChargeTarget) async -> BatteryChargeTargetUpdateResult
     let openBatterySettings: () -> Void
     @State private var isRequesting = false
-    @State private var selectedTarget = BatteryChargeTarget.stored()
     @State private var targetUpdateResult: BatteryChargeTargetUpdateResult?
     @State private var result: BatteryFullChargeResult?
+    @State private var acceptedSource: BatteryChargeLimitSource?
 
     var body: some View {
         GeekHoverDetailGroup(title: L10n.text("充电上限", "Charge Limit")) {
             VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
                 VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-                    if isRequesting {
-                        ProgressView()
-                            .controlSize(.small)
+                    if chargeLimitState?.availableTargets.isEmpty == false {
+                        chargeTargetSegments
+                            .disabled(!controlsEnabled || isRequesting)
+                    } else {
+                        Text(BatteryChargeLimitPresentation.manualLimitUnavailableMessage())
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    MiniWindowSegmentedPicker(
-                        title: L10n.text("充电上限", "Charge Limit"),
-                        selection: Binding(
-                            get: { selectedTarget },
-                            set: { updateTarget($0) }
-                        ),
-                        options: availableTargets,
-                        label: { $0.displayText }
-                    )
-                    .frame(maxWidth: .infinity)
-                    .disabled(isRequesting || chargeLimitState == nil)
                 }
                 .font(AdvancedPanelTypography.body)
 
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                if targetUpdateFailed || chargeLimitState == nil {
+                if targetUpdateFailed {
                     Text(targetStatusText)
-                        .font(AdvancedPanelTypography.caption).foregroundStyle(targetStatusColor)
+                        .font(AdvancedPanelTypography.caption)
+                        .foregroundStyle(AppDesignTokens.Palette.destructive)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if let explanation = BatteryChargeLimitPresentation.sourceCaption(chargeLimitState) {
+                    Text(explanation)
+                        .font(AdvancedPanelTypography.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let status = BatteryChargeLimitPresentation.fullChargeStatus(
+                    chargeLimitState, acceptedSource: acceptedSource
+                ) {
+                    Text(status)
+                        .font(AdvancedPanelTypography.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
+                if showsFullChargeAction && temporaryFullChargeStatus == nil {
+                    fullChargeButton
                 }
 
                 Button(
@@ -1404,11 +1567,6 @@ private struct GeekChargeTargetSetting: View {
                 )
                 .buttonStyle(.link)
                 .font(AdvancedPanelTypography.caption)
-
-
-                if showsFullChargeAction {
-                    fullChargeButton
-                }
             }
         }
         .alert(
@@ -1427,26 +1585,61 @@ private struct GeekChargeTargetSetting: View {
         } message: {
             Text(resultMessage)
         }
-        .onAppear(perform: synchronizeTargetFromSystem)
-        .onChange(of: chargeLimitState) { _, _ in
-            synchronizeTargetFromSystem()
+        .onChange(of: chargeLimitState) { previous, current in
+            acceptedSource = BatteryChargeLimitPresentation.retainedAcceptedSource(
+                acceptedSource, previous: previous, current: current, isRequesting: isRequesting
+            )
+            if !isRequesting && targetUpdateResult == .applied { targetUpdateResult = nil }
         }
+        .onChange(of: isRequesting) { _, requesting in
+            if !requesting {
+                acceptedSource = BatteryChargeLimitPresentation.retainedAcceptedSource(
+                    acceptedSource, previous: chargeLimitState, current: chargeLimitState, isRequesting: false
+                )
+                if targetUpdateResult == .applied { targetUpdateResult = nil }
+            }
+        }
+    }
+
+    @ViewBuilder private var chargeTargetSegments: some View {
+        // macOS supplies the segments; more than five stay in one scrollable row.
+        if availableTargets.count > 5 {
+            ScrollView(.horizontal) {
+                segmentedPicker.frame(minWidth: CGFloat(availableTargets.count) * 48)
+            }
+            .scrollIndicators(.visible)
+        } else {
+            segmentedPicker
+        }
+    }
+
+    private var segmentedPicker: some View {
+        Picker(L10n.text("充电上限", "Charge Limit"), selection: Binding<BatteryChargeTarget?>(
+            get: { BatteryChargeLimitPresentation.selectedSegment(chargeLimitState) },
+            set: { if let target = $0 { updateTarget(target) } }
+        )) {
+            ForEach(availableTargets) { target in
+                Text(BatteryChargeLimitPresentation.manualTargetLabel(target))
+                    .tag(target as BatteryChargeTarget?)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(maxWidth: .infinity)
+        .accessibilityIdentifier("charge-limit-segments")
+        .accessibilityValue(chargeLimitState?.effectiveLimit.map { "\($0)%" }
+            ?? L10n.text("实际充电上限未知", "Effective charge limit unknown"))
     }
 
     private var fullChargeButton: some View {
         Button {
             requestFullCharge()
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "battery.100percent.bolt")
-                    .foregroundStyle(Color.accentColor)
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                 Text(L10n.text("本次充到 100%", "Charge This Time to 100%"))
                     .foregroundStyle(.primary)
                 Spacer(minLength: 2)
-                Image(systemName: AppSymbols.Panel.attachedDetail)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
+                GeekDisclosureIcon(systemImage: AppSymbols.Panel.attachedDetail)
             }
             .font(AdvancedPanelTypography.body)
 
@@ -1455,7 +1648,7 @@ private struct GeekChargeTargetSetting: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(ResponsivePlainButtonStyle())
-        .disabled(isRequesting)
+        .disabled(!canRequestFullCharge)
         .help(L10n.text(
             "临时解除 macOS 的充电暂停，不改变已选充电上限。",
             "Temporarily override the macOS charging pause without changing the selected limit."
@@ -1468,26 +1661,26 @@ private struct GeekChargeTargetSetting: View {
     }
 
     private func updateTarget(_ target: BatteryChargeTarget) {
-        guard target != selectedTarget, !isRequesting else { return }
+        guard controlsEnabled, availableTargets.contains(target), !isRequesting else { return }
+        isRequesting = true
         Task {
-            isRequesting = true
             let update = await setChargeTarget(target)
             targetUpdateResult = update
             if update == .applied {
-                selectedTarget = target
-                if target == .full, showsFullChargeAction {
-                    result = await chargeToFull()
-                }
+                acceptedSource = nil
             }
             isRequesting = false
         }
     }
 
     private func requestFullCharge() {
-        guard !isRequesting else { return }
+        guard canRequestFullCharge else { return }
+        isRequesting = true
         Task {
-            isRequesting = true
-            result = await chargeToFull()
+            let requestedSource = chargeLimitState?.source ?? .unknown
+            let fullChargeResult = await chargeToFull()
+            result = fullChargeResult
+            acceptedSource = fullChargeResult == .accepted ? requestedSource : nil
             isRequesting = false
         }
     }
@@ -1497,8 +1690,17 @@ private struct GeekChargeTargetSetting: View {
         return targetUpdateResult != .applied
     }
 
-    private var targetStatusColor: Color {
-        targetUpdateFailed ? .red : .secondary
+    private var temporaryFullChargeStatus: String? {
+        BatteryChargeLimitPresentation.fullChargeStatus(chargeLimitState, acceptedSource: acceptedSource)
+    }
+
+    private var canRequestFullCharge: Bool {
+        isFullChargeActionAvailable && !isRequesting
+    }
+
+    private var isFullChargeActionAvailable: Bool {
+        controlsEnabled && showsFullChargeAction
+            && powerSource == .acPower && temporaryFullChargeStatus == nil
     }
 
     private var targetStatusText: String {
@@ -1522,34 +1724,27 @@ private struct GeekChargeTargetSetting: View {
                     "Charge limit unavailable"
                 )
             }
-            return L10n.text(
-                "与系统设置同步 · 当前目标 \(selectedTarget.displayText)",
-                "Synced with System Settings · Target \(selectedTarget.displayText)"
-            )
+            return BatteryChargeLimitPresentation.summary(chargeLimitState)
         }
     }
 
     private var availableTargets: [BatteryChargeTarget] {
-        chargeLimitState?.availableTargets ?? [selectedTarget]
-    }
-
-    private func synchronizeTargetFromSystem() {
-        guard !isRequesting, let target = chargeLimitState?.target else { return }
-        selectedTarget = target
-        targetUpdateResult = nil
+        chargeLimitState?.availableTargets ?? []
     }
 
     private var resultTitle: String {
         switch result {
         case .accepted:
             L10n.text("已请求充到满电", "Charge to Full Requested")
+        case .noActiveLimit:
+            L10n.text("无需解除上限", "No Active Limit")
         case .alreadyCharging:
             L10n.text("正在充电", "Already Charging")
         case .alreadyFull:
             L10n.text("电池已满", "Battery Is Full")
         case .requiresACPower:
             L10n.text("请先连接电源", "Connect Power First")
-        case .unsupported, .rejected, .verificationFailed, .none:
+        case .unsupported, .rejected, .optimizedChargingRejectedAfterManualLift, .verificationFailed, .none:
             L10n.text("无法充到满电", "Unable to Charge to Full")
         }
     }
@@ -1558,9 +1753,11 @@ private struct GeekChargeTargetSetting: View {
         switch result {
         case .accepted:
             L10n.text(
-                "macOS 已接受临时满充请求，通常会在几十秒内开始充电，目标为 100%。长期电池保护仍保持开启。",
-                "macOS accepted the temporary full-charge request. Charging usually starts within tens of seconds and targets 100%. Long-term battery protection remains enabled."
+                "macOS 已接受临时满充请求，并已回读确认解除上限。开始供电可能还需十几秒；已选的手动上限不变。",
+                "macOS accepted the temporary full-charge request and readback confirmed the limit was lifted. Power delivery may take tens of seconds to start; the selected manual limit is unchanged."
             )
+        case .noActiveLimit:
+            BatteryChargeLimitPresentation.noActiveLimitMessage()
         case .alreadyCharging:
             L10n.text("电池已经在充电。", "The battery is already charging.")
         case .alreadyFull:
@@ -1568,14 +1765,15 @@ private struct GeekChargeTargetSetting: View {
         case .requiresACPower:
             L10n.text("连接电源适配器后再试。", "Connect a power adapter and try again.")
         case .unsupported:
-            L10n.text(
-                "当前 macOS 或机型不提供可验证的临时满充控制，请使用系统电池菜单。",
-                "This macOS version or Mac does not expose a verifiable temporary full-charge control. Use the system Battery menu."
-            )
+            BatteryChargeLimitPresentation.unsupportedMessage(chargeLimitState)
         case .rejected:
             L10n.text(
                 "macOS 拒绝了临时满充请求，请检查电池设置后重试。",
                 "macOS rejected the temporary full-charge request. Check Battery settings and try again."
+            )
+        case .optimizedChargingRejectedAfterManualLift(let effectiveLimit):
+            BatteryChargeLimitPresentation.optimizedChargingRejectedAfterManualLiftMessage(
+                effectiveLimit: effectiveLimit
             )
         case .verificationFailed:
             L10n.text(
@@ -1591,9 +1789,9 @@ private struct GeekChargeTargetSetting: View {
 private extension BatteryFullChargeResult {
     var needsBatterySettings: Bool {
         switch self {
-        case .unsupported, .rejected, .verificationFailed:
+        case .unsupported, .rejected, .optimizedChargingRejectedAfterManualLift, .verificationFailed:
             true
-        case .accepted, .alreadyCharging, .alreadyFull, .requiresACPower:
+        case .accepted, .noActiveLimit, .alreadyCharging, .alreadyFull, .requiresACPower:
             false
         }
     }
@@ -1643,6 +1841,7 @@ enum GeekEnergyModePowerTitle {
 }
 
 private struct GeekHoverDetailGroup<Content: View>: View {
+    @Environment(\.panelMetricColors) private var metricColors
     let title: String
     let isActive: Bool
     let showsFailure: Bool
@@ -1661,7 +1860,7 @@ private struct GeekHoverDetailGroup<Content: View>: View {
             HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
                 Text(title.uppercased())
                     .font(AdvancedPanelTypography.captionStrong)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(metricColors.sectionHeader)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
@@ -1792,66 +1991,5 @@ private struct GeekEnergyModeGroup: View {
              let .verificationFailed(source, mode):
             (source, mode)
         }
-    }
-}
-
-private struct GeekEnergyModeOptionRow: View {
-    let sourceTitle: String
-    let title: String
-    let selected: Bool
-    let isChanging: Bool
-    let isDisabled: Bool
-    let statusText: String?
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Text(title)
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 2)
-                if isChanging {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .accessibilityHidden(true)
-                } else if selected {
-                    Image(systemName: "checkmark")
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .accessibilityHidden(true)
-                }
-            }
-            .font(AdvancedPanelTypography.body)
-
-            .frame(height: 18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
-                    .fill(
-                        isHovered || isChanging
-                            ? Color.accentColor.opacity(0.16)
-                            : .clear
-                    )
-            )
-        }
-        .buttonStyle(ResponsivePlainButtonStyle())
-        .disabled(isDisabled)
-        .onHover { isHovered = $0 }
-        .help(statusText ?? L10n.text(
-            "更改为\(title)",
-            "Change to \(title)"
-        ))
-        .accessibilityLabel(L10n.text(
-            "\(sourceTitle)，更改能源模式为\(title)",
-            "\(sourceTitle), Change Energy Mode to \(title)"
-        ))
-        .accessibilityHint(statusText ?? L10n.text(
-            "将\(sourceTitle)能源模式更改为\(title)；首次使用时只需批准一次系统控制辅助程序",
-            "Changes the \(sourceTitle) Energy Mode to \(title); the system-control helper needs one approval on first use"
-        ))
-        .accessibilityValue(selected
-            ? L10n.text("当前模式", "Current Mode")
-            : (statusText ?? L10n.text("可选择", "Available")))
     }
 }

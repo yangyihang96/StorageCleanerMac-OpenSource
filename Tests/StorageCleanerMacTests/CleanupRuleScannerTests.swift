@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 @testable import StorageCleanerMac
 
+@MainActor
 final class CleanupRuleScannerTests: XCTestCase {
     func testDeveloperOnlyScopeKeepsTheExistingScannerAndDeveloperRules() throws {
         let allRules = try CleanupRuleSetLoader.loadBundled()
@@ -93,15 +94,15 @@ final class CleanupRuleScannerTests: XCTestCase {
 
     @MainActor
     func testDeveloperThresholdPersistsInExistingScanStore() throws {
-        let suiteName = "CleanupRuleScannerTests.developer-threshold.\(UUID().uuidString)"
-        let preferences = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let preferences = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
-        let first = ScanStore(cleanupPreferences: preferences)
+        let first = try ScanStore.makeForTests(for: self, cleanupPreferences: preferences)
         first.setDeveloperInactivityThresholdDays(75)
         XCTAssertEqual(first.developerInactivityThresholdDays, 75)
         XCTAssertEqual(
-            ScanStore(cleanupPreferences: preferences).developerInactivityThresholdDays,
+            try ScanStore.makeForTests(for: self, cleanupPreferences: preferences).developerInactivityThresholdDays,
             75
         )
     }
@@ -175,6 +176,8 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertEqual(changed.items.map(\.status), [.skipped(.candidateBecameActive)])
     }
 
+    /// D19/D47: developer tool logs are green and preselected while the tool's
+    /// app is closed; sessions, checkpoints and agent data are not listed.
     func testDeveloperToolArtifactsExposeOwnerAndTypeWhileProtectedStateStaysExcluded() async throws {
         let home = try makeFixtureHome()
         try write(
@@ -185,40 +188,27 @@ final class CleanupRuleScannerTests: XCTestCase {
             bytes: 128 * 1_024,
             to: home.appendingPathComponent(".cache/opencode/cache.bin")
         )
-        try write(
-            bytes: 128 * 1_024,
-            to: home.appendingPathComponent(".codex/logs/latest.log")
-        )
-        try write(
-            bytes: 128 * 1_024,
-            to: home.appendingPathComponent(".codex/sessions/protected.jsonl")
-        )
-        try write(
-            bytes: 128 * 1_024,
-            to: home.appendingPathComponent(".gemini/history/session.json")
-        )
-        try write(
-            bytes: 128 * 1_024,
-            to: home.appendingPathComponent(".workbuddy/sessions/session.json")
-        )
-        try write(
-            bytes: 128 * 1_024,
-            to: home.appendingPathComponent("Library/Application Support/Cursor/User/workspaceStorage/protected.bin")
-        )
+        let codexLog = home.appendingPathComponent(".codex/logs/latest.log")
+        try write(bytes: 128 * 1_024, to: codexLog)
+        let quiet = Date().addingTimeInterval(-10 * 86_400)
+        for url in [codexLog, codexLog.deletingLastPathComponent()] {
+            try FileManager.default.setAttributes([.modificationDate: quiet], ofItemAtPath: url.path)
+        }
+        for protectedPath in [
+            ".codex/sessions/protected.jsonl",
+            ".codex/.tmp/runtime.lock",
+            ".gemini/history/session.json",
+            ".workbuddy/sessions/session.json",
+            ".claude/projects/project.jsonl",
+            "Library/Application Support/Cursor/User/workspaceStorage/protected.bin",
+        ] {
+            try write(bytes: 128 * 1_024, to: home.appendingPathComponent(protectedPath))
+        }
 
-        let wantedIDs = [
-            "developer.cursor-cache",
-            "developer.opencode-cache",
-            "developer.codex-logs",
-            "developer.gemini-cli-data",
-            "developer.workbuddy-agent-data",
-        ]
         let rules = CleanupRuleSet(
             schemaVersion: 2,
             rulesVersion: "developer-artifacts.fixture",
-            rules: wantedIDs.compactMap { wantedID in
-                DeveloperToolArtifactCatalog.definitions.first { $0.id == wantedID }?.cleanupRule
-            }
+            rules: DeveloperToolArtifactCatalog.cleanupRules
         )
         let session = try await scan(home: home, ruleSet: rules)
         let byRuleID = Dictionary(uniqueKeysWithValues: session.candidates.map { ($0.ruleID, $0) })
@@ -235,26 +225,20 @@ final class CleanupRuleScannerTests: XCTestCase {
         let codexLogs = try XCTUnwrap(byRuleID["developer.codex-logs"])
         XCTAssertEqual(codexLogs.developerTool, .codex)
         XCTAssertEqual(codexLogs.developerArtifactKind, .logs)
-        XCTAssertEqual(codexLogs.action, .revealOnly)
-        XCTAssertFalse(codexLogs.isSelectable)
+        XCTAssertEqual(codexLogs.action, .moveToTrash)
+        XCTAssertEqual(codexLogs.risk, .safe, "Logs are not graded by activity")
+        XCTAssertEqual(codexLogs.selectionEligibility, .selectable)
+        XCTAssertTrue(CleanupSelection.defaults(in: session).selectedCandidateIDs.contains(codexLogs.id))
 
-        let gemini = try XCTUnwrap(byRuleID["developer.gemini-cli-data"])
-        XCTAssertEqual(gemini.developerTool, .geminiCLI)
-        XCTAssertEqual(gemini.developerArtifactKind, .agentData)
-        XCTAssertEqual(gemini.action, .revealOnly)
-        XCTAssertFalse(gemini.isSelectable)
-
-        let workBuddy = try XCTUnwrap(byRuleID["developer.workbuddy-agent-data"])
-        XCTAssertEqual(workBuddy.developerTool, .workBuddy)
-        XCTAssertEqual(workBuddy.developerArtifactKind, .agentData)
-        XCTAssertEqual(workBuddy.action, .revealOnly)
-        XCTAssertFalse(workBuddy.isSelectable)
-        XCTAssertNotNil(workBuddy.snapshot.identity.creationTimeNanoseconds)
-
+        XCTAssertTrue(session.candidates.allSatisfy(\.isSelectable))
         XCTAssertFalse(session.candidates.contains {
-            $0.snapshot.standardizedPath.contains("/sessions/")
-                || $0.snapshot.standardizedPath.contains("/User/workspaceStorage/")
+            $0.snapshot.standardizedPath.contains("/sessions")
+                || $0.snapshot.standardizedPath.hasSuffix("/.tmp")
+                || $0.snapshot.standardizedPath.contains("/history")
+                || $0.snapshot.standardizedPath.contains("/projects")
+                || $0.snapshot.standardizedPath.contains("/User/workspaceStorage")
         })
+        XCTAssertFalse(DeveloperToolArtifactCatalog.definitions.contains { $0.kind == .agentData })
     }
 
     func testBundledRuleSetLoadsAndValidates() throws {
@@ -321,9 +305,15 @@ final class CleanupRuleScannerTests: XCTestCase {
         let npmContent = try XCTUnwrap(session.candidates.first {
             $0.ruleID == "developer.npm-content-cache"
         })
-        XCTAssertFalse(defaults.selectedCandidateIDs.contains(npmContent.id))
+        // D47: a green row is preselected even when its rule is only
+        // "optional" (this fixture rule is not graded by developer activity).
+        XCTAssertEqual(npmContent.risk, .safe)
+        XCTAssertEqual(npmContent.defaultSelection, .unselected)
+        XCTAssertTrue(defaults.selectedCandidateIDs.contains(npmContent.id))
     }
 
+    /// D19, D22–D25: every bundled rule lists items that can be selected and
+    /// removed. Personal data, agent sessions and app bundles have no rule.
     func testBundledRulesEncodeStorageAnalyzerDecisionTiersWithNativeSafetyGuards() throws {
         let rules = try CleanupRuleSetLoader.loadBundled().rules
         let ruleByID = Dictionary(uniqueKeysWithValues: rules.map { ($0.id, $0) })
@@ -341,37 +331,53 @@ final class CleanupRuleScannerTests: XCTestCase {
             "system.user-logs",
             "downloads.installers",
             "downloads.large-items",
+            "applications.duplicate-installed-apps",
+        ]
+        XCTAssertEqual(
+            Set(ruleByID.keys),
+            Set(artifactRuleIDs + coverageRuleIDs + decisionRuleIDs)
+        )
+        for removedRuleID in [
             "personal.pictures-library",
             "user-data.wechat",
             "user-data.chrome",
             "user-data.codex-sessions",
             "user-data.ego-lite",
             "user-data.crossover",
-            "applications.duplicate-installed-apps",
+            "applications.installed-apps",
             "applications.large-creative-apps",
-        ]
-        for ruleID in artifactRuleIDs + coverageRuleIDs
-            + decisionRuleIDs + ["applications.installed-apps"] {
-            XCTAssertNotNil(ruleByID[ruleID], "Missing storage-analyzer scope: \(ruleID)")
+            "mail.library-attachments",
+            "developer.codex-agent-data",
+            "developer.codex-runtime-temporary-files",
+            "developer.claude-code-agent-data",
+            "developer.gemini-cli-data",
+        ] {
+            XCTAssertNil(ruleByID[removedRuleID], "D19/D24/D25 removed \(removedRuleID)")
         }
-        XCTAssertEqual(
-            Set(ruleByID.keys),
-            Set(
-                artifactRuleIDs + coverageRuleIDs
-                    + decisionRuleIDs + ["applications.installed-apps"]
-            )
-        )
+
+        // D19: nothing is listed read-only any more.
+        XCTAssertTrue(rules.allSatisfy { $0.action.isExecutable && $0.allowsManualSelection })
+        XCTAssertFalse(rules.contains { $0.action == .revealOnly })
         XCTAssertEqual(
             rules.filter { $0.risk == .safe }.count,
-            5
-                + artifactDefinitions.filter { $0.policy == .regenerable }.count
+            7
+                + artifactDefinitions.count
                 + CleanupCoverageCatalog.regenerableCacheDefinitions.count
+                + CleanupCoverageCatalog.logDefinitions.count
         )
         XCTAssertEqual(
-            rules.filter { $0.risk == .reviewOnly }.count,
-            16 + artifactDefinitions.filter { $0.policy != .regenerable }.count
+            Set(rules.filter { $0.risk == .reviewOnly }.map(\.id)),
+            [
+                "downloads.installers",
+                "downloads.large-items",
+                "system-cache.cloudkit",
+                "mail.downloaded-attachments",
+            ]
         )
-        XCTAssertEqual(rules.filter { $0.risk == .protected }.count, 2)
+        XCTAssertEqual(
+            Set(rules.filter { $0.risk == .protected }.map(\.id)),
+            ["applications.duplicate-installed-apps", "trash.user-trash"]
+        )
 
         let automaticRules = rules.filter { $0.action == .moveToTrash }
         XCTAssertFalse(automaticRules.isEmpty)
@@ -379,38 +385,29 @@ final class CleanupRuleScannerTests: XCTestCase {
             $0.risk == .safe && $0.allowsManualSelection
         })
         let reviewedRules = rules.filter { $0.action == .moveToTrashAfterReview }
-        XCTAssertFalse(reviewedRules.isEmpty)
         XCTAssertTrue(reviewedRules.allSatisfy {
-            $0.risk == .reviewOnly && $0.allowsManualSelection
+            $0.risk == .reviewOnly
+                && $0.allowsManualSelection
+                && $0.defaultSelection == .unselected
         })
-        let protectedReviewedRules = rules.filter {
-            $0.action == .moveToTrashAfterProtectedReview
-        }
-        XCTAssertFalse(protectedReviewedRules.isEmpty)
-        XCTAssertTrue(protectedReviewedRules.allSatisfy {
-            $0.risk == .protected && $0.allowsManualSelection
-        })
-
-        let applications = try XCTUnwrap(ruleByID["applications.installed-apps"])
-        XCTAssertEqual(applications.root.kind.rawValue, "applicationsDirectory")
-        XCTAssertEqual(applications.root.path, "/Applications")
-        XCTAssertEqual(applications.risk, .informational)
-        XCTAssertEqual(applications.recommendation, .advisoryOnly)
-        XCTAssertEqual(applications.defaultSelection, .forbidden)
-        XCTAssertEqual(applications.executionEligibility, .advisoryOnly)
-        XCTAssertEqual(applications.action, .revealOnly)
-        XCTAssertFalse(applications.allowsManualSelection)
-        XCTAssertEqual(applications.maximumDepth, 32)
-        XCTAssertTrue(applications.include.extensions.isEmpty)
+        XCTAssertEqual(
+            rules.filter { $0.action == .moveToTrashAfterProtectedReview }.map(\.id),
+            ["applications.duplicate-installed-apps"]
+        )
+        XCTAssertEqual(
+            rules.filter { $0.action == .emptyTrash }.map(\.id),
+            ["trash.user-trash"]
+        )
 
         let duplicateApplications = try XCTUnwrap(
             ruleByID["applications.duplicate-installed-apps"]
         )
         XCTAssertEqual(duplicateApplications.risk, .protected)
         XCTAssertEqual(duplicateApplications.recommendation, .notRecommended)
+        XCTAssertEqual(duplicateApplications.defaultSelection, .unselected)
         XCTAssertEqual(duplicateApplications.action, .moveToTrashAfterProtectedReview)
         XCTAssertTrue(duplicateApplications.allowsManualSelection)
-        XCTAssertEqual(duplicateApplications.maximumDepth, 0)
+        XCTAssertEqual(duplicateApplications.maximumDepth, 32)
         XCTAssertEqual(duplicateApplications.include.extensions, ["app"])
         XCTAssertTrue(duplicateApplications.effectiveRequiresDuplicateBundleIdentifier)
         XCTAssertTrue(duplicateApplications.effectiveIncludedBundleIdentifiers.isEmpty)
@@ -467,38 +464,83 @@ final class CleanupRuleScannerTests: XCTestCase {
             ["com.apple.dt.Xcode"]
         )
 
+        // D19/D47: one row per app or log source, green, preselected unless
+        // the owning app is running.
         for ruleID in ["system.user-caches", "system.user-logs"] {
             let rule = try XCTUnwrap(ruleByID[ruleID])
-            XCTAssertEqual(rule.risk, .reviewOnly)
-            XCTAssertEqual(rule.recommendation, .advisoryOnly)
-            XCTAssertEqual(rule.defaultSelection, .forbidden)
-            XCTAssertEqual(rule.executionEligibility, .advisoryOnly)
-            XCTAssertEqual(rule.action, .revealOnly)
-            XCTAssertFalse(rule.allowsManualSelection)
+            XCTAssertEqual(rule.risk, .safe)
+            XCTAssertEqual(rule.recommendation, .recommended)
+            XCTAssertEqual(rule.defaultSelection, .selected)
+            XCTAssertEqual(rule.executionEligibility, .eligible)
+            XCTAssertEqual(rule.action, .moveToTrash)
+            XCTAssertTrue(rule.allowsManualSelection)
+            XCTAssertTrue(rule.isContainerRule)
+            XCTAssertEqual(rule.ownerInference, .candidateName)
+        }
+        let userCaches = try XCTUnwrap(ruleByID["system.user-caches"])
+        for excluded in [
+            "Homebrew", "Google", "BraveSoftware", "Citro Labs", "CloudKit", "Claude",
+            "com.apple.bird", "com.apple.nsurlsessiond", "com.apple.containermanagerd",
+            "com.local.StorageCleanerMac", "com.local.StorageCleanerMac.beta",
+            "com.apple.FileProviderDaemon.AppStoreService", "com.apple.XProtectFramework.plugins",
+        ] {
+            XCTAssertTrue(userCaches.exclude.excludes(childName: excluded), excluded)
+        }
+        XCTAssertFalse(userCaches.exclude.excludes(childName: "com.example.app"))
+        // D47 supplement (review P1-1a): developer tool caches have their own
+        // activity-graded rules, so the user-cache rows leave them out.
+        for developerCache in [
+            "go-build", "gopls", "golangci-lint", "ms-playwright", "ms-playwright-go", "pnpm", "Yarn",
+            "node-gyp", "typescript", "deno", "electron", "electron-builder", "Cypress", "pypoetry",
+            "CocoaPods", "org.carthage.CarthageKit", "Mozilla.sccache", "flutter_engine", "claude-cli-nodejs",
+        ] {
+            XCTAssertTrue(userCaches.exclude.excludes(childName: developerCache), developerCache)
+            let owner = try XCTUnwrap(rules.first {
+                $0.root.path == "Library/Caches"
+                    && $0.include.nameMatcher.mode == .exact
+                    && $0.include.nameMatcher.values.contains(developerCache)
+            }, developerCache)
+            XCTAssertEqual(owner.categoryID, "developer", developerCache)
+            XCTAssertTrue(DeveloperCleanupAgePolicy.applies(to: owner), developerCache)
+        }
+        let userLogs = try XCTUnwrap(ruleByID["system.user-logs"])
+        for excluded in ["com.apple.diagnosticextensionsd", "com.openai.codex", "GitHub Copilot", "OpenClaw"] {
+            XCTAssertTrue(userLogs.exclude.excludes(childName: excluded), excluded)
         }
 
         XCTAssertEqual(
             Set(artifactDefinitions.map(\.tool)),
             [
                 .codex, .claudeCode, .cursor, .githubCopilot, .openCode, .openClaw,
-                .geminiCLI, .workBuddy, .windsurf, .continueDev, .cline, .rooCode,
+                .workBuddy, .windsurf, .continueDev,
+                // D83 adds only generated caches/logs for these tool owners.
+                .claudeDesktop, .visualStudioCode, .lmStudio, .rodBrowser,
             ]
         )
+        XCTAssertFalse(artifactDefinitions.contains { $0.kind == .agentData })
         for definition in artifactDefinitions {
             let rule = try XCTUnwrap(ruleByID[definition.id])
             XCTAssertEqual(rule.developerTool, definition.tool)
             XCTAssertEqual(rule.developerArtifactKind, definition.kind)
             XCTAssertEqual(rule.root.path, definition.rootPath)
             XCTAssertEqual(Set(rule.include.nameMatcher.values), Set(definition.candidateNames))
-            if definition.policy == .referenceOnly {
-                XCTAssertEqual(rule.maximumDepth, 0)
-                XCTAssertEqual(rule.minimumBytes, 0)
-                XCTAssertEqual(rule.action, .revealOnly)
-                XCTAssertFalse(rule.allowsManualSelection)
+            XCTAssertEqual(rule.risk, .safe)
+            XCTAssertEqual(rule.action, .moveToTrash)
+            XCTAssertTrue(rule.allowsManualSelection)
+            if definition.kind == .logs {
+                XCTAssertEqual(definition.policy, .disposableLogs)
+                XCTAssertEqual(rule.recommendation, .recommended)
+                XCTAssertEqual(rule.defaultSelection, .selected)
+                XCTAssertFalse(DeveloperCleanupAgePolicy.applies(to: rule))
+            } else {
+                XCTAssertEqual(definition.policy, .regenerable)
+                XCTAssertEqual(rule.defaultSelection, .unselected)
+                XCTAssertTrue(DeveloperCleanupAgePolicy.applies(to: rule))
             }
         }
 
-        for definition in CleanupCoverageCatalog.regenerableCacheDefinitions {
+        for definition in CleanupCoverageCatalog.regenerableCacheDefinitions
+            + CleanupCoverageCatalog.logDefinitions {
             let rule = try XCTUnwrap(ruleByID[definition.id])
             XCTAssertEqual(rule.ownerDisplayName, definition.ownerDisplayName)
             XCTAssertEqual(rule.root.path, definition.rootPath)
@@ -507,31 +549,35 @@ final class CleanupRuleScannerTests: XCTestCase {
                 Set(definition.candidateNames)
             )
             XCTAssertEqual(rule.risk, .safe)
-            XCTAssertEqual(rule.recommendation, .optional)
-            XCTAssertEqual(rule.defaultSelection, .unselected)
             XCTAssertEqual(rule.executionEligibility, .eligible)
             XCTAssertEqual(rule.measurementRequirement, .complete)
             XCTAssertEqual(rule.action, .moveToTrash)
             XCTAssertTrue(rule.allowsManualSelection)
+            let preselects = rule.categoryID != "developer"
+            XCTAssertEqual(rule.recommendation, preselects ? .recommended : .optional, definition.id)
+            XCTAssertEqual(rule.defaultSelection, preselects ? .selected : .unselected, definition.id)
         }
 
-        for definition in CleanupCoverageCatalog.readOnlyDefinitions {
-            let rule = try XCTUnwrap(ruleByID[definition.id])
-            XCTAssertEqual(rule.ownerDisplayName, definition.ownerDisplayName)
-            XCTAssertEqual(rule.root.path, definition.rootPath)
+        for ruleID in ["system-cache.cloudkit", "mail.downloaded-attachments"] {
+            let rule = try XCTUnwrap(ruleByID[ruleID])
             XCTAssertEqual(rule.risk, .reviewOnly)
-            XCTAssertEqual(rule.recommendation, .advisoryOnly)
-            XCTAssertEqual(rule.defaultSelection, .forbidden)
-            XCTAssertEqual(rule.executionEligibility, .advisoryOnly)
-            XCTAssertEqual(rule.action, .revealOnly)
-            XCTAssertFalse(rule.allowsManualSelection)
+            XCTAssertEqual(rule.recommendation, .optional)
+            XCTAssertEqual(rule.defaultSelection, .unselected)
+            XCTAssertEqual(rule.executionEligibility, .eligibleAfterReview)
+            XCTAssertEqual(rule.action, .moveToTrashAfterReview)
+            XCTAssertTrue(rule.allowsManualSelection)
         }
+        XCTAssertEqual(
+            ruleByID["mail.downloaded-attachments"]?.requiredClosedBundleIDs,
+            ["com.apple.mail"]
+        )
 
-        let mailLibrary = try XCTUnwrap(ruleByID["mail.library-attachments"])
-        XCTAssertEqual(mailLibrary.effectiveCandidateScope, .descendantAggregate)
-        XCTAssertEqual(mailLibrary.include.nameMatcher.values, ["Attachments"])
-        XCTAssertEqual(mailLibrary.action, .revealOnly)
-        XCTAssertFalse(mailLibrary.allowsManualSelection)
+        let trash = try XCTUnwrap(ruleByID["trash.user-trash"])
+        XCTAssertEqual(trash.root.path, ".Trash")
+        XCTAssertEqual(trash.effectiveCandidateScope, .root)
+        XCTAssertEqual(trash.action, .emptyTrash)
+        XCTAssertEqual(trash.recommendation, .notRecommended)
+        XCTAssertEqual(trash.defaultSelection, .unselected)
 
         let downloads = try XCTUnwrap(ruleByID["downloads.large-items"])
         XCTAssertEqual(downloads.root.path, "Downloads")
@@ -544,42 +590,18 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertEqual(installers.defaultSelection, .unselected)
         XCTAssertEqual(installers.action, .moveToTrashAfterReview)
 
-        for ruleID in [
-            "personal.pictures-library",
-            "user-data.wechat",
-            "user-data.chrome",
-            "user-data.codex-sessions",
-            "user-data.ego-lite",
-            "user-data.crossover",
-        ] {
-            let rule = try XCTUnwrap(ruleByID[ruleID])
-            XCTAssertEqual(rule.risk, .reviewOnly)
-            XCTAssertEqual(rule.recommendation, .advisoryOnly)
-            XCTAssertEqual(rule.defaultSelection, .forbidden)
-            XCTAssertEqual(rule.executionEligibility, .advisoryOnly)
-            XCTAssertEqual(rule.action, .revealOnly)
-            XCTAssertFalse(rule.allowsManualSelection)
-        }
-
-        let creativeApps = try XCTUnwrap(ruleByID["applications.large-creative-apps"])
-        XCTAssertFalse(creativeApps.effectiveRequiresDuplicateBundleIdentifier)
-        XCTAssertEqual(creativeApps.effectiveIncludedBundleIdentifiers, [
-            "com.apple.FinalCutApp",
-            "com.apple.iMovieApp",
-            "com.apple.motionappApp",
-            "com.apple.mobilelogic",
-        ])
-
         XCTAssertTrue(rules.allSatisfy {
             [
                 .moveToTrash,
                 .moveToTrashAfterReview,
                 .moveToTrashAfterProtectedReview,
-                .revealOnly,
+                .emptyTrash,
             ].contains($0.action)
         })
     }
 
+    /// D19: the per-app cache rows never repeat a path a more specific rule
+    /// lists, and never list a parent that contains one (here `Google`).
     func testKnownBrowserCacheWinsOverGenericCacheWithoutDoubleCounting() async throws {
         let home = try makeFixtureHome()
         let chromeCache = home.appendingPathComponent(
@@ -590,6 +612,14 @@ final class CleanupRuleScannerTests: XCTestCase {
             bytes: 2 * 1_024 * 1_024,
             to: chromeCache.appendingPathComponent("Default/cache.bin")
         )
+        try write(
+            bytes: 2 * 1_024 * 1_024,
+            to: home.appendingPathComponent("Library/Caches/Google/Updater/cache.bin")
+        )
+        try write(
+            bytes: 2 * 1_024 * 1_024,
+            to: home.appendingPathComponent("Library/Caches/com.example.other/cache.bin")
+        )
         let chromeRule = try XCTUnwrap(
             CleanupCoverageCatalog.regenerableCacheDefinitions
                 .first { $0.id == "browser-cache.google-chrome" }?
@@ -598,35 +628,38 @@ final class CleanupRuleScannerTests: XCTestCase {
         let genericRule = makeRule(
             id: "system.user-caches",
             root: "Library/Caches",
-            minimumBytes: 1_024 * 1_024,
-            risk: .reviewOnly,
-            recommendation: .advisoryOnly,
-            defaultSelection: .forbidden,
-            executionEligibility: .advisoryOnly,
-            measurementRequirement: .bestEffort,
-            allowsManualSelection: false,
-            action: .revealOnly
+            excludedRelativePrefixes: ["Google"],
+            minimumBytes: 1_024 * 1_024
         )
 
         let session = try await scan(
             home: home,
             ruleSet: makeRuleSet(rules: [chromeRule, genericRule])
         )
-        let candidate = try XCTUnwrap(session.candidates.first)
+        let candidate = try XCTUnwrap(session.candidates.first { $0.ruleID == chromeRule.id })
 
-        XCTAssertEqual(session.candidates.count, 1)
-        XCTAssertEqual(candidate.ruleID, chromeRule.id)
+        XCTAssertEqual(
+            session.candidates.map(\.sourceURL.lastPathComponent).sorted(),
+            ["Chrome", "com.example.other"]
+        )
         XCTAssertEqual(candidate.subcategoryTitle, CleanupRuleCopy.title(for: chromeRule))
         XCTAssertEqual(candidate.requiredClosedBundleIDs, ["com.google.Chrome"])
-        XCTAssertEqual(candidate.defaultSelection, .unselected)
+        XCTAssertEqual(candidate.ownerResolution, .declared)
+        XCTAssertEqual(candidate.defaultSelection, .selected)
         XCTAssertEqual(candidate.selectionEligibility, .selectable)
         XCTAssertEqual(
             CleanupRecommendationDisplayPolicy.level(for: candidate),
-            .optional
+            .recommended
         )
         XCTAssertGreaterThanOrEqual(candidate.estimatedSizeBytes, 2 * 1_024 * 1_024)
+
+        XCTAssertThrowsError(try CleanupRuleValidator.validate(makeRuleSet(rules: [
+            chromeRule,
+            makeRule(id: "system.user-caches", root: "Library/Caches"),
+        ])), "A container that does not exclude Google would list Chrome's cache twice")
     }
 
+    /// D19: a lower-bound measurement stays selectable and keeps its tier.
     func testIncompleteOptionalCacheDisplaysViewOnlyWithoutChangingRuleSafety() async throws {
         let home = try makeFixtureHome()
         let chromeCache = home.appendingPathComponent(
@@ -658,103 +691,47 @@ final class CleanupRuleScannerTests: XCTestCase {
         )
         let candidate = try XCTUnwrap(session.candidates.first)
 
-        XCTAssertEqual(candidate.recommendation.level, .optional)
-        XCTAssertTrue(candidate.measurementCompleteness.isLowerBound)
-        XCTAssertEqual(candidate.selectionEligibility, .unavailable)
+        XCTAssertEqual(candidate.recommendation.level, .recommended)
+        XCTAssertEqual(candidate.measurementCompleteness, .lowerBound(reason: .symbolicLinkSkipped))
+        XCTAssertEqual(candidate.selectionEligibility, .selectable)
         XCTAssertEqual(
             CleanupRecommendationDisplayPolicy.level(for: candidate),
-            .advisoryOnly
+            .recommended
         )
-        XCTAssertEqual(
-            CleanupRecommendationDisplayPolicy.level(
-                for: [candidate],
-                fallback: .optional
-            ),
-            .advisoryOnly
-        )
+        XCTAssertTrue(CleanupSelection.defaults(in: session).selectedCandidateIDs.contains(candidate.id))
     }
 
-    func testMailAttachmentDiscoveryAggregatesOnlyMatchedDescendants() async throws {
+    /// D24: copies saved when attachments were opened are yellow and
+    /// selectable; attachments inside the mail library are not listed.
+    func testMailDownloadsAreReviewedAndMailLibraryAttachmentsAreNotListed() async throws {
         let home = try makeFixtureHome()
-        let mailRoot = home.appendingPathComponent("Library/Mail", isDirectory: true)
         try write(
             bytes: 8_192,
-            to: mailRoot.appendingPathComponent(
-                "V10/account/Inbox.mbox/Data/1/Attachments/invoice.pdf"
+            to: home.appendingPathComponent(
+                "Library/Containers/com.apple.mail/Data/Library/Mail Downloads/A1/invoice.pdf"
             )
         )
         try write(
-            bytes: 4_096,
-            to: mailRoot.appendingPathComponent(
-                "V10/account/Sent.mbox/Data/2/Attachments/photo.jpg"
+            bytes: 8_192,
+            to: home.appendingPathComponent(
+                "Library/Mail/V10/account/Inbox.mbox/Data/1/Attachments/invoice.pdf"
             )
         )
-        try write(
-            bytes: 32_768,
-            to: mailRoot.appendingPathComponent(
-                "V10/account/Inbox.mbox/Data/1/Messages/database.emlx"
-            )
-        )
+        let bundled = try CleanupRuleSetLoader.loadBundled()
+        let rules = CleanupScanOperations.scopedRuleSet(bundled, includedCategoryIDs: ["mail"])
+        XCTAssertEqual(rules.rules.map(\.id), ["mail.downloaded-attachments"])
 
-        let rule = CleanupCoverageCatalog.mailLibraryAttachmentsRule
-        let session = try await scan(
-            home: home,
-            ruleSet: makeRuleSet(rules: [rule])
-        )
+        let session = try await scan(home: home, ruleSet: rules)
         let candidate = try XCTUnwrap(session.candidates.first)
 
         XCTAssertEqual(session.candidates.count, 1)
-        XCTAssertEqual(candidate.ruleID, rule.id)
-        XCTAssertEqual(candidate.sourceURL.standardizedFileURL, mailRoot.standardizedFileURL)
-        XCTAssertGreaterThanOrEqual(candidate.estimatedSizeBytes, 12_288)
-        XCTAssertLessThan(candidate.estimatedSizeBytes, 32_768)
-        XCTAssertEqual(candidate.action, .revealOnly)
-        XCTAssertFalse(candidate.isManuallySelectable)
-        XCTAssertTrue(candidate.recommendation.evidenceCodes.contains(
-            "read-only-descendant-aggregate"
-        ))
-        XCTAssertTrue(candidate.recommendation.evidenceCodes.contains(
-            "matched-descendant-count:2"
-        ))
-    }
-
-    func testMailAttachmentAggregateBecomesLowerBoundWhenTraversalSkipsSymlink() async throws {
-        let home = try makeFixtureHome()
-        let mailRoot = home.appendingPathComponent("Library/Mail", isDirectory: true)
-        try write(
-            bytes: 4_096,
-            to: mailRoot.appendingPathComponent(
-                "V10/account/Inbox.mbox/Data/Attachments/invoice.pdf"
-            )
-        )
-        let outside = home.appendingPathComponent("outside", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: outside,
-            withIntermediateDirectories: true
-        )
-        let linkedDirectory = mailRoot.appendingPathComponent(
-            "V10/account/LinkedData",
-            isDirectory: true
-        )
-        try FileManager.default.createSymbolicLink(
-            at: linkedDirectory,
-            withDestinationURL: outside
-        )
-
-        let session = try await scan(
-            home: home,
-            ruleSet: makeRuleSet(rules: [
-                CleanupCoverageCatalog.mailLibraryAttachmentsRule,
-            ])
-        )
-        let candidate = try XCTUnwrap(session.candidates.first)
-
-        XCTAssertTrue(candidate.measurementCompleteness.isLowerBound)
-        XCTAssertEqual(candidate.selectionEligibility, .unavailable)
-        XCTAssertEqual(session.outcome, .partial)
-        XCTAssertTrue(session.issues.contains {
-            $0.kind == .symbolicLinkSkipped
-                && $0.path == linkedDirectory.standardizedFileURL.path
+        XCTAssertEqual(candidate.sourceURL.lastPathComponent, "Mail Downloads")
+        XCTAssertEqual(candidate.risk, .reviewOnly)
+        XCTAssertEqual(candidate.selectionEligibility, .selectableWithReview)
+        XCTAssertEqual(candidate.requiredClosedBundleIDs, ["com.apple.mail"])
+        XCTAssertTrue(CleanupSelection.defaults(in: session).selectedCandidateIDs.isEmpty)
+        XCTAssertFalse(session.candidates.contains {
+            $0.snapshot.standardizedPath.contains("/Library/Mail/")
         })
     }
 
@@ -796,8 +773,8 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertEqual(second.candidates.count, 1)
         let candidate = try XCTUnwrap(first.candidates.first)
 
-        XCTAssertEqual(candidate.sourceURL.standardizedFileURL, cacheRoot.standardizedFileURL)
-        XCTAssertEqual(candidate.allowedRootURL.standardizedFileURL, home.standardizedFileURL)
+        XCTAssertEqual(PathSafety.lexicalPath(candidate.sourceURL.path), PathSafety.lexicalPath(cacheRoot.path))
+        XCTAssertEqual(PathSafety.lexicalPath(candidate.allowedRootURL.path), PathSafety.lexicalPath(home.path))
         XCTAssertEqual(candidate.id, second.candidates.first?.id)
         XCTAssertEqual(candidate.selectionEligibility, .selectable)
         XCTAssertEqual(candidate.defaultSelection, .selected)
@@ -810,7 +787,7 @@ final class CleanupRuleScannerTests: XCTestCase {
             activeRules: rules,
             disposition: .trash
         )
-        XCTAssertEqual(plan.items.map(\.sourceURL.standardizedFileURL), [cacheRoot.standardizedFileURL])
+        XCTAssertEqual(plan.items.map { PathSafety.lexicalPath($0.sourceURL.path) }, [PathSafety.lexicalPath(cacheRoot.path)])
     }
 
     func testDeepStorageAnalyzerCandidateCountsDataBeyondEightLevels() async throws {
@@ -820,6 +797,8 @@ final class CleanupRuleScannerTests: XCTestCase {
             partial.appendingPathComponent("level-\(depth)")
         }
         try write(bytes: 8_192, to: nested.appendingPathComponent("payload.bin"))
+        // D19: read-only listings are gone, so the depth check uses a
+        // reviewed (selectable) rule.
         let rule = makeRule(
             id: "user-data.application-support",
             root: "Library/Application Support",
@@ -828,21 +807,24 @@ final class CleanupRuleScannerTests: XCTestCase {
             titleKey: "cleanup.rule.applicationSupport.title",
             maximumDepth: 32,
             risk: .reviewOnly,
-            recommendation: .advisoryOnly,
-            allowsManualSelection: false,
-            action: .revealOnly,
+            recommendation: .notRecommended,
+            allowsManualSelection: true,
+            action: .moveToTrashAfterReview,
             reasonKey: "cleanup.reason.manualAppData"
         )
 
         let session = try await scan(home: home, ruleSet: makeRuleSet(rules: [rule]))
         let candidate = try XCTUnwrap(session.candidates.first)
 
-        XCTAssertEqual(candidate.sourceURL.standardizedFileURL, candidateRoot.standardizedFileURL)
+        XCTAssertEqual(PathSafety.lexicalPath(candidate.sourceURL.path), PathSafety.lexicalPath(candidateRoot.path))
         XCTAssertGreaterThanOrEqual(candidate.estimatedSizeBytes, 8_192)
         XCTAssertEqual(candidate.risk, .reviewOnly)
-        XCTAssertEqual(candidate.selectionEligibility, .reviewRequired)
+        XCTAssertEqual(candidate.measurementCompleteness, .complete)
+        XCTAssertEqual(candidate.selectionEligibility, .selectableWithReview)
     }
 
+    /// D25: only extra copies of the same app are listed; other apps are not.
+    /// Copies are measured fully and kept in whole groups.
     func testDuplicateApplicationBundlesBecomeProtectedDecisionItems() async throws {
         let home = try makeFixtureHome()
         let applications = home.appendingPathComponent("Applications")
@@ -862,134 +844,44 @@ final class CleanupRuleScannerTests: XCTestCase {
             bytes: 4_096,
             to: applications.appendingPathComponent("Setapp/Contents/payload.bin")
         )
-        let informationalRule = CleanupRule(
-            id: "applications.installed-apps",
-            selectionPolicyVersion: 3,
-            categoryID: "applications",
-            categoryTitleKey: "cleanup.category.applications",
-            titleKey: "cleanup.rule.installedApps.title",
-            root: CleanupRuleRoot(kind: .applicationsDirectory, path: "/Applications"),
-            maximumDepth: 32,
-            minimumAgeDays: 0,
-            minimumBytes: 1,
-            include: CleanupRuleMatch(
-                entryKinds: [.directory],
-                extensions: [],
-                nameMatcher: CleanupNameMatcher(mode: .any, values: [])
-            ),
-            exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
-            cloudPolicy: .metadataOnly,
-            risk: .informational,
-            recommendation: .advisoryOnly,
-            defaultSelection: .forbidden,
-            executionEligibility: .advisoryOnly,
-            measurementRequirement: .bestEffort,
-            allowsManualSelection: false,
-            action: .revealOnly,
-            requiredClosedBundleIDs: [],
-            reasonKey: "cleanup.rule.installedApps.reason"
-        )
-        let protectedRule = CleanupRule(
-            id: "applications.duplicate-installed-apps",
-            selectionPolicyVersion: 1,
-            categoryID: "applications",
-            categoryTitleKey: "cleanup.category.applications",
-            titleKey: "cleanup.rule.duplicateInstalledApps.title",
-            root: CleanupRuleRoot(kind: .applicationsDirectory, path: "/Applications"),
-            maximumDepth: 0,
-            minimumAgeDays: 0,
-            minimumBytes: 1,
-            include: CleanupRuleMatch(
-                entryKinds: [.directory],
-                extensions: ["app"],
-                nameMatcher: CleanupNameMatcher(mode: .any, values: [])
-            ),
-            exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
-            cloudPolicy: .metadataOnly,
-            risk: .protected,
-            recommendation: .notRecommended,
-            defaultSelection: .unselected,
-            executionEligibility: .eligibleAfterProtectedReview,
-            measurementRequirement: .complete,
-            allowsManualSelection: true,
-            action: .moveToTrashAfterProtectedReview,
-            requiredClosedBundleIDs: [],
-            reasonKey: "cleanup.rule.duplicateInstalledApps.reason"
-        )
+        let protectedRule = duplicateApplicationsRule()
 
         let scanner = try ReadOnlyCleanupScanner(
             fileSystem: FixtureReadOnlyFileSystem(),
-            ruleSet: makeRuleSet(rules: [informationalRule, protectedRule]),
+            ruleSet: makeRuleSet(rules: [protectedRule]),
             applicationsURL: applications
         )
         let session = try await scanner.scan(
             request: CleanupScanRequest(userHomeURL: home)
         ) { _ in }
-        let protected = session.candidates.filter { $0.risk == .protected }
-        let informational = session.candidates.filter { $0.risk == .informational }
 
-        XCTAssertEqual(Set(protected.map { $0.sourceURL.lastPathComponent }), [
+        XCTAssertEqual(Set(session.candidates.map { $0.sourceURL.lastPathComponent }), [
             "Example.app", "Example Beta.app",
         ])
-        XCTAssertEqual(Set(informational.map { $0.sourceURL.lastPathComponent }), [
-            "Different.app", "Setapp",
-        ])
-        XCTAssertTrue(protected.allSatisfy {
-            $0.action == .moveToTrashAfterProtectedReview
+        XCTAssertTrue(session.candidates.allSatisfy {
+            $0.risk == .protected
+                && $0.action == .moveToTrashAfterProtectedReview
                 && $0.isSelectable
                 && $0.selectionEligibility == .selectableWithProtectedReview
+                && $0.measurementCompleteness == .complete
+                && $0.estimatedSizeBytes >= 4_096
+                && $0.ownerResolution == .applicationBundle
+                && $0.ownerBundleIdentifiers == ["com.example.product"]
                 && $0.recommendation.evidenceCodes.contains("duplicate-bundle-identifier")
-                && $0.recommendation.evidenceCodes.contains(where: {
-                    $0.hasPrefix("duplicate-bundle-group:")
-                })
+                && $0.duplicateApplicationGroupCode != nil
         })
         XCTAssertTrue(CleanupSelection.defaults(in: session).selectedCandidateIDs.isEmpty)
 
         var selection = CleanupSelection()
-        let selected = try XCTUnwrap(protected.first)
+        let selected = try XCTUnwrap(session.candidates.first)
         selection.setCandidate(selected.id, selected: true, in: session)
         XCTAssertTrue(selection.isExplicitlySelected(selected.id))
     }
 
-    func testApprovedCreativeApplicationsUseBundleIdentifierAllowlist() async throws {
-        let home = try makeFixtureHome()
-        let applications = home.appendingPathComponent("Applications")
-        try makeApplicationBundle(
-            at: applications.appendingPathComponent("Allowed.app"),
-            bundleIdentifier: "com.example.allowed"
-        )
-        try makeApplicationBundle(
-            at: applications.appendingPathComponent("Allowed Name.app"),
-            bundleIdentifier: "com.example.other"
-        )
-        let informationalRule = CleanupRule(
-            id: "applications.installed-apps",
-            selectionPolicyVersion: 3,
-            categoryID: "applications",
-            categoryTitleKey: "cleanup.category.applications",
-            titleKey: "cleanup.rule.installedApps.title",
-            root: CleanupRuleRoot(kind: .applicationsDirectory, path: "/Applications"),
-            maximumDepth: 32,
-            minimumAgeDays: 0,
-            minimumBytes: 1,
-            include: CleanupRuleMatch(
-                entryKinds: [.directory],
-                extensions: [],
-                nameMatcher: CleanupNameMatcher(mode: .any, values: [])
-            ),
-            exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
-            cloudPolicy: .metadataOnly,
-            risk: .informational,
-            recommendation: .advisoryOnly,
-            defaultSelection: .forbidden,
-            executionEligibility: .advisoryOnly,
-            measurementRequirement: .bestEffort,
-            allowsManualSelection: false,
-            action: .revealOnly,
-            requiredClosedBundleIDs: [],
-            reasonKey: "cleanup.rule.installedApps.reason"
-        )
-        let protectedRule = CleanupRule(
+    /// D25: app bundles are removed from the Uninstall page, so the validator
+    /// rejects rules that would list whole apps in the junk scan.
+    func testApprovedCreativeApplicationsUseBundleIdentifierAllowlist() throws {
+        let allowlisted = CleanupRule(
             id: "applications.large-creative-apps",
             selectionPolicyVersion: 1,
             categoryID: "applications",
@@ -1017,28 +909,42 @@ final class CleanupRuleScannerTests: XCTestCase {
             reasonKey: "cleanup.rule.largeCreativeApps.reason",
             includedBundleIdentifiers: ["com.example.allowed"]
         )
-        let scanner = try ReadOnlyCleanupScanner(
-            fileSystem: FixtureReadOnlyFileSystem(),
-            ruleSet: makeRuleSet(rules: [informationalRule, protectedRule]),
-            applicationsURL: applications
+        let informational = CleanupRule(
+            id: "applications.installed-apps",
+            selectionPolicyVersion: 3,
+            categoryID: "applications",
+            categoryTitleKey: "cleanup.category.applications",
+            titleKey: "cleanup.rule.installedApps.title",
+            root: CleanupRuleRoot(kind: .applicationsDirectory, path: "/Applications"),
+            maximumDepth: 32,
+            minimumAgeDays: 0,
+            minimumBytes: 1,
+            include: CleanupRuleMatch(
+                entryKinds: [.directory],
+                extensions: [],
+                nameMatcher: CleanupNameMatcher(mode: .any, values: [])
+            ),
+            exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
+            cloudPolicy: .metadataOnly,
+            risk: .informational,
+            recommendation: .advisoryOnly,
+            defaultSelection: .forbidden,
+            executionEligibility: .advisoryOnly,
+            measurementRequirement: .bestEffort,
+            allowsManualSelection: false,
+            action: .revealOnly,
+            requiredClosedBundleIDs: [],
+            reasonKey: "cleanup.rule.installedApps.reason"
         )
-        let session = try await scanner.scan(
-            request: CleanupScanRequest(userHomeURL: home)
-        ) { _ in }
-
-        XCTAssertEqual(
-            session.candidates(with: .protected).map { $0.sourceURL.lastPathComponent },
-            ["Allowed.app"]
-        )
-        let protected = try XCTUnwrap(session.candidates(with: .protected).first)
-        XCTAssertTrue(protected.isSelectable)
-        XCTAssertTrue(protected.recommendation.evidenceCodes.contains(
-            "application-bundle-identifier:com.example.allowed"
-        ))
-        XCTAssertEqual(
-            Set(session.candidates(with: .informational).map { $0.sourceURL.lastPathComponent }),
-            ["Allowed Name.app"]
-        )
+        for rule in [allowlisted, informational] {
+            XCTAssertThrowsError(try CleanupRuleValidator.validate(makeRuleSet(rules: [rule]))) {
+                XCTAssertEqual(
+                    $0 as? CleanupRuleValidationError,
+                    .unsafeActionRiskCombination(ruleID: rule.id)
+                )
+            }
+        }
+        XCTAssertNoThrow(try CleanupRuleValidator.validate(makeRuleSet(rules: [duplicateApplicationsRule()])))
     }
 
     func testOptInCapturesCurrentHomeStorageAnalyzerParity() async throws {
@@ -1250,15 +1156,19 @@ final class CleanupRuleScannerTests: XCTestCase {
         ])
         let session = try await scan(home: home, ruleSet: ruleSet)
 
+        // D19: the reveal-only log is found but not listed; it is counted
+        // under "some scopes were safely skipped".
         XCTAssertEqual(
             session.outcome,
-            .complete,
+            .partial,
             "issues=\(session.issues.map { "\($0.kind.rawValue):\($0.path ?? "")" }) permissions=\(session.permissions.map { "\($0.status.rawValue):\($0.path)" })"
         )
+        XCTAssertEqual(session.metrics.notActionableCandidateCount, 1)
+        XCTAssertTrue(session.issues.contains { $0.kind == .candidateNotActionable })
         XCTAssertEqual(session.categories.count, 1)
         XCTAssertEqual(session.categories.first?.subcategories.count, 2)
-        XCTAssertEqual(session.candidates.count, 2)
-        XCTAssertEqual(Set(session.candidates.map(\.risk)), [.safe, .reviewOnly])
+        XCTAssertEqual(session.candidates.count, 1)
+        XCTAssertEqual(Set(session.candidates.map(\.risk)), [.safe])
         XCTAssertTrue(session.candidates.allSatisfy { !$0.reason.isEmpty })
 
         XCTAssertEqual(
@@ -1371,8 +1281,8 @@ final class CleanupRuleScannerTests: XCTestCase {
         let home = try makeFixtureHome()
         let outside = home.deletingLastPathComponent()
             .appendingPathComponent("outside-\(UUID().uuidString).bin")
+        addTeardownBlock { TestFileSystem.remove(outside) }
         try write(bytes: 8_192, to: outside)
-        addTeardownBlock { try? FileManager.default.removeItem(at: outside) }
         let link = home.appendingPathComponent("Library/Caches/outside-link")
         try FileManager.default.createSymbolicLink(
             at: link,
@@ -1389,14 +1299,16 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
     }
 
+    /// D19: a lower-bound item is selectable and enters the plan; the plan
+    /// moves only the item's own root and never the link target.
     func testLowerBoundMeasurementIsVisibleButCannotEnterPlan() async throws {
         let home = try makeFixtureHome()
         let candidateRoot = home.appendingPathComponent("Library/Caches/candidate")
         try write(bytes: 4_096, to: candidateRoot.appendingPathComponent("payload.bin"))
         let outside = home.deletingLastPathComponent()
             .appendingPathComponent("outside-\(UUID().uuidString).bin")
+        addTeardownBlock { TestFileSystem.remove(outside) }
         try write(bytes: 8_192, to: outside)
-        addTeardownBlock { try? FileManager.default.removeItem(at: outside) }
         try FileManager.default.createSymbolicLink(
             at: candidateRoot.appendingPathComponent("outside-link"),
             withDestinationURL: outside
@@ -1412,19 +1324,21 @@ final class CleanupRuleScannerTests: XCTestCase {
             candidate.measurementCompleteness,
             .lowerBound(reason: .symbolicLinkSkipped)
         )
-        XCTAssertFalse(candidate.isSelectable)
+        XCTAssertTrue(candidate.isSelectable)
         XCTAssertEqual(session.metrics.lowerBoundMeasurementCandidateCount, 1)
-        XCTAssertTrue(CleanupSelection.defaults(in: session).selectedCandidateIDs.isEmpty)
-        XCTAssertThrowsError(try CleanPlanBuilder.makePlan(
+        XCTAssertTrue(CleanupSelection.defaults(in: session).selectedCandidateIDs.contains(candidate.id))
+        let plan = try CleanPlanBuilder.makePlan(
             session: session,
             selection: CleanupSelection(selectedCandidateIDs: [candidate.id]),
             activeRules: rules,
             disposition: .trash
-        )) {
-            XCTAssertEqual($0 as? CleanPlanBuildError, .invalidCandidate)
-        }
+        )
+        XCTAssertEqual(plan.items.map { PathSafety.lexicalPath($0.sourceURL.path) }, [PathSafety.lexicalPath(candidateRoot.path)])
+        XCTAssertEqual(plan.items.first?.measurementCompleteness, .lowerBound(reason: .symbolicLinkSkipped))
     }
 
+    /// D19: an item whose own folder cannot be listed cannot be acted on, so
+    /// it is not listed; it is counted as safely skipped instead.
     func testFailedMeasurementIsVisibleButUnavailable() async throws {
         let home = try makeFixtureHome()
         let candidateRoot = home.appendingPathComponent("Library/Caches/blocked")
@@ -1446,15 +1360,15 @@ final class CleanupRuleScannerTests: XCTestCase {
         let session = try await scanner.scan(
             request: CleanupScanRequest(userHomeURL: home)
         ) { _ in }
-        let candidate = try XCTUnwrap(session.candidates.first)
 
-        XCTAssertEqual(
-            candidate.measurementCompleteness,
-            .failed(reason: .permissionDenied)
-        )
-        XCTAssertFalse(candidate.isSelectable)
-        XCTAssertEqual(session.metrics.failedMeasurementCandidateCount, 1)
+        XCTAssertTrue(session.candidates.isEmpty)
+        XCTAssertEqual(session.metrics.notActionableCandidateCount, 1)
+        XCTAssertEqual(session.metrics.failedMeasurementCandidateCount, 0)
         XCTAssertEqual(session.metrics.permissionFailureCount, 1)
+        XCTAssertTrue(session.issues.contains {
+            $0.kind == .candidateNotActionable
+                && $0.path == candidateRoot.standardizedFileURL.path
+        })
         XCTAssertEqual(session.outcome, .partial)
     }
 
@@ -1524,7 +1438,15 @@ final class CleanupRuleScannerTests: XCTestCase {
         let home = try makeFixtureHome()
         try write(bytes: 8_192, to: home.appendingPathComponent("Library/Caches/b.bin"))
         try write(bytes: 4_096, to: home.appendingPathComponent("Library/Caches/a.bin"))
-        try write(bytes: 6_144, to: home.appendingPathComponent("Library/Logs/review.log"))
+        let reviewLog = home.appendingPathComponent("Library/Logs/review.log")
+        try write(bytes: 6_144, to: reviewLog)
+        // The yellow log fixture is recommended by its rule, so "Select
+        // Recommended" takes it (marked as explicitly reviewed). Since D47 its
+        // last write no longer matters; it is kept quiet as before.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-10 * 86_400)],
+            ofItemAtPath: reviewLog.path
+        )
         let rules = makeRuleSet(rules: [
             makeRule(id: "system.cache"),
             makeRule(
@@ -1618,10 +1540,12 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertNotEqual(original, replaced)
     }
 
+    /// D19: a reveal-only rule produces no listed item. A forged selection of
+    /// a non-selectable candidate is still rejected by the selection model.
     func testLegacyReviewOnlyCandidateCannotEnterSelectionEvenWithForgedID() async throws {
         let home = try makeFixtureHome()
         try write(bytes: 1_024, to: home.appendingPathComponent("Library/Logs/review.log"))
-        let session = try await scan(home: home, ruleSet: makeRuleSet(rules: [
+        let scanned = try await scan(home: home, ruleSet: makeRuleSet(rules: [
             makeRule(
                 id: "system.logs",
                 root: "Library/Logs",
@@ -1632,11 +1556,70 @@ final class CleanupRuleScannerTests: XCTestCase {
                 reasonKey: "cleanup.rule.userLogs.reason"
             ),
         ]))
-        let candidate = try XCTUnwrap(session.candidates.first)
-        var selection = CleanupSelection(selectedCandidateIDs: [candidate.id])
+        XCTAssertTrue(scanned.candidates.isEmpty)
+        XCTAssertEqual(scanned.metrics.notActionableCandidateCount, 1)
+
+        let sessionID = ScanSessionID()
+        let snapshot = try FixtureReadOnlyFileSystem().snapshot(
+            at: home.appendingPathComponent("Library/Logs/review.log")
+        )
+        let forged = ScanCandidate(
+            id: ScanCandidateID(),
+            sessionID: sessionID,
+            ruleID: "system.logs",
+            ruleSelectionPolicyVersion: 1,
+            categoryID: "system",
+            categoryTitle: "System",
+            subcategoryTitle: "Logs",
+            sourceURL: home.appendingPathComponent("Library/Logs/review.log"),
+            allowedRootURL: home.appendingPathComponent("Library/Logs"),
+            snapshot: snapshot,
+            risk: .reviewOnly,
+            recommendation: CleanupRecommendation(
+                level: .advisoryOnly,
+                reasonCode: "cleanup.rule.userLogs.reason",
+                evidenceCodes: []
+            ),
+            defaultSelection: .forbidden,
+            executionEligibility: .advisoryOnly,
+            measurementCompleteness: .complete,
+            isManuallySelectable: false,
+            action: .revealOnly,
+            requiredClosedBundleIDs: [],
+            reason: "Fixture"
+        )
+        let session = ScanSession(
+            id: sessionID,
+            rulesVersion: "fixture.1",
+            startedAt: Date(),
+            completedAt: Date(),
+            outcome: .complete,
+            categories: [CleanupScanCategory(
+                id: "system",
+                title: "System",
+                subcategories: [CleanupScanSubcategory(
+                    id: "system.logs",
+                    title: "Logs",
+                    risk: .reviewOnly,
+                    recommendation: .advisoryOnly,
+                    reason: "Fixture",
+                    candidates: [forged]
+                )]
+            )],
+            issues: [],
+            permissions: [],
+            metrics: ScanMetrics(
+                visitedEntryCount: 1,
+                candidateCount: 1,
+                deduplicatedIdentityCount: 0,
+                estimatedCandidateBytes: 1_024,
+                duration: 0
+            )
+        )
+        var selection = CleanupSelection(selectedCandidateIDs: [forged.id])
 
         XCTAssertTrue(selection.selectedCandidates(in: session).isEmpty)
-        selection.setCandidate(candidate.id, selected: true, in: session)
+        selection.setCandidate(forged.id, selected: true, in: session)
         XCTAssertTrue(selection.selectedCandidateIDs.isEmpty)
     }
 
@@ -1723,12 +1706,7 @@ final class CleanupRuleScannerTests: XCTestCase {
                 reasonKey: "cleanup.rule.userLogs.reason"
             ),
         ]))
-        let store = await MainActor.run {
-            ScanStore(
-                cleanupFeatureConfiguration: CleanupFeatureConfiguration(mode: .v2ScanOnly),
-                cleanupScanOperation: { _, _ in session }
-            )
-        }
+        let store = try await makeScanOnlyStore(session: session)
 
         await MainActor.run { store.startScan() }
         while await MainActor.run(body: { store.isScanning }) {
@@ -1810,16 +1788,24 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
 
-    func testScanOnlyFeatureFlagDisablesAllLegacyTrashEntryPoints() async throws {
-        let home = try makeFixtureHome()
-        try write(bytes: 1_024, to: home.appendingPathComponent("Library/Caches/a.bin"))
-        let session = try await scan(home: home, ruleSet: makeRuleSet())
-        let store = await MainActor.run {
-            ScanStore(
+    /// A scan-only store that completes the given fixture session. Its scan
+    /// history is private to the test (r2-live-fixes-2 review P2-1).
+    private func makeScanOnlyStore(session: ScanSession) async throws -> ScanStore {
+        let historySuite = ScanHistoryTestDefaults.makeSuite(for: self)
+        return try await MainActor.run {
+            try ScanStore.makeForTests(for: self,
+                scanHistoryDefaults: ScanHistoryTestDefaults.defaults(named: historySuite),
                 cleanupFeatureConfiguration: CleanupFeatureConfiguration(mode: .v2ScanOnly),
                 cleanupScanOperation: { _, _ in session }
             )
         }
+    }
+
+    func testScanOnlyFeatureFlagDisablesAllLegacyTrashEntryPoints() async throws {
+        let home = try makeFixtureHome()
+        try write(bytes: 1_024, to: home.appendingPathComponent("Library/Caches/a.bin"))
+        let session = try await scan(home: home, ruleSet: makeRuleSet())
+        let store = try await makeScanOnlyStore(session: session)
 
         await MainActor.run { store.startScan() }
         while await MainActor.run(body: { store.isScanning }) {
@@ -1853,8 +1839,8 @@ final class CleanupRuleScannerTests: XCTestCase {
     }
 
     private func makeFixtureHome() throws -> URL {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("StorageCleanerCleanupFixture-\(UUID().uuidString)")
+        let root = TestFileSystem.uniqueRoot("CleanupFixture")
+        TestFileSystem.registerCleanup(of: root, for: self)
         let home = root.appendingPathComponent("Home")
         try FileManager.default.createDirectory(
             at: home.appendingPathComponent("Library/Caches"),
@@ -1864,9 +1850,6 @@ final class CleanupRuleScannerTests: XCTestCase {
             at: home.appendingPathComponent("Library/Logs"),
             withIntermediateDirectories: true
         )
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: root)
-        }
         return home
     }
 
@@ -1898,6 +1881,37 @@ final class CleanupRuleScannerTests: XCTestCase {
         )
         try plist.write(to: contents.appendingPathComponent("Info.plist"))
         try write(bytes: 4_096, to: contents.appendingPathComponent("Resources/payload.bin"))
+    }
+
+    private func duplicateApplicationsRule() -> CleanupRule {
+        CleanupRule(
+            id: "applications.duplicate-installed-apps",
+            selectionPolicyVersion: 1,
+            categoryID: "applications",
+            categoryTitleKey: "cleanup.category.applications",
+            titleKey: "cleanup.rule.duplicateInstalledApps.title",
+            root: CleanupRuleRoot(kind: .applicationsDirectory, path: "/Applications"),
+            maximumDepth: 32,
+            minimumAgeDays: 0,
+            minimumBytes: 1,
+            include: CleanupRuleMatch(
+                entryKinds: [.directory],
+                extensions: ["app"],
+                nameMatcher: CleanupNameMatcher(mode: .any, values: [])
+            ),
+            exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
+            cloudPolicy: .metadataOnly,
+            risk: .protected,
+            recommendation: .notRecommended,
+            defaultSelection: .unselected,
+            executionEligibility: .eligibleAfterProtectedReview,
+            measurementRequirement: .complete,
+            allowsManualSelection: true,
+            action: .moveToTrashAfterProtectedReview,
+            requiredClosedBundleIDs: [],
+            reasonKey: "cleanup.rule.duplicateInstalledApps.reason",
+            requiresDuplicateBundleIdentifier: true
+        )
     }
 
     private func makeRuleSet(
@@ -1934,7 +1948,7 @@ final class CleanupRuleScannerTests: XCTestCase {
         let actionExecution: CleanupExecutionEligibility = switch action {
         case .moveToTrash: .eligible
         case .moveToTrashAfterReview: .eligibleAfterReview
-        case .moveToTrashAfterProtectedReview: .eligibleAfterProtectedReview
+        case .moveToTrashAfterProtectedReview, .emptyTrash: .eligibleAfterProtectedReview
         case .revealOnly: .advisoryOnly
         }
         let resolvedExecution = executionEligibility ?? actionExecution
@@ -1974,6 +1988,47 @@ final class CleanupRuleScannerTests: XCTestCase {
             action: action,
             requiredClosedBundleIDs: [],
             reasonKey: reasonKey
+        )
+    }
+
+    /// P2-4: a folder the app may not read (for example the Trash without Full
+    /// Disk Access) can fail with a Cocoa or a POSIX error. Either way it is a
+    /// permission problem, so the scan shows the Full Disk Access guidance
+    /// instead of treating it as unreadable. Codes are read in their own domain.
+    func testPermissionErrorsAreRecognizedInEveryDomain() {
+        let permissionErrors: [Error] = [
+            CocoaError(.fileReadNoPermission),
+            CocoaError(.fileWriteNoPermission),
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM)),
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES)),
+            POSIXError(.EPERM),
+            NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnknownError, userInfo: [
+                NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM)),
+            ]),
+        ]
+        for error in permissionErrors {
+            XCTAssertEqual(
+                FoundationReadOnlyFileSystem.cleanupError(for: error),
+                .permissionDenied,
+                "\(error)"
+            )
+        }
+        let missingErrors: [Error] = [
+            CocoaError(.fileNoSuchFile),
+            CocoaError(.fileReadNoSuchFile),
+            NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT)),
+        ]
+        for error in missingErrors {
+            XCTAssertEqual(FoundationReadOnlyFileSystem.cleanupError(for: error), .vanished, "\(error)")
+        }
+        // POSIX code 4 is EINTR, not Cocoa's "no such file" (also 4).
+        XCTAssertEqual(
+            FoundationReadOnlyFileSystem.cleanupError(for: NSError(domain: NSPOSIXErrorDomain, code: Int(EINTR))),
+            .unreadable
+        )
+        XCTAssertEqual(
+            FoundationReadOnlyFileSystem.cleanupError(for: CocoaError(.fileReadCorruptFile)),
+            .unreadable
         )
     }
 }

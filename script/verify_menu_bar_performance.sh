@@ -18,4 +18,4 @@ disk = charts.split('struct GeekDiskIOChart: View {')[1].split('struct GeekHover
 assert 'points.map' not in disk and 'displayBuckets(' not in disk, 'Disk preparation leaked into draw/hover path'
 PY
 swift test -c release --scratch-path "${STORAGE_CLEANER_VERIFY_ROOT:-/tmp/storage-cleaner-verify}/release" \
-  --jobs "${SWIFT_BUILD_JOBS:-2}" --filter MenuBarPerformanceRegressionTests
+  --jobs "${SWIFT_BUILD_JOBS:-2}" -Xswiftc -enable-testing --filter MenuBarPerformanceRegressionTests

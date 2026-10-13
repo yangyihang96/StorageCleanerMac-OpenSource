@@ -1,4 +1,5 @@
 import Foundation
+import FileOperationShared
 import XCTest
 @testable import StorageCleanerMac
 
@@ -114,7 +115,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
                 requestTermination: recorder.terminate
             )]
         }
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationUpdateCoordinator: coordinator,
             applicationUpdateGracefulQuitRequester: requester
         )
@@ -149,6 +150,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             application: stale
         )
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
             heavyWorkCoordinator: HeavyWorkCoordinator()
         )
 
@@ -223,6 +225,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
         let task = ApplicationUpdateTask(sessionID: UUID(), application: application)
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
                     teamIdentifier: "TEAM123",
@@ -264,6 +267,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
         let task = ApplicationUpdateTask(sessionID: UUID(), application: application)
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
                     teamIdentifier: "TEAM123",
@@ -304,6 +308,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
         let task = ApplicationUpdateTask(sessionID: UUID(), application: application)
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
                     teamIdentifier: "OTHERTEAM",
@@ -355,10 +360,11 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
         let task = ApplicationUpdateTask(sessionID: UUID(), application: application)
         let provider = SuccessfulApplicationUpdateProvider(
-            applicationURL: installedURL,
+            applicationURL: appURL,
             targetVersion: ApplicationVersion(marketing: "2.0", build: "200")
         )
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
             providerRegistry: ApplicationUpdateProviderRegistry(providers: [provider]),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
@@ -419,6 +425,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
         let task = ApplicationUpdateTask(sessionID: UUID(), application: application)
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
                     teamIdentifier: "TEAM123",
@@ -515,8 +522,8 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertEqual(plan.requiresAuthorizationApplicationIDs, ["authorization"])
         XCTAssertEqual(plan.appStoreApplicationIDs, ["store"])
         XCTAssertEqual(plan.websiteApplicationIDs, ["website"])
-        XCTAssertEqual(Set(plan.manualApplicationIDs), ["pinned", "manual"])
-        XCTAssertEqual(plan.skippedApplicationIDs, ["system"])
+        XCTAssertEqual(Set(plan.manualApplicationIDs), ["manual"])
+        XCTAssertEqual(plan.skippedApplicationIDs, ["pinned", "system"])
     }
 
     func testPlanRejectsInvalidFormulaAndCaskTokens() {
@@ -586,7 +593,10 @@ final class AppUpdateCoordinatorTests: XCTestCase {
     func testStateMachineRejectsTerminalAndOutOfOrderTransitions() {
         XCTAssertTrue(ApplicationUpdateCoordinator.isValidTransition(from: .queued, to: .checking))
         XCTAssertTrue(ApplicationUpdateCoordinator.isValidTransition(from: .checking, to: .needsReconciliation))
-        XCTAssertTrue(ApplicationUpdateCoordinator.isValidTransition(from: .needsReconciliation, to: .installing))
+        // D78 repair round 2: pending evidence cannot authorize another install.
+        XCTAssertFalse(ApplicationUpdateCoordinator.isValidTransition(from: .needsReconciliation, to: .installing))
+        XCTAssertFalse(ApplicationUpdateCoordinator.isValidTransition(from: .needsReconciliation, to: .queued))
+        XCTAssertTrue(ApplicationUpdateCoordinator.isValidTransition(from: .needsReconciliation, to: .verifying))
         XCTAssertTrue(ApplicationUpdateCoordinator.isValidTransition(from: .failed, to: .queued))
         XCTAssertTrue(ApplicationUpdateCoordinator.isValidTransition(from: .installing, to: .needsReconciliation))
         XCTAssertFalse(ApplicationUpdateCoordinator.isValidTransition(from: .queued, to: .completed))
@@ -595,11 +605,11 @@ final class AppUpdateCoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    func testStoreRejectsBufferedTaskAndSnapshotEventsFromStaleSession() {
+    func testStoreRejectsBufferedTaskAndSnapshotEventsFromStaleSession() throws {
         let application = AppUpdateTestFixtures.strictHomebrewApplication(id: "shared-application")
         let oldSessionID = UUID()
         let activeSessionID = UUID()
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.appUpdates = [application]
 
         var staleTask = ApplicationUpdateTask(
@@ -683,14 +693,14 @@ final class AppUpdateCoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    func testExecutionTimeWaitingStateMakesLaterTerminationEventRecoverable() {
+    func testExecutionTimeWaitingStateMakesLaterTerminationEventRecoverable() throws {
         let sessionID = UUID()
         let application = AppUpdateTestFixtures.strictHomebrewApplication(
             id: "late-running",
             token: "late-running",
             path: "/Applications/Late Running.app"
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.appUpdates = [application]
         var task = ApplicationUpdateTask(
             sessionID: sessionID,
@@ -940,7 +950,8 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         let cancelledApplicationIDs = await executor.cancelledApplicationIDs()
         let executionOrder = await executor.executionOrder()
 
-        XCTAssertTrue(snapshot.tasks.allSatisfy { $0.state == .cancelled })
+        XCTAssertEqual(snapshot.tasks.first { $0.applicationID == "blocking" }?.state, .needsReconciliation)
+        XCTAssertEqual(snapshot.tasks.first { $0.applicationID == "never" }?.state, .cancelled)
         XCTAssertTrue(cancelledApplicationIDs.contains("blocking"))
         XCTAssertFalse(executionOrder.contains("never"))
     }
@@ -983,7 +994,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertTrue(persisted?.tasks.allSatisfy { $0.state == .cancelled } == true)
     }
 
-    func testExplicitCancellationClearsOldSnapshotWhenSavingCancelledStateFails() async throws {
+    func testExplicitCancellationKeepsOldIntentWhenPendingCancellationCannotBeSaved() async throws {
         let repository = FaultInjectingApplicationUpdateQueueRepository()
         let executor = ScriptedAppUpdateExecutor(outcomes: ["blocking": .waitForCancellation])
         let coordinator = ApplicationUpdateCoordinator(repository: repository, executor: executor)
@@ -998,14 +1009,15 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         }
         await repository.configure(failSave: true, failClear: false)
 
-        try await coordinator.cancel()
+        do { try await coordinator.cancel(); XCTFail("Unconfirmed installation intent must remain durable") }
+        catch ApplicationUpdateCoordinatorError.cancellationPersistenceFailed {}
 
         let persisted = try await repository.load()
         let cancelledApplicationIDs = await executor.cancelledApplicationIDs()
-        XCTAssertNil(persisted)
+        XCTAssertEqual(persisted?.tasks.first?.state, .installing)
         XCTAssertEqual(cancelledApplicationIDs, [application.id])
         let current = await coordinator.currentSnapshot()
-        XCTAssertTrue(current?.tasks.allSatisfy { $0.state == .cancelled } == true)
+        XCTAssertEqual(current?.tasks.first?.state, .needsReconciliation)
     }
 
     func testExplicitCancellationThrowsWhenSavingAndClearingSnapshotBothFail() async throws {
@@ -1034,7 +1046,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         let cancelledApplicationIDs = await executor.cancelledApplicationIDs()
         XCTAssertEqual(cancelledApplicationIDs, [application.id])
         let current = await coordinator.currentSnapshot()
-        XCTAssertTrue(current?.tasks.allSatisfy { $0.state == .cancelled } == true)
+        XCTAssertEqual(current?.tasks.first?.state, .needsReconciliation)
     }
 
     func testTerminationSuspendsAndResumesQueueWithoutUserCancellation() async throws {
@@ -1088,7 +1100,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertEqual(Set(executionOrder), ["blocking", "after"])
     }
 
-    func testFailedTaskCanRetryWithoutCreatingANewSession() async throws {
+    func testFailedTaskRetryCreatesANewAuthorizedSession() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let repository = ApplicationUpdateQueueRepository(
@@ -1108,7 +1120,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             $0.tasks.first?.state == .completed
         }
 
-        XCTAssertEqual(finished.plan.id, started.plan.id)
+        XCTAssertNotEqual(finished.plan.id, started.plan.id)
         XCTAssertEqual(finished.tasks.first?.attemptCount, 2)
     }
 
@@ -1185,11 +1197,16 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             canAutomaticallyUpdate: true,
             requiresUserInteraction: false
         )
-        let task = ApplicationUpdateTask(sessionID: UUID(), application: original)
+        var task = ApplicationUpdateTask(sessionID: UUID(), application: original)
+        task.recoveryEvidence = .init(applicationPath: original.path, homebrewMetadata: original.homebrewMetadata,
+            artifacts: [.init(path: original.path, originalIdentity: original.identity, originalVersion: original.installedVersion, wasRunning: false)])
         var freshScan = original
         freshScan.installedVersion = ApplicationVersion(marketing: "2.0", build: "200")
         freshScan.buildNumber = "200"
+        let readback = ApplicationMetadataReader(signatureInspector: FixedApplicationSignatureInspector(teamIdentifier: "TEAM123", codeSigningIdentifier: "com.example.reconcile"))
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
+            brewBatchInstaller: coordinatorFixtureInstaller(token: "reconcile", reader: readback),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
                     teamIdentifier: "TEAM123",
@@ -1205,7 +1222,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertEqual(result.observedVersion, ApplicationVersion(marketing: "2.0", build: "200"))
     }
 
-    func testOfficialReconcileRecoversNilApplicationAfterReplacementCrash() async throws {
+    func testConfirmedOfficialRecoveryRecoversNilApplicationAfterReplacementCrash() async throws {
         let fixture = try makeOfficialReplacementReconcileFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
 
@@ -1216,12 +1233,55 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
 
         let executor = makeOfficialReplacementExecutor(fixture: fixture)
-        let result = try await executor.reconcile(task: fixture.task, application: nil)
+        let result = try await executor.verifyAndRelease(task: fixture.task, application: nil)
 
         XCTAssertEqual(result.state, .completed)
         XCTAssertEqual(result.observedVersion, fixture.targetVersion)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.transactionURL.path))
+    }
+
+    func testAutomaticWebsiteAndSparkleRecoveryLeavesTransactionBytesAndBundlesUnchanged() async throws {
+        for provider in [ApplicationUpdateProviderIdentifier.officialWebsite, .sparkle] {
+            let fixture = try makeOfficialReplacementReconcileFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try FileManager.default.moveItem(at: fixture.destination, to: fixture.backup)
+            try OfficialApplicationReplacementTransactionStore(fileURL: fixture.transactionURL).save(fixture.transaction(.destinationMovedToBackup))
+            var application = fixture.application
+            application.updateProvider = provider
+            let task = ApplicationUpdateTask(sessionID: UUID(), application: application, state: .needsReconciliation)
+            let journal = try Data(contentsOf: fixture.transactionURL)
+            let backupDigest = try AuthenticatedApplicationDigest.compute(fixture.backup)
+            let stagedDigest = try AuthenticatedApplicationDigest.compute(fixture.staged)
+            let executor = makeOfficialReplacementExecutor(fixture: fixture)
+            let result = try await executor.reconcile(task: task, application: nil)
+            XCTAssertEqual(result.state, .needsReconciliation)
+            XCTAssertFalse(result.confirmedStopped)
+            XCTAssertEqual(try Data(contentsOf: fixture.transactionURL), journal)
+            XCTAssertEqual(try AuthenticatedApplicationDigest.compute(fixture.backup), backupDigest)
+            XCTAssertEqual(try AuthenticatedApplicationDigest.compute(fixture.staged), stagedDigest)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+        }
+    }
+
+    func testConfirmedWebsiteAndSparkleRecoveryCanRestoreBackupThenReleaseUnchangedUpdate() async throws {
+        for provider in [ApplicationUpdateProviderIdentifier.officialWebsite, .sparkle] {
+            let fixture = try makeOfficialReplacementReconcileFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try FileManager.default.moveItem(at: fixture.destination, to: fixture.backup)
+            try OfficialApplicationReplacementTransactionStore(fileURL: fixture.transactionURL).save(fixture.transaction(.destinationMovedToBackup))
+            var application = fixture.application
+            application.updateProvider = provider
+            let task = ApplicationUpdateTask(sessionID: UUID(), application: application, state: .needsReconciliation)
+            let executor = makeOfficialReplacementExecutor(fixture: fixture)
+            let result = try await executor.verifyAndRelease(task: task, application: nil)
+            XCTAssertEqual(result.state, .failed)
+            XCTAssertTrue(result.confirmedStopped)
+            XCTAssertEqual(Bundle(url: fixture.destination)?.infoDictionary?["CFBundleShortVersionString"] as? String, "1.0")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staged.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.transactionURL.path))
+        }
     }
 
     func testOfficialReconcileRejectsTransactionIdentityOrTargetMismatchBeforeCleanup() async throws {
@@ -1242,13 +1302,12 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
         let executor = makeOfficialReplacementExecutor(fixture: fixture)
 
-        do {
-            _ = try await executor.reconcile(task: mismatchedTask, application: nil)
-            XCTFail("Expected identity mismatch to fail closed")
-        } catch ProviderBackedUpdateExecutorError.replacementRecoveryFailed {
-            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
-            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.transactionURL.path))
-        }
+        let result = try await executor.verifyAndRelease(task: mismatchedTask, application: nil)
+        XCTAssertEqual(result.state, .needsReconciliation)
+        XCTAssertFalse(result.confirmedStopped)
+        XCTAssertTrue(result.detail.contains("identityMismatch"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.transactionURL.path))
     }
 
     func testFormulaReconciliationQueriesOnlyThePlannedHomebrewToken() async throws {
@@ -1262,15 +1321,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             [.posixPermissions: NSNumber(value: Int16(0o755))],
             ofItemAtPath: brew.path
         )
-        let runner = FormulaVerificationCommandRunner(response: Data(#"""
-        {
-          "formulae": [{
-            "name": "example",
-            "full_name": "example",
-            "installed": [{"version": "2.0"}]
-          }]
-        }
-        """#.utf8))
+        let runner = FormulaVerificationCommandRunner(response: Data("example 2.0\n".utf8))
         let scanner = HomebrewInventoryScanner(
             runner: runner,
             environmentProvider: {
@@ -1292,8 +1343,11 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             appBundlePaths: []
         )
         formula.caskToken = nil
+        formula.packageKind = .commandLineTool
         let task = ApplicationUpdateTask(sessionID: UUID(), application: formula)
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
+            brewBatchInstaller: HomebrewBatchInstaller(executable: { brew }, command: runner, captureExecutable: appUpdateFixtureExecutable),
             homebrewScanner: scanner,
             heavyWorkCoordinator: HeavyWorkCoordinator()
         )
@@ -1303,7 +1357,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertEqual(result.state, .completed)
         XCTAssertEqual(result.observedVersion, ApplicationVersion(marketing: "2.0"))
         let arguments = await runner.recordedArguments()
-        XCTAssertEqual(arguments, [["info", "--json=v2", "--formula", "example"]])
+        XCTAssertEqual(arguments, [["list", "--versions", "--formula", "example"]])
     }
 
     func testReconcileRejectsChangedVersionBelowFrozenTarget() async throws {
@@ -1317,15 +1371,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             [.posixPermissions: NSNumber(value: Int16(0o755))],
             ofItemAtPath: brew.path
         )
-        let runner = FormulaVerificationCommandRunner(response: Data(#"""
-        {
-          "formulae": [{
-            "name": "example",
-            "full_name": "example",
-            "installed": [{"version": "1.5"}]
-          }]
-        }
-        """#.utf8))
+        let runner = FormulaVerificationCommandRunner(response: Data("example 1.5\n".utf8))
         let scanner = HomebrewInventoryScanner(
             runner: runner,
             environmentProvider: {
@@ -1347,8 +1393,11 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             appBundlePaths: []
         )
         formula.caskToken = nil
+        formula.packageKind = .commandLineTool
         let task = ApplicationUpdateTask(sessionID: UUID(), application: formula)
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
+            brewBatchInstaller: HomebrewBatchInstaller(executable: { brew }, command: runner, captureExecutable: appUpdateFixtureExecutable),
             homebrewScanner: scanner,
             heavyWorkCoordinator: HeavyWorkCoordinator()
         )
@@ -1391,11 +1440,16 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             canAutomaticallyUpdate: true,
             requiresUserInteraction: false
         )
-        let task = ApplicationUpdateTask(sessionID: UUID(), application: original)
+        var task = ApplicationUpdateTask(sessionID: UUID(), application: original)
+        task.recoveryEvidence = .init(applicationPath: original.path, homebrewMetadata: original.homebrewMetadata,
+            artifacts: [.init(path: original.path, originalIdentity: original.identity, originalVersion: original.installedVersion, wasRunning: false)])
         var freshScan = original
         freshScan.installedVersion = ApplicationVersion(marketing: "2.0", build: "200")
         freshScan.buildNumber = "200"
+        let readback = ApplicationMetadataReader(signatureInspector: FixedApplicationSignatureInspector(teamIdentifier: "OTHERTEAM", codeSigningIdentifier: "com.example.identity"))
         let executor = ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
+            brewBatchInstaller: coordinatorFixtureInstaller(token: "identity", reader: readback),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
                     teamIdentifier: "OTHERTEAM",
@@ -1408,8 +1462,9 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         do {
             _ = try await executor.reconcile(task: task, application: freshScan)
             XCTFail("Expected changed signing identity to fail closed")
-        } catch ProviderBackedUpdateExecutorError.applicationIdentityChanged {
-            // Expected.
+        } catch {
+            XCTAssertEqual((error as NSError).domain, "Homebrew.UpdateIdentity")
+            XCTAssertTrue(error.localizedDescription.contains("TEAM123 → OTHERTEAM"))
         }
     }
 
@@ -1508,6 +1563,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         let task = ApplicationUpdateTask(sessionID: UUID(), application: application)
         let identity = application.identity
         let transactionID = UUID()
+        let authenticatedDigest = try AuthenticatedApplicationDigest.compute(staged)
         let transaction = { phase in
             OfficialApplicationReplacementTransaction(
                 id: transactionID,
@@ -1518,7 +1574,8 @@ final class AppUpdateCoordinatorTests: XCTestCase {
                 expectedIdentity: identity,
                 originalVersion: originalVersion,
                 targetVersion: targetVersion,
-                phase: phase
+                phase: phase,
+                authenticatedDigest: authenticatedDigest
             )
         }
         let identityVerifier: OfficialApplicationReplacement.IdentityVerifier = { url, expected in
@@ -1540,10 +1597,20 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         )
     }
 
+    private func coordinatorFixtureInstaller(token: String, reader: ApplicationMetadataReader) -> HomebrewBatchInstaller {
+        HomebrewBatchInstaller(executable: { URL(fileURLWithPath: "/fixture/bin/brew") },
+            command: FormulaVerificationCommandRunner(response: Data((token + " 2.0\n").utf8)),
+            rechecker: AppUpdateFreshTestRechecker { url in
+                guard let app = await reader.read(applicationURL: url, runningState: ApplicationRunningStateSnapshot(bundleIdentifiers: [], normalizedBundlePaths: [])) else { return nil }
+                return .init(application: app, signature: AppUpdatePerformanceTestSupport.signature(for: app, valid: app.sourceEvidence.contains("valid-code-signature")))
+            }, captureExecutable: appUpdateFixtureExecutable)
+    }
+
     private func makeOfficialReplacementExecutor(
         fixture: OfficialReplacementReconcileFixture
     ) -> ProviderBackedApplicationUpdateExecutor {
         ProviderBackedApplicationUpdateExecutor(
+            processSafety: .init(processTable: { [] }),
             metadataReader: ApplicationMetadataReader(
                 signatureInspector: FixedApplicationSignatureInspector(
                     teamIdentifier: "TEAM123",

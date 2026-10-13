@@ -5,6 +5,7 @@ extension MenuBarAdvancedStatusView {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
             liveCard(.memory) { geekMemoryHistoryHoverTarget }
             liveCard(.memory) { geekMemoryCompositionHoverTarget }
+            GeekMemoryQuitConfirmationHost(store: store) {
             liveCard(.memoryProcesses) {
             if let result = store.memoryOptimizationResult {
                 GeekMemoryQuitResultCard(
@@ -20,6 +21,7 @@ extension MenuBarAdvancedStatusView {
             }
             if showsExtendedGeekDetails, store.memoryOptimizationResult == nil {
                 geekMemoryPagesCard
+            }
             }
             }
             if showsExtendedGeekDetails {
@@ -40,10 +42,11 @@ extension MenuBarAdvancedStatusView {
         } detail: {
             GeekMemoryHistoryHoverDetail(
                 points: memoryHistory,
-                duration: geekChartDuration,
+                duration: geekMetricRange(.memory).duration,
                 currentValue: memoryRingUsedPercentText,
                 pressure: memoryPressureDisplayText,
-                snapshot: memorySnapshot
+                snapshot: memorySnapshot,
+                isUpdating: geekMetricIsUpdating(.memory)
             )
         }
     }
@@ -66,19 +69,25 @@ extension MenuBarAdvancedStatusView {
         } detail: {
             GeekMemoryCompositionHistoryDetail(
                 points: memoryHistory,
-                duration: geekChartDuration,
-                composition: memorySnapshot?.ringComposition
+                duration: geekMetricRange(.memory).duration,
+                composition: memorySnapshot?.ringComposition,
+                isUpdating: geekMetricIsUpdating(.memory)
             )
         }
     }
 
     private var geekMemoryRingsCard: some View {
-        GeekCombinedCard(height: 174) {
-            VStack(spacing: 6) {
-                HStack {
-                    Label(L10n.text("内存", "Memory"), systemImage: AppSymbols.Monitor.memory)
-                        .font(AdvancedPanelTypography.captionStrong)
-                    Spacer(minLength: 4)
+        GeekCombinedCard(
+            height: GeekVisualTokens.detailMemoryGaugeSize
+                + MiniWindowStyleTokens.dataRowHeight
+                + GeekPanelLayout.detailSpacing
+                + GeekVisualTokens.cardVerticalPadding * 2
+        ) {
+            VStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                // Same module header as the CPU page's first card. The
+                // trailing text is the memory snapshot's freshness: its
+                // sample time, or 已过期 / 已暂停 / an unavailability reason.
+                GeekModuleHeader(systemImage: AppSymbols.Monitor.memory, title: L10n.text("内存", "Memory")) {
                     TimelineView(.periodic(from: .now, by: MemorySampleStatusPresentation.refreshInterval)) { timeline in
                         Text(memorySampleStatusText(at: timeline.date))
                             .font(AdvancedPanelTypography.caption)
@@ -91,7 +100,9 @@ extension MenuBarAdvancedStatusView {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(L10n.text("内存采样", "Memory sample"))
                 .accessibilityValue(memorySampleEvidenceText)
+                // D43: pressure on the left, usage on the right (iStat).
                 HStack(spacing: 40) {
+                    geekMemoryPressureRing(size: GeekVisualTokens.detailMemoryGaugeSize)
                     GeekCombinedRing(
                         title: L10n.text("占用", "Used"),
                         value: memoryRingUsedPercentText,
@@ -102,12 +113,7 @@ extension MenuBarAdvancedStatusView {
                         strokeWidth: GeekVisualTokens.gaugeStrokeWidth(size: GeekVisualTokens.detailMemoryGaugeSize)
                     )
                     .help(memoryRingExplanation)
-                    geekMemoryPressureRing(size: GeekVisualTokens.detailMemoryGaugeSize)
                 }
-                Text(memoryUsageAmountText)
-                    .font(AdvancedPanelTypography.body)
-                    .monospacedDigit()
-                    .help(memoryRingExplanation)
             }
             .frame(maxWidth: .infinity)
         }
@@ -147,34 +153,49 @@ extension MenuBarAdvancedStatusView {
                                     && !process.selectableProcessIDs.isEmpty,
                                 selectionTint: memoryTint,
                                 onToggle: {
+                                    MenuBarPresentationTrace.beginInput("process.select", label: "process.select")
                                     store.toggleMemoryAppUsageSelection(process)
                                 }
                             )
                         }
                     }
+                    .menuBarPresentationProbe(
+                        "process.select",
+                        revision: UInt64(truncatingIfNeeded: store.selectedMemoryProcessIDs.sorted().hashValue)
+                    )
+                }
+
+                // U1 066/068 (BOARD N19): with apps selected the quit action
+                // is a full-width destructive button below the list.
+                if store.selectedMemoryAppCount > 0 {
+                    GeekMemoryQuitSelectedButton(store: store, tint: memoryTint, presentation: .prominent)
+                        .padding(.top, MiniWindowStyleTokens.rowSpacing)
                 }
             }
         }
     }
 
     private var memoryProcessHeader: some View {
-        HStack(spacing: 8) {
-            memoryProcessTitle
-            Spacer(minLength: 8)
+        GeekProcessListHeader(title: memoryProcessTitleText, help: memoryProcessTitleHelp) {
             memoryProcessActions
         }
     }
 
     private var memoryProcessTitle: some View {
-        Text(L10n.text(
+        GeekSectionTitle(title: memoryProcessTitleText)
+            .layoutPriority(1)
+            .help(memoryProcessTitleHelp)
+    }
+
+    private var memoryProcessTitleText: String {
+        L10n.text(
             "进程组 · 前\(geekMemoryTopProcesses.count)/\(geekMemoryAllProcesses.count)项",
             "Process groups · \(geekMemoryTopProcesses.count)/\(geekMemoryAllProcesses.count)"
-        ))
-            .font(AdvancedPanelTypography.captionStrong)
-            .foregroundStyle(memoryTint)
-            .lineLimit(1)
-            .layoutPriority(1)
-            .help(L10n.text("按应用或可执行路径合并为进程组；已选项优先，其余按内存占用排序。", "Grouped by app or executable path; selected groups first, then memory use."))
+        )
+    }
+
+    private var memoryProcessTitleHelp: String {
+        L10n.text("按应用或可执行路径合并为进程组；已选项优先，其余按内存占用排序。", "Grouped by app or executable path; selected groups first, then memory use.")
     }
 
     private var memoryProcessActions: some View {
@@ -187,23 +208,27 @@ extension MenuBarAdvancedStatusView {
             .font(AdvancedPanelTypography.caption)
             .accessibilityLabel(L10n.text("在主窗口只读查看全部已采样进程", "View all sampled processes read-only in the main window"))
             GeekMemoryProcessSelectionMenu(store: store, tint: memoryTint)
-            GeekMemoryCleanupButton(store: store, tint: memoryTint)
+            // Once apps are selected the action moves below the list.
+            if store.selectedMemoryAppCount == 0 {
+                GeekMemoryQuitSelectedButton(store: store, tint: memoryTint)
+            }
         }
         .fixedSize(horizontal: true, vertical: false)
     }
 
+    /// Cumulative swap activity (the kernel's swap page counters as bytes).
     private var geekMemoryPagesCard: some View {
         GeekCombinedCard(height: 42) {
             VStack(spacing: 1) {
                 if let snapshot = memorySnapshot {
-                    GeekMemoryInlineFact(
-                        title: L10n.text("换入（累计）", "Page Ins (Total)"),
-                        value: compactPageCount(snapshot.pageInsCount)
-                    )
-                    GeekMemoryInlineFact(
-                        title: L10n.text("换出（累计）", "Page Outs (Total)"),
-                        value: compactPageCount(snapshot.pageOutsCount)
-                    )
+                    ForEach(GeekMemorySwapActivity.rows(
+                        swappedInBytes: snapshot.swappedInBytes,
+                        swappedOutBytes: snapshot.swappedOutBytes
+                    )) { row in
+                        GeekMemoryInlineFact(title: row.title, value: row.value)
+                            .help(row.help)
+                            .accessibilityHint(row.help)
+                    }
                 } else {
                     geekMemoryLoadingIndicator
                 }
@@ -217,7 +242,7 @@ extension MenuBarAdvancedStatusView {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(L10n.text("交换内存", "Swap Memory"))
                         .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(memoryTint)
+                        .foregroundStyle(panelMetricColors.sectionHeader)
                         .help(geekSwapExplanation)
 
                     Text(memorySnapshot.map(swapUsageText) ?? "—")
@@ -232,9 +257,8 @@ extension MenuBarAdvancedStatusView {
                 GeekCombinedRing(
                     title: L10n.text("交换内存", "Swap Memory"),
                     value: geekSwapPercentText,
-                    detail: geekSwapExplanation,
                     progress: geekSwapProgress,
-                    tint: memoryTint,
+                    tint: panelMetricColors.swap,
                     size: 30
                 )
             }
@@ -246,11 +270,17 @@ extension MenuBarAdvancedStatusView {
     private var geekMemorySwapHoverTarget: some View {
         GeekHoverDetailTarget(
             accessibilityLabel: L10n.text("交换内存三级详情", "Swap Memory Deep Detail"),
+            chartRangeMetric: .memory,
             popoverSize: GeekHoverDetailMetrics.historySize
         ) {
             geekMemorySwapCard
         } detail: {
-            GeekSwapHoverDetail(snapshot: memorySnapshot)
+            GeekSwapHoverDetail(
+                snapshot: memorySnapshot,
+                points: memoryHistory,
+                duration: geekMetricRange(.memory).duration,
+                isUpdating: geekMetricIsUpdating(.memory)
+            )
         }
     }
 
@@ -307,20 +337,6 @@ extension MenuBarAdvancedStatusView {
         return "\(usedText) / \(ByteFormat.string(snapshot.swapTotalBytes))"
     }
 
-    private func compactPageCount(_ value: Int64) -> String {
-        let count = Double(max(0, value))
-        switch count {
-        case 1_000_000_000...:
-            return String(format: "%.1fB", count / 1_000_000_000)
-        case 1_000_000...:
-            return String(format: "%.1fM", count / 1_000_000)
-        case 1_000...:
-            return String(format: "%.1fK", count / 1_000)
-        default:
-            return "\(value)"
-        }
-    }
-
     private var geekMemoryLoadingIndicator: some View {
         ProgressView()
             .controlSize(.small)
@@ -329,7 +345,70 @@ extension MenuBarAdvancedStatusView {
     }
 }
 
-private struct GeekMemoryProcessSelectionMenu: View {
+struct GeekMemorySwapActivityRow: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let value: String
+    let help: String
+}
+
+/// The memory page's cumulative swap rows, directly above the swap card.
+/// macOS counts the compressed data read back from and written to the swap
+/// files in pages (vm_stat's Swapins / Swapouts); the rows show that amount
+/// in bytes (pages x page size) through the memory byte format. A missing
+/// reading is a dash, never zero.
+enum GeekMemorySwapActivity {
+    static func rows(swappedInBytes: Int64?, swappedOutBytes: Int64?) -> [GeekMemorySwapActivityRow] {
+        [
+            GeekMemorySwapActivityRow(
+                id: "swapped-in",
+                title: L10n.text("换入（累计）", "Swapped In (Total)"),
+                value: value(swappedInBytes),
+                help: help(
+                    L10n.text(
+                        "开机以来从交换文件读回内存的数据量（压缩后的大小）。",
+                        "Compressed data read back from the swap files since startup."
+                    ),
+                    isKnown: swappedInBytes != nil
+                )
+            ),
+            GeekMemorySwapActivityRow(
+                id: "swapped-out",
+                title: L10n.text("换出（累计）", "Swapped Out (Total)"),
+                value: value(swappedOutBytes),
+                help: help(
+                    L10n.text(
+                        "开机以来写入交换文件的数据量（压缩后的大小）。",
+                        "Compressed data written to the swap files since startup."
+                    ),
+                    isKnown: swappedOutBytes != nil
+                )
+            ),
+        ]
+    }
+
+    private static func value(_ bytes: Int64?) -> String {
+        bytes.map(ByteFormat.string) ?? "—"
+    }
+
+    /// `man vm_stat` (line 107 on macOS 27.2): "Both swap counters also include
+    /// I/O used for swapfile maintenance." (BOARD N11-4)
+    private static func help(_ meaning: String, isKnown: Bool) -> String {
+        let conversion = L10n.text(
+            "macOS 按页统计，这里按页大小换算成字节；也包含交换文件维护产生的读写。",
+            " macOS counts it in pages; shown here in bytes (pages × page size). It also includes I/O for swap file maintenance."
+        )
+        guard isKnown else {
+            return meaning + conversion + L10n.text(
+                "当前未能读取系统的虚拟内存统计。",
+                " The system's virtual memory statistics could not be read."
+            )
+        }
+        return meaning + conversion
+    }
+}
+
+struct GeekMemoryProcessSelectionMenu: View {
     @ObservedObject var store: ScanStore
     let tint: Color
 
@@ -376,11 +455,10 @@ private struct GeekMemoryProcessSelectionMenu: View {
                 }
             }
         } label: {
-            Label(
+            Text(
                 selectedCount == 0
                     ? L10n.text("选择", "Select")
-                    : L10n.text("已选 \(selectedCount)", "\(selectedCount) Selected"),
-                systemImage: "checklist"
+                    : L10n.text("已选 \(selectedCount)", "\(selectedCount) Selected")
             )
             .font(AdvancedPanelTypography.body)
         }
@@ -414,20 +492,130 @@ private struct GeekMemoryProcessSelectionMenu: View {
     }
 }
 
-private struct GeekMemoryCleanupButton: View {
+/// D2 (2026-10-04): the mini-window memory page quits exactly the apps the
+/// user selected. Without a manual selection the action is unavailable and
+/// does nothing; the suggested apps are only selected by the menu's explicit
+/// "选择建议项" item.
+@MainActor
+enum GeekMemoryQuitSelection {
+    static var title: String { L10n.text("退出所选应用", "Quit Selected Apps") }
+
+    static func isAvailable(store: ScanStore) -> Bool {
+        store.selectedMemoryAppCount > 0 && store.canRequestMemoryQuitActions
+    }
+
+    /// Asks for confirmation in the mini window, for the manual selection only.
+    static func request(store: ScanStore) {
+        guard isAvailable(store: store) else { return }
+        store.requestQuitSelectedMemoryProcesses(presentConfirmationInMenuBar: true)
+    }
+
+    static func help(selectedCount: Int, hasSelectableApps: Bool) -> String {
+        if selectedCount > 0 {
+            return L10n.text(
+                "确认后正常退出已选择的 \(selectedCount) 个应用",
+                "Quit the \(selectedCount) selected applications normally after confirmation"
+            )
+        }
+        return hasSelectableApps
+            ? L10n.text(
+                "先在列表或“选择”菜单中选择要退出的应用",
+                "Select the applications to quit in the list or the Select menu first"
+            )
+            : L10n.text(
+                "当前没有可选择的应用",
+                "No applications are currently available for selection"
+            )
+    }
+
+    static var accessibilityHint: String {
+        L10n.text(
+            "确认后正常退出已选择的应用；未选择应用时不可用",
+            "Quits the selected applications normally after confirmation; unavailable until applications are selected"
+        )
+    }
+
+    /// The full-width button's title once apps are selected (U1 066/068).
+    static func prominentTitle(selectedCount: Int) -> String {
+        L10n.text(
+            "退出所选应用（\(selectedCount) 个）",
+            selectedCount == 1 ? "Quit Selected App (1)" : "Quit Selected Apps (\(selectedCount))"
+        )
+    }
+}
+
+/// "退出所选应用". Without a selection it is the small, unavailable header
+/// button (D2). With apps selected it becomes a full-width destructive button
+/// at the bottom of the process card (UI plan U1, 066/068; BOARD N19) and the
+/// header shows no second one. Either asks for confirmation first
+/// (`GeekMemoryQuitConfirmationHost`).
+struct GeekMemoryQuitSelectedButton: View {
+    enum Presentation {
+        case header
+        case prominent
+    }
+
     @ObservedObject var store: ScanStore
     let tint: Color
-
-    private var hasRecommendedApps: Bool {
-        store.memorySnapshot?.recommendedQuitApps.isEmpty == false
-    }
+    var presentation: Presentation = .header
 
     private var selectedCount: Int {
         store.selectedMemoryAppCount
     }
 
-    private var canPrepareSelection: Bool {
-        selectedCount > 0 || hasRecommendedApps
+    private var hasSelectableApps: Bool {
+        store.menuBarPreparedMemoryApps.contains { !$0.selectableProcessIDs.isEmpty }
+    }
+
+    var body: some View {
+        switch presentation {
+        case .header:
+            // Text only: with an icon the English header actions ("View all",
+            // "12 Selected", "Quit Selected Apps") exceed the card's 280 pt.
+            Button(GeekMemoryQuitSelection.title) {
+                GeekMemoryQuitSelection.request(store: store)
+            }
+            .buttonStyle(.bordered)
+            .font(AdvancedPanelTypography.body)
+            .controlSize(.small)
+            .tint(tint)
+            .disabled(!GeekMemoryQuitSelection.isAvailable(store: store))
+            .help(GeekMemoryQuitSelection.help(selectedCount: selectedCount, hasSelectableApps: hasSelectableApps))
+            .accessibilityLabel(GeekMemoryQuitSelection.title)
+            .accessibilityHint(GeekMemoryQuitSelection.accessibilityHint)
+        case .prominent:
+            // A destructive action: the destructive color, never a status
+            // or safe color.
+            Button {
+                GeekMemoryQuitSelection.request(store: store)
+            } label: {
+                Text(GeekMemoryQuitSelection.prominentTitle(selectedCount: selectedCount))
+                    .font(AdvancedPanelTypography.captionStrong)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .tint(AppDesignTokens.Palette.destructive)
+            .disabled(!GeekMemoryQuitSelection.isAvailable(store: store))
+            .help(GeekMemoryQuitSelection.help(selectedCount: selectedCount, hasSelectableApps: hasSelectableApps))
+            .accessibilityLabel(GeekMemoryQuitSelection.title)
+            .accessibilityValue(L10n.text("已选择 \(selectedCount) 个应用", "\(selectedCount) apps selected"))
+            .accessibilityHint(GeekMemoryQuitSelection.accessibilityHint)
+        }
+    }
+}
+
+/// The mini window's "退出所选应用？" confirmation. It is attached to the
+/// process card, not to a button, so it stays presented while the button
+/// changes between its header and full-width forms.
+struct GeekMemoryQuitConfirmationHost<Content: View>: View {
+    @ObservedObject var store: ScanStore
+    let content: Content
+
+    init(store: ScanStore, @ViewBuilder content: () -> Content) {
+        self.store = store
+        self.content = content()
     }
 
     private var confirmationBinding: Binding<Bool> {
@@ -443,64 +631,24 @@ private struct GeekMemoryCleanupButton: View {
     }
 
     var body: some View {
-        Button {
-            guard store.ensureMemorySelectionForQuit() else { return }
-            store.requestQuitSelectedMemoryProcesses(presentConfirmationInMenuBar: true)
-        } label: {
-            Label(
-                L10n.text("内存清理", "Clean Memory"),
-                systemImage: "checkmark.circle"
-            )
-        }
-        .buttonStyle(.bordered)
-        .font(AdvancedPanelTypography.body)
-        .controlSize(.small)
-        .tint(tint)
-        .disabled(!canPrepareSelection || !store.canRequestMemoryQuitActions)
-        .help(
-            selectedCount > 0
-                ? L10n.text(
-                    "确认后正常退出已选择的 \(selectedCount) 个应用",
-                    "Quit the \(selectedCount) selected applications normally after confirmation"
-                )
-                : hasRecommendedApps
-                    ? L10n.text(
-                        "未手动选择时使用建议项，并在确认后正常退出",
-                        "Uses suggested apps when none are selected, then quits normally after confirmation"
-                    )
-                    : L10n.text(
-                        "当前没有可选择的应用",
-                        "No applications are currently available for selection"
-                    )
-        )
-        .accessibilityLabel(L10n.text("内存清理", "Clean Memory"))
-        .accessibilityHint(
-            L10n.text(
-                "优先使用手动选择；未选择时使用建议项，确认后统一退出",
-                "Uses the manual selection first, or suggested apps when none are selected"
-            )
-        )
-        .alert(
-            L10n.text("退出所选应用？", "Quit Selected Apps?"),
-            isPresented: confirmationBinding
-        ) {
-            Button(L10n.text("取消", "Cancel"), role: .cancel) {
-                store.cancelQuitSelectedMemoryProcesses()
+        content
+            .alert(
+                L10n.text("退出所选应用？", "Quit Selected Apps?"),
+                isPresented: confirmationBinding
+            ) {
+                Button(L10n.text("取消", "Cancel"), role: .cancel) {
+                    store.cancelQuitSelectedMemoryProcesses()
+                }
+                Button(L10n.text("正常退出", "Quit Normally"), role: .destructive) {
+                    store.confirmQuitSelectedMemoryProcesses()
+                }
+                .disabled(!store.canRequestMemoryQuitActions)
+            } message: {
+                // BOARD N19: the apps by name and who handles unsaved work.
+                if let summary = store.pendingMemoryQuitSummary {
+                    Text(summary.confirmationMessage)
+                }
             }
-            Button(L10n.text("正常退出", "Quit Normally"), role: .destructive) {
-                store.confirmQuitSelectedMemoryProcesses()
-            }
-            .disabled(!store.canRequestMemoryQuitActions)
-        } message: {
-            if let summary = store.pendingMemoryQuitSummary {
-                Text(
-                    L10n.text(
-                        "已选择 \(summary.appCount) 个应用，目前约占 \(ByteFormat.string(summary.estimatedBytes))；退出后将刷新重测实际释放量。",
-                        "\(summary.appCount) apps are selected and currently use about \(ByteFormat.string(summary.estimatedBytes)); actual release will be remeasured after quitting."
-                    )
-                )
-            }
-        }
     }
 }
 
@@ -512,9 +660,7 @@ private struct GeekMemoryQuitResultCard: View {
     var body: some View {
         GeekCombinedCard(height: 220) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 7) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(AppDesignTokens.Palette.success)
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                     Text(L10n.text("退出结果", "Quit Result"))
                         .font(AdvancedPanelTypography.captionStrong)
                     Spacer(minLength: 4)
@@ -546,7 +692,8 @@ private struct GeekMemoryQuitResultCard: View {
                     GeekCombinedRing(
                         title: L10n.text("操作前", "Before"),
                         value: result.beforeSnapshot.usedPercentText,
-                        detail: result.beforeSnapshot.pressureLevel.title,
+                        detail: result.beforeSnapshot.reportablePressureLevel?.title
+                            ?? L10n.text("不可用", "Unavailable"),
                         progress: result.beforeSnapshot.measuredUsedRatio,
                         tint: AppDesignTokens.Palette.warning,
                         size: 54
@@ -556,7 +703,8 @@ private struct GeekMemoryQuitResultCard: View {
                     GeekCombinedRing(
                         title: L10n.text("操作后", "After"),
                         value: result.snapshot.usedPercentText,
-                        detail: result.snapshot.pressureLevel.title,
+                        detail: result.snapshot.reportablePressureLevel?.title
+                            ?? L10n.text("不可用", "Unavailable"),
                         progress: result.snapshot.measuredUsedRatio,
                         tint: AppDesignTokens.Palette.success,
                         size: 54
@@ -582,7 +730,7 @@ private struct GeekMemoryQuitResultCard: View {
                     Button(L10n.text("完成", "Done"), action: onDone)
                         .buttonStyle(.borderedProminent)
                     Button(action: onOpenReport) {
-                        Label(L10n.text("查看报告", "View Report"), systemImage: "doc.text")
+                        Text(L10n.text("查看报告", "View Report"))
                     }
                     .buttonStyle(.bordered)
                 }
@@ -667,15 +815,14 @@ private struct GeekCompactMemoryProcessRow: View {
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: 6) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(AdvancedPanelTypography.captionStrong)
+                AppSymbolGlyph(systemImage: isSelected ? "checkmark.circle.fill" : "circle",
+                               size: MiniWindowStyleTokens.disclosureIconSlotSize, weight: .semibold)
                     .foregroundStyle(isSelected ? selectionTint : Color.secondary.opacity(0.55))
-                    .frame(width: 12, height: 12)
+                    .frame(width: MiniWindowStyleTokens.disclosureIconSlotSize,
+                           height: MiniWindowStyleTokens.disclosureIconSlotSize)
                     .accessibilityHidden(true)
 
-                AdvancedAppIcon(path: process.iconPath, fallback: "gearshape.2")
-                    .scaleEffect(0.62)
-                    .frame(width: 14, height: 14)
+                GeekSecondaryProcessIcon(path: process.iconPath, fallback: "gearshape.2")
 
                 Text(process.name)
                     .font(AdvancedPanelTypography.body)
@@ -689,7 +836,7 @@ private struct GeekCompactMemoryProcessRow: View {
                     .lineLimit(1)
             }
             .padding(.horizontal, 3)
-            .frame(minHeight: 14)
+            .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
             .contentShape(Rectangle())
             .background {
                 RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
@@ -715,8 +862,8 @@ private struct GeekCompactMemoryProcessRow: View {
             !isSelectionEnabled
                 ? L10n.text("仅查看", "Read Only")
                 : isSelected
-                ? L10n.text("已选择清理", "Selected for cleanup")
-                : L10n.text("未选择清理", "Not selected for cleanup")
+                ? L10n.text("已选择退出", "Selected to quit")
+                : L10n.text("未选择退出", "Not selected to quit")
         )
         .accessibilityHint(
             isSelectionEnabled

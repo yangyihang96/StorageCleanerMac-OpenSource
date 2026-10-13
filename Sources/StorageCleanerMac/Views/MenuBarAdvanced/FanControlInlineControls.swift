@@ -19,7 +19,7 @@ struct FanControlDraft: Equatable {
         confirmedFractions: [Int: Double] = [:]
     ) {
         let mode: GeekFanControlMode? = switch observedMode {
-        case .fanSet, .maximum: .manual
+        case .fanSet: .manual
         default: observedMode
         }
         let uniqueReadings = Set(telemetry.readings.map(\.index)).count == telemetry.readings.count
@@ -39,7 +39,7 @@ struct FanControlDraft: Equatable {
     var synchronizesFans: Bool { configuration.synchronizesFans }
 
     mutating func selectMode(_ mode: GeekFanControlMode) {
-        guard [.systemAutomatic, .manual, .customCurve].contains(mode) else { return }
+        guard [.systemAutomatic, .manual, .customCurve, .maximum].contains(mode) else { return }
         configuration.mode = mode
     }
 
@@ -139,7 +139,9 @@ struct FanControlDraft: Equatable {
                     fanControl.commitManualPercentage(configuration.percentagesByFan[last]!, fanID: last)
                 }
             }
-        case .fanSet, .maximum:
+        case .maximum:
+            await fanControl.selectMode(.maximum)
+        case .fanSet:
             return false
         }
         return true
@@ -155,21 +157,49 @@ struct FanSyncToggleRow: View {
             guard !isDisabled else { return }
             draft.setSynchronized(!draft.synchronizesFans)
         } label: {
+            // U1 117: the only switch in the fan palette; the modes above are
+            // single-choice cards.
             HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(L10n.text("同步所有风扇", "Synchronize All Fans"))
+                Text(title)
+                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
                 Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
-                Image(systemName: draft.synchronizesFans ? "checkmark" : "minus")
-                    .foregroundStyle(draft.synchronizesFans ? Color.accentColor : Color.secondary)
+                Capsule(style: .continuous)
+                    .fill(draft.synchronizesFans ? AppDesignTokens.Palette.information : Color.secondary.opacity(0.32))
+                    .frame(width: 30, height: 17)
+                    .overlay(alignment: draft.synchronizesFans ? .trailing : .leading) {
+                        Circle().fill(.white).frame(width: 13, height: 13).padding(2)
+                    }
                     .accessibilityHidden(true)
             }
-            .frame(minHeight: MiniWindowStyleTokens.controlRowHeight)
+            .frame(maxWidth: .infinity, minHeight: MiniWindowStyleTokens.controlRowHeight, alignment: .trailing)
             .contentShape(Rectangle())
         }
         .buttonStyle(ResponsivePlainButtonStyle())
         .font(AdvancedPanelTypography.caption)
         .disabled(isDisabled)
+        .accessibilityLabel(L10n.text("同步所有风扇", "Synchronize All Fans"))
         .accessibilityValue(draft.synchronizesFans ? L10n.text("已开启", "On") : L10n.text("已关闭", "Off"))
-        .help(L10n.text("按各风扇自己的最低至最高量程同步目标比例；应用前不改变转速。", "Use the same fraction of each fan's own range. No speed changes before Apply."))
+        #if DEBUG
+        .layoutProbe("fan.sync.toggle")
+        #endif
+    }
+
+    private var title: String {
+        draft.configuration.percentagesByFan.count == 2
+            ? L10n.text("双风扇同步", "Sync Both Fans")
+            : L10n.text("风扇同步", "Sync Fans")
+    }
+}
+
+/// The compact button has a bounded name; menu items and assistive text retain
+/// the hardware name. Chinese keeps the existing localized button names.
+struct FanTargetPickerPresentation: Equatable {
+    let buttonTitle: String
+    let fullName: String
+
+    init(reading: SystemFanReading, usesChinese: Bool) {
+        fullName = reading.displayName
+        buttonTitle = usesChinese ? fullName : "Fan \(reading.index + 1)"
     }
 }
 
@@ -178,22 +208,85 @@ struct FanManualSliderList: View {
     let telemetry: FanTelemetryState
     let isDisabled: Bool
     var compact = false
+    var compactFooter: ((Int?) -> AnyView)? = nil
     @State private var selectedFanID: Int?
 
     var body: some View {
-        if draft.synchronizesFans {
-            sliderRow(fanID: nil, title: L10n.text("全部风扇", "All Fans"))
-        } else if let reading = telemetry.readings.first(where: { $0.index == selectedFanID }) ?? telemetry.readings.first {
-            Picker(L10n.text("目标风扇", "Target Fan"), selection: Binding(
-                get: { reading.index },
-                set: { selectedFanID = $0 }
-            )) {
-                ForEach(telemetry.readings) { fan in Text(fan.displayName).tag(fan.index) }
+        if compact && telemetry.fanCount > 1 {
+            // Keep the header outside the synchronized/individual slider
+            // branches so switching targets cannot replace its layout owner.
+            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
+                compactFanHeader
+                manualSlider
             }
-            .pickerStyle(.menu)
-            .disabled(isDisabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            manualSlider
+        }
+    }
+
+    @ViewBuilder
+    private var manualSlider: some View {
+        if draft.synchronizesFans {
+            sliderRow(fanID: nil, title: compact ? L10n.text("风扇", "Fans") : L10n.text("全部风扇", "All Fans"))
+        } else if let reading = telemetry.readings.first(where: { $0.index == selectedFanID }) ?? telemetry.readings.first {
+            if !compact {
+                targetFanPicker(reading: reading)
+            }
             sliderRow(fanID: reading.index, title: reading.displayName)
         }
+    }
+
+    private var compactFanHeader: some View {
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+            if !draft.synchronizesFans,
+               let reading = telemetry.readings.first(where: { $0.index == selectedFanID }) ?? telemetry.readings.first {
+                compactTargetFanMenu(reading: reading)
+            }
+            FanSyncToggleRow(draft: $draft, isDisabled: isDisabled)
+        }
+        .frame(maxWidth: .infinity, minHeight: MiniWindowStyleTokens.dataRowHeight, alignment: .trailing)
+    }
+
+    private func targetFanPicker(reading: SystemFanReading) -> some View {
+        Picker(L10n.text("目标风扇", "Target Fan"), selection: Binding(
+            get: { reading.index },
+            set: { selectedFanID = $0 }
+        )) {
+            ForEach(telemetry.readings) { fan in Text(fan.displayName).tag(fan.index) }
+        }
+        .pickerStyle(.menu)
+        .disabled(isDisabled)
+        // The Picker's title is already its accessibility label (review r4 P2-1).
+    }
+
+    private func compactTargetFanMenu(reading: SystemFanReading) -> some View {
+        let presentation = FanTargetPickerPresentation(reading: reading, usesChinese: L10n.usesChinese)
+        return Menu {
+            Picker(L10n.text("目标风扇", "Target Fan"), selection: Binding(
+                get: { selectedFanID ?? reading.index },
+                set: { selectedFanID = $0 }
+            )) {
+                ForEach(telemetry.readings) { fan in
+                    Text(FanTargetPickerPresentation(reading: fan, usesChinese: L10n.usesChinese).fullName)
+                        .tag(fan.index)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Text(presentation.buttonTitle)
+                .font(AdvancedPanelTypography.caption)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 80)
+        .disabled(isDisabled)
+        .help(presentation.fullName)
+        .accessibilityLabel(L10n.text("目标风扇：\(presentation.fullName)", "Target Fan: \(presentation.fullName)"))
+        #if DEBUG
+        .layoutProbe("fan.target.menu")
+        #endif
     }
 
     private func sliderRow(fanID: Int?, title: String) -> some View {
@@ -201,20 +294,22 @@ struct FanManualSliderList: View {
         let minimum = FanCurveEditor.targetRPM(percentage: 0, fanReadings: readings)
         let maximum = FanCurveEditor.targetRPM(percentage: 100, fanReadings: readings)
         return VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(title).lineLimit(1)
-                Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
-                if compact {
-                    Text(draft.percentage(for: fanID).map { "\(Int($0.rounded()))%" } ?? "—")
-                        .monospacedDigit()
-                } else {
-                    Text(Self.actualRPM(fanID: fanID, telemetry: telemetry).map {
-                        L10n.text("实际 ", "Actual ") + SystemFanSpeedFormat.string($0)
-                    } ?? L10n.text("实际 —", "Actual —"))
-                        .monospacedDigit().foregroundStyle(.secondary)
+            if !compact {
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                    Text(title).lineLimit(1)
+                    Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
+                    if compact && telemetry.fanCount == 1 {
+                        Text(draft.percentage(for: fanID).map { "\(Int($0.rounded()))%" } ?? "—")
+                            .monospacedDigit()
+                    } else if !compact {
+                        Text(Self.actualRPM(fanID: fanID, telemetry: telemetry).map {
+                            L10n.text("实际 ", "Actual ") + SystemFanSpeedFormat.string($0)
+                        } ?? L10n.text("实际 —", "Actual —"))
+                            .monospacedDigit().foregroundStyle(.secondary)
+                    }
                 }
+                .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
             }
-            .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
             if !compact {
                 HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                     Text(fanID == nil && telemetry.fanCount > 1
@@ -225,20 +320,41 @@ struct FanManualSliderList: View {
                 }
             }
             if let minimum, let maximum, let percentage = draft.percentage(for: fanID) {
-                FanControlSlider(value: Binding(
-                    get: { draft.percentage(for: fanID) ?? percentage },
-                    set: { guard !isDisabled else { return }; draft.setPercentage($0, fanID: fanID) }
-                ), isDisabled: isDisabled) { _ in }
                 HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                    Text(compact ? "\(minimum)" : SystemFanSpeedFormat.string(minimum))
-                    Spacer(minLength: 0)
-                    if compact { targetRPMField(fanID: fanID, title: title) }
-                    Spacer(minLength: 0)
-                    Text(compact ? "\(maximum)" : SystemFanSpeedFormat.string(maximum))
+                    FanControlSlider(value: Binding(
+                        get: { draft.percentage(for: fanID) ?? percentage },
+                        set: { guard !isDisabled else { return }; draft.setPercentage($0, fanID: fanID) }
+                    ), isDisabled: isDisabled) { _ in }
+                    .help(L10n.text("硬件量程 \(minimum)–\(maximum) RPM；0% 为最低转速，不代表停转。", "Hardware range \(minimum)–\(maximum) RPM; 0% is minimum speed, not stopped."))
+                    if compact {
+                        Text("\(Int(percentage.rounded()))%")
+                            .monospacedDigit().fixedSize()
+                    }
                 }
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .help(L10n.text("硬件读取量程；0% 对应最低转速，不代表停转。", "Reported hardware range; 0% means minimum speed, not stopped."))
+                if compact, let compactFooter {
+                    compactFooter(fanID)
+                } else if compact {
+                    HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                        Text(Self.actualRPM(fanID: fanID, telemetry: telemetry).map {
+                            L10n.text("实际 ", "Actual ") + SystemFanSpeedFormat.string($0)
+                        } ?? L10n.text("实际 —", "Actual —"))
+                        Spacer(minLength: 0)
+                        Text(draft.targetRPM(fanID: fanID, telemetry: telemetry).map {
+                            L10n.text("草稿目标 ", "Draft Target ") + SystemFanSpeedFormat.string($0)
+                        } ?? L10n.text("草稿目标 —", "Draft Target —"))
+                    }
+                    .font(AdvancedPanelTypography.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                        Text(SystemFanSpeedFormat.string(minimum))
+                        Spacer(minLength: 0)
+                        Text(SystemFanSpeedFormat.string(maximum))
+                    }
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                }
                 if fanID == nil && !compact {
                     HStack(spacing: MiniWindowStyleTokens.rowSpacing) {
                         ForEach([25.0, 50.0, 75.0, 100.0], id: \.self) { preset in
@@ -295,8 +411,6 @@ struct FanManualSliderList: View {
 /// mid-drag ("lease expired" reverts) and to make the panel visibly lag. A
 /// gesture-driven slider keeps the run loop alive for the whole drag.
 struct FanControlSlider: View {
-    @Environment(\.panelChartAccentColor) private var panelChartAccentColor
-
     @Binding var value: Double
     var isDisabled = false
     let onEditingChanged: (Bool) -> Void
@@ -382,6 +496,6 @@ struct FanControlSlider: View {
     }
 
     private var controlTint: Color {
-        panelChartAccentColor ?? .accentColor
+        AppDesignTokens.Palette.information
     }
 }

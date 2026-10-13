@@ -5,19 +5,40 @@ struct CleanupScanOverviewView: View {
     let session: ScanSession
 
     var body: some View {
-        CleanupScanResultsView(
-            store: store,
-            filter: .overview,
-            session: session
-        )
+        Group {
+            if session.smartScanScopes == [.health] {
+                SmartScanPageShell(alignsWithFeatureFlow: true) {
+                    AppPageHeader(title: ReviewFilter.overview.title, isHero: true, role: .landing) {
+                        Button { store.rescanAfterV2Cleanup() } label: {
+                            Label(L10n.text("重新扫描", "Scan Again"), systemImage: "arrow.clockwise")
+                        }
+                    }
+                } content: {
+                    ScrollView { SmartScanHealthResultsView(snapshot: session.smartScanHealthSnapshot, status: session.smartScanHealthStatus).padding(.vertical, 16) }
+                } footer: {
+                    StatusFooter(status: session.outcome == .cancelled
+                        ? .idle(L10n.text("扫描已取消", "Scan cancelled"))
+                        : session.smartScanHealthSnapshot == nil
+                            ? .failed(session.smartScanHealthStatus?.title ?? L10n.text("健康信息不可用", "Health information unavailable"))
+                            : .completed(L10n.text("健康检查完成", "Health check completed")),
+                        trustText: L10n.text("只读检查 · 不会更改系统设置", "Read-only check · System settings stay unchanged"),
+                        isIntegrated: true)
+                }
+            } else {
+                CleanupScanResultsView(store: store, filter: .overview, session: session)
+            }
+        }
         .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
     }
 }
 
 struct CleanupScanResultsView: View {
     @Environment(\.windowLayoutMetrics) private var layout
+    @Environment(\.pageLayout) private var pageLayout
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.colorScheme) private var colorScheme
+    @AppSurfaces private var surfaces
     @ObservedObject var store: ScanStore
     let filter: ReviewFilter
     let session: ScanSession
@@ -25,6 +46,9 @@ struct CleanupScanResultsView: View {
     @State private var sortOrder: CleanupResultSort = .largest
     @State private var isSecondaryDetailsExpanded = false
     @State private var expandedRiskTierIDs: Set<String> = []
+    @State private var expandedLightfieldSubcategoryIDs: Set<String> = []
+    /// The list has scrolled under the fixed header (shows the hairline).
+    @State private var isListScrolled = false
 
     private var categories: [CleanupScanCategory] {
         filter == .devCaches
@@ -34,76 +58,91 @@ struct CleanupScanResultsView: View {
 
     private var candidates: [ScanCandidate] { categories.flatMap(\.candidates) }
 
-    /// Only selectable candidates may be described as safe-to-clean. Review
-    /// and protected items stay visible in their own summary instead of being
-    /// folded into the primary cleanup number.
+    /// D23: emptying the Trash is listed and counted on its own, apart from
+    /// the green, yellow and red items that move to Trash.
+    private var trashCandidates: [ScanCandidate] {
+        candidates.filter { $0.action.permanentlyDeletes && $0.isSelectable }
+    }
+
+    /// D19: the risk cards and tiers only count items that can be selected and
+    /// moved to Trash. The scanner no longer lists anything else. The scan
+    /// history counts with the same definition (BOARD N20).
+    private var tierTotals: CleanupScanTierTotals {
+        CleanupScanTierTotals(categories: categories)
+    }
+
+    private var tierCandidates: [ScanCandidate] {
+        tierTotals.all
+    }
+
     private var safeCandidates: [ScanCandidate] {
-        candidates.filter { $0.risk == .safe && $0.isSelectable }
+        tierTotals.safe
     }
 
     private var reviewCandidates: [ScanCandidate] {
-        candidates.filter { $0.risk == .reviewOnly }
-    }
-
-    private var actionableReviewCandidates: [ScanCandidate] {
-        reviewCandidates.filter(\.isSelectable)
-    }
-
-    private var advisoryReviewCandidates: [ScanCandidate] {
-        reviewCandidates.filter { !$0.isSelectable }
+        tierTotals.review
     }
 
     private var protectedCandidates: [ScanCandidate] {
-        candidates.filter { $0.risk == .protected }
+        tierTotals.protected
     }
 
-    private var actionableProtectedCandidates: [ScanCandidate] {
-        protectedCandidates.filter(\.isSelectable)
-    }
-
-    private var protectedReferenceCandidates: [ScanCandidate] {
-        protectedCandidates.filter { !$0.isSelectable }
+    /// Groups on the three tiers; the Trash group has its own section.
+    private var tierSubcategories: [CleanupScanSubcategory] {
+        categories.flatMap(\.subcategories).filter { subcategory in
+            !subcategory.candidates.contains { $0.action.permanentlyDeletes }
+        }
     }
 
     private func decisionCount(for risk: CleanupRisk) -> Int {
-        categories.reduce(0) { count, category in
-            count + category.subcategories.filter {
-                $0.risk == risk && !$0.candidates.isEmpty
-            }.count
-        }
+        selectableDecisionCount(for: risk)
     }
 
     private func selectedDecisionCount(for risk: CleanupRisk) -> Int {
-        categories.reduce(0) { count, category in
-            count + category.subcategories.filter { subcategory in
-                subcategory.risk == risk
-                    && !subcategory.selectableCandidateIDs.isEmpty
-                    && store.cleanupSelection.state(
-                        for: subcategory.selectableCandidateIDs
-                    ) != .unchecked
-            }.count
-        }
+        tierSubcategories.filter { subcategory in
+            subcategory.risk == risk
+                && !subcategory.selectableCandidateIDs.isEmpty
+                && store.cleanupSelection.state(
+                    for: subcategory.selectableCandidateIDs
+                ) != .unchecked
+        }.count
     }
 
     private func selectableDecisionCount(for risk: CleanupRisk) -> Int {
-        categories.reduce(0) { count, category in
-            count + category.subcategories.filter { subcategory in
-                subcategory.risk == risk
-                    && !subcategory.selectableCandidateIDs.isEmpty
-            }.count
-        }
+        tierSubcategories.filter { subcategory in
+            subcategory.risk == risk
+                && !subcategory.selectableCandidateIDs.isEmpty
+        }.count
     }
 
     private var safeBytes: Int64 {
-        CleanupByteCount.sum(safeCandidates.map(\.estimatedSizeBytes))
+        tierTotals.safeBytes
     }
 
     private var reviewBytes: Int64 {
-        CleanupByteCount.sum(actionableReviewCandidates.map(\.estimatedSizeBytes))
+        tierTotals.reviewBytes
     }
 
     private var protectedBytes: Int64 {
-        CleanupByteCount.sum(protectedCandidates.map(\.estimatedSizeBytes))
+        tierTotals.protectedBytes
+    }
+
+    private var trashCandidateIDs: [ScanCandidateID] {
+        trashCandidates.map(\.id)
+    }
+
+    private var isTrashSelected: Bool {
+        trashCandidates.contains {
+            store.cleanupSelection.selectedCandidateIDs.contains($0.id)
+        }
+    }
+
+    /// Only pages that list the Trash item explain why it is missing.
+    private var trashPermissionDenied: Bool {
+        filter != .devCaches && session.permissions.contains {
+            $0.ruleID == CleanupCoverageCatalog.userTrashRule.id
+                && $0.status == .permissionDenied
+        }
     }
 
     private var selectedBytes: Int64 {
@@ -113,18 +152,24 @@ struct CleanupScanResultsView: View {
             .reduce(0) { CleanupByteCount.adding($1.estimatedSizeBytes, to: $0) }
     }
 
+    private var selectionQuitNotice: String? {
+        let candidateIDs = Set(categories.flatMap(\.selectableCandidateIDs))
+        return OperationQuitNotice.text(forSelected: store.cleanupSelection.selectedCandidates(in: session)
+            .filter { candidateIDs.contains($0.id) })
+    }
+
     private var recommendedCount: Int {
-        categories.flatMap(\.candidates)
-            .filter {
-                $0.isSelectable
-                    && $0.defaultSelection != .forbidden
-                    && $0.recommendation.level == .recommended
-            }
-            .count
+        candidates.filter(\.isRecommendedForSelection).count
     }
 
     private var safeSelectableCount: Int {
-        candidates.filter { $0.risk == .safe && $0.isSelectable }.count
+        safeCandidates.count
+    }
+
+    /// Rows that can be checked on this page (the confirmation sheet counts
+    /// rows too, so the two numbers agree).
+    private var selectableLeafCount: Int {
+        selectionScopeIDs.count
     }
 
     private var selectedLeafCount: Int {
@@ -137,13 +182,13 @@ struct CleanupScanResultsView: View {
     private var decisionItemCount: Int {
         [CleanupRisk.safe, .reviewOnly, .protected].reduce(0) {
             $0 + selectableDecisionCount(for: $1)
-        }
+        } + (trashCandidates.isEmpty ? 0 : 1)
     }
 
     private var selectedCount: Int {
         [CleanupRisk.safe, .reviewOnly, .protected].reduce(0) {
             $0 + selectedDecisionCount(for: $1)
-        }
+        } + (isTrashSelected ? 1 : 0)
     }
 
     private var selectionScopeIDs: Set<ScanCandidateID> {
@@ -158,7 +203,9 @@ struct CleanupScanResultsView: View {
 
     private var selectedProtectedCandidates: [ScanCandidate] {
         store.cleanupSelection.selectedCandidates(in: session).filter {
-            selectionScopeIDs.contains($0.id) && $0.risk == .protected
+            selectionScopeIDs.contains($0.id)
+                && $0.risk == .protected
+                && !$0.action.permanentlyDeletes
         }
     }
 
@@ -195,11 +242,9 @@ struct CleanupScanResultsView: View {
     }
 
     private func displayedSubcategories(for risk: CleanupRisk) -> [CleanupScanSubcategory] {
-        let matching = categories.flatMap { category in
-            category.subcategories.filter { subcategory in
-                subcategory.risk == risk
-                    && subcategory.candidates.contains(where: matchesCurrentFilter)
-            }
+        let matching = tierSubcategories.filter { subcategory in
+            subcategory.risk == risk
+                && subcategory.candidates.contains(where: matchesCurrentFilter)
         }
         switch sortOrder {
         case .largest:
@@ -241,19 +286,98 @@ struct CleanupScanResultsView: View {
     }
 
     private func selectableCandidateIDs(for risk: CleanupRisk) -> Set<ScanCandidateID> {
-        Set(candidates.filter { $0.risk == risk && $0.isSelectable }.map(\.id))
+        Set(tierCandidates.filter { $0.risk == risk }.map(\.id))
     }
 
     var body: some View {
-        SmartScanPageShell {
+        Group {
+            if filter == .green { lightfieldResults } else { legacyResults }
+        }
+#if DEBUG
+        // Review screenshots of the debug fixture open the green tier.
+        .onAppear {
+            if DebugSmartScanSessionFixture.expandsGreenTier {
+                expandedRiskTierIDs.insert(CleanupRisk.safe.rawValue)
+            }
+        }
+#endif
+        // A2: row owners follow apps that open or quit after the scan; the
+        // selection is not changed.
+        .task(id: session.id) { await refreshOwnerRunningState() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.didTerminateApplicationNotification
+        )) { _ in
+            Task { await refreshOwnerRunningState() }
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.didLaunchApplicationNotification
+        )) { _ in
+            Task { await refreshOwnerRunningState() }
+        }
+        .confirmationDialog(
+            L10n.text("正常退出这些应用？", "Quit These Apps Normally?"),
+            isPresented: Binding(
+                get: {
+                    guard let request = store.cleanupOwnerQuitRequest else { return false }
+                    return !request.isFromConfirmation
+                },
+                set: { if !$0 { store.cancelQuitCleanupOwners() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(L10n.text("正常退出并清理", "Quit Normally and Clean")) {
+                store.quitOwnersAndRecheckCleanup()
+            }
+            Button(L10n.text("取消", "Cancel"), role: .cancel) {
+                store.cancelQuitCleanupOwners()
+            }
+        } message: {
+            Text(CleanupOwnerQuitPresentation.message(for: store.cleanupOwnerQuitRequest))
+        }
+    }
+
+    private var legacyResults: some View {
+        SmartScanPageShell(alignsWithFeatureFlow: filter == .overview) {
             resultHeader
                 .padding(.bottom, AppDesignTokens.Spacing.small)
+                .overlay(alignment: .bottom) {
+                    FixedHeaderDivider(isVisible: isListScrolled)
+                }
         } content: {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: layout.sectionSpacing) {
+                        // D45 / U3 (D53 V0): one-sentence conclusion, then the
+                        // bento of risk cards and the largest categories.
+                        if candidates.isEmpty {
+                            // D58: nothing found is an all-clear state; the
+                            // risk cards below still show their empty tiers.
+                            StateArtPanel(
+                                art: .stateAllClear,
+                                fallbackSystemImage: "checkmark.seal.fill",
+                                title: L10n.text("没有发现可清理的项目", "Nothing Found to Clean"),
+                                detail: L10n.text(
+                                    "本次只读扫描没有发现需要你处理的项目。",
+                                    "This read-only scan found nothing that needs your attention."
+                                ),
+                                arrangement: .banner
+                            )
+                            .id(Self.topAnchorID)
+                        } else {
+                            conclusionHead
+                                .id(Self.topAnchorID)
+                        }
+                        if session.smartScanScopes?.contains(.health) == true {
+                            SmartScanHealthResultsView(snapshot: session.smartScanHealthSnapshot, status: session.smartScanHealthStatus)
+                        }
                         riskSummary { risk in
-                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                            tierScope(for: risk).perform(AppMotion.layout(reduceMotion: reduceMotion)) {
+                                expandedRiskTierIDs.insert(risk.rawValue)
+                                proxy.scrollTo(risk.rawValue, anchor: .top)
+                            }
+                        }
+                        categoryBento { risk in
+                            tierScope(for: risk).perform(AppMotion.layout(reduceMotion: reduceMotion)) {
                                 expandedRiskTierIDs.insert(risk.rawValue)
                                 proxy.scrollTo(risk.rawValue, anchor: .top)
                             }
@@ -294,12 +418,12 @@ struct CleanupScanResultsView: View {
                             title: L10n.text("绿色 · 可安全清理", "Green · Safe to Clean"),
                             detail: filter == .devCaches
                                 ? L10n.text(
-                                    "目录内最近一次可读修改超过一年；默认选中，执行前仍会确认。",
-                                    "The latest readable change inside the folder is over one year old; selected by default and still confirmed before cleanup."
+                                    "超过一年未修改的开发缓存与开发工具日志；默认全部勾选，所属应用正在运行的行除外，执行前仍会确认。",
+                                    "Developer caches unchanged for over a year and developer tool logs. All are selected by default except rows whose app is running; still confirmed before cleanup."
                                 )
                                 : L10n.text(
-                                    "可重新生成；已按现有安全规则默认选择，执行前仍会确认。",
-                                    "Regenerable and selected by the existing safety rules; still confirmed before cleanup."
+                                    "可重新生成的缓存与日志；默认全部勾选，所属应用正在运行的行除外。最近仍有写入、未识别所属应用或体积较大的行会在行内注明；执行前仍会确认，文件移入废纸篓可恢复。",
+                                    "Rebuildable caches and logs. All are selected by default except rows whose app is running; rows still being written, whose app is unknown, or that are large say so. Still confirmed before cleanup; files move to Trash and can be restored."
                                 )
                         )
                         tierSection(
@@ -307,12 +431,12 @@ struct CleanupScanResultsView: View {
                             title: L10n.text("黄色 · 需要人工判断", "Yellow · Manual Review"),
                             detail: filter == .devCaches
                                 ? L10n.text(
-                                    "可重新生成缓存超过 \(session.developerInactivityThresholdDays) 天但未满一年时可人工判断；日志、会话与检查点只读展示，不能加入清理计划。",
-                                    "Regenerable caches older than \(session.developerInactivityThresholdDays) days but under one year can be reviewed; logs, sessions, and checkpoints remain read-only and cannot enter a cleanup plan."
+                                    "超过 \(session.developerInactivityThresholdDays) 天但未满一年未修改的可重新生成缓存；默认不选，可逐项选择，执行前需额外确认。",
+                                    "Rebuildable caches unchanged for more than \(session.developerInactivityThresholdDays) days but under a year; off by default, selectable individually, with an extra confirmation before cleanup."
                                 )
                                 : L10n.text(
-                                    "默认不选；可逐项核对并手动加入带额外确认的计划。",
-                                    "Off by default; review individual items before adding them to a separately confirmed plan."
+                                    "下载内容、邮件附件副本、CloudKit 缓存等需要你判断的项目；默认不选，可逐项选择，执行前需额外确认。",
+                                    "Items that need your judgment, such as downloads, mail attachment copies, and the CloudKit cache; off by default, selectable individually, with an extra confirmation before cleanup."
                                 )
                         )
                         tierSection(
@@ -320,33 +444,303 @@ struct CleanupScanResultsView: View {
                             title: L10n.text("红色 · 高风险", "Red · High Risk"),
                             detail: filter == .devCaches
                                 ? L10n.text(
-                                    "最近 \(session.developerInactivityThresholdDays) 天内有变动；默认不选，可按分组或逐项选择，执行前仍需双重确认。",
-                                    "Changed within the last \(session.developerInactivityThresholdDays) days; off by default, selectable by group or item, and requires two confirmations before execution."
+                                    "最近 \(session.developerInactivityThresholdDays) 天内有变动，或部分内容无法读取；默认不选，可按分组或逐项选择，执行前仍需双重确认。",
+                                    "Changed within the last \(session.developerInactivityThresholdDays) days, or partly unreadable; off by default, selectable by group or item, and requires two confirmations before execution."
                                 )
                                 : L10n.text(
-                                    "默认不选；核对版本、用途和备份后可手动选择，执行前需要双重确认。",
-                                    "Off by default; after checking versions, purpose, and backups, you may select manually with two confirmations before execution."
+                                    "近期仍有活动的开发产物与重复的应用副本；默认不选，可按分组或逐项选择，执行前需要双重确认。重复应用整组勾选时自动保留一份。",
+                                    "Recently active developer files and duplicate app copies; off by default, selectable by group or item, with two confirmations before execution. Checking a whole duplicate-app group keeps one copy."
                                 )
                         )
+                        trashSection
                         secondaryDetailsSection
                             .id("scan-coverage-details")
                     }
-                    .padding(.top, AppDesignTokens.Spacing.small)
+                    .padding(.top, 14)
                     .padding(.bottom, AppDesignTokens.Spacing.medium)
                 }
                 .scrollIndicators(.automatic)
+                // Rows scrolling under the fixed header fade out instead of
+                // showing through it (main session review of 06/06b).
+                .scrollTopFade(height: 14)
+                .reportsScrollOffset($isListScrolled)
+#if DEBUG
+                // Review screenshots open the green tier; start them at the
+                // top of the page (the open tier must not scroll the list).
+                .task {
+                    guard DebugSmartScanSessionFixture.expandsGreenTier else { return }
+                    for _ in 0..<3 {
+                        try? await Task.sleep(for: .milliseconds(150))
+                        proxy.scrollTo(Self.topAnchorID, anchor: .top)
+                    }
+                }
+#endif
             }
         } footer: {
             cleanupActionBar
         }
     }
 
+    private var lightfieldResults: some View {
+        let amount: FeatureLightfieldAmount = FeatureLightfieldAmount.parse(
+            CleanupMeasurementPresentation.aggregateValue(tierCandidates)
+        )
+        let summaryLabel: String = resultHeaderSubtitle
+            + (amount.qualifier.isEmpty ? "" : " · " + amount.qualifier)
+        let safetyLine: String = isTrashSelected
+            ? L10n.text("永久清空废纸篓 · 单独双重确认，不可恢复", "Empty Trash permanently · Separate double confirmation; not recoverable")
+            : L10n.text("移到废纸篓 · 清理前逐项确认", "Move to Trash · Review before cleanup")
+        let actionTitle: String = store.cleanupFeatureConfiguration.mode == .v2Full
+            ? cleanupActionTitle : L10n.text("生成 Dry-run", "Create Dry Run")
+        let actionEnabled: Bool = selectedBytes > 0 && session.outcome != .cancelled
+            && (store.cleanupFeatureConfiguration.mode != .v2Full || store.canRequestV2Cleanup)
+        return FeatureLightfieldPage(module: .green, phase: .result, title: filter.sidebarTitle,
+            status: L10n.text(selectionActionSummaryChinese, selectionActionSummaryEnglish),
+            safety: safetyLine, actionTitle: actionTitle, actionEnabled: actionEnabled,
+            action: {
+                if store.cleanupFeatureConfiguration.mode == .v2Full {
+                    store.requestV2Cleanup(disposition: .trash, candidateIDs: selectionScopeIDs)
+                } else { store.prepareCleanupDryRun(candidateIDs: selectionScopeIDs) }
+            }) {
+            FeatureLightfieldResults(module: .green,
+                label: summaryLabel,
+                value: amount.value, unit: amount.unit, precision: amount.precision) {
+                lightfieldResultItems
+            }
+        }
+#if DEBUG
+        // Screenshot fixture flag only: opens the green groups to show item rows.
+        .onAppear {
+            if DebugSmartScanSessionFixture.expandsGreenTier {
+                expandedLightfieldSubcategoryIDs = Set(displayedSubcategories(for: .safe).map(\.id))
+            }
+        }
+#endif
+    }
+
+    @ViewBuilder
+    private var lightfieldResultItems: some View {
+        lightfieldResultToolbar
+        if let outcomeNotice {
+            Text(outcomeNotice).font(.system(size: 13))
+                .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).warningColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // D93: a checked row whose app is running is named as soon as it is
+        // checked, not only when the cleanup skips it.
+        if let quitNotice = selectionQuitNotice {
+            Text(quitNotice).font(.system(size: 13))
+                .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).warningColor)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        lightfieldSubcategoryRows
+        if let trash = trashCandidates.first,
+           resultFilter == .all || (resultFilter == .selected && isTrashSelected) {
+            let entryCount = trash.permanentDeletionEntries?.count ?? 0
+            DisclosureGroup(L10n.text("清空废纸篓 · 永久删除", "Empty Trash · Permanent deletion")) {
+                ForEach(trashCandidates) { candidate in
+                    CleanupCandidateRow(store: store, session: session, candidate: candidate,
+                        cleanupScopeIDs: selectionScopeIDs, usesLightfield: true)
+                }
+            }
+            // D23 scope note (restored from V1): only what was already in the
+            // Trash at scan time is deleted; this cleanup's moves are not.
+            Text(L10n.text(
+                "单独一项，默认不选。只永久删除扫描时废纸篓里已有的 \(entryCount) 项，本次移入废纸篓的文件不受影响；执行前单独二次确认。",
+                "A separate item, off by default. It permanently deletes only the \(entryCount) item(s) already in the Trash during the scan; files this cleanup moves to Trash are not affected. Confirmed twice on its own."
+            ))
+            .font(.system(size: 13))
+            .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 6)
+        } else if trashPermissionDenied, resultFilter == .all {
+            // Restored V1 guidance: without Full Disk Access the Trash cannot
+            // be read, so emptying it is unknown rather than “nothing”.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L10n.text("无法读取废纸篓", "Trash Cannot Be Read"))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).warningColor)
+                Text(L10n.text(
+                    "没有读取废纸篓的权限，因此不知道其中是否有可清空的项目。请在“系统设置 › 隐私与安全性 › 完全磁盘访问权限”中允许本应用，然后重新扫描。",
+                    "This app cannot read the Trash, so it cannot tell whether anything can be emptied. Allow this app in System Settings › Privacy & Security › Full Disk Access, then scan again."
+                ))
+                .font(.system(size: 13))
+                .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
+                .fixedSize(horizontal: false, vertical: true)
+                Button(L10n.text("打开系统设置", "Open System Settings")) {
+                    _ = CleanupService.openFullDiskAccessSettings()
+                }
+                .buttonStyle(FeatureLightfieldRowButtonStyle())
+                .foregroundStyle(FeatureLightfieldPalette.accent(.green))
+            }
+            .padding(.vertical, 8)
+#if DEBUG
+            .layoutProbe("lightfield.cleanup.trashDenied")
+#endif
+        }
+        DisclosureGroup(L10n.text("扫描详情与权限", "Scan Details & Permissions")) {
+            lightfieldScanDetails
+        }
+        if let summary = store.cleanupDryRunSummary, summary.sessionID == session.id {
+            Text(L10n.text("已核对 \(summary.selectedCount) 项 · 文件系统改动：0", "\(summary.selectedCount) validated · File-system changes: 0"))
+        }
+    }
+
+    private var lightfieldResultToolbar: some View {
+        HStack(spacing: 12) {
+            Button(L10n.text("重新扫描", "Scan Again"), action: store.startScanRespectingAccessGuide)
+            Menu(L10n.text("选择", "Selection")) {
+                Button(L10n.text("推荐项目", "Recommended"), action: store.selectRecommendedCleanupCandidates)
+                Button(L10n.text("恢复默认", "Restore Defaults"), action: store.restoreDefaultCleanupSelection)
+            }.disabled(!store.canEditV2CleanupSelection)
+            Picker(L10n.text("筛选", "Filter"), selection: $resultFilter) {
+                ForEach(CleanupResultFilter.allCases) { value in Text(value.title).tag(value) }
+            }.pickerStyle(.menu)
+            Picker(L10n.text("排序", "Sort"), selection: $sortOrder) {
+                ForEach(CleanupResultSort.allCases) { value in Text(value.title).tag(value) }
+            }.pickerStyle(.menu)
+        }
+        .font(.system(size: 13))
+        .padding(.vertical, 6)
+#if DEBUG
+        .layoutProbe("lightfield.results.toolbar")
+#endif
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(FeatureLightfieldRowButtonStyle())
+    }
+
+    private var lightfieldSubcategories: [CleanupScanSubcategory] {
+        let risks: [CleanupRisk] = [.safe, .reviewOnly, .protected]
+        return risks.flatMap { risk in displayedSubcategories(for: risk) }
+    }
+
+    private var lightfieldSubcategoryRows: some View {
+        ForEach(Array(lightfieldSubcategories.enumerated()), id: \.element.id) { index, subcategory in
+            lightfieldSubcategoryRow(subcategory)
+                .lightfieldRowEntrance(index)
+        }
+    }
+
+    private func lightfieldSubcategoryRow(_ subcategory: CleanupScanSubcategory) -> some View {
+        let expanded: Bool = expandedLightfieldSubcategoryIDs.contains(subcategory.id)
+        // D67 selection row: the check box stays in the first 20 pt column and
+        // the disclosure moves to the row end, inside the row grid.
+        return VStack(alignment: .leading, spacing: 0) {
+            FeatureLightfieldResultRow(
+                title: subcategory.title,
+                detail: riskTitle(subcategory.risk) + " · " + riskCaption(for: subcategory.risk),
+                value: CleanupMeasurementPresentation.aggregateValue(subcategory.candidates),
+                status: lightfieldStatus(for: subcategory.risk),
+                reservesTrailing: true
+            ) {
+                lightfieldSelectionButton(for: subcategory)
+            } trailing: {
+                Button {
+                    withAnimation(FeatureLightfieldMotion.animation(FeatureLightfieldMotion.check, reduceMotion: reduceMotion)) {
+                        if expanded { expandedLightfieldSubcategoryIDs.remove(subcategory.id) }
+                        else { expandedLightfieldSubcategoryIDs.insert(subcategory.id) }
+                    }
+                } label: {
+                    FeatureLightfieldDisclosureChevron(expanded: expanded)
+                }
+                .buttonStyle(FeatureLightfieldRowButtonStyle())
+                .accessibilityLabel(L10n.text("\(subcategory.title) 的项目", "Items in \(subcategory.title)"))
+                .accessibilityValue(expanded ? L10n.text("已展开", "Expanded") : L10n.text("已折叠", "Collapsed"))
+            }
+            .help(subcategory.reason)
+            if expanded {
+                ForEach(sortedCandidates(in: subcategory)) { candidate in
+                    // Item rows sit one column in from their group's check box.
+                    CleanupCandidateRow(store: store, session: session, candidate: candidate,
+                        cleanupScopeIDs: selectionScopeIDs, usesLightfield: true)
+                        .padding(.leading, FeatureLightfield.childRowIndent)
+#if DEBUG
+                        .layoutProbe("lightfield.cleanup.child.\(candidate.id.rawValue)")
+#endif
+                }
+            }
+        }
+    }
+
+    private func lightfieldStatus(for risk: CleanupRisk) -> FeatureLightfieldStatus {
+        switch risk {
+        case .safe: .normal
+        case .protected: .failure
+        case .reviewOnly, .informational: .warning
+        }
+    }
+
+    private func lightfieldSelectionButton(for subcategory: CleanupScanSubcategory) -> some View {
+        let ids: [ScanCandidateID] = subcategory.selectableCandidateIDs
+        let state: TriStateSelection = store.cleanupSelection.groupState(for: ids, in: session)
+        let isDisabled: Bool = !store.canEditV2CleanupSelection
+            || session.outcome == .cancelled || ids.isEmpty
+        return Button {
+            store.setCleanupCandidates(ids, selected: state != .checked)
+        } label: {
+            FeatureLightfieldCheck(selected: state != .unchecked, module: .green,
+                mixed: state == .mixed)
+        }
+        .buttonStyle(FeatureLightfieldRowButtonStyle())
+        .accessibilityLabel(subcategory.title + " · " + riskSelectionSummary(risk: subcategory.risk))
+        // Same spoken state and hint as the V1 tri-state control: VoiceOver
+        // reads selected / partially selected / not selected.
+        .accessibilityValue(state.cleanupAccessibilityValue)
+        .accessibilityHint(isDisabled
+            ? L10n.text("此分组没有可选择项目。", "This group has no selectable items.")
+            : L10n.text("按空格切换此分组的选择状态。", "Press Space to toggle this group's selection."))
+        .disabled(isDisabled)
+#if DEBUG
+        .layoutProbe("lightfield.cleanup.group." + subcategory.id)
+#endif
+    }
+
+    /// Same scan measurements and advice as V1, in text rows without its cards.
+    private var lightfieldScanDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let system = session.system, system.diskTotalBytes > 0 {
+                Text(system.diskName)
+                Text(L10n.text("总容量", "Total") + " · " + ByteFormat.string(system.diskTotalBytes))
+                Text(L10n.text("已使用", "Used") + " · " + ByteFormat.string(system.diskUsedBytes))
+                Text(L10n.text("可用空间", "Available") + " · " + ByteFormat.string(system.diskFreeBytes))
+                Text(L10n.text("其余已用", "Other Used") + " · " + ByteFormat.string(max(0, system.diskUsedBytes - min(system.diskUsedBytes, identifiedBytes))))
+            }
+            ForEach([CleanupRisk.safe, .reviewOnly, .protected], id: \.rawValue) { risk in
+                Text(riskTitle(risk) + " · " + riskValueText(risk) + " · " + riskCaption(for: risk))
+            }
+            Text(conclusionSentence)
+            FeatureLightfieldHairline()
+            Text(L10n.text("Top 5 空间占用", "Top 5 Space Users"))
+            if topCandidates.isEmpty { Text(L10n.text("本次扫描没有达到显示阈值的项目。", "No item reached the display threshold.")) }
+            ForEach(topCandidates) { candidate in
+                Button { store.revealCleanupCandidate(candidate) } label: {
+                    Text(candidate.sourceURL.lastPathComponent + " · " + CleanupMeasurementPresentation.aggregateValue([candidate]))
+                }.buttonStyle(FeatureLightfieldRowButtonStyle())
+            }
+            Text(L10n.text("已读取范围", "Readable Scopes") + " · \(session.permissions.filter { $0.status == .readable }.count)/\(session.permissions.count)")
+            Text(L10n.text("扫描耗时", "Duration") + " · " + String(format: "%.1fs", session.metrics.duration))
+            Text(L10n.text("完整容量", "Complete Measurements") + " · \(session.metrics.completeMeasurementCandidateCount)")
+            Text(L10n.text("至少值 / 失败", "Lower Bounds / Failed") + " · \(session.metrics.lowerBoundMeasurementCandidateCount) / \(session.metrics.failedMeasurementCandidateCount)")
+            Text(L10n.text("目录 / 条目", "Directories / Entries") + " · \(session.metrics.visitedDirectoryCount) / \(session.metrics.visitedEntryCount)")
+            Text(L10n.text("权限失败 / 云文件 / 超时 / 未列出", "Permission Failures / Cloud / Timeouts / Not Listed") + " · \(session.metrics.permissionFailureCount) / \(session.metrics.cloudSkippedCount) / \(session.metrics.timedOutRuleCount) / \(session.metrics.notActionableCandidateCount)")
+            Text(L10n.text("候选截断", "Truncated Candidates") + " · \(session.metrics.truncatedCandidateCount)")
+            Text(L10n.text("先核对绿色，再逐项判断黄色；红色项目双重确认；永久清空废纸篓单独确认。", "Review green items first, then yellow individually; red items require two confirmations; emptying Trash requires separate confirmation."))
+            Text(L10n.text("定期复查缓存和开发产物；系统内容交给 macOS 或原应用；个人文件先核对备份可恢复，再归档。", "Review caches and build artifacts periodically; let macOS or the owning app manage system content; verify a restorable backup before archiving personal files."))
+        }.font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
+    }
+
+    private static let topAnchorID = "cleanup-results-top"
+
     private var resultHeader: some View {
         AppPageHeader(
             title: filter.sidebarTitle,
             subtitle: resultHeaderSubtitle,
             systemImage: filter.systemImage,
-            isHero: true
+            isHero: true,
+            // Results are a list page: the regular header leaves the height
+            // to the rows (D53 §2.3, review 5).
+            role: .tool
         ) {
             Button {
                 store.startScanRespectingAccessGuide()
@@ -371,15 +765,15 @@ struct CleanupScanResultsView: View {
     }
 
     private var resultDetailedSummary: String {
-        let advisorySuffix = advisoryReviewCandidates.isEmpty
+        let trashSuffix = trashCandidates.isEmpty
             ? ""
             : L10n.text(
-                "，另识别出 \(CleanupMeasurementPresentation.aggregateValue(advisoryReviewCandidates)) 仅供查看",
-                "; another \(CleanupMeasurementPresentation.aggregateValue(advisoryReviewCandidates)) is shown for reference only"
+                "；废纸篓另有 \(CleanupMeasurementPresentation.aggregateValue(trashCandidates)) 可单独清空",
+                "; the Trash holds another \(CleanupMeasurementPresentation.aggregateValue(trashCandidates)) that can be emptied separately"
             )
         let summary = L10n.text(
-            "扫描完成：发现 \(ByteFormat.string(safeBytes)) 可安全清理，另有 \(CleanupMeasurementPresentation.aggregateValue(actionableReviewCandidates)) 需要人工判断\(advisorySuffix)。",
-            "Scan complete: \(ByteFormat.string(safeBytes)) is safe to clean and \(CleanupMeasurementPresentation.aggregateValue(actionableReviewCandidates)) needs review\(advisorySuffix)."
+            "扫描完成：发现 \(ByteFormat.string(safeBytes)) 可安全清理，另有 \(CleanupMeasurementPresentation.aggregateValue(reviewCandidates)) 需要人工判断、\(CleanupMeasurementPresentation.aggregateValue(protectedCandidates)) 需双重确认\(trashSuffix)。",
+            "Scan complete: \(ByteFormat.string(safeBytes)) is safe to clean, \(CleanupMeasurementPresentation.aggregateValue(reviewCandidates)) needs review, and \(CleanupMeasurementPresentation.aggregateValue(protectedCandidates)) needs two confirmations\(trashSuffix)."
         )
         guard let outcomeNotice else { return summary }
         return "\(summary) · \(outcomeNotice)"
@@ -392,19 +786,46 @@ struct CleanupScanResultsView: View {
         )
     }
 
+    /// Why some found items are not listed: cleanup skips anything that holds
+    /// a path the user excluded, and rows holding the user's own data (such
+    /// as IDE local history) are not junk. Both are counted, not listed.
+    private var notListedReasonDetail: (chinese: String, english: String) {
+        let excluded = session.metrics.excludedPathCandidateCount
+        let protected = session.metrics.protectedDataCandidateCount
+        var chinese = [String]()
+        var english = [String]()
+        if excluded > 0 {
+            chinese.append("\(excluded) 项包含你排除的路径")
+            english.append("\(excluded) contain a path you excluded")
+        }
+        if protected > 0 {
+            chinese.append("\(protected) 项含本地历史记录等个人数据")
+            english.append("\(protected) hold personal data such as local history")
+        }
+        guard !chinese.isEmpty else { return ("", "") }
+        return (
+            "；其中 " + chinese.joined(separator: "，"),
+            "; of them, " + english.joined(separator: ", ")
+        )
+    }
+
     private var outcomeNotice: String? {
         switch session.outcome {
         case .complete:
             nil
         case .partial:
-            if filter == .devCaches,
-               session.includedCategoryIDs == ["developer"],
-               session.metrics.timedOutRuleCount == 0,
-               session.metrics.permissionFailureCount == 0,
-               session.metrics.failedMeasurementCandidateCount == 0 {
+            if session.metrics.notActionableCandidateCount > 0 {
                 L10n.text(
-                    "会话与检查点仅采集顶层元数据",
-                    "Sessions and checkpoints use top-level metadata only"
+                    "部分范围已因安全边界跳过（\(session.metrics.notActionableCandidateCount) 项无法安全处理，未列出\(notListedReasonDetail.chinese)）",
+                    "Some scopes were safely skipped (\(session.metrics.notActionableCandidateCount) items could not be handled safely and are not listed\(notListedReasonDetail.english))"
+                )
+            } else if session.metrics.timedOutRuleCount == 0,
+                      session.metrics.permissionFailureCount == 0,
+                      session.metrics.lowerBoundMeasurementCandidateCount > 0 {
+                // D19: lower-bound items stay listed and selectable.
+                L10n.text(
+                    "部分项目的大小为“至少”：其中的符号链接未跟随，或有子目录无法读取",
+                    "Some sizes are lower bounds: links inside were not followed, or a subfolder could not be read"
                 )
             } else {
                 L10n.text("部分范围已因安全边界跳过", "Some scopes were safely skipped")
@@ -414,77 +835,120 @@ struct CleanupScanResultsView: View {
         }
     }
 
+    /// Three risk cards in one row when they fit. The count and selection
+    /// line sits beside the value only where it fits whole; otherwise every
+    /// card puts it on its own full-width line (review P2-7: it is never
+    /// truncated or shrunk). Narrow windows wrap the cards to two columns.
     private func riskSummary(
         onSelect: @escaping (CleanupRisk) -> Void
     ) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: layout.cardSpacing) {
-                ForEach([CleanupRisk.safe, .reviewOnly, .protected], id: \.rawValue) { risk in
-                    riskSummaryButton(risk: risk, action: { onSelect(risk) })
-                        .frame(minWidth: 200)
-                }
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: layout.cardSpacing)], spacing: layout.cardSpacing) {
-                ForEach([CleanupRisk.safe, .reviewOnly, .protected], id: \.rawValue) { risk in
-                    riskSummaryButton(risk: risk, action: { onSelect(risk) })
+        let risks: [CleanupRisk] = [.safe, .reviewOnly, .protected]
+        return ViewThatFits(in: .horizontal) {
+            riskSummaryRow(risks: risks, captionBelow: false, onSelect: onSelect)
+            riskSummaryRow(risks: risks, captionBelow: true, onSelect: onSelect)
+            // Only three summaries: eager layout publishes every risk after
+            // a short-window reflow, even when the last row needs scrolling.
+            AdaptiveCardGrid(minimumColumnWidth: 260, maximumColumns: 3, spacing: layout.cardSpacing) {
+                ForEach(risks, id: \.rawValue) { risk in
+                    riskSummaryButton(risk: risk, captionBelow: true, action: { onSelect(risk) })
                 }
             }
         }
     }
 
+    private func riskSummaryRow(
+        risks: [CleanupRisk],
+        captionBelow: Bool,
+        onSelect: @escaping (CleanupRisk) -> Void
+    ) -> some View {
+        HStack(spacing: layout.cardSpacing) {
+            ForEach(Array(risks.enumerated()), id: \.element.rawValue) { index, risk in
+                // Wide enough for "At least 30.5 GiB" (about 253 pt) beside
+                // the icon; narrower windows wrap to two columns instead of
+                // truncating the value.
+                riskSummaryButton(risk: risk, captionBelow: captionBelow, action: { onSelect(risk) })
+                    .frame(minWidth: 260, maxHeight: .infinity)
+                    .appStaggeredAppearance(index: index + 1)
+            }
+        }
+        // The cards of a row share one height.
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func riskSummaryButton(
         risk: CleanupRisk,
+        captionBelow: Bool,
         action: @escaping () -> Void
     ) -> some View {
         let tint = CleanupRiskPresentation.tint(risk)
         let count = decisionCount(for: risk)
         let selection = riskSelectionSummary(risk: risk)
+        let caption = Text(riskCaption(for: risk))
+            .font(AppDesignTokens.TypeScale.caption)
+            .foregroundStyle(surfaces.textTertiary)
+            .monospacedDigit()
+#if DEBUG
+            .layoutProbe("results.riskCaption.\(risk.rawValue)")
+#endif
         return Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    Image(systemName: CleanupRiskPresentation.systemImage(risk))
-                        .symbolRenderingMode(.hierarchical)
-                        .font(.system(size: 22))
-                        .foregroundStyle(tint)
-                        .frame(width: 40, height: 40)
-                        .background(tint.opacity(0.12), in: Circle())
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle().fill(tint.opacity(0.16))
+                        Circle().strokeBorder(tint.opacity(0.45), lineWidth: 1)
+                        Image(systemName: CleanupRiskPresentation.systemImage(risk))
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(tint)
+                    }
+                    .frame(width: 34, height: 34)
+                    .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(riskTitle(risk))
-                            .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                            .font(AppDesignTokens.TypeScale.secondaryEmphasis)
+                            .foregroundStyle(surfaces.textSecondary)
+                            .lineLimit(1)
                         Text(riskValueText(risk))
-                            .font(.system(size: 23, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
+                            .font(AppDesignTokens.TypeScale.metricInline)
+                            .foregroundStyle(surfaces.textPrimary)
                             .lineLimit(1)
                             .help(riskValueText(risk))
+                            .appDataTransition(value: riskValueText(risk))
                     }
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 4)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        CleanupSuggestionChip(risk: risk)
+                        if !captionBelow {
+                            caption
+                                .lineLimit(1)
+                                .fixedSize()
+                        }
+                    }
                 }
-                Text("\(count) · \(selection)")
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .fixedSize(horizontal: false, vertical: true)
+                if captionBelow {
+                    caption
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
-            .padding(AppDesignTokens.Layout.compactPadding)
-            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-            .background(tint.opacity(0.07), in: RoundedRectangle(
-                cornerRadius: AppDesignTokens.Layout.cardRadius,
-                style: .continuous
-            ))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, minHeight: 52, maxHeight: .infinity, alignment: .leading)
+            .background {
+                SurfaceBackground(level: .card, cornerRadius: AppDesignTokens.Corner.card, tint: tint)
+            }
             .overlay {
-                RoundedRectangle(
-                    cornerRadius: AppDesignTokens.Layout.cardRadius,
-                    style: .continuous
-                )
-                .stroke(
-                    tint.opacity(colorSchemeContrast == .increased ? 0.82 : 0.34),
-                    lineWidth: colorSchemeContrast == .increased ? 2 : 1
-                )
-                .accessibilityHidden(true)
+                if colorSchemeContrast == .increased {
+                    RoundedRectangle(cornerRadius: AppDesignTokens.Corner.card, style: .continuous)
+                        .stroke(tint.opacity(0.82), lineWidth: 2)
+                        .accessibilityHidden(true)
+                }
             }
+            .contentShape(RoundedRectangle(cornerRadius: AppDesignTokens.Corner.card, style: .continuous))
         }
         .buttonStyle(ResponsivePlainButtonStyle())
+        .appHoverLift(cornerRadius: AppDesignTokens.Corner.card, tint: tint)
 #if DEBUG
         .layoutProbe(LayoutProbeID.cleanupRiskSummary(risk))
 #endif
@@ -496,6 +960,116 @@ struct CleanupScanResultsView: View {
             "定位到此风险分组，不会改变选择。",
             "Moves to this risk group without changing selection."
         ))
+    }
+
+    /// D45 / U3: "可安全清理 12.4 GB" with the rest in one sentence, on one
+    /// short line so the list starts on the first screen (review 5). The
+    /// number counts up once (Reduce Motion: shown at once).
+    private var conclusionHead: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                conclusionNumber
+                Text(conclusionSentence)
+                    .font(AppDesignTokens.TypeScale.body)
+                    .foregroundStyle(surfaces.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(conclusionSentence)
+                Spacer(minLength: 0)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                conclusionNumber
+                Text(conclusionSentence)
+                    .font(AppDesignTokens.TypeScale.secondary)
+                    .foregroundStyle(surfaces.textSecondary)
+                    .lineLimit(2)
+                    .help(conclusionSentence)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .appStaggeredAppearance(index: 0)
+#if DEBUG
+        .layoutProbe("results.conclusion")
+#endif
+    }
+
+    private var conclusionNumber: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(L10n.text("可安全清理", "Safe to clean"))
+                .font(AppDesignTokens.TypeScale.sectionTitle)
+                .foregroundStyle(surfaces.textSecondary)
+            AnimatedByteCount(bytes: safeBytes)
+                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .foregroundStyle(AppDesignTokens.Palette.success)
+        }
+        .fixedSize()
+    }
+
+    private var conclusionSentence: String {
+        var chinese: [String] = []
+        var english: [String] = []
+        if !reviewCandidates.isEmpty {
+            let value = CleanupMeasurementPresentation.aggregateValue(reviewCandidates)
+            chinese.append("\(value) 需要你判断")
+            english.append("\(value) needs your review")
+        }
+        if !protectedCandidates.isEmpty {
+            let value = CleanupMeasurementPresentation.aggregateValue(protectedCandidates)
+            chinese.append("\(value) 为高风险，需双重确认")
+            english.append("\(value) is high risk and needs two confirmations")
+        }
+        if !trashCandidates.isEmpty {
+            let value = CleanupMeasurementPresentation.aggregateValue(trashCandidates)
+            chinese.append("废纸篓另有 \(value) 可单独清空")
+            english.append("the Trash holds \(value) that can be emptied separately")
+        }
+        let lead = L10n.text(
+            "已为你勾选所属应用未运行的绿色项目",
+            "Green items whose apps are not running are selected for you"
+        )
+        guard !chinese.isEmpty else {
+            return L10n.text("\(lead)；没有需要人工判断的项目。", "\(lead); nothing needs manual review.")
+        }
+        return L10n.text(
+            "\(lead)；另有 " + chinese.joined(separator: "，") + "。",
+            "\(lead); " + english.joined(separator: ", ") + "."
+        )
+    }
+
+    /// The largest categories as bento cards (CleanMyMac / 柠檬 pattern);
+    /// clicking one opens the tier that holds most of it.
+    @ViewBuilder
+    private func categoryBento(onSelect: @escaping (CleanupRisk) -> Void) -> some View {
+        // Review 5: only wide and tall windows have room for the bento
+        // before the list; otherwise the risk cards carry the summary.
+        if let pageLayout, pageLayout.width >= .wide, pageLayout.height == .tall {
+            categoryBentoGrid(onSelect: onSelect)
+        }
+    }
+
+    private func categoryBentoGrid(onSelect: @escaping (CleanupRisk) -> Void) -> some View {
+        let shown = Array(categories
+            .filter { !$0.candidates.isEmpty }
+            .sorted { $0.discoveredBytes > $1.discoveredBytes }
+            .prefix(pageLayout?.width == .extraWide ? 8 : 4))
+        return AdaptiveCardGrid(minimumColumnWidth: 180, maximumColumns: 4, spacing: layout.cardSpacing) {
+            ForEach(Array(shown.enumerated()), id: \.element.id) { index, category in
+                CleanupCategoryBentoCard(category: category) {
+                    onSelect(dominantRisk(of: category))
+                }
+                .appStaggeredAppearance(index: index + 4)
+            }
+        }
+#if DEBUG
+        .layoutProbe("results.bento")
+#endif
+    }
+
+    private func dominantRisk(of category: CleanupScanCategory) -> CleanupRisk {
+        let byRisk = Dictionary(grouping: category.candidates.filter { !$0.action.permanentlyDeletes }, by: \.risk)
+            .mapValues { $0.reduce(Int64(0)) { CleanupByteCount.adding($1.estimatedSizeBytes, to: $0) } }
+        return byRisk.max { $0.value < $1.value }?.key ?? .safe
     }
 
     private func riskTitle(_ risk: CleanupRisk) -> String {
@@ -521,17 +1095,23 @@ struct CleanupScanResultsView: View {
     }
 
     private func riskValueText(_ risk: CleanupRisk) -> String {
+        // D19: each card counts only items that can be selected and cleaned.
         let valueCandidates: [ScanCandidate]
         switch risk {
         case .safe: valueCandidates = safeCandidates
-        case .reviewOnly: valueCandidates = actionableReviewCandidates
+        case .reviewOnly: valueCandidates = reviewCandidates
         case .protected: valueCandidates = protectedCandidates
-        case .informational: valueCandidates = candidates.filter { $0.risk == risk }
+        case .informational: valueCandidates = tierCandidates.filter { $0.risk == risk }
         }
         return CleanupMeasurementPresentation.aggregateValue(valueCandidates)
     }
 
-    private func riskSelectionSummary(risk: CleanupRisk) -> String {
+    /// The count and selection line of a risk card (tests measure it).
+    func riskCaption(for risk: CleanupRisk) -> String {
+        "\(decisionCount(for: risk)) · \(riskSelectionSummary(risk: risk))"
+    }
+
+    func riskSelectionSummary(risk: CleanupRisk) -> String {
         let selectableCount = selectableDecisionCount(for: risk)
         guard selectableCount > 0 else {
             return L10n.text("无可操作项目", "No actionable items")
@@ -553,52 +1133,34 @@ struct CleanupScanResultsView: View {
                     tint: AppDesignTokens.Palette.success
                 )
             }
-            if !actionableReviewCandidates.isEmpty {
+            if !reviewCandidates.isEmpty {
                 CleanupResultSummaryCard(
                     title: L10n.text("需要人工判断", "Manual Review"),
-                    value: CleanupMeasurementPresentation.aggregateValue(actionableReviewCandidates),
-                    detail: L10n.items(actionableReviewCandidates.count),
+                    value: CleanupMeasurementPresentation.aggregateValue(reviewCandidates),
+                    detail: L10n.items(reviewCandidates.count),
                     tint: AppDesignTokens.Palette.warning
-                )
-            }
-            if !advisoryReviewCandidates.isEmpty {
-                CleanupResultSummaryCard(
-                    title: L10n.text("只读参考", "Read-only Reference"),
-                    value: CleanupMeasurementPresentation.aggregateValue(advisoryReviewCandidates),
-                    detail: L10n.items(advisoryReviewCandidates.count),
-                    tint: AppDesignTokens.Palette.information
                 )
             }
             if !protectedCandidates.isEmpty {
                 CleanupResultSummaryCard(
                     title: L10n.text("红色高风险", "Red High Risk"),
                     value: CleanupMeasurementPresentation.aggregateValue(protectedCandidates),
-                    detail: protectedSelectionSummary,
+                    detail: L10n.text(
+                        "\(protectedCandidates.count) 项可手动选择",
+                        "\(protectedCandidates.count) manually selectable"
+                    ),
+                    tint: AppDesignTokens.Palette.destructive
+                )
+            }
+            if !trashCandidates.isEmpty {
+                CleanupResultSummaryCard(
+                    title: L10n.text("废纸篓", "Trash"),
+                    value: CleanupMeasurementPresentation.aggregateValue(trashCandidates),
+                    detail: L10n.text("可单独清空，不可恢复", "Can be emptied separately; not recoverable"),
                     tint: AppDesignTokens.Palette.destructive
                 )
             }
         }
-    }
-
-    private var protectedSelectionSummary: String {
-        let actionable = actionableProtectedCandidates.count
-        let protected = protectedReferenceCandidates.count
-        if actionable > 0, protected > 0 {
-            return L10n.text(
-                "\(actionable) 项可选择 · \(protected) 项受保护",
-                "\(actionable) selectable · \(protected) protected"
-            )
-        }
-        if actionable > 0 {
-            return L10n.text(
-                "\(actionable) 项可手动选择",
-                "\(actionable) manually selectable"
-            )
-        }
-        return L10n.text(
-            "\(protected) 项受保护",
-            "\(protected) protected"
-        )
     }
 
     private var selectionToolbar: some View {
@@ -628,8 +1190,8 @@ struct CleanupScanResultsView: View {
 
     private var selectionCountLabel: some View {
             Text(L10n.text(
-                "已勾选 \(selectedCount)/\(decisionItemCount) 项",
-                "\(selectedCount) of \(decisionItemCount) selected"
+                "已勾选 \(selectedLeafCount)/\(selectableLeafCount) 项 · \(selectedCount) 组",
+                "\(selectedLeafCount) of \(selectableLeafCount) selected · \(selectedCount) groups"
             ))
             .font(AppDesignTokens.Typography.metadata)
             .foregroundStyle(.secondary)
@@ -674,31 +1236,47 @@ struct CleanupScanResultsView: View {
             .appButtonChrome(.secondary)
     }
 
+    /// §3.3: the report-wide selection commands may change every listed row.
+    private var reportScope: BulkUpdateScope {
+        BulkUpdateScope(rowCount: tierCandidates.count)
+    }
+
+    /// The rows a group lists under the current filter.
+    private func displayedRowCount(in subcategory: CleanupScanSubcategory) -> Int {
+        subcategory.candidates.lazy.filter(matchesCurrentFilter).count
+    }
+
+    /// §3.3: expanding a tier or toggling its checkbox touches the rows of all
+    /// its groups at once, so they are added up.
+    private func tierScope(for risk: CleanupRisk) -> BulkUpdateScope {
+        BulkUpdateScope(rowCounts: displayedSubcategories(for: risk).map(displayedRowCount(in:)))
+    }
+
     private var selectionMenu: some View {
             Menu {
                 Button {
-                    store.selectRecommendedCleanupCandidates()
+                    reportScope.perform { store.selectRecommendedCleanupCandidates() }
                 } label: {
                     Label(L10n.text("选择推荐项目", "Select Recommended"), systemImage: "checkmark.square")
                 }
                 .disabled(!store.canEditV2CleanupSelection || session.outcome == .cancelled || recommendedCount == 0)
 
                 Button {
-                    store.restoreDefaultCleanupSelection()
+                    reportScope.perform { store.restoreDefaultCleanupSelection() }
                 } label: {
                     Label(L10n.text("恢复默认选择", "Restore Default Selection"), systemImage: "arrow.uturn.backward.square")
                 }
                 .disabled(!store.canEditV2CleanupSelection || selectedLeafCount == 0)
 
                 Button {
-                    store.selectAllCleanupCandidates()
+                    reportScope.perform { store.selectAllCleanupCandidates() }
                 } label: {
                     Label(L10n.text("全选绿色", "Select All Green"), systemImage: "checkmark.square")
                 }
                 .disabled(!store.canEditV2CleanupSelection || session.outcome == .cancelled || safeSelectableCount == 0)
 
                 Button {
-                    store.clearCleanupCandidates()
+                    reportScope.perform { store.clearCleanupCandidates() }
                 } label: {
                     Label(L10n.text("清空", "Clear"), systemImage: "xmark.square")
                 }
@@ -770,7 +1348,7 @@ struct CleanupScanResultsView: View {
                         tint: AppDesignTokens.Palette.warning
                     )
                     CleanupStorageLegend(
-                        title: L10n.text("红色受保护", "Red protected"),
+                        title: L10n.text("红色高风险", "Red high risk"),
                         value: CleanupMeasurementPresentation.aggregateValue(protectedCandidates),
                         tint: AppDesignTokens.Palette.destructive
                     )
@@ -837,8 +1415,8 @@ struct CleanupScanResultsView: View {
             CleanupReportSectionHeader(
                 title: L10n.text("执行建议", "Action Plan"),
                 detail: L10n.text(
-                    "先处理低风险高收益项目，再人工核对黄色内容；红色项目不直接删除。",
-                    "Handle low-risk, high-value items first, then review yellow items; never directly delete red items."
+                    "先处理默认勾选的绿色项目，再逐项核对黄色内容；红色项目需双重确认后才移入废纸篓，清空废纸篓单独确认。",
+                    "Start with the selected green items, then review yellow items one by one; red items move to Trash only after two confirmations, and emptying the Trash is confirmed separately."
                 ),
                 systemImage: "checklist"
             )
@@ -865,10 +1443,10 @@ struct CleanupScanResultsView: View {
                 Divider()
                 CleanupReportAdviceRow(
                     number: 3,
-                    title: L10n.text("通过正规入口处理红色项目", "Use supported flows for red items"),
+                    title: L10n.text("红色项目逐项双重确认", "Confirm red items twice"),
                     detail: L10n.text(
-                        "大型应用请使用卸载器或系统入口，不手动删除容器和关联数据。",
-                        "Use uninstallers or system controls for large apps; do not hand-delete containers or related data."
+                        "近期仍有活动的开发产物和重复的应用副本默认不选；重复应用整组勾选时自动保留一份。删除应用本身请使用“卸载”页。",
+                        "Recently active developer files and duplicate app copies are off by default; checking a whole duplicate-app group keeps one copy. To remove an app itself, use Uninstall."
                     ),
                     tint: AppDesignTokens.Palette.destructive
                 )
@@ -897,7 +1475,7 @@ struct CleanupScanResultsView: View {
                     CleanupSelectionAvailabilityIndicator(risk: risk)
                 } else {
                     CleanupTriStateButton(
-                        state: store.cleanupSelection.state(for: Array(tierSelectionIDs)),
+                        state: store.cleanupSelection.groupState(for: Array(tierSelectionIDs), in: session),
                         isEnabled: session.outcome != .cancelled
                             && store.canEditV2CleanupSelection,
                         label: riskSelectionLabel(
@@ -907,11 +1485,14 @@ struct CleanupScanResultsView: View {
                         tint: tint,
                         enabledHint: riskSelectionHint(risk)
                     ) {
-                        let state = store.cleanupSelection.state(for: Array(tierSelectionIDs))
-                        store.setCleanupCandidates(
-                            Array(tierSelectionIDs),
-                            selected: state != .checked
-                        )
+                        let state = store.cleanupSelection.groupState(for: Array(tierSelectionIDs), in: session)
+                        // §3.3: one update over every group of the tier.
+                        BulkUpdateScope(rowCount: tierSelectionIDs.count).perform {
+                            store.setCleanupCandidates(
+                                Array(tierSelectionIDs),
+                                selected: state != .checked
+                            )
+                        }
                     }
                 }
                 Button {
@@ -944,11 +1525,9 @@ struct CleanupScanResultsView: View {
                     : L10n.text("查看此风险分组", "Show this risk group"))
             }
             .padding(AppDesignTokens.Layout.compactPadding)
-            .glassPanel(
-                cornerRadius: AppDesignTokens.Layout.cardRadius,
-                tint: tint,
-                prominence: .quiet
-            )
+            .background {
+                SurfaceBackground(level: .card, cornerRadius: AppDesignTokens.Corner.card, tint: tint)
+            }
 
             if isExpanded {
                 VStack(spacing: AppDesignTokens.Spacing.small) {
@@ -964,17 +1543,22 @@ struct CleanupScanResultsView: View {
                                 prominence: .quiet
                             )
                     } else {
-                        ForEach(tierSubcategories) { subcategory in
+                        ForEach(Array(tierSubcategories.enumerated()), id: \.element.id) { index, subcategory in
                             CleanupSubcategorySelectionView(
                                 store: store,
                                 session: session,
                                 subcategory: subcategory,
-                                candidates: sortedCandidates(in: subcategory)
+                                candidates: sortedCandidates(in: subcategory),
+                                cleanupScopeIDs: selectionScopeIDs
                             )
+                            .appStaggeredAppearance(index: index)
                         }
                     }
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                // §3.3: the tier's rows add up; above 200 its groups neither
+                // stagger in (also when a filter adds one) nor animate rows.
+                .appBulkAnimationGuard(tierScope(for: risk))
+                .transition(AppMotion.rowTransition(reduceMotion: reduceMotion))
             }
         }
         .id(risk.rawValue)
@@ -1033,8 +1617,19 @@ struct CleanupScanResultsView: View {
         }
     }
 
+    /// A2: reads again which owner apps are running. The Debug screenshot
+    /// fixture keeps its made-up running owner instead (review P2-2).
+    private func refreshOwnerRunningState() async {
+#if DEBUG
+        if store.isDebugSmartScanSessionFixtureActive { return }
+#endif
+        await store.refreshCleanupOwnerRunningState()
+    }
+
     private func toggleTierExpansion(_ risk: CleanupRisk) {
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
+        // §3.3 / §3.1: the tier's rows appear at once above 200 rows or under
+        // Reduce Motion; otherwise the layout moves with `standard`.
+        tierScope(for: risk).perform(AppMotion.layout(reduceMotion: reduceMotion)) {
             if expandedRiskTierIDs.contains(risk.rawValue) {
                 expandedRiskTierIDs.remove(risk.rawValue)
             } else {
@@ -1105,11 +1700,12 @@ struct CleanupScanResultsView: View {
                     title: L10n.text("安全跳过", "Safely Skipped"),
                     value: "\(session.metrics.permissionFailureCount)",
                     detail: L10n.text(
-                        "权限失败 · 云文件 \(session.metrics.cloudSkippedCount) · 超时 \(session.metrics.timedOutRuleCount)",
-                        "permission failures · cloud \(session.metrics.cloudSkippedCount) · timeouts \(session.metrics.timedOutRuleCount)"
+                        "权限失败 · 云文件 \(session.metrics.cloudSkippedCount) · 超时 \(session.metrics.timedOutRuleCount) · 未列出 \(session.metrics.notActionableCandidateCount)",
+                        "permission failures · cloud \(session.metrics.cloudSkippedCount) · timeouts \(session.metrics.timedOutRuleCount) · not listed \(session.metrics.notActionableCandidateCount)"
                     ),
                     tint: session.metrics.permissionFailureCount == 0
                         && session.metrics.timedOutRuleCount == 0
+                        && session.metrics.notActionableCandidateCount == 0
                             ? AppDesignTokens.Palette.information
                             : AppDesignTokens.Palette.warning
                 )
@@ -1167,6 +1763,78 @@ struct CleanupScanResultsView: View {
         }
     }
 
+    /// D23: one separate item that empties the Trash. It is never preselected
+    /// and is confirmed on its own, apart from items that move to Trash.
+    @ViewBuilder
+    private var trashSection: some View {
+        if let trash = trashCandidates.first,
+           resultFilter == .all || (resultFilter == .selected && isTrashSelected) {
+            let tint = AppDesignTokens.Palette.destructive
+            let entryCount = trash.permanentDeletionEntries?.count ?? 0
+            HStack(alignment: .top, spacing: AppDesignTokens.Spacing.small) {
+                CleanupTriStateButton(
+                    state: store.cleanupSelection.state(for: trashCandidateIDs),
+                    isEnabled: session.outcome != .cancelled
+                        && store.canEditV2CleanupSelection,
+                    label: L10n.text("清空废纸篓", "Empty Trash"),
+                    tint: tint,
+                    enabledHint: L10n.text(
+                        "默认不选；勾选后执行前需要单独二次确认，删除不可恢复。",
+                        "Off by default. Once checked, it needs its own two confirmations, and the deletion cannot be undone."
+                    )
+                ) {
+                    let state = store.cleanupSelection.state(for: trashCandidateIDs)
+                    store.setCleanupCandidates(trashCandidateIDs, selected: state != .checked)
+                }
+                CleanupReportSectionHeader(
+                    title: L10n.text("清空废纸篓 · 不可恢复", "Empty Trash · Cannot Be Undone"),
+                    detail: L10n.text(
+                        "单独一项，默认不选。只永久删除扫描时废纸篓里已有的 \(entryCount) 项，本次移入废纸篓的文件不受影响；执行前单独二次确认。",
+                        "A separate item, off by default. It permanently deletes only the \(entryCount) item(s) already in the Trash during the scan; files this cleanup moves to Trash are not affected. Confirmed twice on its own."
+                    ),
+                    systemImage: "trash.slash",
+                    tint: tint
+                )
+                Text(CleanupMeasurementPresentation.value(trash))
+                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                    .monospacedDigit()
+            }
+            .padding(AppDesignTokens.Layout.compactPadding)
+            .glassPanel(
+                cornerRadius: AppDesignTokens.Layout.cardRadius,
+                tint: tint,
+                prominence: .quiet
+            )
+            .id("empty-trash")
+        } else if trashPermissionDenied, resultFilter == .all {
+            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+                CleanupReportSectionHeader(
+                    title: L10n.text("无法读取废纸篓", "Trash Cannot Be Read"),
+                    detail: L10n.text(
+                        "没有读取废纸篓的权限，因此不知道其中是否有可清空的项目。请在“系统设置 › 隐私与安全性 › 完全磁盘访问权限”中允许本应用，然后重新扫描。",
+                        "This app cannot read the Trash, so it cannot tell whether anything can be emptied. Allow this app in System Settings › Privacy & Security › Full Disk Access, then scan again."
+                    ),
+                    systemImage: "lock.trianglebadge.exclamationmark",
+                    tint: AppDesignTokens.Palette.warning
+                )
+                HStack {
+                    Spacer(minLength: 0)
+                    Button(L10n.text("打开系统设置", "Open System Settings")) {
+                        _ = CleanupService.openFullDiskAccessSettings()
+                    }
+                    .appButtonChrome(.secondary)
+                }
+            }
+            .padding(AppDesignTokens.Layout.compactPadding)
+            .glassPanel(
+                cornerRadius: AppDesignTokens.Layout.cardRadius,
+                tint: AppDesignTokens.Palette.warning,
+                prominence: .quiet
+            )
+            .id("empty-trash")
+        }
+    }
+
     private var secondaryDetailsSection: some View {
         DisclosureGroup(isExpanded: $isSecondaryDetailsExpanded) {
             LazyVStack(spacing: layout.sectionSpacing) {
@@ -1207,17 +1875,41 @@ struct CleanupScanResultsView: View {
     }
 
     private var cleanupActionBar: some View {
-        VStack(spacing: AppDesignTokens.Spacing.small) {
-            HStack(spacing: AppDesignTokens.Spacing.medium) {
-                Text(L10n.text(
-                    selectionActionSummaryChinese,
-                    selectionActionSummaryEnglish
-                ))
-                .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                .monospacedDigit()
-
-                Spacer()
-
+        VStack(spacing: 6) {
+            PinnedActionBar {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.text(
+                        selectionActionSummaryChinese,
+                        selectionActionSummaryEnglish
+                    ))
+                    .font(AppDesignTokens.TypeScale.bodyEmphasis)
+                    .foregroundStyle(surfaces.textPrimary)
+                    .monospacedDigit()
+                    .appDataTransition(value: selectedLeafCount)
+                    if store.cleanupFeatureConfiguration.mode == .v2Full {
+                        Text(isTrashSelected
+                             ? L10n.text(
+                                "已勾选清空废纸篓：扫描时废纸篓里的项目会被永久删除，不可恢复。",
+                                "Empty Trash is checked: items in the Trash during the scan will be permanently deleted and cannot be restored."
+                             )
+                             : L10n.text(
+                                "文件会先移入废纸篓；清空废纸篓后，磁盘空间才会真正释放。",
+                                "Files move to Trash first; disk space is released after Trash is emptied."
+                             ))
+                        .font(AppDesignTokens.TypeScale.caption)
+                        .foregroundStyle(isTrashSelected ? AppDesignTokens.Palette.destructive : surfaces.textSecondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    // D93: named when the row is checked, before cleanup skips it.
+                    if let quitNotice = selectionQuitNotice {
+                        Text(quitNotice)
+                            .font(AppDesignTokens.TypeScale.caption)
+                            .foregroundStyle(AppDesignTokens.Palette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } actions: {
                 if store.cleanupFeatureConfiguration.mode == .v2Full {
                     Button {
                         store.requestV2Cleanup(
@@ -1229,12 +1921,14 @@ struct CleanupScanResultsView: View {
                             cleanupActionTitle,
                             systemImage: selectedReviewCandidates.isEmpty
                                 && selectedProtectedCandidates.isEmpty
+                                && !isTrashSelected
                                     ? "checkmark.shield"
                                     : "exclamationmark.shield"
                         )
                     }
-                    .appButtonChrome(.primary)
-                    .tint(cleanupActionTint)
+                    // D53 §1.2: cleaning is destructive and always takes the
+                    // red gradient (N19, D49); the label still names the risk.
+                    .buttonStyle(GradientButtonStyle(kind: .destructive, size: .medium))
                     .disabled(
                         selectedBytes == 0
                             || session.outcome == .cancelled
@@ -1253,19 +1947,6 @@ struct CleanupScanResultsView: View {
                 }
             }
 
-            if store.cleanupFeatureConfiguration.mode == .v2Full {
-                Label(
-                    L10n.text(
-                        "文件会先移入废纸篓；清空废纸篓后，磁盘空间才会真正释放。",
-                        "Files move to Trash first; disk space is released after Trash is emptied."
-                    ),
-                    systemImage: "trash"
-                )
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
             if let summary = store.cleanupDryRunSummary,
                summary.sessionID == session.id {
                 Label(
@@ -1280,16 +1961,10 @@ struct CleanupScanResultsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(AppDesignTokens.Layout.compactPadding)
-        .glassPanel(
-            cornerRadius: AppDesignTokens.Layout.cardRadius,
-            tint: cleanupActionTint,
-            elevated: true
-        )
     }
 
     private var cleanupActionTitle: String {
-        selectedReviewCandidates.isEmpty && selectedProtectedCandidates.isEmpty
+        selectedReviewCandidates.isEmpty && selectedProtectedCandidates.isEmpty && !isTrashSelected
             ? L10n.text(
                 "安全清理 · \(ByteFormat.string(selectedBytes))",
                 "Safe Cleanup · \(ByteFormat.string(selectedBytes))"
@@ -1301,7 +1976,7 @@ struct CleanupScanResultsView: View {
     }
 
     private var cleanupActionTint: Color {
-        if !selectedProtectedCandidates.isEmpty {
+        if !selectedProtectedCandidates.isEmpty || isTrashSelected {
             return AppDesignTokens.Palette.destructive
         }
         return selectedReviewCandidates.isEmpty
@@ -1309,24 +1984,34 @@ struct CleanupScanResultsView: View {
             : AppDesignTokens.Palette.warning
     }
 
+    /// Rows, like the confirmation sheet (coordinator note, D53 V0); the
+    /// number of groups follows as a hint.
     private var selectionActionSummaryChinese: String {
+        let lead = "已选择 \(selectedLeafCount) 项（\(selectedCount) 组）"
+        if isTrashSelected {
+            return "\(lead) · 含永久清空废纸篓"
+        }
         if !selectedProtectedCandidates.isEmpty {
-            return "已选择 \(selectedCount) 项 · 红色 \(selectedProtectedCandidates.count) 项需双重确认"
+            return "\(lead) · 红色 \(selectedProtectedCandidates.count) 项需双重确认"
         }
         if !selectedReviewCandidates.isEmpty {
-            return "已选择 \(selectedCount) 项 · 黄色 \(selectedReviewCandidates.count) 项需确认"
+            return "\(lead) · 黄色 \(selectedReviewCandidates.count) 项需确认"
         }
-        return "已选择 \(selectedCount) 项 · \(ByteFormat.string(selectedBytes))"
+        return "\(lead) · \(ByteFormat.string(selectedBytes))"
     }
 
     private var selectionActionSummaryEnglish: String {
+        let lead = "\(selectedLeafCount) selected (\(selectedCount) groups)"
+        if isTrashSelected {
+            return "\(lead) · includes permanently emptying the Trash"
+        }
         if !selectedProtectedCandidates.isEmpty {
-            return "\(selectedCount) selected · \(selectedProtectedCandidates.count) red item(s) need two confirmations"
+            return "\(lead) · \(selectedProtectedCandidates.count) red item(s) need two confirmations"
         }
         if !selectedReviewCandidates.isEmpty {
-            return "\(selectedCount) selected · \(selectedReviewCandidates.count) yellow item(s) need confirmation"
+            return "\(lead) · \(selectedReviewCandidates.count) yellow item(s) need confirmation"
         }
-        return "\(selectedCount) selected · \(ByteFormat.string(selectedBytes))"
+        return "\(lead) · \(ByteFormat.string(selectedBytes))"
     }
 
     private func matchesCurrentFilter(_ candidate: ScanCandidate) -> Bool {
@@ -1336,9 +2021,7 @@ struct CleanupScanResultsView: View {
         case .selected:
             store.cleanupSelection.selectedCandidateIDs.contains(candidate.id)
         case .recommended:
-            candidate.isSelectable
-                && candidate.defaultSelection != .forbidden
-                && candidate.recommendation.level == .recommended
+            candidate.isRecommendedForSelection
         }
     }
 }
@@ -1363,6 +2046,7 @@ struct DeveloperCleanupThresholdControl: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+            ProjectArtifactEntryButton(coordinator: store.heavyWorkCoordinator)
             HStack(alignment: .center, spacing: AppDesignTokens.Spacing.medium) {
                 Label {
                     VStack(alignment: .leading, spacing: 3) {
@@ -1643,7 +2327,7 @@ private enum CleanupResultSort: String, CaseIterable, Identifiable {
     }
 }
 
-private enum CleanupMeasurementPresentation {
+enum CleanupMeasurementPresentation {
     static func value(_ candidate: ScanCandidate) -> String {
         switch candidate.measurementCompleteness {
         case .complete:
@@ -1702,9 +2386,23 @@ private enum CleanupMeasurementPresentation {
             case .unknown:
                 L10n.text("容量信息不完整", "Measurement is incomplete")
             }
+            if candidate.measurementCompleteness.isFailed {
+                return L10n.text(
+                    "\(reasonText)，因此不能加入清理计划。",
+                    "\(reasonText), so this item cannot enter a cleanup plan."
+                )
+            }
+            if candidate.action.permanentlyDeletes {
+                // D23: entries left out at scan time are never deleted.
+                return L10n.text(
+                    "\(reasonText)；这些项目不会被删除，显示的大小只计入将删除的项目。",
+                    "\(reasonText); those entries are not deleted, and the size counts only the entries that will be."
+                )
+            }
+            // D19: a lower bound is still selectable; only the item itself moves.
             return L10n.text(
-                "\(reasonText)，因此不能加入清理计划。",
-                "\(reasonText), so this item cannot enter a cleanup plan."
+                "\(reasonText)，大小按已读取部分显示为“至少”；清理时只把该项目本身移入废纸篓，不会跟随其中的符号链接。",
+                "\(reasonText), so the size shows the readable part as \"at least\". Cleanup moves only this item itself to Trash and never follows links inside it."
             )
         }
     }
@@ -1749,11 +2447,13 @@ private struct CleanupSubcategorySelectionView: View {
     let session: ScanSession
     let subcategory: CleanupScanSubcategory
     let candidates: [ScanCandidate]
+    var cleanupScopeIDs: Set<ScanCandidateID>? = nil
+    var usesLightfield = false
     @State private var isExpanded = false
     @State private var isShowingDetails = false
 
     private var state: TriStateSelection {
-        store.cleanupSelection.state(for: subcategory.selectableCandidateIDs)
+        store.cleanupSelection.groupState(for: subcategory.selectableCandidateIDs, in: session)
     }
 
     private var displayedRecommendation: CleanupRecommendationLevel {
@@ -1767,10 +2467,10 @@ private struct CleanupSubcategorySelectionView: View {
         let total = candidates.count
         let selectable = subcategory.selectableCandidateIDs.count
         if selectable == 0 {
-            let status = subcategory.risk == .protected
-                ? L10n.text("受保护", "protected")
-                : L10n.text("仅供查看", "view only")
-            return "\(L10n.items(total)) · \(status)"
+            return L10n.text(
+                "\(L10n.items(total)) · 没有可清理项目",
+                "\(L10n.items(total)) · nothing to clean"
+            )
         }
         if selectable < total {
             return L10n.text(
@@ -1824,10 +2524,12 @@ private struct CleanupSubcategorySelectionView: View {
                         tint: CleanupRiskPresentation.tint(subcategory.risk),
                         enabledHint: selectionHint
                     ) {
-                        store.setCleanupCandidates(
-                            subcategory.selectableCandidateIDs,
-                            selected: state != .checked
-                        )
+                        BulkUpdateScope(rowCount: subcategory.selectableCandidateIDs.count).perform {
+                            store.setCleanupCandidates(
+                                subcategory.selectableCandidateIDs,
+                                selected: state != .checked
+                            )
+                        }
                     }
                 }
 
@@ -1839,22 +2541,30 @@ private struct CleanupSubcategorySelectionView: View {
                             .font(AppDesignTokens.Typography.compactSymbol)
                             .foregroundStyle(CleanupRiskPresentation.tint(subcategory.risk))
                             .frame(width: 18, height: 18)
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: AppDesignTokens.Spacing.small) {
                                 Text(subcategory.title)
-                                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                                CleanupRiskBadge(risk: subcategory.risk)
+                                    .font(AppDesignTokens.TypeScale.bodyEmphasis)
                                 CleanupRecommendationBadge(level: displayedRecommendation)
                             }
+                            // D45 / U3: one sentence on what it is and what to do.
+                            Text(CleanupRiskPresentation.oneLineReason(subcategory.reason))
+                                .font(AppDesignTokens.TypeScale.secondary)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .help(subcategory.reason)
                             Text(itemCountSummary)
-                            .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .font(AppDesignTokens.TypeScale.caption)
+                            .foregroundStyle(.tertiary)
                             .monospacedDigit()
                         }
                         Spacer(minLength: AppDesignTokens.Spacing.small)
-                        Text(CleanupMeasurementPresentation.aggregateValue(candidates))
-                            .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                            .monospacedDigit()
+                        VStack(alignment: .trailing, spacing: 4) {
+                            Text(CleanupMeasurementPresentation.aggregateValue(candidates))
+                                .font(AppDesignTokens.TypeScale.bodyEmphasis)
+                                .monospacedDigit()
+                            CleanupSuggestionChip(risk: subcategory.risk)
+                        }
                     }
                     .contentShape(Rectangle())
                 }
@@ -1899,36 +2609,43 @@ private struct CleanupSubcategorySelectionView: View {
             .padding(.leading, layout.cardPadding)
             .padding(.trailing, layout.cardPadding)
             .padding(.vertical, AppDesignTokens.Layout.compactPadding)
-            .background(
-                Color.primary.opacity(0.035),
-                in: RoundedRectangle(
-                    cornerRadius: max(8, AppDesignTokens.Layout.cardRadius - 4),
-                    style: .continuous
-                )
-            )
 
             if isExpanded {
+                // §3.3: rows animate in only when a group is small enough.
                 ForEach(candidates) { candidate in
                     Divider()
                         .padding(.leading, layout.cardPadding + 56)
                     CleanupCandidateRow(
                         store: store,
                         session: session,
-                        candidate: candidate
+                        candidate: candidate,
+                        cleanupScopeIDs: cleanupScopeIDs
                     )
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .transition(AppMotion.rowTransition(reduceMotion: reduceMotion))
             }
         }
-        .glassPanel(
-            cornerRadius: AppDesignTokens.Layout.cardRadius,
-            tint: CleanupRiskPresentation.tint(subcategory.risk),
-            prominence: .quiet
-        )
+        .appBulkAnimationGuard(rowCount: candidates.count)
+        .background {
+            SurfaceBackground(level: .card, cornerRadius: AppDesignTokens.Corner.card)
+        }
+#if DEBUG
+        .layoutProbe("results.group.\(subcategory.id)")
+#endif
+#if DEBUG
+        // Review screenshots of the debug fixture open the green groups too.
+        .onAppear {
+            if DebugSmartScanSessionFixture.expandsGreenTier, subcategory.risk == .safe {
+                isExpanded = true
+            }
+        }
+#endif
     }
 
     private func toggleExpansion() {
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
+        // §3.3: expanding a group of more than 200 rows is not animated, and
+        // under Reduce Motion the layout lands at once (§3.1).
+        BulkUpdateScope(rowCount: candidates.count).perform(AppMotion.layout(reduceMotion: reduceMotion)) {
             isExpanded.toggle()
         }
     }
@@ -1939,6 +2656,9 @@ private struct CleanupCandidateRow: View {
     @ObservedObject var store: ScanStore
     let session: ScanSession
     let candidate: ScanCandidate
+    /// The page's cleanup scope, used when "正常退出并清理" continues.
+    var cleanupScopeIDs: Set<ScanCandidateID>? = nil
+    var usesLightfield: Bool = false
     @State private var isShowingDetails = false
 
     private var isSelected: Bool {
@@ -1949,6 +2669,24 @@ private struct CleanupCandidateRow: View {
         candidate.isSelectable
             && session.outcome != .cancelled
             && store.canEditV2CleanupSelection
+            && !DuplicateApplicationRetentionPolicy.isProtected(candidate)
+    }
+
+    /// Round 3 (P2-1): the row's running owners, split into those that can
+    /// be asked to quit and those that must be quit by hand.
+    private var ownerQuitOptions: CleanupOwnerQuitService.Options {
+        candidate.isOwnerRunning ? store.cleanupOwnerQuitOptions(for: candidate) : .init()
+    }
+
+    /// A2: only for a selected row whose owner app is running and can be asked
+    /// to quit. Duplicate app copies are never offered (a running copy is kept).
+    private var canQuitOwnerAndClean: Bool {
+        store.cleanupFeatureConfiguration.mode == .v2Full
+            && isSelected
+            && canSelect
+            && candidate.isOwnerRunning
+            && candidate.ownerResolution != .applicationBundle
+            && !ownerQuitOptions.quittable.isEmpty
     }
 
     private var selection: Binding<Bool> {
@@ -1959,17 +2697,88 @@ private struct CleanupCandidateRow: View {
         }
     }
 
+    /// A running owner is a warning, shown apart from the path in the warning
+    /// colour and never truncated (restored from V1 rows).
+    private var lightfieldNote: String? {
+        candidate.isOwnerRunning ? ownerStatusLine?.text : nil
+    }
+
+    /// D47's rebuild-cost hint stays first so middle truncation keeps it;
+    /// "Belongs to X" (D93, rule provenance) follows, then the path.
+    private var lightfieldDetail: String {
+        CleanupRuleExplanation.lightfieldDetail(
+            rebuildCost: CleanupCandidateRowHint.rebuildCost(for: candidate)?.text,
+            ownerStatus: lightfieldNote == nil ? ownerStatusLine?.text : nil,
+            ownership: candidate.ruleExplanation.ownership,
+            path: candidate.snapshot.standardizedPath
+        )
+    }
+
+    private var lightfieldHelp: String {
+        let parts: [String?] = [
+            candidate.reason, ownerStatusLine?.text, developerArtifactLine,
+            applicationVersionLine, CleanupCandidateRowHint.rebuildCost(for: candidate)?.text,
+            candidate.ruleExplanation.summary
+        ]
+        return parts.compactMap { $0 }.joined(separator: " · ")
+    }
+
     var body: some View {
+        Group {
+            if usesLightfield { lightfieldRow } else { legacyRow }
+        }
+    }
+
+    private var lightfieldRow: some View {
+        FeatureLightfieldResultRow(title: candidate.sourceURL.lastPathComponent,
+            detail: lightfieldDetail,
+            value: CleanupMeasurementPresentation.value(candidate), note: lightfieldNote) {
+            Button { selection.wrappedValue.toggle() } label: {
+                FeatureLightfieldCheck(selected: isSelected, module: .green)
+            }.buttonStyle(FeatureLightfieldRowButtonStyle()).disabled(!canSelect)
+                .accessibilityRepresentation {
+                    Toggle(isOn: selection) { Text(accessibilitySummary) }.toggleStyle(.checkbox).disabled(!canSelect)
+                }
+                .accessibilityLabel(accessibilitySummary)
+                .accessibilityValue(selectionAccessibilityValue)
+                .accessibilityHint(selectionAccessibilityHint)
+        }
+        .contextMenu {
+            Button(L10n.text("详细信息", "Details")) { isShowingDetails = true }
+            Button(L10n.text("在访达中显示", "Show in Finder")) { store.revealCleanupCandidate(candidate) }
+            if canQuitOwnerAndClean {
+                Button(L10n.text("正常退出并清理", "Quit Normally and Clean")) {
+                    store.requestQuitCleanupOwners(for: [candidate.id], cleanupScope: cleanupScopeIDs)
+                }.disabled(store.isQuittingCleanupOwners)
+            }
+        }
+        .popover(isPresented: $isShowingDetails) { candidateDetails }
+        .help(lightfieldHelp)
+    }
+
+    private var legacyRow: some View {
         HStack(spacing: AppDesignTokens.Spacing.medium) {
             Toggle(isOn: selection) {
                 candidateContent
             }
-            .toggleStyle(.checkbox)
+            .toggleStyle(AnimatedCheckboxToggleStyle(tint: CleanupRiskPresentation.tint(candidate.risk)))
             .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
             .disabled(!canSelect)
             .accessibilityLabel(accessibilitySummary)
             .accessibilityValue(selectionAccessibilityValue)
             .accessibilityHint(selectionAccessibilityHint)
+
+            if canQuitOwnerAndClean {
+                Button(L10n.text("正常退出并清理", "Quit Normally and Clean")) {
+                    store.requestQuitCleanupOwners(for: [candidate.id], cleanupScope: cleanupScopeIDs)
+                }
+                .appButtonChrome(.tertiary)
+                .disabled(store.isQuittingCleanupOwners)
+                .help(L10n.text(
+                    "先列出将退出的应用并请你确认；只发送正常退出请求，不强制结束，然后检查并清理所选项目。",
+                    "Lists the apps first for your confirmation, sends only a normal quit request (never a force quit), then checks and cleans the selection."
+                ))
+            }
 
             AppIconButton(
                 title: L10n.text(
@@ -2025,6 +2834,32 @@ private struct CleanupCandidateRow: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // D93: belongs to and why (not) preselected; the effect is in the
+                // help text and the details popover.
+                Text(L10n.text("属于 ", "Belongs to ") + candidate.ruleExplanation.ownership
+                     + " · " + candidate.ruleExplanation.preselection)
+                    .font(AppDesignTokens.Typography.metadata)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let applicationVersionLine {
+                    Text(applicationVersionLine)
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let ownerStatusLine {
+                    Label(ownerStatusLine.text, systemImage: ownerStatusLine.systemImage)
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(ownerStatusLine.tint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // D47: a large preselected cache says what cleaning it costs.
+                if let rebuildCost = CleanupCandidateRowHint.rebuildCost(for: candidate) {
+                    Label(rebuildCost.text, systemImage: rebuildCost.systemImage)
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(Self.style(for: rebuildCost.tone))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 8)
             Text(CleanupMeasurementPresentation.value(candidate))
@@ -2033,6 +2868,7 @@ private struct CleanupCandidateRow: View {
         }
         .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
         .contentShape(Rectangle())
+        .help(candidate.ruleExplanation.summary)
     }
 
     private var candidateDetails: some View {
@@ -2065,6 +2901,8 @@ private struct CleanupCandidateRow: View {
                     }
                 }
             }
+            // D93: belongs to, effect after cleanup, why (not) preselected.
+            CleanupRuleExplanationView(explanation: candidate.ruleExplanation)
             VStack(alignment: .leading, spacing: 4) {
                 Text(L10n.text("完整路径", "Full Path"))
                     .font(AppDesignTokens.Typography.metadata)
@@ -2118,6 +2956,81 @@ private struct CleanupCandidateRow: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// D22/D47: an owner app that was running when the scan finished (the
+    /// only row D47 leaves unchecked); item 10 and D47: a log row still written
+    /// in the last 7 days or a cache whose app is unknown; D25: the duplicate
+    /// copy that stays when every other copy is checked.
+    private var ownerStatusLine: (text: String, systemImage: String, tint: AnyShapeStyle)? {
+        // Round 3 (P2-7): a running copy, or the one the command line tools
+        // use, is always kept.
+        if DuplicateApplicationRetentionPolicy.isProtected(candidate) {
+            return (
+                candidate.isOwnerRunning
+                    ? L10n.text("正在运行，将保留此副本；手动退出后才能选择", "Running, so this copy is kept; quit it by hand to select it")
+                    : L10n.text("命令行工具当前使用的 Xcode，将保留此副本", "The Xcode the command line tools use; this copy is kept"),
+                "checkmark.seal",
+                AnyShapeStyle(AppDesignTokens.Palette.success)
+            )
+        }
+        if candidate.isOwnerRunning {
+            let options = ownerQuitOptions
+            // Round 3 (P2-1): an app that cannot be asked to quit is named.
+            if options.quittable.isEmpty, !options.manual.isEmpty {
+                return (
+                    CleanupOwnerQuitPresentation.manualQuitText(for: options.manual),
+                    "hand.raised",
+                    AnyShapeStyle(AppDesignTokens.Palette.warning)
+                )
+            }
+            return (
+                L10n.text("正在运行，清理前需退出", "Running; quit it before cleanup"),
+                "app.badge",
+                AnyShapeStyle(AppDesignTokens.Palette.warning)
+            )
+        }
+        // Item 10 and D47: recent or unconfirmed log writes, an unidentified
+        // owner. D47 preselects these rows; the line says why to look twice.
+        if let hint = CleanupCandidateRowHint.ownerStatus(for: candidate) {
+            return (hint.text, hint.systemImage, Self.style(for: hint.tone))
+        }
+        if isRetainedDuplicateCopy {
+            return (
+                L10n.text("将保留此副本", "This copy will be kept"),
+                "checkmark.seal",
+                AnyShapeStyle(AppDesignTokens.Palette.success)
+            )
+        }
+        return nil
+    }
+
+    private static func style(for tone: CleanupCandidateRowHint.Tone) -> AnyShapeStyle {
+        switch tone {
+        case .warning: AnyShapeStyle(AppDesignTokens.Palette.warning)
+        case .secondary: AnyShapeStyle(.secondary)
+        }
+    }
+
+    /// P2-1: each duplicate copy shows its version and build, and the copy
+    /// the command line tools use says so (round 3: without the command name).
+    private var applicationVersionLine: String? {
+        guard let summary = candidate.applicationVersionSummary else { return nil }
+        guard candidate.isActiveDeveloperDirectory else { return summary }
+        return summary + L10n.text(
+            " · 命令行工具当前使用的 Xcode",
+            " · the Xcode the command line tools use"
+        )
+    }
+
+    private var isRetainedDuplicateCopy: Bool {
+        guard !isSelected,
+              let groupCode = candidate.duplicateApplicationGroupCode else { return false }
+        let others = DuplicateApplicationRetentionPolicy.members(of: groupCode, in: session)
+            .filter { $0.id != candidate.id }
+        return !others.isEmpty && others.allSatisfy {
+            store.cleanupSelection.selectedCandidateIDs.contains($0.id)
+        }
+    }
+
     private var developerActivitySummary: String? {
         guard candidate.categoryID == "developer" else { return nil }
         guard let latest = candidate.latestContentModificationTimeNanoseconds else {
@@ -2127,9 +3040,6 @@ private struct CleanupCandidateRow: View {
             latestModificationTimeNanoseconds: latest,
             referenceDate: session.startedAt
         )
-        if isDeveloperMetadataReference {
-            return L10n.text("目录修改约 \(days) 天前", "Folder changed about \(days) days ago")
-        }
         return L10n.text("最近变动约 \(days) 天前", "Last changed about \(days) days ago")
     }
 
@@ -2153,10 +3063,11 @@ private struct CleanupCandidateRow: View {
                 referenceDate: session.startedAt
             )
         } ?? 0
-        if isDeveloperMetadataReference {
+        // Tool logs are not graded by activity, so no threshold applies.
+        guard candidate.developerArtifactKind != .logs else {
             return L10n.text(
-                "\(date.formatted(date: .abbreviated, time: .shortened)) · 顶层目录修改时间；未读取会话内容",
-                "\(date.formatted(date: .abbreviated, time: .shortened)) · top-level folder modification time; session contents were not read"
+                "\(date.formatted(date: .abbreviated, time: .shortened)) · 距扫描约 \(days) 天",
+                "\(date.formatted(date: .abbreviated, time: .shortened)) · about \(days) days before scan"
             )
         }
         return L10n.text(
@@ -2165,16 +3076,8 @@ private struct CleanupCandidateRow: View {
         )
     }
 
-    private var isDeveloperMetadataReference: Bool {
-        candidate.categoryID == "developer"
-            && candidate.action == .revealOnly
-            && candidate.measurementCompleteness.isLowerBound
-    }
-
     private var developerActivityTitle: String {
-        isDeveloperMetadataReference
-            ? L10n.text("目录修改时间", "Folder Modified")
-            : L10n.text("最近活动", "Latest Activity")
+        L10n.text("最近活动", "Latest Activity")
     }
 
     private var developerCreationDetail: String {
@@ -2189,7 +3092,8 @@ private struct CleanupCandidateRow: View {
     }
 
     private var accessibilitySummary: String {
-        let artifact = candidate.developerArtifactSummary.map { "\($0)，" } ?? ""
+        let artifact = (candidate.developerArtifactSummary ?? applicationVersionLine)
+            .map { "\($0)，" } ?? ""
         return L10n.text(
             "\(candidate.sourceURL.lastPathComponent)，\(artifact)\(CleanupMeasurementPresentation.value(candidate))，\(selectionAccessibilityValue)，\(eligibilityAccessibilityValue)。",
             "\(candidate.sourceURL.lastPathComponent), \(artifact)\(CleanupMeasurementPresentation.value(candidate)), \(selectionAccessibilityValue), \(eligibilityAccessibilityValue)."
@@ -2210,6 +3114,8 @@ private struct CleanupCandidateRow: View {
             L10n.text("可手动选择，执行前需要风险确认", "manually selectable with risk confirmation")
         case .selectableWithProtectedReview:
             L10n.text("可手动选择，执行前需要双重高风险确认", "manually selectable with two high-risk confirmations")
+        case .selectableWithPermanentDeletionReview:
+            L10n.text("可手动选择，执行前需要单独二次确认，永久删除不可恢复", "manually selectable with two separate confirmations; permanent deletion cannot be undone")
         case .reviewRequired:
             L10n.text("需要人工判断", "manual review required")
         case .protected:
@@ -2222,12 +3128,23 @@ private struct CleanupCandidateRow: View {
     }
 
     private var selectionAccessibilityHint: String {
-        if !candidate.measurementCompleteness.isComplete {
+        if candidate.measurementCompleteness.isFailed {
             return CleanupMeasurementPresentation.detail(candidate)
-                ?? L10n.text("容量测量不完整，不能加入清理计划。", "Measurement is incomplete, so this item cannot enter a cleanup plan.")
+                ?? L10n.text("容量无法计算，不能加入清理计划。", "The size could not be measured, so this item cannot enter a cleanup plan.")
+        }
+        if candidate.isOwnerRunning {
+            return L10n.text(
+                "所属应用正在运行，清理前需退出；运行中会被跳过。按空格切换选择。",
+                "Its app is running; quit it before cleanup, or the item is skipped. Press Space to toggle selection."
+            )
         }
         if canSelect {
             switch candidate.selectionEligibility {
+            case .selectableWithPermanentDeletionReview:
+                return L10n.text(
+                    "按空格切换选择；清空废纸篓执行前需要单独二次确认，删除不可恢复。",
+                    "Press Space to toggle; emptying the Trash needs two separate confirmations and cannot be undone."
+                )
             case .selectableWithReview:
                 return L10n.text(
                     "按空格切换选择；黄色项目在执行前还需要风险确认。文件夹按钮只在 Finder 中显示。",
@@ -2249,19 +3166,19 @@ private struct CleanupCandidateRow: View {
 
 }
 
+/// Shown in place of a checkbox when a group has nothing to clean. D19: every
+/// listed item can be selected, so this only appears for an empty tier.
 private struct CleanupSelectionAvailabilityIndicator: View {
     let risk: CleanupRisk
 
     private var title: String {
-        risk == .protected
-            ? L10n.text("受保护，不能加入清理计划", "Protected and cannot be added to the cleanup plan")
-            : L10n.text("仅供查看，不能加入清理计划", "View only and cannot be added to the cleanup plan")
+        L10n.text("此分组没有可清理的项目", "No cleanable items in this group")
     }
 
     var body: some View {
-        Image(systemName: risk == .protected ? "lock.fill" : "eye")
+        Image(systemName: "square.dashed")
             .font(AppDesignTokens.Typography.compactSymbol)
-            .foregroundStyle(CleanupRiskPresentation.tint(risk))
+            .foregroundStyle(AppDesignTokens.Palette.secondaryText)
             .frame(width: 28, height: 28)
             .accessibilityLabel(title)
             .help(title)
@@ -2290,15 +3207,14 @@ private struct CleanupTriStateButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
-                .font(AppDesignTokens.Typography.symbol)
-                .foregroundStyle(
-                    state == .unchecked
-                        ? AppDesignTokens.Palette.secondaryText
-                        : tint
-                )
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
+            AnimatedCheckmarkBox(
+                mark: state == .unchecked ? .off : (state == .checked ? .on : .mixed),
+                tint: tint,
+                side: 18
+            )
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
+            .help(systemImage == "square" ? label : label)
         }
         .buttonStyle(ResponsivePlainButtonStyle())
         .disabled(!isEnabled)
@@ -2310,8 +3226,13 @@ private struct CleanupTriStateButton: View {
         .help(isEnabled ? label : disabledHint ?? label)
     }
 
-    private var accessibilityValue: String {
-        switch state {
+    private var accessibilityValue: String { state.cleanupAccessibilityValue }
+}
+
+extension TriStateSelection {
+    /// Spoken selection state of a cleanup group, shared by V1 and D67 rows.
+    var cleanupAccessibilityValue: String {
+        switch self {
         case .unchecked:
             return L10n.text("未选择", "Not selected")
         case .checked:
@@ -2479,10 +3400,10 @@ enum CleanupRiskPresentation {
     static func guidance(_ subcategory: CleanupScanSubcategory) -> String {
         switch subcategory.risk {
         case .safe:
-            if subcategory.candidates.contains(where: { !$0.requiredClosedBundleIDs.isEmpty }) {
+            if subcategory.candidates.contains(where: { !$0.ownerBundleIdentifiers.isEmpty }) {
                 return L10n.text(
-                    "清理前请退出相关应用；清理后首次启动或构建可能较慢。",
-                    "Quit related apps first; the next launch or build may be slower."
+                    "所属应用未运行时默认勾选；清理前请退出相关应用，运行中的会被跳过。清理后首次启动或构建可能较慢。",
+                    "Selected by default while the owning app is closed; quit related apps first, or running ones are skipped. The next launch or build may be slower."
                 )
             }
             return L10n.text(
@@ -2490,12 +3411,6 @@ enum CleanupRiskPresentation {
                 "Select only after review; execution rechecks identity and moves items to Trash."
             )
         case .reviewOnly:
-            if subcategory.selectableCandidateIDs.isEmpty {
-                return L10n.text(
-                    "包含应用数据，只能在 Finder 中审查；请使用原应用或卸载器管理。",
-                    "Contains app data. Review in Finder and manage it from the owning app or an uninstaller."
-                )
-            }
             return L10n.text(
                 "先确认内容、所属应用和备份；手动选择后仍需风险确认，并只会移到废纸篓。",
                 "Confirm content, owning app, and backup first; manual selection still needs risk confirmation and only moves to Trash."
@@ -2507,12 +3422,181 @@ enum CleanupRiskPresentation {
                     "Recently active and off by default. After confirming no current task uses it and required backups exist, select it individually; execution needs two confirmations."
                 )
             }
+            if subcategory.candidates.contains(where: { $0.action.permanentlyDeletes }) {
+                return L10n.text(
+                    "默认不选。只永久删除扫描时废纸篓里已有的项目，执行前单独二次确认，不可恢复。",
+                    "Off by default. Only items already in the Trash during the scan are permanently deleted, after two separate confirmations; this cannot be undone."
+                )
+            }
             return L10n.text(
-                "默认不选。只有规则明确允许的应用才可逐项选择；执行前需要双重确认，并只会移入废纸篓。",
-                "Off by default. Only apps explicitly allowed by a rule can be selected individually; two confirmations are required and the app only moves to Trash."
+                "默认不选。重复安装的应用副本整组勾选时自动保留一份；执行前需要双重确认，并只会移入废纸篓。删除应用本身请使用“卸载”页。",
+                "Off by default. Checking a whole group of duplicate app copies keeps one copy; two confirmations are required and copies only move to Trash. To remove an app itself, use Uninstall."
             )
         case .informational:
             return L10n.text("仅作容量参考。", "For capacity reference only.")
         }
+    }
+}
+
+/// D45 / U3 suggestion words (柠檬 pattern): green → 建议清理,
+/// yellow → 需人工判断, red → 谨慎. Presentation of the existing tiers only;
+/// selection and confirmation rules are unchanged.
+struct CleanupSuggestionChip: View {
+    let risk: CleanupRisk
+
+    var body: some View {
+        let tint = CleanupRiskPresentation.tint(risk)
+        Text(CleanupRiskPresentation.suggestion(risk))
+            .font(AppDesignTokens.TypeScale.captionEmphasis)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(tint.opacity(0.14), in: Capsule(style: .continuous))
+            .overlay(Capsule(style: .continuous).strokeBorder(tint.opacity(0.30), lineWidth: 1))
+            .fixedSize()
+            .accessibilityLabel(CleanupRiskPresentation.suggestion(risk))
+    }
+}
+
+extension CleanupRiskPresentation {
+    static func suggestion(_ risk: CleanupRisk) -> String {
+        switch risk {
+        case .safe: L10n.text("建议清理", "Recommended")
+        case .reviewOnly: L10n.text("需人工判断", "Needs Review")
+        case .protected: L10n.text("谨慎", "Caution")
+        case .informational: L10n.text("仅供查看", "View Only")
+        }
+    }
+
+    /// The first sentence of a rule's reason, for the one-line row note.
+    static func oneLineReason(_ reason: String) -> String {
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let separators: [Character] = ["。", "；", ";"]
+        if let end = trimmed.firstIndex(where: { separators.contains($0) }) {
+            return String(trimmed[..<end])
+        }
+        if let range = trimmed.range(of: ". ") {
+            return String(trimmed[..<range.lowerBound])
+        }
+        return trimmed
+    }
+}
+
+/// A category tile of the results bento: tile, name, size, row count and
+/// the green / yellow / red mix of its bytes.
+private struct CleanupCategoryBentoCard: View {
+    @AppSurfaces private var surfaces
+    let category: CleanupScanCategory
+    let action: () -> Void
+
+    private var parts: [(CleanupRisk, Int64)] {
+        [CleanupRisk.safe, .reviewOnly, .protected].map { risk in
+            (risk, category.candidates
+                .filter { $0.risk == risk && !$0.action.permanentlyDeletes }
+                .reduce(Int64(0)) { CleanupByteCount.adding($1.estimatedSizeBytes, to: $0) })
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    IconTile(systemImage: Self.symbol(for: category), side: 32)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(category.title)
+                            .font(AppDesignTokens.TypeScale.bodyEmphasis)
+                            .foregroundStyle(surfaces.textPrimary)
+                            .lineLimit(1)
+                        Text(L10n.items(category.candidates.count))
+                            .font(AppDesignTokens.TypeScale.caption)
+                            .foregroundStyle(surfaces.textTertiary)
+                            .monospacedDigit()
+                    }
+                    Spacer(minLength: 0)
+                }
+                Text(CleanupMeasurementPresentation.aggregateValue(category.candidates))
+                    .font(AppDesignTokens.TypeScale.metricInline)
+                    .foregroundStyle(surfaces.textPrimary)
+                    .lineLimit(1)
+                mixBar
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background { SurfaceBackground(level: .card, cornerRadius: AppDesignTokens.Corner.card) }
+            .contentShape(RoundedRectangle(cornerRadius: AppDesignTokens.Corner.card, style: .continuous))
+        }
+        .buttonStyle(ResponsivePlainButtonStyle())
+        .appHoverLift()
+        .help(category.title)
+        .accessibilityLabel("\(category.title), \(CleanupMeasurementPresentation.aggregateValue(category.candidates))")
+        .accessibilityHint(L10n.text("定位到它所在的风险分组，不会改变选择。", "Moves to its risk group without changing selection."))
+    }
+
+    private var mixBar: some View {
+        let total = max(1, parts.reduce(Int64(0)) { $0 + $1.1 })
+        return GeometryReader { proxy in
+            HStack(spacing: 2) {
+                ForEach(parts.filter { $0.1 > 0 }, id: \.0.rawValue) { risk, bytes in
+                    Capsule(style: .continuous)
+                        .fill(CleanupRiskPresentation.tint(risk))
+                        .frame(width: max(4, proxy.size.width * CGFloat(Double(bytes) / Double(total)) - 2))
+                }
+            }
+        }
+        .frame(height: 5)
+        .accessibilityHidden(true)
+    }
+
+    static func symbol(for category: CleanupScanCategory) -> String {
+        switch category.id {
+        case "system": "gearshape.2.fill"
+        case "application-cache": "square.stack.3d.up.fill"
+        case "browser-cache": "globe"
+        case "developer": "hammer.fill"
+        case "logs": "doc.text.fill"
+        case "mail": "envelope.fill"
+        case "trash": "trash.fill"
+        case "downloads": "arrow.down.circle.fill"
+        case "verified-duplicates", "applications": "square.on.square.fill"
+        default: "folder.fill"
+        }
+    }
+}
+
+/// Counts bytes up from zero once, then follows later values (§3.2.4).
+/// Reduce Motion shows the final value at once.
+struct AnimatedByteCount: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shown: Double = 0
+    let bytes: Int64
+
+    var body: some View {
+        ByteCountText(value: shown)
+            .onAppear { animate(to: Double(bytes), fromZero: true) }
+            .onChange(of: bytes) { _, value in animate(to: Double(value), fromZero: false) }
+            .accessibilityLabel(ByteFormat.string(bytes))
+    }
+
+    private func animate(to value: Double, fromZero: Bool) {
+        guard let animation = AppMotion.resolved(.data, reduceMotion: reduceMotion) else {
+            shown = value
+            return
+        }
+        if fromZero { shown = 0 }
+        withAnimation(animation) { shown = value }
+    }
+}
+
+private struct ByteCountText: View, @preconcurrency Animatable {
+    var value: Double
+
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+
+    var body: some View {
+        Text(ByteFormat.string(Int64(max(0, value.rounded()))))
+            .monospacedDigit()
     }
 }

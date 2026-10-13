@@ -1,2 +1,4 @@
 "CFBundleDisplayName" = "存储清理助手";
 "CFBundleName" = "存储清理助手";
+"NSAppBundlesUsageDescription" = "仅在您确认卸载时，请求管理所选应用的安装包，以安全移入废纸篓。";
+"NSPhotoLibraryUsageDescription" = "仅读取照片元数据和本地小缩略图以查找重复或相似照片。读写权限仅用于创建待删除相册和加入您选中的照片；不删除、不上传、不下载云端原图。";

@@ -178,8 +178,19 @@ enum MSeriesKernelError: Error { case allocation, invalidOutput, invalidTiming, 
 final class MSeriesCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var requested = false
-    func cancel() { lock.withLock { requested = true } }
+    private var firstRequestNanoseconds: UInt64?
+    private var firstRequestDate: Date?
+    private let clock: @Sendable () -> UInt64
+    init(clock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) { self.clock = clock }
+    func cancel() {
+        lock.withLock {
+            if !requested { firstRequestNanoseconds = clock(); firstRequestDate = Date() }
+            requested = true
+        }
+    }
     var isCancelled: Bool { lock.withLock { requested } }
+    var requestedAtNanoseconds: UInt64? { lock.withLock { firstRequestNanoseconds } }
+    var requestedAt: Date? { lock.withLock { firstRequestDate } }
     func check() throws {
         if isCancelled { throw CancellationError() }
         if ProcessInfo.processInfo.thermalState == .serious || ProcessInfo.processInfo.thermalState == .critical {

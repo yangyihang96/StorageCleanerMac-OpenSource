@@ -35,7 +35,7 @@ final class MiniWindowSinglePageTests: XCTestCase {
             available: CGSize(width: 312, height: 599)), 1)
     }
 
-    func testScreenConstrainedPageRendersBothEndsWithoutScrollViews() async throws {
+    func testScreenConstrainedPageKeepsReadableBookendsReachableByScrolling() async throws {
         let natural = CGSize(width: 312, height: 900)
         let available = CGSize(width: 312, height: 480)
         let host = NSHostingView(rootView: MiniWindowFittedPage(contentSize: natural, availableSize: available) {
@@ -70,28 +70,26 @@ final class MiniWindowSinglePageTests: XCTestCase {
     }
 
     private func checkBothEnds(in host: NSView) async throws {
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
         for _ in 0..<20 {
             host.layoutSubtreeIfNeeded()
             host.displayIfNeeded()
             try await Task.sleep(for: .milliseconds(10))
         }
-        func hasScrollView(_ view: NSView) -> Bool {
-            view is NSScrollView || view.subviews.contains(where: hasScrollView)
+        func findScrollView(_ view: NSView) -> NSScrollView? {
+            (view as? NSScrollView) ?? view.subviews.compactMap(findScrollView).first
         }
-        XCTAssertFalse(hasScrollView(host))
-        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-        host.cacheDisplay(in: host.bounds, to: bitmap)
-        var redRows: [Int] = []
-        var blueRows: [Int] = []
-        for y in 0..<bitmap.pixelsHigh {
-            guard let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: y)?.usingColorSpace(.deviceRGB) else { continue }
-            if color.redComponent > 0.7 && color.blueComponent < 0.3 { redRows.append(y) }
-            if color.blueComponent > 0.7 && color.redComponent < 0.3 { blueRows.append(y) }
-        }
-        XCTAssertFalse(redRows.isEmpty, "The first row must remain visible")
-        XCTAssertFalse(blueRows.isEmpty, "The last row must remain visible")
-        let extremes = redRows + blueRows
-        XCTAssertLessThan(try XCTUnwrap(extremes.min()), 4)
-        XCTAssertGreaterThan(try XCTUnwrap(extremes.max()), bitmap.pixelsHigh - 4)
+        let scroll = try XCTUnwrap(findScrollView(host))
+        let document = try XCTUnwrap(scroll.documentView)
+        XCTAssertGreaterThanOrEqual(document.frame.height, 899, "Preserve natural height instead of scaling")
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        XCTAssertEqual(scroll.contentView.bounds.minY, 0, accuracy: 1)
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: document.frame.height - scroll.contentSize.height))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        XCTAssertGreaterThanOrEqual(scroll.contentView.bounds.maxY, document.frame.height - 1, "Last row remains reachable")
     }
 }

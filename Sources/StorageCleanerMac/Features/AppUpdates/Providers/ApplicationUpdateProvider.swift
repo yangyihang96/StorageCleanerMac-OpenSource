@@ -48,12 +48,8 @@ struct ApplicationUpdateProviderRegistry: Sendable {
             MacAppStoreProvider(),
             HomebrewProvider(),
             SparkleProvider(),
-            OfficialWebsiteUpdateProvider(),
-            // Vendor updaters (Keystone, Squirrel) rank below every source
-            // this app can verify itself, but above the unconfirmed fallback:
-            // an app that maintains itself deserves an in-app guidance path,
-            // not the "source unconfirmed" dead end.
             VendorUpdaterProvider(),
+            OfficialWebsiteUpdateProvider(),
             ManualUpdateProvider(),
         ]
     }
@@ -63,43 +59,13 @@ struct ApplicationUpdateProviderRegistry: Sendable {
             return SystemManagedProvider()
         }
         for provider in providers where await provider.canHandle(application) {
-            // A signed/registry-verified installer is stronger evidence than a
-            // generic Sparkle declaration.  Sparkle only proves that the app
-            // exposes an in-app updater; if the same bundle is also bound to a
-            // verified external DMG, prefer the provider that can complete the
-            // identity/signature/version verification in this process.
+            // Prefer a verified installer only when Sparkle cannot execute.
             if provider.identifier == .sparkle,
-               let officialProvider = providers.first(where: {
-                   $0.identifier == .officialWebsite
-               }),
-               await officialProvider.canHandle(application),
-               let officialSource = try? await officialProvider.inspect(application),
-               officialSource.providerIdentifier == .officialWebsite,
-               officialSource.canAutomaticallyUpdate {
-                return officialProvider
-            }
-            guard provider.identifier == .homebrew,
-                  let metadata = application.homebrewMetadata,
-                  let homebrewSource = try? await provider.inspect(application),
-                  let officialProvider = providers.first(where: {
-                      $0.identifier == .officialWebsite
-                  }),
-                  await officialProvider.canHandle(application),
-                  let officialSource = try? await officialProvider.inspect(application),
-                  officialSource.providerIdentifier == .officialWebsite,
-                  officialSource.canAutomaticallyUpdate else {
-                return provider
-            }
-            // Homebrew's `auto_updates` flag means the cask normally owns its
-            // updater. If a separately verified official DMG is available,
-            // prefer that stronger identity-bound path (CC Switch/draw.io).
-            // Ordinary strict Homebrew casks keep their existing priority.
-            guard metadata.autoUpdates || !homebrewSource.canAutomaticallyUpdate else {
-                return provider
-            }
-            // A Homebrew cask that delegates updates upstream must not hide a
-            // separately verified official DMG capable of the full safe path.
-            return officialProvider
+               (try? await provider.inspect(application))?.canAutomaticallyUpdate != true,
+               let official = providers.first(where: { $0.identifier == .officialWebsite }),
+               await official.canHandle(application), (try? await official.inspect(application))?.canAutomaticallyUpdate == true { return official }
+            // Homebrew owns all its packages, including self-updating casks.
+            return provider
         }
         return ManualUpdateProvider()
     }
@@ -162,6 +128,12 @@ struct ApplicationUpdateProviderRegistry: Sendable {
             classified.updateStatus = check.status
             classified.updateError = check.warning
             classified.versionCheckState = versionCheckState(for: check)
+            if provider.identifier == .vendorUpdater, sourceInfo.canAutomaticallyUpdate,
+               check.status == .automaticallyUpdatable, classified.sourceEvidence.contains("vendor-official-cli") {
+                // A vendor CLI can check and install without publishing a target
+                // version. Do not fabricate one; completion still needs readback.
+                classified.versionCheckState = .updateAvailable
+            }
             if provider.identifier == .macAppStore {
                 let isAutomatic = sourceInfo.canAutomaticallyUpdate
                     && check.status == .automaticallyUpdatable
@@ -169,6 +141,25 @@ struct ApplicationUpdateProviderRegistry: Sendable {
                 classified.canAutomaticallyUpdate = isAutomatic
                 classified.requiresUserInteraction = !isAutomatic
                 applySourcePresentation(to: &classified)
+            }
+            if classified.canAutomaticallyUpdate {
+                classified.requiresApplicationQuit = classified.isRunning && classified.packageKind == .graphicalApplication
+                classified.requiresAdministratorAuthorization = classified.homebrewMetadata?.needsAdministrator == true
+                    || provider.identifier == .macAppStore
+                    || (classified.packageKind == .graphicalApplication && [.sparkle, .officialWebsite].contains(provider.identifier)
+                        && !FileManager.default.isWritableFile(atPath: classified.bundleURL.deletingLastPathComponent().path))
+            }
+            if classified.canAutomaticallyUpdate, classified.requiresAdministratorAuthorization,
+               [.sparkle, .officialWebsite].contains(provider.identifier),
+               !AppUpdateProtectedReplacementPolicy.accepts(classified) {
+                classified.canAutomaticallyUpdate = false
+                classified.updateCapability = .inApplication
+                classified.updateError = L10n.text("辅助程序仅支持 /Applications 顶层应用，请打开应用内更新", "The helper supports only top-level /Applications apps; open in-app updates")
+            }
+            if [.sparkle, .vendorUpdater].contains(provider.identifier), check.status != .automaticallyUpdatable {
+                classified.canAutomaticallyUpdate = false
+                classified.updateCapability = .inApplication
+                classified.requiresUserInteraction = true
             }
         } catch is CancellationError {
             classified.versionCheckState = .notChecked
@@ -179,6 +170,11 @@ struct ApplicationUpdateProviderRegistry: Sendable {
             classified.versionCheckState = .failed
             classified.updateStatus = .failed
             classified.updateError = error.localizedDescription
+            if [.sparkle, .vendorUpdater].contains(provider.identifier) {
+                classified.canAutomaticallyUpdate = false
+                classified.updateCapability = .inApplication
+                classified.requiresUserInteraction = true
+            }
         }
         return classified
     }
@@ -193,10 +189,10 @@ struct ApplicationUpdateProviderRegistry: Sendable {
         case .macAppStore:
             return sourceInfo.canAutomaticallyUpdate ? .automatic : .appStoreManaged
         case .homebrew: return sourceInfo.canAutomaticallyUpdate ? .automatic : .manual
-        case .sparkle: return .inApplication
+        case .sparkle: return sourceInfo.canAutomaticallyUpdate ? .automatic : .inApplication
         case .officialWebsite:
             return sourceInfo.canAutomaticallyUpdate ? .automatic : .websiteGuided
-        case .vendorUpdater: return .inApplication
+        case .vendorUpdater: return sourceInfo.canAutomaticallyUpdate ? .automatic : .inApplication
         case .manual: return application.officialSource == nil ? .unavailable : .websiteGuided
         }
     }
@@ -265,13 +261,11 @@ struct ApplicationUpdateProviderRegistry: Sendable {
         case .sparkle:
             application.installationSource = .sparkle
             application.sourceDisplayName = "Sparkle"
-            application.canAutomaticallyUpdate = false
-            application.updateCapability = .inApplication
+
         case .vendorUpdater:
             application.installationSource = .vendor
             application.sourceDisplayName = L10n.text("厂商更新器", "Vendor Updater")
-            application.canAutomaticallyUpdate = false
-            application.updateCapability = .inApplication
+
         case .officialWebsite:
             application.installationSource = .officialWebsite
             application.sourceDisplayName = application.officialSource?.displayHost

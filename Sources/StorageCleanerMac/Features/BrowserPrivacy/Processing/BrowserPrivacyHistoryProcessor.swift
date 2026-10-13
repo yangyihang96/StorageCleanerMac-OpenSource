@@ -69,6 +69,7 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
     private struct GroupKey: Hashable, Sendable {
         let browserID: String
         let profileID: String
+        let isDirectlyDeletable: Bool
     }
 
     private struct ChromiumFixtureVisit {
@@ -89,9 +90,100 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         let lastVisitTime: Int64
     }
 
+    /// The state the database must be in after the transaction. It is
+    /// computed before the first write, checked before COMMIT, and checked
+    /// once more on a fresh read-only connection.
+    private struct ChromiumMutationExpectation {
+        let deletedVisitIDs: [Int64]
+        /// URLs that keep at least one visit: counters follow Chromium.
+        var updatedURLs: [ChromiumFixtureURLInvariant] = []
+        /// URLs left without any visit: the row and its dependents go.
+        var deletedURLIDs: [Int64] = []
+        var deletedSegmentIDs: [Int64] = []
+        var remainingVisitedLinkCounts: [Int64: Int64] = [:]
+        var deletedVisitedLinkIDs: [Int64] = []
+        var emptiedClusterIDs: [Int64] = []
+    }
+
     private enum MutationVerification {
         case visitRowsOnly
-        case chromiumV70([ChromiumFixtureURLInvariant])
+        case chromiumV70(ChromiumMutationExpectation)
+    }
+
+    /// A prepared statement that is rebound for each row of a batch, so a
+    /// large selection does not re-parse the same SQL thousands of times.
+    private final class ReusableStatement {
+        private let handle: OpaquePointer
+        private let control: SQLiteExecutionControl
+        private let busyDeadline: UInt64
+
+        init(
+            _ sql: String,
+            database: OpaquePointer,
+            control: SQLiteExecutionControl,
+            busyDeadline: UInt64
+        ) throws {
+            handle = try SQLiteRuntime.prepare(
+                sql,
+                database: database,
+                control: control,
+                busyDeadlineNanoseconds: busyDeadline
+            )
+            self.control = control
+            self.busyDeadline = busyDeadline
+        }
+
+        deinit {
+            sqlite3_finalize(handle)
+        }
+
+        private func bind(_ values: [Int64]) throws {
+            sqlite3_reset(handle)
+            for (index, value) in values.enumerated() {
+                guard sqlite3_bind_int64(handle, Int32(index + 1), value) == SQLITE_OK else {
+                    throw SQLiteSnapshotFailure.malformedSchema
+                }
+            }
+        }
+
+        /// Runs a write to completion.
+        func run(_ values: [Int64]) throws {
+            try bind(values)
+            defer { sqlite3_reset(handle) }
+            guard try SQLiteRuntime.step(
+                handle,
+                control: control,
+                busyDeadlineNanoseconds: busyDeadline
+            ) == SQLITE_DONE else {
+                throw SQLiteSnapshotFailure.unavailable
+            }
+        }
+
+        /// Visits result rows until `body` returns false.
+        func forEachRow(
+            _ values: [Int64],
+            _ body: (OpaquePointer) -> Bool
+        ) throws {
+            try bind(values)
+            defer { sqlite3_reset(handle) }
+            while try SQLiteRuntime.step(
+                handle,
+                control: control,
+                busyDeadlineNanoseconds: busyDeadline
+            ) == SQLITE_ROW {
+                guard body(handle) else { return }
+            }
+        }
+
+        /// The first column of every result row.
+        func integers(_ values: [Int64]) throws -> [Int64] {
+            var result: [Int64] = []
+            try forEachRow(values) { statement in
+                result.append(sqlite3_column_int64(statement, 0))
+                return true
+            }
+            return result
+        }
     }
 
     private let registry: BrowserPrivacyProviderRegistry
@@ -103,6 +195,10 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
     /// Test-only state injection point for exercising the committed-but-
     /// unverified branch. Production callers leave it nil.
     private let beforeReadBackHook: (@Sendable () -> Void)?
+    /// Test-only: runs inside the write transaction, right after BEGIN, so a
+    /// test can expire the deadline or raise an unexpected error there.
+    /// Production callers leave it nil.
+    private let inTransactionHook: (@Sendable (SQLiteExecutionControl) throws -> Void)?
 
     init(
         registry: BrowserPrivacyProviderRegistry = BrowserPrivacyProviderRegistry(),
@@ -111,7 +207,8 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         busyRetrySeconds: TimeInterval = 2,
         operationTimeoutSeconds: TimeInterval = 15,
-        beforeReadBackHook: (@Sendable () -> Void)? = nil
+        beforeReadBackHook: (@Sendable () -> Void)? = nil,
+        inTransactionHook: (@Sendable (SQLiteExecutionControl) throws -> Void)? = nil
     ) {
         self.registry = registry
         self.runningApplicationChecker = runningApplicationChecker
@@ -120,13 +217,21 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         self.busyRetrySeconds = Self.clampedSeconds(busyRetrySeconds, upperBound: 2)
         self.operationTimeoutSeconds = Self.clampedSeconds(operationTimeoutSeconds, upperBound: 15)
         self.beforeReadBackHook = beforeReadBackHook
+        self.inTransactionHook = inTransactionHook
     }
 
     func process(records: [BrowserPrivacyRecord]) async -> BrowserPrivacyProcessingReport {
         let uniqueRecords = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             .values
+        // Records without a locator can only be handled in the browser. They
+        // form their own group, so they do not hold back the records of the
+        // same profile that can be deleted directly.
         let grouped = Dictionary(grouping: uniqueRecords) {
-            GroupKey(browserID: $0.browser.id, profileID: $0.profileID)
+            GroupKey(
+                browserID: $0.browser.id,
+                profileID: $0.profileID,
+                isDirectlyDeletable: $0.locator != nil
+            )
         }
         var entries: [BrowserPrivacyProcessingEntry] = []
         entries.reserveCapacity(grouped.count)
@@ -137,7 +242,7 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                     records: records,
                     capability: .verifiedVisitDeletion,
                     outcome: .failed,
-                    detail: "Processing was cancelled before this profile was changed."
+                    reason: .cancelled
                 ))
                 continue
             }
@@ -163,36 +268,22 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                 records: records,
                 capability: .unsupported,
                 outcome: .unsupported,
-                detail: "The scan provider is no longer registered; no database was changed."
+                reason: .providerUnavailable
             )
         }
         guard let adapter = provider.historyWriteAdapter else {
-            return Self.entry(
-                records: records,
-                capability: .manualBrowserGuidance,
-                outcome: .manual,
-                detail: BrowserPrivacySQLiteWriteAdapter.manualGuidanceReason(
-                    for: first.browser.engine
-                )
-            )
+            return Self.manualEntry(records: records)
         }
         guard !provider.descriptor.bundleIdentifiers.isEmpty else {
             return Self.entry(
                 records: records,
                 capability: .unsupported,
                 outcome: .unsupported,
-                detail: "The browser process cannot be identified safely; no database was changed."
+                reason: .browserProcessUnknown
             )
         }
         guard records.allSatisfy({ $0.locator != nil }) else {
-            return Self.entry(
-                records: records,
-                capability: .manualBrowserGuidance,
-                outcome: .manual,
-                detail: BrowserPrivacySQLiteWriteAdapter.manualGuidanceReason(
-                    for: first.browser.engine
-                )
-            )
+            return Self.manualEntry(records: records)
         }
         guard adapter.engine == first.browser.engine,
               (adapter == BrowserPrivacySQLiteWriteAdapter.verified(for: adapter.engine)
@@ -208,7 +299,7 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                 records: records,
                 capability: .unsupported,
                 outcome: .unsupported,
-                detail: "The selected rows do not share one trusted scan-time database identity."
+                reason: .selectionNotTrusted
             )
         }
 
@@ -220,7 +311,7 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                 records: records,
                 capability: .verifiedVisitDeletion,
                 outcome: .failed,
-                detail: "Quit \(first.browser.displayName) normally, then try again. The browser is still running."
+                reason: .browserRunning
             )
         }
 
@@ -256,16 +347,21 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                     adapter: adapter,
                     busyRetrySeconds: busySeconds,
                     operationTimeoutSeconds: timeoutSeconds,
-                    beforeReadBackHook: self.beforeReadBackHook
+                    beforeReadBackHook: self.beforeReadBackHook,
+                    inTransactionHook: self.inTransactionHook
                 )
             }.value
+            await backupService.annotate(
+                backup,
+                summary: Self.recoverySummary(records: records, locators: locators, outcome: .deleted)
+            )
             return Self.entry(
                 records: records,
                 capability: .verifiedVisitDeletion,
                 outcome: .deleted,
                 verifiedDeletedRecordIDs: Set(records.map(\.id)),
                 recoveryBackupID: backup.id,
-                detail: "The selected visit rows were deleted and confirmed absent by a new read-only check."
+                reason: .deletedAndVerified
             )
         } catch let failure as BrowserPrivacyHistoryProcessingFailure {
             if failure == .rollbackFailed, let recoveryBackup {
@@ -280,20 +376,36 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                         schema: adapter.schema,
                         deadlineNanoseconds: restoreDeadline
                     )
+                    await backupService.annotate(
+                        recoveryBackup,
+                        summary: Self.recoverySummary(
+                            records: records,
+                            locators: locators,
+                            outcome: .restoredAfterFailure
+                        )
+                    )
                     return Self.entry(
                         records: records,
                         capability: .verifiedVisitDeletion,
                         outcome: .failed,
                         recoveryBackupID: recoveryBackup.id,
-                        detail: "SQLite rollback could not be confirmed, so the verified recovery backup was restored. No deletion is reported."
+                        reason: .restoredFromBackup
                     )
                 } catch {
+                    await backupService.annotate(
+                        recoveryBackup,
+                        summary: Self.recoverySummary(
+                            records: records,
+                            locators: locators,
+                            outcome: .restoreUnconfirmed
+                        )
+                    )
                     return Self.entry(
                         records: records,
                         capability: .verifiedVisitDeletion,
                         outcome: .indeterminate,
                         recoveryBackupID: recoveryBackup.id,
-                        detail: "SQLite rollback and automatic recovery could not be confirmed. Stop processing and keep the recovery backup."
+                        reason: .restoreUnconfirmed
                     )
                 }
             }
@@ -306,31 +418,277 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
             } else {
                 .failed
             }
+            // Only a committed change keeps its backup. Every other failure
+            // here was rolled back or never started, so the copy of the
+            // whole history would serve no purpose and is removed.
+            var keptBackupID: UUID?
+            if let recoveryBackup {
+                if failure.isIndeterminate {
+                    await backupService.annotate(
+                        recoveryBackup,
+                        summary: Self.recoverySummary(
+                            records: records,
+                            locators: locators,
+                            outcome: .unverified
+                        )
+                    )
+                    keptBackupID = recoveryBackup.id
+                } else {
+                    await backupService.discard(recoveryBackup)
+                }
+            }
             return Self.entry(
                 records: records,
                 capability: failure.requiresManualHandling
                     ? .manualBrowserGuidance
                     : (failure.isUnsupported ? .unsupported : .verifiedVisitDeletion),
                 outcome: outcome,
-                recoveryBackupID: recoveryBackup?.id,
-                detail: failure.detail
+                recoveryBackupID: keptBackupID,
+                reason: failure.reason
+            )
+        } catch let failure as BrowserPrivacyBackupStorageFailure {
+            // The backup folder could not be written; nothing is changed
+            // without a backup.
+            return Self.entry(
+                records: records,
+                capability: .verifiedVisitDeletion,
+                outcome: .failed,
+                reason: failure.rootIsSymbolicLink ? .backupLocationUnsafe
+                    : (failure.timeMachineExclusionFailed ? .backupExclusionFailed : .backupFailed)
             )
         } catch let failure as SQLiteSnapshotFailure {
+            // The transaction was rolled back or never opened.
+            if let recoveryBackup {
+                await backupService.discard(recoveryBackup)
+            }
             return Self.entry(
                 records: records,
                 capability: .verifiedVisitDeletion,
                 outcome: .failed,
-                recoveryBackupID: recoveryBackup?.id,
-                detail: Self.detail(for: failure)
+                reason: Self.reason(for: failure)
             )
         } catch {
+            // No failure this code plans for. Once the backup exists it is
+            // not known whether the database changed, so the backup is kept
+            // and described like any other.
+            guard let recoveryBackup else {
+                return Self.entry(
+                    records: records,
+                    capability: .verifiedVisitDeletion,
+                    outcome: .failed,
+                    reason: .unexpectedErrorBeforeChanges
+                )
+            }
+            await backupService.annotate(
+                recoveryBackup,
+                summary: Self.recoverySummary(
+                    records: records,
+                    locators: locators,
+                    outcome: .unexpectedError
+                )
+            )
             return Self.entry(
                 records: records,
                 capability: .verifiedVisitDeletion,
                 outcome: .failed,
-                recoveryBackupID: recoveryBackup?.id,
-                detail: "The transaction failed and was rolled back; no deletion was confirmed."
+                recoveryBackupID: recoveryBackup.id,
+                reason: .unexpectedError
             )
+        }
+    }
+
+    /// Puts a browser's history database back to the state saved in
+    /// `entry`. Everything visited after that backup is lost and everything
+    /// deleted after it comes back, so the caller confirms with the user
+    /// first. The current state is backed up before anything is written, so
+    /// the restore itself can be undone from Recent Deletions.
+    ///
+    /// The destination is never taken from the backup's metadata: it is the
+    /// profile the registry discovers now whose identifier matches the
+    /// backup, under the same trust rules as a deletion. The browser must
+    /// have quit and the database must have no unmerged writes.
+    func restore(
+        _ entry: BrowserPrivacyRecoveryEntry,
+        installedApplications: [BrowserPrivacyInstalledApplication]? = nil
+    ) async -> BrowserPrivacyRestoreResult {
+        guard let provider = registry.provider(id: entry.browserID),
+              let adapter = provider.historyWriteAdapter,
+              !provider.descriptor.bundleIdentifiers.isEmpty else {
+            return .init(reason: .profileUnavailable, browserName: entry.summary?.browserDisplayName)
+        }
+        let browserName = provider.descriptor.displayName
+        let applications: [BrowserPrivacyInstalledApplication]
+        if let installedApplications {
+            applications = installedApplications
+        } else {
+            applications = await BrowserPrivacyApplicationLocator
+                .discoverWithSigningIdentity(homeDirectory: homeDirectory)
+        }
+        let profiles = provider.discoverProfiles(
+            homeDirectory: homeDirectory,
+            installedApplications: applications
+        ).profiles
+        guard let profile = profiles.first(where: {
+            BrowserPrivacyRecoveryBackupService.profileFingerprint(for: $0.id) == entry.profileFingerprint
+        }) else {
+            return .init(reason: .profileUnavailable, browserName: browserName)
+        }
+        let trustedRoot = adapter == .chromiumProduction
+            ? provider.descriptor.productionWriteRoot(
+                browser: profile.browser,
+                homeDirectory: homeDirectory,
+                databaseURL: profile.historyDatabaseURL,
+                profileParentURL: profile.sourceTrustedParentURL
+            )
+            : profile.sourceTrustedParentURL
+        guard let trustedRoot else {
+            return .init(reason: .profileUnavailable, browserName: browserName)
+        }
+
+        let runningBundleIDs = await runningApplicationChecker.runningBundleIdentifiers(
+            matching: Set(provider.descriptor.bundleIdentifiers)
+        )
+        guard runningBundleIDs.isEmpty else {
+            return .init(reason: .browserRunning, browserName: browserName)
+        }
+
+        let destination = SQLiteSnapshotSource(
+            databaseURL: profile.historyDatabaseURL,
+            trustedParentURL: trustedRoot
+        )
+        let restoreLease: BrowserPrivacyRecoveryLease?
+        do {
+            restoreLease = try backupService.beginRestoring(entry.backup)
+        } catch {
+            let reason: BrowserPrivacyRestoreReason
+            if error is BrowserPrivacyBackupStorageFailure {
+                reason = .currentStateNotSaved
+            } else {
+                reason = Self.sourceBackupReason(for: error)
+            }
+            return .init(reason: reason, browserName: browserName)
+        }
+        // Keep the source protected across every suspension, undo-backup
+        // annotation, and final metadata write, including failed restores.
+        defer { withExtendedLifetime(restoreLease) {} }
+        let undoBackup: BrowserPrivacyRecoveryBackup
+        do {
+            try Self.validateSQLiteSidecars(
+                databaseURL: profile.historyDatabaseURL,
+                trustedParentURL: trustedRoot,
+                adapter: adapter
+            )
+            undoBackup = try await backupService.backup(
+                source: destination,
+                schema: adapter.schema,
+                browserID: entry.browserID,
+                profileID: profile.id,
+                deadlineNanoseconds: Self.addingClamped(
+                    MonotonicClock.now,
+                    Self.nanoseconds(seconds: operationTimeoutSeconds)
+                )
+            )
+        } catch {
+            // Nothing was written. These errors concern the current database
+            // or the recovery folder, never the backup being restored.
+            let reason: BrowserPrivacyRestoreReason = switch error {
+            case BrowserPrivacyHistoryProcessingFailure.productionSidecarPresent: .pendingWrites
+            case SQLiteSnapshotFailure.busy: .databaseBusy
+            case SQLiteSnapshotFailure.permissionDenied: .permissionDenied
+            case SQLiteSnapshotFailure.unavailable: .databaseChanged
+            case SQLiteSnapshotFailure.timedOut: .timedOut
+            case SQLiteSnapshotFailure.cancelled: .cancelled
+            default: .currentStateNotSaved
+            }
+            return .init(reason: reason, browserName: browserName)
+        }
+        let savedState = BrowserPrivacyRecoverySummary(
+            browserDisplayName: browserName,
+            profileDisplayName: profile.displayName,
+            visitCount: nil,
+            pageCount: nil,
+            outcome: .savedBeforeRestore
+        )
+
+        let stampBefore = try? SecureSourceFile.contentStamp(at: profile.historyDatabaseURL)
+        var databaseRestored = false
+        do {
+            try await backupService.restore(
+                entry.backup,
+                destination: destination,
+                schema: adapter.schema,
+                deadlineNanoseconds: Self.addingClamped(
+                    MonotonicClock.now,
+                    Self.nanoseconds(seconds: operationTimeoutSeconds)
+                )
+            )
+            databaseRestored = true
+            try backupService.finishRestoring(entry.backup)
+        } catch {
+            // A final marker failure happens after the database copy. It is
+            // neither an undo-backup failure nor a browser write-permission error.
+            let reason: BrowserPrivacyRestoreReason = databaseRestored
+                ? .restoreResultNotSaved : Self.restoreReason(for: error)
+            // SQLite's backup API commits the copy at once or not at all, but
+            // the checks after it can still fail. If the file was touched at
+            // all, keep the saved state so the user can go back to it.
+            let stampAfter = try? SecureSourceFile.contentStamp(at: profile.historyDatabaseURL)
+            guard stampBefore == nil || stampAfter != stampBefore else {
+                await backupService.discard(undoBackup)
+                return .init(reason: reason, browserName: browserName)
+            }
+            // Describing the saved state applies the count limit; the backup
+            // being restored must not be the one that makes room for it.
+            await backupService.annotate(undoBackup, summary: savedState, sparing: [entry.id])
+            return .init(
+                reason: reason,
+                browserName: browserName,
+                undoBackupID: undoBackup.id,
+                historyMayHaveChanged: true
+            )
+        }
+        await backupService.annotate(undoBackup, summary: savedState, sparing: [entry.id])
+        return .init(
+            reason: .restored,
+            browserName: browserName,
+            undoBackupID: undoBackup.id,
+            historyMayHaveChanged: true
+        )
+    }
+
+    private static func restoreReason(for error: any Error) -> BrowserPrivacyRestoreReason {
+        switch error {
+        case let SQLitePersistentBackupFailure.sourceRead(failure):
+            sourceBackupReason(for: failure)
+        case BrowserPrivacyHistoryProcessingFailure.identityChanged:
+            .databaseChanged
+        case let failure as SQLiteSnapshotFailure:
+            switch failure {
+            case .busy: .databaseBusy
+            case .permissionDenied: .permissionDenied
+            // Source validation has its own wrapper. An unclassified copy
+            // failure must not claim that a validated backup is damaged.
+            case .corrupt, .malformedSchema: .failed
+            case .sizeLimitExceeded: .backupTooLarge
+            case .timedOut: .timedOut
+            case .cancelled: .cancelled
+            case .unavailable: .databaseChanged
+            }
+        default:
+            .failed
+        }
+    }
+
+    private static func sourceBackupReason(for error: any Error) -> BrowserPrivacyRestoreReason {
+        switch error {
+        case SQLiteSnapshotFailure.busy: .backupInUse
+        case SQLiteSnapshotFailure.sizeLimitExceeded: .backupTooLarge
+        case SQLiteSnapshotFailure.timedOut: .timedOut
+        case SQLiteSnapshotFailure.cancelled: .cancelled
+        case SQLiteSnapshotFailure.unavailable, SQLiteSnapshotFailure.permissionDenied,
+             SQLiteSnapshotFailure.corrupt, SQLiteSnapshotFailure.malformedSchema:
+            .backupUnavailable
+        default: .failed
         }
     }
 
@@ -384,7 +742,8 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         adapter: BrowserPrivacySQLiteWriteAdapter,
         busyRetrySeconds: TimeInterval,
         operationTimeoutSeconds: TimeInterval,
-        beforeReadBackHook: (@Sendable () -> Void)?
+        beforeReadBackHook: (@Sendable () -> Void)?,
+        inTransactionHook: (@Sendable (SQLiteExecutionControl) throws -> Void)?
     ) throws {
         guard let locator = locators.first else { return }
         let deadline = addingClamped(
@@ -431,7 +790,8 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
             canonicalDatabaseURL: canonicalDatabaseURL,
             expectedIdentity: expectedIdentity,
             control: control,
-            busyDeadline: busyDeadline
+            busyDeadline: busyDeadline,
+            inTransactionHook: inTransactionHook
         )
 
         // A browser can change the file again after our commit. The hook is
@@ -463,7 +823,8 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         canonicalDatabaseURL: URL,
         expectedIdentity: [BrowserPrivacyPathIdentity],
         control: SQLiteExecutionControl,
-        busyDeadline: UInt64
+        busyDeadline: UInt64,
+        inTransactionHook: (@Sendable (SQLiteExecutionControl) throws -> Void)?
     ) throws -> MutationVerification {
         guard let locator = locators.first else { return .visitRowsOnly }
         return try SQLiteRuntime.withWritableDatabase(
@@ -511,6 +872,7 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                     busyDeadline: busyDeadline
                 )
                 transactionOpen = true
+                try inTransactionHook?(control)
                 for rowLocator in locators {
                     guard try rowExists(
                         rowID: rowLocator.visitRowID,
@@ -618,21 +980,23 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                 transactionOpen = false
                 return verification
             } catch {
-                if transactionOpen {
-                    do {
-                        try execute(
-                            "ROLLBACK",
-                            database: database,
-                            control: control,
-                            busyDeadline: busyDeadline
-                        )
-                    } catch {
-                        throw BrowserPrivacyHistoryProcessingFailure.rollbackFailed
-                    }
+                if transactionOpen, !rollBack(database) {
+                    throw BrowserPrivacyHistoryProcessingFailure.rollbackFailed
                 }
                 throw error
             }
         }
+    }
+
+    /// Ends the open write transaction. It runs exactly when the operation's
+    /// deadline has passed or it was cancelled, so it bypasses the execution
+    /// control and removes the progress handler that would interrupt it.
+    private static func rollBack(_ database: OpaquePointer) -> Bool {
+        sqlite3_progress_handler(database, 0, nil, nil)
+        let result = sqlite3_exec(database, "ROLLBACK", nil, nil, nil)
+        // SQLite rolls back by itself after some I/O errors; autocommit mode
+        // confirms that no transaction is left open either way.
+        return result == SQLITE_OK || sqlite3_get_autocommit(database) != 0
     }
 
     private static func requireSQLiteIntegrity(
@@ -754,14 +1118,35 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         }
     }
 
+    /// Removes the selected visits the way Chromium's own history deletion
+    /// does (`ExpireHistoryBackend` / `VisitDatabase::DeleteVisit` /
+    /// `DeleteAnnotationsForVisit` / `DeleteOneURL`):
+    ///
+    /// - visits that were reached from a deleted visit inherit its referrer;
+    /// - the visit's source, annotation, cluster and duplicate rows go with it;
+    /// - a visited-link row loses one count per deleted visit and is removed
+    ///   when none is left;
+    /// - a URL that keeps visits gets its counters and last-visit time
+    ///   adjusted; a URL left without visits is removed together with its
+    ///   search terms and segments.
+    ///
+    /// Everything that cannot be handled consistently is refused before the
+    /// first write.
     private static func mutateChromiumV70(
         locators: [BrowserPrivacyRecordLocator],
         adapter: BrowserPrivacySQLiteWriteAdapter,
         database: OpaquePointer,
         control: SQLiteExecutionControl,
         busyDeadline: UInt64
-    ) throws -> [ChromiumFixtureURLInvariant] {
-        for table in adapter.schema.requiredTables.map(\.name) {
+    ) throws -> ChromiumMutationExpectation {
+        let isProduction = adapter.mutationPlan == .chromiumProduction
+        let optionalTables = try existingOptionalTables(
+            adapter: adapter,
+            database: database,
+            control: control,
+            busyDeadline: busyDeadline
+        )
+        for table in adapter.schema.requiredTables.map(\.name) + optionalTables {
             try requireNoTriggers(
                 on: table,
                 database: database,
@@ -770,14 +1155,16 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
             )
         }
         let selectedIDs = Set(locators.map(\.visitRowID))
-        let identifierList = selectedIDs.sorted().map(String.init).joined(separator: ",")
-        if adapter.mutationPlan == .chromiumProduction {
-            for sql in [
-                "SELECT 1 FROM clusters_and_visits WHERE visit_id IN (\(identifierList)) LIMIT 1",
-                "SELECT 1 FROM cluster_visit_duplicates WHERE visit_id IN (\(identifierList)) OR duplicate_visit_id IN (\(identifierList)) LIMIT 1",
-                "SELECT 1 FROM visits WHERE rowid NOT IN (\(identifierList)) AND opener_visit IN (\(identifierList)) LIMIT 1",
+        let sortedIDs = selectedIDs.sorted()
+        let chunks = identifierChunks(sortedIDs)
+
+        if isProduction {
+            // A visit that the browser has synced also exists in the account
+            // and on other devices. Removing only the local row would leave
+            // those copies behind, so it has to be deleted in the browser.
+            for chunk in chunks where try hasRows(
                 """
-                SELECT 1 FROM visits WHERE rowid IN (\(identifierList)) AND (
+                SELECT 1 FROM visits WHERE rowid IN (\(chunk)) AND (
                     is_known_to_sync != 0
                     OR COALESCE(originator_cache_guid, '') != ''
                     OR COALESCE(originator_visit_id, 0) != 0
@@ -785,128 +1172,311 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                     OR COALESCE(originator_opener_visit, 0) != 0
                 ) LIMIT 1
                 """,
-            ] where try hasRows(
-                sql,
                 database: database,
                 control: control,
                 busyDeadline: busyDeadline
             ) {
-                throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
+                throw BrowserPrivacyHistoryProcessingFailure.syncedVisits
             }
         }
-        let visits = try chromiumFixtureVisits(
-            identifierList: identifierList,
+
+        var visits: [ChromiumFixtureVisit] = []
+        visits.reserveCapacity(sortedIDs.count)
+        for chunk in chunks {
+            visits.append(contentsOf: try chromiumFixtureVisits(
+                identifierList: chunk,
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            ))
+        }
+        let byID = Dictionary(visits.map { ($0.rowID, $0) }, uniquingKeysWith: { first, _ in first })
+        guard visits.count == selectedIDs.count,
+              locators.allSatisfy({ locator in
+                  byID[locator.visitRowID]?.urlID == locator.parentRowID
+              }) else {
+            throw BrowserPrivacyHistoryProcessingFailure.staleLocator
+        }
+
+        // Chromium: UPDATE visits SET from_visit = <deleted.from_visit>
+        // WHERE from_visit = <deleted.id>. Walking through other selected
+        // visits gives the same result as deleting them one after another.
+        var repairedFromVisits: [(visitID: Int64, referrer: Int64)] = []
+        repairedFromVisits.reserveCapacity(visits.count)
+        for visit in visits {
+            var referrer = visit.fromVisit
+            var seen: Set<Int64> = [visit.rowID]
+            while selectedIDs.contains(referrer) {
+                guard seen.insert(referrer).inserted, let parent = byID[referrer] else {
+                    throw BrowserPrivacyHistoryProcessingFailure.inconsistentDatabase
+                }
+                referrer = parent.fromVisit
+            }
+            repairedFromVisits.append((visit.rowID, referrer))
+        }
+
+        var expectation = ChromiumMutationExpectation(deletedVisitIDs: sortedIDs)
+
+        // URLs: decide per URL whether any visit remains.
+        let visitsByURL = Dictionary(grouping: visits, by: \.urlID)
+        let urlVisits = try ReusableStatement(
+            "SELECT rowid, visit_time FROM visits WHERE url = ?1 ORDER BY visit_time DESC, rowid DESC",
             database: database,
             control: control,
             busyDeadline: busyDeadline
         )
-        let byID = Dictionary(uniqueKeysWithValues: visits.map { ($0.rowID, $0) })
-        guard visits.count == selectedIDs.count,
-              visits.allSatisfy({ $0.visitedLinkID == 0 }),
-              locators.allSatisfy({ locator in
-                  byID[locator.visitRowID]?.urlID == locator.parentRowID
-              }) else {
-            throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
-        }
-        for segmentID in Set(visits.map(\.segmentID)).subtracting([0]) where !(try hasRows(
-            "SELECT 1 FROM segments WHERE id = \(segmentID) LIMIT 1",
+        let urlSegments = try ReusableStatement(
+            "SELECT id FROM segments WHERE url_id = ?1",
             database: database,
             control: control,
             busyDeadline: busyDeadline
-        )) {
-            throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
-        }
-
-        var repairedFromVisits: [Int64: Int64] = [:]
-        for visit in visits {
-            var fromVisit = visit.fromVisit
-            var seen: Set<Int64> = []
-            while selectedIDs.contains(fromVisit) {
-                guard seen.insert(fromVisit).inserted, let parent = byID[fromVisit] else {
-                    throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
-                }
-                fromVisit = parent.fromVisit
+        )
+        for urlID in visitsByURL.keys.sorted() {
+            guard let selectedVisits = visitsByURL[urlID],
+                  let current = try chromiumURLInvariant(
+                      urlID: urlID,
+                      database: database,
+                      control: control,
+                      busyDeadline: busyDeadline
+                  ) else {
+                throw BrowserPrivacyHistoryProcessingFailure.inconsistentDatabase
             }
-            if fromVisit != 0 {
-                guard try rowExists(
-                    rowID: fromVisit,
-                    table: adapter.visitTable,
-                    database: database,
-                    control: control,
-                    busyDeadline: busyDeadline
-                ) else {
-                    throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
-                }
+            var latestRemainingVisitTime: Int64?
+            try urlVisits.forEachRow([urlID]) { statement in
+                if selectedIDs.contains(sqlite3_column_int64(statement, 0)) { return true }
+                latestRemainingVisitTime = sqlite3_column_int64(statement, 1)
+                return false
             }
-            repairedFromVisits[visit.rowID] = fromVisit
-        }
-
-        var invariants: [ChromiumFixtureURLInvariant] = []
-        for (urlID, selectedVisits) in Dictionary(grouping: visits, by: \.urlID) {
-            guard let lastVisitTime = integerScalar(
-                "SELECT MAX(visit_time) FROM visits WHERE url = \(urlID) AND rowid NOT IN (\(identifierList))",
-                database: database,
-                control: control,
-                busyDeadline: busyDeadline
-            ), let current = chromiumURLInvariant(
+            guard let latestRemainingVisitTime else {
+                // No visit is left: Chromium removes the URL row itself.
+                expectation.deletedURLIDs.append(urlID)
+                expectation.deletedSegmentIDs.append(contentsOf: try urlSegments.integers([urlID]))
+                continue
+            }
+            // Must stay in sync with Chromium's AddPageVisit/ExpireURLsForVisits:
+            // a reload (core transition 8) never incremented visit_count, and
+            // both counters are clamped at zero.
+            let visitDecrement = Int64(selectedVisits.count { ($0.transition & 0xff) != 8 })
+            let typedDecrement = Int64(selectedVisits.count(where: \.incrementedOmniboxTypedScore))
+            expectation.updatedURLs.append(ChromiumFixtureURLInvariant(
                 urlID: urlID,
-                database: database,
-                control: control,
-                busyDeadline: busyDeadline
-            ) else {
-                // A last-visit delete is intentionally outside this fixture plan.
-                throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
-            }
-            let visitDecrement = Int64(selectedVisits.filter {
-                ($0.transition & 0xff) != 8
-            }.count)
-            let typedDecrement = Int64(selectedVisits.filter(
-                \.incrementedOmniboxTypedScore
-            ).count)
-            guard current.visitCount >= visitDecrement,
-                  current.typedCount >= typedDecrement else {
-                throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
-            }
-            invariants.append(ChromiumFixtureURLInvariant(
-                urlID: urlID,
-                visitCount: current.visitCount - visitDecrement,
-                typedCount: current.typedCount - typedDecrement,
-                lastVisitTime: lastVisitTime
+                visitCount: max(0, current.visitCount - visitDecrement),
+                typedCount: max(0, current.typedCount - typedDecrement),
+                lastVisitTime: latestRemainingVisitTime
             ))
         }
 
-        for (rowID, fromVisit) in repairedFromVisits {
-            try executeBoundUpdate(
-                "UPDATE visits SET from_visit = ?1 WHERE from_visit = ?2",
-                values: [fromVisit, rowID],
+        // Visited links: one count per deleted visit that went through the link.
+        let linkedVisits = Dictionary(
+            grouping: visits.filter { $0.visitedLinkID != 0 },
+            by: \.visitedLinkID
+        )
+        if !linkedVisits.isEmpty {
+            guard isProduction else {
+                throw BrowserPrivacyHistoryProcessingFailure.unsupportedSchema
+            }
+            let linkRow = try ReusableStatement(
+                "SELECT link_url_id, visit_count FROM visited_links WHERE id = ?1",
                 database: database,
                 control: control,
                 busyDeadline: busyDeadline
             )
-        }
-        try execute("DELETE FROM visit_source WHERE id IN (\(identifierList))", database: database, control: control, busyDeadline: busyDeadline)
-        try execute("DELETE FROM context_annotations WHERE visit_id IN (\(identifierList))", database: database, control: control, busyDeadline: busyDeadline)
-        try execute("DELETE FROM content_annotations WHERE visit_id IN (\(identifierList))", database: database, control: control, busyDeadline: busyDeadline)
-        try execute("DELETE FROM visits WHERE rowid IN (\(identifierList))", database: database, control: control, busyDeadline: busyDeadline)
-        guard sqlite3_changes(database) == selectedIDs.count else {
-            throw BrowserPrivacyHistoryProcessingFailure.missingLocator
-        }
-        for invariant in invariants {
-            try executeBoundUpdate(
-                "UPDATE urls SET visit_count = ?1, typed_count = ?2, last_visit_time = ?3 WHERE id = ?4",
-                values: [
-                    invariant.visitCount, invariant.typedCount,
-                    invariant.lastVisitTime, invariant.urlID,
-                ],
-                database: database,
-                control: control,
-                busyDeadline: busyDeadline
-            )
-            guard sqlite3_changes(database) == 1 else {
-                throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+            for linkID in linkedVisits.keys.sorted() {
+                guard let users = linkedVisits[linkID] else { continue }
+                var row: (urlID: Int64, visitCount: Int64)?
+                try linkRow.forEachRow([linkID]) { statement in
+                    row = (sqlite3_column_int64(statement, 0), sqlite3_column_int64(statement, 1))
+                    return false
+                }
+                // Chromium ignores a visited-link id that has no row.
+                guard let row else { continue }
+                // Only touch a link row that belongs to the URL being deleted.
+                guard users.allSatisfy({ $0.urlID == row.urlID }) else {
+                    throw BrowserPrivacyHistoryProcessingFailure.inconsistentDatabase
+                }
+                let remaining = row.visitCount - Int64(users.count)
+                if remaining > 0 {
+                    expectation.remainingVisitedLinkCounts[linkID] = remaining
+                } else {
+                    expectation.deletedVisitedLinkIDs.append(linkID)
+                }
             }
         }
-        return invariants
+
+        // Clusters: a cluster whose every member is being deleted is removed.
+        if isProduction {
+            var touchedClusterIDs = Set<Int64>()
+            for chunk in chunks {
+                touchedClusterIDs.formUnion(try integerColumn(
+                    "SELECT DISTINCT cluster_id FROM clusters_and_visits WHERE visit_id IN (\(chunk))",
+                    database: database,
+                    control: control,
+                    busyDeadline: busyDeadline
+                ))
+            }
+            if !touchedClusterIDs.isEmpty {
+                let clusterMembers = try ReusableStatement(
+                    "SELECT visit_id FROM clusters_and_visits WHERE cluster_id = ?1",
+                    database: database,
+                    control: control,
+                    busyDeadline: busyDeadline
+                )
+                for clusterID in touchedClusterIDs.sorted() {
+                    var keepsAMember = false
+                    try clusterMembers.forEachRow([clusterID]) { statement in
+                        if selectedIDs.contains(sqlite3_column_int64(statement, 0)) { return true }
+                        keepsAMember = true
+                        return false
+                    }
+                    if !keepsAMember {
+                        expectation.emptiedClusterIDs.append(clusterID)
+                    }
+                }
+            }
+        }
+
+        // ---- Writes. Nothing above changed the database. ----
+
+        let repairChain = try ReusableStatement(
+            "UPDATE visits SET from_visit = ?1 WHERE from_visit = ?2",
+            database: database,
+            control: control,
+            busyDeadline: busyDeadline
+        )
+        for repair in repairedFromVisits {
+            try repairChain.run([repair.referrer, repair.visitID])
+        }
+
+        var deletedVisitCount = 0
+        for chunk in chunks {
+            var statements = [
+                "DELETE FROM visit_source WHERE id IN (\(chunk))",
+                "DELETE FROM context_annotations WHERE visit_id IN (\(chunk))",
+                "DELETE FROM content_annotations WHERE visit_id IN (\(chunk))",
+            ]
+            if isProduction {
+                statements.append(
+                    "DELETE FROM cluster_visit_duplicates WHERE visit_id IN (\(chunk)) OR duplicate_visit_id IN (\(chunk))"
+                )
+                statements.append("DELETE FROM clusters_and_visits WHERE visit_id IN (\(chunk))")
+            }
+            for sql in statements {
+                try execute(sql, database: database, control: control, busyDeadline: busyDeadline)
+            }
+            try execute(
+                "DELETE FROM visits WHERE rowid IN (\(chunk))",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            )
+            deletedVisitCount += Int(sqlite3_changes(database))
+        }
+        guard deletedVisitCount == selectedIDs.count else {
+            throw BrowserPrivacyHistoryProcessingFailure.missingLocator
+        }
+
+        if !expectation.emptiedClusterIDs.isEmpty {
+            for table in optionalTables {
+                let deleteCluster = try ReusableStatement(
+                    "DELETE FROM \(table) WHERE cluster_id = ?1",
+                    database: database,
+                    control: control,
+                    busyDeadline: busyDeadline
+                )
+                for clusterID in expectation.emptiedClusterIDs {
+                    try deleteCluster.run([clusterID])
+                }
+            }
+        }
+
+        if !expectation.remainingVisitedLinkCounts.isEmpty {
+            let updateLink = try ReusableStatement(
+                "UPDATE visited_links SET visit_count = ?1 WHERE id = ?2",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            )
+            for linkID in expectation.remainingVisitedLinkCounts.keys.sorted() {
+                guard let remaining = expectation.remainingVisitedLinkCounts[linkID] else { continue }
+                try updateLink.run([remaining, linkID])
+                guard sqlite3_changes(database) == 1 else {
+                    throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+                }
+            }
+        }
+        if !expectation.deletedVisitedLinkIDs.isEmpty {
+            let deleteLink = try ReusableStatement(
+                "DELETE FROM visited_links WHERE id = ?1",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            )
+            for linkID in expectation.deletedVisitedLinkIDs {
+                try deleteLink.run([linkID])
+                guard sqlite3_changes(database) == 1 else {
+                    throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+                }
+            }
+        }
+
+        if !expectation.deletedURLIDs.isEmpty {
+            // Chromium's DeleteOneURL: segment usage, segments, the URL row,
+            // then the URL's keyword search terms.
+            let deleteSegmentUsage = try ReusableStatement(
+                "DELETE FROM segment_usage WHERE segment_id IN (SELECT id FROM segments WHERE url_id = ?1)",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            )
+            let deleteSegments = try ReusableStatement(
+                "DELETE FROM segments WHERE url_id = ?1",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            )
+            let deleteSearchTerms = isProduction
+                ? try ReusableStatement(
+                    "DELETE FROM keyword_search_terms WHERE url_id = ?1",
+                    database: database,
+                    control: control,
+                    busyDeadline: busyDeadline
+                )
+                : nil
+            let deleteURL = try ReusableStatement(
+                "DELETE FROM urls WHERE id = ?1",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            )
+            for urlID in expectation.deletedURLIDs {
+                try deleteSegmentUsage.run([urlID])
+                try deleteSegments.run([urlID])
+                try deleteSearchTerms?.run([urlID])
+                try deleteURL.run([urlID])
+                guard sqlite3_changes(database) == 1 else {
+                    throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+                }
+            }
+        }
+
+        if !expectation.updatedURLs.isEmpty {
+            let updateURL = try ReusableStatement(
+                "UPDATE urls SET visit_count = ?1, typed_count = ?2, last_visit_time = ?3 WHERE id = ?4",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            )
+            for invariant in expectation.updatedURLs {
+                try updateURL.run([
+                    invariant.visitCount, invariant.typedCount,
+                    invariant.lastVisitTime, invariant.urlID,
+                ])
+                guard sqlite3_changes(database) == 1 else {
+                    throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+                }
+            }
+        }
+        return expectation
     }
 
     private static func verifyMutation(
@@ -917,33 +1487,51 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         control: SQLiteExecutionControl,
         busyDeadline: UInt64
     ) throws {
-        for locator in locators where try rowExists(
-            rowID: locator.visitRowID,
-            table: adapter.visitTable,
-            database: database,
-            control: control,
-            busyDeadline: busyDeadline
-        ) {
-            _ = locator
-            throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+        guard case let .chromiumV70(expectation) = verification else {
+            for locator in locators where try rowExists(
+                rowID: locator.visitRowID,
+                table: adapter.visitTable,
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            ) {
+                _ = locator
+                throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+            }
+            return
         }
-        guard case let .chromiumV70(invariants) = verification else { return }
-        let identifierList = locators.map(\.visitRowID).sorted().map(String.init).joined(separator: ",")
-        for (table, column) in [
+
+        let isProduction = adapter.mutationPlan == .chromiumProduction
+        func requireNoRows(_ sql: String) throws {
+            if try hasRows(sql, database: database, control: control, busyDeadline: busyDeadline) {
+                throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+            }
+        }
+
+        // No selected visit and nothing that pointed at one may remain.
+        var visitReferences = [
+            ("visits", "rowid"),
             ("visit_source", "id"),
             ("context_annotations", "visit_id"),
             ("content_annotations", "visit_id"),
             ("visits", "from_visit"),
-        ] where try hasRows(
-            "SELECT 1 FROM \(table) WHERE \(column) IN (\(identifierList)) LIMIT 1",
-            database: database,
-            control: control,
-            busyDeadline: busyDeadline
-        ) {
-            throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+        ]
+        if isProduction {
+            visitReferences += [
+                ("clusters_and_visits", "visit_id"),
+                ("cluster_visit_duplicates", "visit_id"),
+                ("cluster_visit_duplicates", "duplicate_visit_id"),
+            ]
         }
-        for expected in invariants {
-            guard let actual = chromiumURLInvariant(
+        for chunk in identifierChunks(expectation.deletedVisitIDs) {
+            for (table, column) in visitReferences {
+                try requireNoRows("SELECT 1 FROM \(table) WHERE \(column) IN (\(chunk)) LIMIT 1")
+            }
+        }
+
+        // URLs that keep visits carry exactly the planned counters.
+        for expected in expectation.updatedURLs {
+            guard let actual = try chromiumURLInvariant(
                 urlID: expected.urlID,
                 database: database,
                 control: control,
@@ -953,6 +1541,78 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                actual.lastVisitTime == expected.lastVisitTime else {
                 throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
             }
+        }
+
+        // A removed URL leaves no row, no visit and no dependent behind.
+        var urlReferences = [("urls", "id"), ("visits", "url"), ("segments", "url_id")]
+        if isProduction {
+            urlReferences.append(("keyword_search_terms", "url_id"))
+        }
+        for chunk in identifierChunks(expectation.deletedURLIDs) {
+            for (table, column) in urlReferences {
+                try requireNoRows("SELECT 1 FROM \(table) WHERE \(column) IN (\(chunk)) LIMIT 1")
+            }
+        }
+        for chunk in identifierChunks(expectation.deletedSegmentIDs) {
+            try requireNoRows("SELECT 1 FROM segment_usage WHERE segment_id IN (\(chunk)) LIMIT 1")
+        }
+
+        guard isProduction else { return }
+
+        for chunk in identifierChunks(expectation.deletedVisitedLinkIDs) {
+            try requireNoRows("SELECT 1 FROM visited_links WHERE id IN (\(chunk)) LIMIT 1")
+        }
+        for (linkID, expectedCount) in expectation.remainingVisitedLinkCounts {
+            guard try integerColumn(
+                "SELECT visit_count FROM visited_links WHERE id = \(linkID)",
+                database: database,
+                control: control,
+                busyDeadline: busyDeadline
+            ) == [expectedCount] else {
+                throw BrowserPrivacyHistoryProcessingFailure.verificationFailed
+            }
+        }
+
+        let clusterTables = ["clusters_and_visits"] + (try existingOptionalTables(
+            adapter: adapter,
+            database: database,
+            control: control,
+            busyDeadline: busyDeadline
+        ))
+        for chunk in identifierChunks(expectation.emptiedClusterIDs) {
+            for table in clusterTables {
+                try requireNoRows("SELECT 1 FROM \(table) WHERE cluster_id IN (\(chunk)) LIMIT 1")
+            }
+        }
+    }
+
+    /// Optional tables of the adapter's contract that exist in this database.
+    private static func existingOptionalTables(
+        adapter: BrowserPrivacySQLiteWriteAdapter,
+        database: OpaquePointer,
+        control: SQLiteExecutionControl,
+        busyDeadline: UInt64
+    ) throws -> [String] {
+        try adapter.schema.optionalTables.map(\.name).filter {
+            try SQLiteRuntime.tableExists(
+                $0,
+                database: database,
+                control: control,
+                busyDeadlineNanoseconds: busyDeadline
+            )
+        }
+    }
+
+    /// Row identifiers are our own 64-bit integers, so they are inlined; the
+    /// chunks keep every statement far below SQLite's SQL length limit.
+    private static func identifierChunks(
+        _ identifiers: [Int64],
+        size: Int = 400
+    ) -> [String] {
+        stride(from: 0, to: identifiers.count, by: size).map { start in
+            identifiers[start ..< min(start + size, identifiers.count)]
+                .map(String.init)
+                .joined(separator: ",")
         }
     }
 
@@ -1035,26 +1695,57 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         return result
     }
 
+    /// Nil means the URL row does not exist. A read error is thrown instead
+    /// of being mistaken for a missing row.
     private static func chromiumURLInvariant(
         urlID: Int64,
         database: OpaquePointer,
         control: SQLiteExecutionControl,
         busyDeadline: UInt64
-    ) -> ChromiumFixtureURLInvariant? {
-        guard let statement = try? SQLiteRuntime.prepare(
+    ) throws -> ChromiumFixtureURLInvariant? {
+        let statement = try SQLiteRuntime.prepare(
             "SELECT visit_count, typed_count, last_visit_time FROM urls WHERE id = \(urlID) LIMIT 1",
             database: database,
             control: control,
             busyDeadlineNanoseconds: busyDeadline
-        ) else { return nil }
+        )
         defer { sqlite3_finalize(statement) }
-        guard (try? SQLiteRuntime.step(statement, control: control, busyDeadlineNanoseconds: busyDeadline)) == SQLITE_ROW else { return nil }
+        guard try SQLiteRuntime.step(
+            statement,
+            control: control,
+            busyDeadlineNanoseconds: busyDeadline
+        ) == SQLITE_ROW else { return nil }
         return ChromiumFixtureURLInvariant(
             urlID: urlID,
             visitCount: sqlite3_column_int64(statement, 0),
             typedCount: sqlite3_column_int64(statement, 1),
             lastVisitTime: sqlite3_column_int64(statement, 2)
         )
+    }
+
+    /// The first column of every result row.
+    private static func integerColumn(
+        _ sql: String,
+        database: OpaquePointer,
+        control: SQLiteExecutionControl,
+        busyDeadline: UInt64
+    ) throws -> [Int64] {
+        let statement = try SQLiteRuntime.prepare(
+            sql,
+            database: database,
+            control: control,
+            busyDeadlineNanoseconds: busyDeadline
+        )
+        defer { sqlite3_finalize(statement) }
+        var result: [Int64] = []
+        while try SQLiteRuntime.step(
+            statement,
+            control: control,
+            busyDeadlineNanoseconds: busyDeadline
+        ) == SQLITE_ROW {
+            result.append(sqlite3_column_int64(statement, 0))
+        }
+        return result
     }
 
     private static func integerScalar(
@@ -1341,7 +2032,9 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         }
     }
 
-    private static func validateSQLiteSidecars(
+    /// Shared with the restore path: a database with unmerged writes next
+    /// to it is never opened for writing.
+    static func validateSQLiteSidecars(
         databaseURL: URL,
         trustedParentURL: URL,
         adapter: BrowserPrivacySQLiteWriteAdapter
@@ -1354,6 +2047,16 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
                 throw SecureSourceFile.failure(forErrno: errno)
             }
             if adapter == .chromiumProduction {
+                // Chromium opens its databases with journal_mode=TRUNCATE, so
+                // a cleanly closed History keeps an empty "-journal" file
+                // next to it. SQLite ignores an empty rollback journal; it
+                // holds no transaction. A journal with content, or any WAL
+                // or shared-memory file, means writes that are not merged.
+                if suffix == "-journal",
+                   metadata.st_mode & S_IFMT == S_IFREG,
+                   metadata.st_size == 0 {
+                    continue
+                }
                 throw BrowserPrivacyHistoryProcessingFailure.productionSidecarPresent
             }
             _ = try SecureSourceFile.identityChain(
@@ -1370,17 +2073,60 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         outcome: BrowserPrivacyProcessingOutcome,
         verifiedDeletedRecordIDs: Set<UUID> = [],
         recoveryBackupID: UUID? = nil,
-        detail: String
+        reason: BrowserPrivacyProcessingReason
     ) -> BrowserPrivacyProcessingEntry {
         BrowserPrivacyProcessingEntry(
             browser: records[0].browser,
             profileID: records[0].profileID,
+            profileDisplayName: records[0].resolvedProfileDisplayName,
             recordCount: records.count,
             capability: capability,
             outcome: outcome,
             verifiedDeletedRecordIDs: verifiedDeletedRecordIDs,
             recoveryBackupID: recoveryBackupID,
-            detail: detail
+            reason: reason,
+            deletionPath: deletionPath(of: records),
+            detail: reason.detail(browserName: records[0].browser.displayName)
+        )
+    }
+
+    /// Groups never mix records with and without a locator.
+    private static func deletionPath(of records: [BrowserPrivacyRecord]) -> BrowserPrivacyDeletionPath {
+        records.allSatisfy { $0.locator != nil } ? .direct : .inBrowser
+    }
+
+    private static func recoverySummary(
+        records: [BrowserPrivacyRecord],
+        locators: [BrowserPrivacyRecordLocator],
+        outcome: BrowserPrivacyRecoveryOutcome
+    ) -> BrowserPrivacyRecoverySummary {
+        BrowserPrivacyRecoverySummary(
+            browserDisplayName: records[0].browser.displayName,
+            profileDisplayName: records[0].resolvedProfileDisplayName,
+            visitCount: records.count,
+            pageCount: BrowserPrivacyDisplayItem.pageCount(of: records),
+            outcome: outcome
+        )
+    }
+
+    /// Records the browser has to delete itself, with the specific cause the
+    /// scan recorded for them.
+    static func manualEntry(records: [BrowserPrivacyRecord]) -> BrowserPrivacyProcessingEntry {
+        let browser = records[0].browser
+        return BrowserPrivacyProcessingEntry(
+            browser: browser,
+            profileID: records[0].profileID,
+            profileDisplayName: records[0].resolvedProfileDisplayName,
+            recordCount: records.count,
+            capability: .manualBrowserGuidance,
+            outcome: .manual,
+            reason: .manualOnly,
+            deletionPath: deletionPath(of: records),
+            detail: BrowserPrivacyDirectDeletionBlocker.manualDetail(
+                recorded: records.lazy.compactMap(\.directDeletionBlocker).first,
+                browserName: browser.displayName,
+                engine: browser.engine
+            )
         )
     }
 
@@ -1391,27 +2137,22 @@ struct BrowserPrivacyHistoryProcessor: BrowserPrivacyHistoryProcessing, Sendable
         if lhs.value[0].browser.displayName != rhs.value[0].browser.displayName {
             return lhs.value[0].browser.displayName < rhs.value[0].browser.displayName
         }
-        return lhs.key.profileID < rhs.key.profileID
+        if lhs.key.profileID != rhs.key.profileID {
+            return lhs.key.profileID < rhs.key.profileID
+        }
+        return lhs.key.isDirectlyDeletable && !rhs.key.isDirectlyDeletable
     }
 
-    private static func detail(for failure: SQLiteSnapshotFailure) -> String {
+    private static func reason(for failure: SQLiteSnapshotFailure) -> BrowserPrivacyProcessingReason {
         switch failure {
-        case .busy:
-            "The history database stayed busy; the transaction was not committed."
-        case .permissionDenied:
-            "The history database is not writable with the current permission; no deletion was confirmed."
-        case .malformedSchema:
-            "The browser schema did not match the verified visit-row adapter."
-        case .corrupt:
-            "SQLite reported a corrupt or invalid history database; no deletion was confirmed."
-        case .sizeLimitExceeded:
-            "The database exceeded the safe operation limit; no deletion was attempted."
-        case .timedOut:
-            "The operation timed out and the open transaction was rolled back."
-        case .cancelled:
-            "Processing was cancelled and the open transaction was rolled back."
-        case .unavailable:
-            "The database changed identity or became unavailable; no deletion was confirmed."
+        case .busy: .databaseBusy
+        case .permissionDenied: .permissionDenied
+        case .malformedSchema: .schemaUnsupported
+        case .corrupt: .databaseDamaged
+        case .sizeLimitExceeded: .databaseTooLarge
+        case .timedOut: .timedOut
+        case .cancelled: .cancelled
+        case .unavailable: .databaseUnavailable
         }
     }
 
@@ -1441,31 +2182,29 @@ private enum BrowserPrivacyHistoryProcessingFailure: Error, Equatable, Sendable 
     case verificationFailed
     case committedButUnverified
     case unsupportedSchema
+    /// Related rows contradict each other, so a consistent deletion cannot be planned.
+    case inconsistentDatabase
+    /// The selected visits are known to the browser's sync service.
+    case syncedVisits
     case productionSidecarPresent
     case rollbackFailed
 
-    var isUnsupported: Bool { self == .unsupportedSchema }
+    var isUnsupported: Bool { self == .unsupportedSchema || self == .inconsistentDatabase }
     var isIndeterminate: Bool { self == .committedButUnverified }
-    var requiresManualHandling: Bool { self == .productionSidecarPresent }
+    var requiresManualHandling: Bool { self == .productionSidecarPresent || self == .syncedVisits }
 
-    var detail: String {
+    var reason: BrowserPrivacyProcessingReason {
         switch self {
-        case .identityChanged:
-            "The trusted path or database identity changed after scanning; no deletion was confirmed."
-        case .missingLocator:
-            "At least one selected visit row no longer exists. The profile transaction was rolled back."
-        case .staleLocator:
-            "A selected row was reused or changed after scanning. The profile transaction was rolled back."
-        case .verificationFailed:
-            "The read-only verification could not prove every selected row absent."
-        case .committedButUnverified:
-            "SQLite committed the profile change, but the final read-only check failed. Re-scan before taking any further action."
-        case .unsupportedSchema:
-            "This schema uses unsupported row or trigger semantics. Process it manually in the browser."
-        case .productionSidecarPresent:
-            "The production history database has an active SQLite sidecar. Process it manually in the browser after normal shutdown."
-        case .rollbackFailed:
-            "SQLite could not confirm rollback. The recovery backup was retained and no deletion is reported as successful."
+        case .identityChanged: .databaseChanged
+        case .missingLocator: .recordMissing
+        case .staleLocator: .recordChanged
+        case .verificationFailed: .verificationFailed
+        case .committedButUnverified: .committedButUnverified
+        case .unsupportedSchema: .schemaUnsupported
+        case .inconsistentDatabase: .inconsistentData
+        case .syncedVisits: .syncedRecords
+        case .productionSidecarPresent: .pendingWrites
+        case .rollbackFailed: .restoreUnconfirmed
         }
     }
 }
@@ -1480,8 +2219,10 @@ final class BrowserPrivacySQLiteWriteAuthorizer {
             deleteTables = [adapter.visitTable]
             updateColumns = [:]
         case .chromiumV70Fixture:
+            // Rows of a deleted visit, and of a URL left without visits.
             deleteTables = [
                 "visit_source", "context_annotations", "content_annotations", "visits",
+                "urls", "segments", "segment_usage",
             ]
             updateColumns = [
                 "visits": ["from_visit"],
@@ -1490,10 +2231,14 @@ final class BrowserPrivacySQLiteWriteAuthorizer {
         case .chromiumProduction:
             deleteTables = [
                 "visit_source", "context_annotations", "content_annotations", "visits",
+                "urls", "segments", "segment_usage", "keyword_search_terms",
+                "clusters_and_visits", "cluster_visit_duplicates",
+                "clusters", "cluster_keywords", "visited_links",
             ]
             updateColumns = [
                 "visits": ["from_visit"],
                 "urls": ["visit_count", "typed_count", "last_visit_time"],
+                "visited_links": ["visit_count"],
             ]
         }
     }

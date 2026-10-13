@@ -18,7 +18,8 @@ struct GeekPowerPreparationKernel: Sendable {
         )
         return points.compactMap { point in
             guard point.date >= start, point.date <= latestAllowedDate,
-                  let value = metric.value(in: point),
+                  let value = metric == .charge ? metric.value(in: point)
+                    : point.bucketStatistics?.metrics["batteryPower"]?.mean ?? metric.value(in: point),
                   value.isFinite else { return nil }
             return (
                 min(point.date, end),
@@ -47,7 +48,7 @@ struct GeekPowerPreparationKernel: Sendable {
             referenceDate: referenceDate
         )
         let unavailableDates = points.filter { metric.value(in: $0)?.isFinite != true }.map(\.date)
-        return GeekChartWindow.displayBuckets(
+        let original = GeekChartWindow.displayBuckets(
             for: dates,
             in: plot,
             range: visibleRange,
@@ -59,6 +60,16 @@ struct GeekPowerPreparationKernel: Sendable {
                     && !unavailableDates.contains { $0 > dates[before] && $0 < dates[after] }
             }
         )
+        guard points.contains(where: { $0.bucketStatistics != nil }) else { return original }
+        let key = metric == .charge ? "charge" : "batteryPower"
+        let gaps = MenuBarSamplingGaps.shared.intervals(at: referenceDate)
+        // Duplicate dates (e.g. a replayed journal entry) keep the later record
+        // instead of trapping in `Dictionary(uniqueKeysWithValues:)`.
+        let records = Dictionary(points.indices.map { index in
+            (points[index].date, points[index].statistics(previous: index > 0 ? points[index - 1] : nil, gaps: gaps).metrics[key])
+        }, uniquingKeysWith: { _, later in later })
+        return GeekCompressedHistoryProjection.buckets(original, dates: dates,
+            records: dates.map { records[$0] ?? nil })
     }
 
     func preparedBatteryBuckets(
@@ -76,8 +87,7 @@ struct GeekPowerPreparationKernel: Sendable {
             plot: plot,
             referenceDate: referenceDate
         )
-        let payloads = TimeBucketAggregator.nearestFilled(
-            buckets.map { bucket -> GeekPowerBucketPayload? in
+        let rawPayloads = buckets.map { bucket -> GeekPowerBucketPayload? in
                 guard let latestIndex = bucket.indices.last,
                       let value = (bucket.averagingGroups != nil
                         ? bucket.mean({ livePoints[$0].value })
@@ -91,7 +101,9 @@ struct GeekPowerPreparationKernel: Sendable {
                     powerSource: point.powerSource
                 )
             }
-        )
+        let payloads = points.contains(where: { $0.bucketStatistics != nil })
+            ? rawPayloads.enumerated().map { TimeBucketValue(value: $0.element, isEstimated: false, sourceIndex: $0.offset) }
+            : TimeBucketAggregator.nearestFilled(rawPayloads)
         let chargingStates = TimeBucketAggregator.forwardFilled(
             buckets.map { bucket -> Bool? in
                 guard let latestIndex = bucket.indices.last else { return nil }
@@ -136,9 +148,11 @@ struct GeekPowerPreparationKernel: Sendable {
 
     var statistics: GeekSeriesStatistics? {
         guard let end = points.last?.date else { return nil }
-        return GeekSeriesStatistics(
-            values: usablePoints(endingAt: end).map(\.value)
-        )
+        let selected = MenuBarHistoryRetention.selected(points, duration: duration, date: \.date, referenceDate: end)
+        let key = metric == .charge ? "charge" : "batteryPower"
+        let gaps = MenuBarSamplingGaps.shared.intervals(at: end)
+        let records = selected.indices.compactMap { selected[$0].statistics(previous: $0 > 0 ? selected[$0 - 1] : nil, gaps: gaps).metrics[key] }
+        return GeekSeriesStatistics(records: records, current: selected.last.flatMap { metric.value(in: $0) })
     }
 
     func bucketValue(
@@ -161,10 +175,16 @@ struct GeekPreparedPowerFrame: Sendable {
     let points: [Point]
     let rawBuckets: [GeekChartBucketSnapshot]
     let buckets: [GeekPreparedPowerBucket]
+    /// Whether `points` have a drawable trend, prepared here instead of on
+    /// every redraw and hover move (review of phase 1, P2-1).
+    let hasRenderableTrend: Bool
     init(kernel: GeekPowerPreparationKernel, plot: CGRect, reference: Date) {
         let points = kernel.usablePoints(endingAt: reference)
         self.points = points
         rawBuckets = kernel.batteryBuckets(points, plot: plot, referenceDate: reference)
         buckets = kernel.preparedBatteryBuckets(points, plot: plot, referenceDate: reference)
+        hasRenderableTrend = PanelChartSampling.hasRenderableTrend(points.map {
+            MenuBarChartSample(date: $0.date, value: $0.value)
+        }) || kernel.points.contains { ($0.bucketStatistics?.metrics[kernel.metric == .charge ? "charge" : "batteryPower"]?.sampleCount ?? 0) >= 2 }
     }
 }

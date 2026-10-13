@@ -3,11 +3,12 @@ import SwiftUI
 import XCTest
 @testable import StorageCleanerMac
 
+@MainActor
 final class GeekSensorsPowerHoverDetailTests: XCTestCase {
-    func testCapturedReferencePopoverSizesRemainExplicit() {
+    func testCapturedReferencePopoverSizesRemainExplicit() throws {
         XCTAssertEqual(
             GeekSensorPowerHoverDetailMetrics.sensorHistorySize,
-            CGSize(width: MiniWindowStyleTokens.historyWidth, height: 216)
+            CGSize(width: MiniWindowStyleTokens.historyWidth, height: 250)
         )
         XCTAssertEqual(
             GeekSensorPowerHoverDetailMetrics.batterySize,
@@ -15,7 +16,7 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         )
         XCTAssertEqual(
             GeekSensorPowerHoverDetailMetrics.batteryHistorySize,
-            CGSize(width: MiniWindowStyleTokens.compactHistoryWidth, height: 196)
+            GeekHoverDetailMetrics.compactHistorySize
         )
         XCTAssertEqual(
             GeekSensorPowerHoverDetailMetrics.energyModeSize,
@@ -41,17 +42,14 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
             GeekSensorPowerHoverDetailMetrics.compactSamplingSize,
             CGSize(width: 220, height: 148)
         )
-        XCTAssertEqual(GeekHardwareControlLayout.authorizationHeight(for: .enabled), 30)
-        XCTAssertEqual(GeekHardwareControlLayout.authorizationHeight(for: .notRegistered), 112)
-        XCTAssertEqual(
-            GeekHardwareControlLayout.fanHeight(
-                capability: .controllable,
-                mode: .manual,
-                fanCount: 2
-            ),
-            160
-        )
-        XCTAssertEqual(GeekHardwareControlLayout.powerHeight(hasBattery: true), 116)
+        let hardware = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHardwareControlView.swift")
+        XCTAssertFalse(hardware.contains("authorizationHeight"))
+        let palette = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift")
+        XCTAssertTrue(palette.contains("ControlPaletteHelperStatusView("))
+        // D73 deletes the dead card implementation; lock the live entry's geometry instead.
+        XCTAssertEqual(FanControlEntryRow.height, 24)
+        XCTAssertFalse(hardware.contains("struct GeekFanControlCard"))
+        XCTAssertFalse(hardware.contains("struct GeekPowerModeControlCard"))
     }
 
     func testHistoryPopoverStaysCompactUntilTwoValidSamplesExist() {
@@ -86,7 +84,7 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
             source.components(separatedBy: "struct GeekBatteryElectricalHoverDetail").last?
                 .components(separatedBy: "struct GeekBatteryHistoryHoverDetail").first
         )
-        for title in ["Charge", "Health", "Status", "Power-based Runtime", "Adapter Power", "Target Charge", "Cycles", "Condition", "Battery Temperature"] {
+        for title in ["Charge", "Health", "Status", "Power-based Runtime", "Adapter Power", "Effective Charge Limit", "Cycles", "Condition", "Battery Temperature"] {
             XCTAssertTrue(electrical.contains("\"\(title)\""), title)
         }
         for removedTitle in ["Power Source", "Design Capacity", "Current Capacity", "Recent Draw", "Adapter", "Charging Power", "Negotiated", "Not Charging"] {
@@ -103,7 +101,7 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
             electrical.components(separatedBy: "private var batteryRows").first?
                 .components(separatedBy: "var body: some View").last
         )
-        XCTAssertTrue(body.contains(".padding(GeekPanelLayout.contentPadding)"))
+        XCTAssertTrue(body.contains(".padding(pageProvidesInset ? 0 : GeekPanelLayout.contentPadding)"))
         XCTAssertFalse(body.contains(".padding(7)"))
         XCTAssertFalse(body.contains("maxHeight: .infinity"))
         XCTAssertFalse(body.contains("L10n.text(\"不可用\", \"Unavailable\")"))
@@ -118,7 +116,9 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         )
         XCTAssertTrue(history.contains("L10n.text(\"电池\", \"Battery\").uppercased()"))
         XCTAssertTrue(history.contains("chargingTint: chargingTint"))
-        XCTAssertTrue(history.contains(".frame(height: 154)"))
+        // Batch 2b review: the chart sits in the shared history plot block,
+        // which frames it to historyChartHeight above the axis row.
+        XCTAssertTrue(history.contains(".geekHistoryAxis(GeekHistoryAxisFooter(duration: chartRangeSelection.range.duration"))
         XCTAssertFalse(history.contains("GeekPowerBatteryLevelBar"))
 
         let energyMode = try XCTUnwrap(
@@ -152,9 +152,10 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
             GeekPowerHistoryMetric.batteryPower.currentText(-4.25),
             L10n.text("当前 -4.25 W · 放电", "Current -4.25 W · Discharging")
         )
+        // r2-mini-sensors review item 7: a zero has no sign (was "+0.00 W").
         XCTAssertEqual(
             GeekPowerHistoryMetric.batteryPower.currentText(0),
-            L10n.text("当前 +0.00 W · 空闲", "Current +0.00 W · Idle")
+            L10n.text("当前 0.00 W · 空闲", "Current 0.00 W · Idle")
         )
     }
 
@@ -485,7 +486,7 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertTrue(chart.contains("PowerConnectionTimeline.connectedRuns"))
         XCTAssertTrue(chart.contains("drawLightningBolt("))
         XCTAssertTrue(chart.contains("barColor(for: point)"))
-        XCTAssertTrue(source.contains("static let health = AppDesignTokens.Palette.batteryHealth"))
+        XCTAssertTrue(source.contains("static let health = MiniWindowColorPalette.pink"))
         XCTAssertTrue(chart.contains("GeekChartDrawing.bar("))
         XCTAssertFalse(chart.contains("GeekPowerHistoryBarLayout"))
     }
@@ -842,7 +843,7 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         )
         XCTAssertEqual(
             GeekFanControlMode.maximum.title,
-            L10n.text("狂暴模式 · 最大转速", "Maximum Cooling · Maximum RPM")
+            L10n.text("最大转速", "Maximum RPM")
         )
 
         let unsupported = HardwareFanCapabilityProbe.probe(
@@ -903,9 +904,11 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertFalse(overview.contains("case .controllable: L10n.text(\"模式未知\""))
         XCTAssertTrue(sensors.contains("FanControlMode.resolve(observedMode:"))
         XCTAssertTrue(sensors.contains("FanStatusPresentation.confirmedModeTitle(fanControl.observedMode)"))
-        XCTAssertTrue(overview.contains("value: geekFanTelemetry.actualRPM.map(String.init)"))
+        // One readout format across overview, secondary ring and lists.
+        XCTAssertTrue(overview.contains("value: geekFanTelemetry.actualRPM.map(SystemFanSpeedFormat.number)"))
+        XCTAssertFalse(overview.contains("? \"RPM\" :"))
         XCTAssertTrue(sensors.contains("Text(reading.displayRPM)"))
-        XCTAssertTrue(controls.contains("FanStatusPresentation.monitoringTitle("))
+        XCTAssertTrue(controls.contains("ControlPaletteAnchorButton(kind: .fan,")) // D73: the live entry replaces the retired card.
         XCTAssertTrue(palette.contains("FanStatusPresentation.confirmedModeTitle(fanControl.observedMode)"))
         XCTAssertFalse(palette.contains("状态未知"))
         XCTAssertFalse(overview.contains("L10n.text(\"连接中断\", \"Disconnected\")"))
@@ -913,15 +916,38 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertTrue(palette.contains("fanModeSection(.systemAutomatic"))
         XCTAssertTrue(palette.contains("displayedMode == .customCurve"))
         XCTAssertTrue(palette.contains("fanModeSection(.manual"))
-        XCTAssertTrue(palette.contains("Image(systemName: AppSymbols.Monitor.sensors)"))
-        XCTAssertTrue(palette.contains("selected ? AppSymbols.Status.success : \"circle\""))
-        XCTAssertTrue(palette.contains(".accessibilityHint(Text(detail))"))
+        // D64 removes the non-interactive palette title icon. Keep the
+        // title and the separate, actionable capability disclosure covered.
+        let fanPalette = try r2SourceDeclaration("struct FanControlPaletteView:", in: palette)
+        let fanBody = try r2SourceDeclaration("private var paletteContent: some View", in: fanPalette)
+        XCTAssertTrue(fanPalette.contains("if telemetry.isFanless {"))
+        XCTAssertTrue(fanPalette.contains("            paletteContent"))
+        XCTAssertFalse(fanBody.contains("GeekModuleIcon("))
+        XCTAssertTrue(fanBody.contains(".font(AdvancedPanelTypography.captionStrong)"))
+        XCTAssertTrue(fanBody.contains("Button { showsCapabilityDetails.toggle() }"))
+        XCTAssertTrue(fanBody.contains(".accessibilityLabel(L10n.text(\"风扇详细信息\", \"Fan Details\"))"))
+        XCTAssertTrue(palette.contains("Text(L10n.text(\"风扇控制\", \"Fan Control\"))"))
+        let panelComponents = try source(
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPanelComponents.swift"
+        )
+        let moduleIcon = try r2SourceDeclaration("struct GeekModuleIcon: View", in: panelComponents)
+        XCTAssertTrue(moduleIcon.contains(
+            "AppSymbolGlyph(systemImage: systemImage, size: MiniWindowStyleTokens.moduleIconGlyphSize)"
+        ))
+        XCTAssertTrue(moduleIcon.contains(".frame(width: MiniWindowStyleTokens.moduleIconSlotSize,"))
+        XCTAssertTrue(moduleIcon.contains("height: MiniWindowStyleTokens.moduleIconSlotSize)"))
+        XCTAssertTrue(moduleIcon.contains(".accessibilityHidden(true)"))
+        XCTAssertEqual(MiniWindowStyleTokens.moduleIconGlyphSize, 12)
+        XCTAssertEqual(MiniWindowStyleTokens.moduleIconSlotSize, 16)
+        // U1 117/118: modes are single-choice cards with a round mark on the
+        // right (FanControlModeCardTests), no longer switch capsules.
+        XCTAssertTrue(palette.contains("FanControlModeCard("))
+        XCTAssertFalse(palette.contains(".fill(selected ? controlTint : Color.secondary.opacity(0.32))"))
         XCTAssertTrue(palette.contains("draft.selectMode(mode)"))
         XCTAssertFalse(palette.contains(
             "fanControl.selectedMode == .systemAutomatic ? .systemAutomatic : nil"
         ))
         XCTAssertTrue(palette.contains("private var displayedMode: GeekFanControlMode? { draft.mode }"))
-        XCTAssertTrue(palette.contains("仅选择草稿，应用后才生效"))
         XCTAssertTrue(palette.contains("FanStatusPresentation.confirmedModeTitle(fanControl.observedMode)"))
         XCTAssertFalse(palette.contains("Toggle(\"\", isOn: .constant"))
         XCTAssertTrue(palette.contains("FanCurveEditor("))
@@ -932,8 +958,16 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/FanControlInlineControls.swift"
         )
         XCTAssertTrue(palette.contains("FanManualSliderList("))
-        XCTAssertTrue(palette.contains("FanSyncToggleRow("))
-        let gestureControls = try XCTUnwrap(sharedControls.components(separatedBy: "struct FanSyncToggleRow: View").last)
+        // U1 117/118 (D44, D45): layout moved, switch semantics stay in the manual area.
+        XCTAssertTrue(sharedControls.contains("FanSyncToggleRow("))
+        XCTAssertEqual(sharedControls.components(separatedBy: "FanSyncToggleRow(").count - 1, 1)
+        XCTAssertFalse(palette.contains("FanSyncToggleRow("))
+        let manualList = try r2SourceDeclaration("struct FanManualSliderList: View", in: sharedControls)
+        XCTAssertTrue(manualList.contains("FanSyncToggleRow("), "The only switch lives in the manual area")
+        // Review r3 P1-1: the slider is the drag and VoiceOver path, so it stays under this contract.
+        let gestureControls = try r2SourceDeclaration("struct FanSyncToggleRow: View", in: sharedControls)
+            + manualList
+            + r2SourceDeclaration("struct FanControlSlider", in: sharedControls)
         XCTAssertFalse(gestureControls.contains("fanControl.updateManualPercentage"))
         XCTAssertFalse(gestureControls.contains("fanControl.commitManualPercentage"))
         XCTAssertTrue(gestureControls.contains("draft.setPercentage"))
@@ -947,7 +981,7 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertTrue(sharedControls.contains("DragGesture(minimumDistance: 0)"))
         XCTAssertTrue(sharedControls.contains("accessibilityAdjustableAction"))
         XCTAssertTrue(sharedControls.contains(".frame(height: 22)"))
-        XCTAssertTrue(sharedControls.contains("draft.synchronizesFans ? \"checkmark\" : \"minus\""))
+        XCTAssertTrue(sharedControls.contains("draft.synchronizesFans ? AppDesignTokens.Palette.information"))
         XCTAssertFalse(sharedControls.contains("            Slider("))
         XCTAssertTrue(sharedControls.contains("同步所有风扇"))
         XCTAssertFalse(palette.contains("isAutomatic: Bool"))
@@ -988,7 +1022,6 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         let power = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift")
         let details = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsPowerHoverDetails.swift")
         let tertiary = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift")
-        let controls = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHardwareControlView.swift")
         let models = try source("Sources/StorageCleanerMac/Models/FanControlModels.swift")
 
         XCTAssertGreaterThanOrEqual(
@@ -1011,15 +1044,24 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertTrue(details.contains(".accessibilityHint(helpText(statistics: statistics))"))
         XCTAssertTrue(details.contains("PanelChartSamplingPlaceholder()"))
         XCTAssertFalse(details.contains("能源模式未采集，选项不可用"))
-        XCTAssertTrue(details.contains("Button(action: action)"))
-        XCTAssertTrue(details.contains(".buttonStyle(ResponsivePlainButtonStyle())"))
-        XCTAssertTrue(details.contains("Change Energy Mode to \\(title)"))
-        XCTAssertTrue(details.contains("\\(sourceTitle), Change Energy Mode to \\(title)"))
-        XCTAssertTrue(details.contains("Changes the \\(sourceTitle) Energy Mode to \\(title)"))
+        // D64 removes the uncalled GeekEnergyModeOptionRow. The live group
+        // uses native segments and a source-aware binding instead.
+        let energy = try r2SourceDeclaration("private struct GeekEnergyModeGroup:", in: details)
+        XCTAssertTrue(energy.contains("MiniWindowSegmentedPicker("))
+        XCTAssertTrue(energy.contains("title: title"))
+        XCTAssertTrue(energy.contains("selection: modeBinding"))
+        XCTAssertTrue(energy.contains("supportedModes.map(Optional.some)"))
+        XCTAssertTrue(energy.contains("get: { mode }"))
+        XCTAssertTrue(energy.contains("onChangeMode(source, selected)"))
+        XCTAssertTrue(energy.contains(".disabled(!controlsEnabled || adjustmentState.isChanging)"))
+        XCTAssertTrue(energy.contains(".help(statusText ?? L10n.text("))
+        let segments = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MiniWindowSegmentedPicker.swift")
+        XCTAssertTrue(segments.contains("control.setAccessibilityLabel(title)"))
+        XCTAssertTrue(segments.contains("control.selectedSegment = options.firstIndex(of: selection)"))
         XCTAssertTrue(details.contains("System control setup was cancelled"))
         XCTAssertTrue(details.contains("one-time system control approval"))
-        XCTAssertTrue(details.contains("L10n.text(\"可选择\", \"Available\")"))
-        XCTAssertTrue(details.contains(".frame(height: 18)"))
+        XCTAssertTrue(energy.contains("Text(statusText)"))
+        XCTAssertTrue(energy.contains(".lineLimit(1)"))
         XCTAssertFalse(power.contains("onChangeMode: changeEnergyMode"))
         XCTAssertTrue(power.contains("computerHealthStore.changeBatteryPowerMode("))
         XCTAssertTrue(power.contains("computerHealthStore.refreshBatteryPowerModes()"))
@@ -1031,10 +1073,18 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertFalse(sensors.contains("电池与供电"))
         XCTAssertFalse(sensors.contains("BATTERY & SUPPLY"))
         XCTAssertFalse(sensors.contains("电池电气信息"))
-        XCTAssertFalse(sensors.contains("BATTERY ELECTRICAL"))
+        XCTAssertFalse(sensors.contains("geekSensorReadoutCard(L10n.text(\"功耗\""))
+        XCTAssertFalse(sensors.contains("geekSensorReadoutCard(L10n.text(\"频率\""))
+        XCTAssertFalse(sensors.contains("secondaryTitle: L10n.text(\"频率\""))
+        XCTAssertFalse(sensors.contains("detail: geekProcessorFrequencyTextCompact"))
+        XCTAssertTrue(power.contains("BATTERY ELECTRICAL"))
+        XCTAssertTrue(power.contains("geekBatteryElectricalReadouts"))
+        XCTAssertTrue(power.contains("geekPowerReadouts"))
+        let processor = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekProcessorView.swift")
+        XCTAssertTrue(processor.contains("geekFrequencyReadouts"))
         XCTAssertTrue(details.contains("GeekBatteryElectricalHoverDetail"))
         XCTAssertTrue(models.contains("readings.compactMap(\\.normalizedPercent)"))
-        XCTAssertTrue(controls.contains("ForEach(Array(telemetry.readings.prefix(2)))"))
+        XCTAssertTrue(sensors.contains("ForEach(geekFanTelemetry.readings.prefix(2))")) // D73: lock the live monitoring rows.
         XCTAssertTrue(sensors.contains("selectedFanIndex: reading.index"))
         XCTAssertTrue(details.contains("point.fanRPM(at: selectedFanIndex)"))
         XCTAssertTrue(details.contains("GeekHoverDetailCanvas(\n            title: chartTitle,"))
@@ -1050,10 +1100,14 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertTrue(sensors.contains("No sensor readings are available for this Mac"))
         XCTAssertTrue(sensors.contains("L10n.text(\"负载\", \"Load\")"))
         XCTAssertTrue(sensors.contains("L10n.text(\"GPU 温度\", \"GPU Temperature\")"))
-        XCTAssertTrue(controls.contains("if hasInternalBattery, !batterySupportedModes.isEmpty"))
+        let powerPalette = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift")
+        XCTAssertTrue(powerPalette.contains("batterySupportedModes: hasInternalBattery"))
+        XCTAssertTrue(details.contains("if !batterySupportedModes.isEmpty")) // D73: no dead power-card contract.
         XCTAssertTrue(overview.contains("value: geekOverviewGPUTemperature.map"))
-        XCTAssertTrue(overview.contains("?? metricValue(.gpuUsage)"))
-        XCTAssertTrue(overview.contains("L10n.text(\"温度\", \"Temperature\")"))
+        XCTAssertTrue(overview.contains("gpuUsageText: metricValue(.gpuUsage)"))
+        // Batch 2b removed the unreferenced tile that carried 温度 / Temperature;
+        // the live overview GPU ring labels its temperature 温度 / Temp.
+        XCTAssertTrue(overview.contains("L10n.text(\"温度\", \"Temp\")"))
         XCTAssertTrue(tertiary.contains("if let gpuTemperature = geekGPUTemperature"))
         XCTAssertTrue(tertiary.contains("title: L10n.text(\"GPU 温度\", \"GPU Temperature\")"))
         XCTAssertTrue(sensors.contains("return orderedZones.filter(available.contains)"))
@@ -1096,12 +1150,32 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
         XCTAssertTrue(fanDetail.contains("accessibilityLabel: chartTitle"))
 
         let sensors = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift")
-        let ringStart = try XCTUnwrap(sensors.range(of: "private var geekSensorFanRingValue")).lowerBound
-        let ringEnd = try XCTUnwrap(sensors.range(of: "private var geekSensorFanRingDetail")).lowerBound
-        let ringValue = String(sensors[ringStart..<ringEnd])
-        XCTAssertTrue(ringValue.contains("actualRPM.map(SystemFanSpeedFormat.number)"))
-        XCTAssertFalse(ringValue.contains("percentage"))
-        XCTAssertTrue(sensors.contains("progress: geekFanTelemetry.percentage.map { $0 / 100 }"))
+        let presentationStart = try XCTUnwrap(sensors.range(of: "struct GeekSensorFanRingPresentation")).lowerBound
+        let ringStart = try XCTUnwrap(sensors.range(of: "struct GeekSensorFanRing: View")).lowerBound
+        let ringEnd = try XCTUnwrap(sensors.range(of: "enum GeekSensorPageAvailability")).lowerBound
+        let presentation = String(sensors[presentationStart..<ringStart])
+        let ring = String(sensors[ringStart..<ringEnd])
+        XCTAssertTrue(presentation.contains("else if let rpm = telemetry.actualRPM"))
+        XCTAssertTrue(presentation.contains("SystemFanSpeedFormat.number(rpm)"))
+        XCTAssertFalse(presentation.contains("percentage"))
+        XCTAssertTrue(sensors.contains("GeekSensorFanRing(telemetry: geekFanTelemetry"))
+        XCTAssertTrue(ring.contains("value: presentation.value"))
+        XCTAssertTrue(ring.contains("detail: presentation.caption"))
+        XCTAssertTrue(ring.contains("progress: telemetry.percentage.map { $0 / 100 }"))
+        let stoppedTelemetry = FanTelemetryState(actualRPM: 0, minRPM: 0, maxRPM: 6_000,
+            targetRPM: nil, fanCount: 1, timestamp: nil, telemetryAvailable: true,
+            isSampling: false, isFanless: false, readings: [stopped])
+        let stoppedRing = GeekSensorFanRingPresentation(telemetry: stoppedTelemetry)
+        XCTAssertEqual(stoppedRing.value, SystemFanSpeedFormat.number(0))
+        XCTAssertEqual(stoppedRing.caption, "rpm")
+        XCTAssertEqual(stoppedTelemetry.percentage, 0)
+        let unknownTelemetry = FanTelemetryState(actualRPM: nil, minRPM: nil, maxRPM: nil,
+            targetRPM: nil, fanCount: 0, timestamp: nil, telemetryAvailable: false,
+            isSampling: false, isFanless: false, readings: [])
+        let unknownRing = GeekSensorFanRingPresentation(telemetry: unknownTelemetry)
+        XCTAssertEqual(unknownRing.value, "—")
+        XCTAssertEqual(unknownRing.caption, L10n.text("不可用", "N/A"))
+        XCTAssertNil(unknownTelemetry.percentage)
         let manual = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/FanControlInlineControls.swift")
         let presetStart = try XCTUnwrap(manual.range(of: "ForEach([25.0, 50.0, 75.0, 100.0]")).lowerBound
         let presetEnd = try XCTUnwrap(manual.range(of: "static func actualRPM", range: presetStart..<manual.endIndex)).lowerBound
@@ -1145,9 +1219,6 @@ final class GeekSensorsPowerHoverDetailTests: XCTestCase {
     }
 
     private func source(_ relativePath: String) throws -> String {
-        try String(
-            contentsOf: projectRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        try r2ProductionSource(at: projectRoot.appendingPathComponent(relativePath))
     }
 }

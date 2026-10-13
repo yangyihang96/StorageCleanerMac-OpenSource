@@ -304,8 +304,8 @@ struct StartupItemInspectorView: View {
 
     private var administratorActionExplanation: String {
         L10n.text(
-            "继续前会先验证并显示影响确认。执行时系统会请求管理员授权；当前安装可能需要先注册并批准系统控制辅助程序。管理员操作目前没有应用内撤销，可通过反向操作恢复状态。",
-            "The app validates the request and shows its impact before continuing. Execution requests administrator approval; this installation may first need to register and approve the system-control helper. Administrator operations currently have no in-app undo; use the inverse action to restore the state."
+            "系统控制辅助程序可能需注册与批准；执行需管理员授权；无应用内撤销，可反向操作恢复",
+            "The system control helper may need registration and system approval; administrator approval required; no in-app undo, restore with the inverse action"
         )
     }
 

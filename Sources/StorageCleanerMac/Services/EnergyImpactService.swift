@@ -42,7 +42,7 @@ enum EnergyImpactService {
         if let onProgress {
             await onProgress(.identifyingApplications)
         }
-        let processRows = processRows(fromPSOutput: processOutput)
+        let processRows = resolvingExecutablePaths(processRows(fromPSOutput: processOutput))
         let applicationProcesses = applicationProcesses(from: processRows)
         let processIDs = applicationProcesses.map(\.row.pid)
 
@@ -138,6 +138,10 @@ enum EnergyImpactService {
                     completed = true
                     break
                 }
+                if !processListOutputFitsLimit(
+                    stdoutBytes: (try? fileManager.attributesOfItem(atPath: standardOutputURL.path)[.size] as? NSNumber)?.uint64Value ?? UInt64.max,
+                    stderrBytes: (try? fileManager.attributesOfItem(atPath: standardErrorURL.path)[.size] as? NSNumber)?.uint64Value ?? UInt64.max
+                ) { break }
             }
             if !completed {
                 // This is our own fixed, short-lived ps child, never another
@@ -151,6 +155,10 @@ enum EnergyImpactService {
             }
             guard !Task.isCancelled else { return "" }
 
+            guard processListOutputFitsLimit(
+                stdoutBytes: (try? fileManager.attributesOfItem(atPath: standardOutputURL.path)[.size] as? NSNumber)?.uint64Value ?? UInt64.max,
+                stderrBytes: (try? fileManager.attributesOfItem(atPath: standardErrorURL.path)[.size] as? NSNumber)?.uint64Value ?? UInt64.max
+            ) else { return "" }
             try? standardOutput.synchronize()
             try? standardError.synchronize()
             guard process.terminationStatus == 0 else { return "" }
@@ -162,6 +170,11 @@ enum EnergyImpactService {
         }
     }
 
+    static func processListOutputFitsLimit(stdoutBytes: UInt64, stderrBytes: UInt64) -> Bool {
+        let (bytes, overflow) = stdoutBytes.addingReportingOverflow(stderrBytes)
+        return !overflow && bytes <= 2 * 1_024 * 1_024
+    }
+
     struct MenuBarCounterFrame: Sendable {
         let sampledAt: Date
         let uptime: TimeInterval
@@ -171,17 +184,49 @@ enum EnergyImpactService {
 
     /// One read per interval. The menu does not restart a 1.2-second measurement
     /// on each refresh; its previous counter frame is the next baseline.
-    static func menuBarCounterFrame() async -> MenuBarCounterFrame? {
-        let output = await processListOutput()
-        guard !Task.isCancelled, !output.isEmpty else { return nil }
-        let rows = processRows(fromPSOutput: output)
-        let counters = resourceUsagesByPID(for: rows.map(\.pid))
+    static func menuBarCounterFrame(
+        readProcessList: @Sendable () async -> String = { await processListOutput() },
+        readResourceUsage: @Sendable (Int32) -> EnergyResourceUsage? = resourceUsage,
+        metadataCache: ProcessSamplingCache = .shared
+    ) async -> MenuBarCounterFrame? {
+        guard !Task.isCancelled else { return nil }
+        let discovery = metadataCache.beginEnergyDiscovery()
+        let output = await readProcessList()
+        guard !Task.isCancelled else {
+            metadataCache.finishEnergyDiscovery(discovery, pids: nil, cancelled: true)
+            return nil
+        }
+        guard !output.isEmpty else {
+            metadataCache.finishEnergyDiscovery(discovery, pids: nil)
+            return nil
+        }
+        let pidDiscovery = processPIDDiscovery(fromPSOutput: output)
+        // A valid PID still belongs to this inventory when its metrics are
+        // unreadable. If any PID itself is unreadable, memory must instead
+        // discover a complete list through its native provider.
+        metadataCache.finishEnergyDiscovery(discovery, pids: pidDiscovery.pids,
+                                            isComplete: pidDiscovery.isComplete)
+        let discoveredRows = processRows(fromPSOutput: output)
+        guard !discoveredRows.isEmpty else { return nil }
+        let counters: [Int32: EnergyResourceUsage] = Dictionary(uniqueKeysWithValues: discoveredRows.compactMap { row in
+            readResourceUsage(row.pid).map { (row.pid, $0) }
+        })
+        let pathHints = Dictionary(uniqueKeysWithValues: discoveredRows.map { ($0.pid, $0.path) })
+        let rows = resolvingExecutablePaths(discoveredRows) { pid in
+            metadataCache.metadata(pid: pid, birth: counters[pid]?.processStartMach,
+                                   psPathHint: pathHints[pid])?.path
+        }
+        guard !Task.isCancelled else { return nil }
         guard !rows.isEmpty, !counters.isEmpty else { return nil }
         return MenuBarCounterFrame(sampledAt: Date(), uptime: ProcessInfo.processInfo.systemUptime,
                                    rows: rows, counters: counters)
     }
 
-    static func menuBarSnapshot(previous: MenuBarCounterFrame, current: MenuBarCounterFrame) -> EnergyImpactSnapshot? {
+    static func menuBarSnapshot(
+        previous: MenuBarCounterFrame,
+        current: MenuBarCounterFrame,
+        metadataCache: ProcessSamplingCache = .shared
+    ) -> EnergyImpactSnapshot? {
         let elapsed = current.uptime - previous.uptime
         guard elapsed > 0, elapsed.isFinite else { return nil }
         // New/reused PIDs and reset counters need another baseline, not a
@@ -196,7 +241,8 @@ enum EnergyImpactService {
         }
         guard !rows.isEmpty else { return nil }
         return makeSnapshot(startedAt: current.sampledAt,
-                            applicationProcesses: applicationProcesses(from: rows),
+                            applicationProcesses: applicationProcesses(from: rows, resourceSamples: current.counters,
+                                                                       metadataCache: metadataCache),
                             firstResourceSamples: previous.counters,
                             latestResourceSamples: current.counters,
                             measuredSampleSeconds: elapsed, sampledAt: current.sampledAt)
@@ -230,7 +276,9 @@ enum EnergyImpactService {
             resourceSamples: measuredResourceSamples,
             currentMeasurements: currentMeasurements,
             uptimeSeconds: uptimeSeconds,
-            calibration: calibration
+            calibration: calibration,
+            sampledAt: sampledAt ?? Date(),
+            sampleSeconds: measuredSampleSeconds
         )
         let measuredProcessCount = applicationProcesses.reduce(0) { count, process in
             count + (measuredResourceSamples[process.row.pid] == nil ? 0 : 1)
@@ -252,6 +300,104 @@ enum EnergyImpactService {
             calibrationWattsPerCore: calibration.cumulativeWattsPerCore,
             usesLocalCalibration: calibration.usesLocalCalibration
         )
+    }
+
+    /// BOARD N16-4: each row's executable path as the kernel reports it
+    /// (`proc_pidpath`). `ps -o comm=` prints a non-ASCII path vis-encoded
+    /// when the app runs without a UTF-8 locale (apps opened from the Finder
+    /// or the Dock: "测试版.app" became "M-fM-5M^KM-hM-/M^UM-gM^IM^H.app"), and a
+    /// launchd helper's path as its relative argv[0] ("Contents/Resources/…").
+    /// A process that has exited since `ps` keeps the printed path. One path
+    /// buffer serves the whole pass (review P2-12).
+    static func resolvingExecutablePaths(_ rows: [EnergyProcessRow]) -> [EnergyProcessRow] {
+        var reader = ExecutablePathReader()
+        return resolvingExecutablePaths(rows) { reader.path(of: $0) }
+    }
+
+    static func resolvingExecutablePaths(
+        _ rows: [EnergyProcessRow],
+        pathForProcess: (Int32) -> String?
+    ) -> [EnergyProcessRow] {
+        rows.map { row in
+            guard let path = pathForProcess(row.pid), path != row.path else { return row }
+            return EnergyProcessRow(
+                pid: row.pid,
+                parentPID: row.parentPID,
+                residentBytes: row.residentBytes,
+                elapsedSeconds: row.elapsedSeconds,
+                cpuTimeSeconds: row.cpuTimeSeconds,
+                cpuPercent: row.cpuPercent,
+                path: path
+            )
+        }
+    }
+
+    static func executablePath(processIdentifier: Int32) -> String? {
+        var reader = ExecutablePathReader()
+        return reader.path(of: processIdentifier)
+    }
+
+    /// Kernel executable paths (`proc_pidpath`) through one reused buffer of
+    /// `4 × MAXPATHLEN` bytes (review P2-12: a sampling pass reads every
+    /// process; a fresh zeroed buffer each was a megabyte or more per pass).
+    /// Each path is the length the kernel returns, so nothing of a longer
+    /// earlier path is carried into a shorter one.
+    struct ExecutablePathReader: Sendable {
+        typealias KernelRead = @Sendable (Int32, UnsafeMutableRawPointer?, UInt32) -> Int32
+        private var buffer = [UInt8](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        private let kernelRead: KernelRead
+
+        init(kernelRead: @escaping KernelRead = { proc_pidpath($0, $1, $2) }) {
+            self.kernelRead = kernelRead
+        }
+
+        mutating func path(of processIdentifier: Int32) -> String? {
+            guard processIdentifier > 0 else { return nil }
+            let kernelRead = self.kernelRead
+            let length = buffer.withUnsafeMutableBytes { raw in
+                kernelRead(processIdentifier, raw.baseAddress, UInt32(raw.count))
+            }
+            guard length > 0, Int(length) <= buffer.count else { return nil }
+            let path = String(decoding: buffer.prefix(Int(length)), as: UTF8.self)
+            return path.hasPrefix("/") ? path : nil
+        }
+    }
+
+    /// BOARD N16-4: a list name shared by different applications, with what
+    /// tells them apart: the bundle's own name when it differs from the
+    /// shown name, otherwise the folder it is in.
+    static func qualifiedName(_ name: String, bundlePath: String?) -> String {
+        guard let bundlePath else { return name }
+        let bundle = URL(fileURLWithPath: bundlePath)
+        let fileName = bundle.deletingPathExtension().lastPathComponent
+        let qualifier = fileName != name && !fileName.isEmpty
+            ? fileName
+            : bundle.deletingLastPathComponent().lastPathComponent
+        guard !qualifier.isEmpty, qualifier != "/" else { return name }
+        return "\(name) · \(qualifier)"
+    }
+
+    struct ProcessPIDDiscovery: Sendable {
+        let pids: [Int32]
+        let isComplete: Bool
+    }
+
+    /// PID discovery has no dependency on RSS, CPU or executable-path
+    /// parsing. An unrecognizable PID makes the whole hint incomplete;
+    /// silently dropping that line would conceal a process from memory.
+    static func processPIDDiscovery(fromPSOutput output: String) -> ProcessPIDDiscovery {
+        var pids: [Int32] = []
+        var seenPIDs: Set<Int32> = []
+        var isComplete = true
+        for line in output.split(separator: "\n") {
+            guard let token = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).first else { continue }
+            guard let pid = Int32(token), pid > 0 else {
+                isComplete = false
+                continue
+            }
+            if seenPIDs.insert(pid).inserted { pids.append(pid) }
+        }
+        return ProcessPIDDiscovery(pids: pids, isComplete: isComplete && !pids.isEmpty)
     }
 
     static func processRows(fromPSOutput output: String) -> [EnergyProcessRow] {
@@ -471,6 +617,7 @@ enum EnergyImpactService {
         var measuredEnergyNanojoules: UInt64 = 0
         var estimatedSupplementJoules: Double = 0
         var measuredProcessCount = 0
+        var currentMeasuredProcessCount = 0
         var currentPowerWatts: Double = 0
         var diskReadBytesPerSecond: Int64 = 0
         var diskWriteBytesPerSecond: Int64 = 0
@@ -497,6 +644,7 @@ enum EnergyImpactService {
                 estimatedSupplementJoules += processCPUSeconds * calibration.cumulativeWattsPerCore
             }
             if let currentMeasurement, currentMeasurement.usesMeasuredPower {
+                currentMeasuredProcessCount += 1
                 currentPowerWatts += max(0, currentMeasurement.powerWatts)
             } else {
                 currentPowerWatts += max(0, row.cpuPercent) / 100 * calibration.currentWattsPerCore
@@ -516,7 +664,7 @@ enum EnergyImpactService {
         }
 
         func app(
-            uptimeSeconds: TimeInterval
+            uptimeSeconds: TimeInterval, sampledAt: Date, sampleSeconds: TimeInterval
         ) -> EnergyImpactApp {
             let measuredEnergyWh = EnergyImpactService.wattHours(fromNanojoules: measuredEnergyNanojoules)
             let estimatedSupplementEnergyWh = max(0, estimatedSupplementJoules) / 3_600
@@ -545,12 +693,15 @@ enum EnergyImpactService {
                 processCount: processIDs.count,
                 measuredProcessCount: measuredProcessCount,
                 processIDs: processIDs.sorted(),
-                isApplication: isApplication
+                isApplication: isApplication,
+                currentMeasuredProcessCount: currentMeasuredProcessCount,
+                sampledAt: sampledAt,
+                currentSampleSeconds: sampleSeconds
             )
         }
     }
 
-    private struct EnergyProcessPresentation {
+    struct EnergyProcessPresentation: Sendable {
         let name: String
         let groupKey: String
         let groupPath: String
@@ -566,11 +717,18 @@ enum EnergyImpactService {
         let usesLocalCalibration: Bool
     }
 
-    private static func applicationProcesses(from processRows: [EnergyProcessRow]) -> [PreparedEnergyProcess] {
+    private static func applicationProcesses(
+        from processRows: [EnergyProcessRow],
+        resourceSamples: [Int32: EnergyResourceUsage] = [:],
+        metadataCache: ProcessSamplingCache? = nil
+    ) -> [PreparedEnergyProcess] {
         let processRowsByPID = Dictionary(uniqueKeysWithValues: processRows.map { ($0.pid, $0) })
         return processRows.compactMap { row in
             guard !row.path.trimmed.isEmpty else { return nil }
-            let presentation = presentation(for: row, processRowsByPID: processRowsByPID)
+            let resolve = { Self.presentation(for: row, processRowsByPID: processRowsByPID) }
+            let presentation = metadataCache?.energyPresentation(
+                row: row, birth: resourceSamples[row.pid]?.processStartMach, resolve: resolve
+            ) ?? resolve()
             guard presentation.isApplication else { return nil }
             return PreparedEnergyProcess(row: row, presentation: presentation)
         }
@@ -581,7 +739,9 @@ enum EnergyImpactService {
         resourceSamples: [Int32: EnergyResourceUsage],
         currentMeasurements: [Int32: EnergyProcessMeasurement],
         uptimeSeconds: TimeInterval,
-        calibration: EnergyCalibration
+        calibration: EnergyCalibration,
+        sampledAt: Date,
+        sampleSeconds: TimeInterval
     ) -> [EnergyImpactApp] {
         var groups: [String: EnergyAppAccumulator] = [:]
 
@@ -605,8 +765,21 @@ enum EnergyImpactService {
             groups[presentation.groupKey] = accumulator
         }
 
-        return groups.values
-            .map { $0.app(uptimeSeconds: uptimeSeconds) }
+        // BOARD N16-4: different applications that show the same name (an
+        // installed app and a copy of it, say) are told apart.
+        var accumulators = Array(groups.values)
+        let sameNamed = Dictionary(grouping: accumulators.indices) { accumulators[$0].name }
+        for indices in sameNamed.values where indices.count > 1 {
+            for index in indices {
+                accumulators[index].name = qualifiedName(
+                    accumulators[index].name,
+                    bundlePath: accumulators[index].bundlePath
+                )
+            }
+        }
+
+        return accumulators
+            .map { $0.app(uptimeSeconds: uptimeSeconds, sampledAt: sampledAt, sampleSeconds: sampleSeconds) }
             .sorted(by: sortByImpact)
     }
 

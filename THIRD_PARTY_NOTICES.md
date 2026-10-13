@@ -16,7 +16,17 @@ The read-only AppleSMC fan-speed access in `SMCFanSpeedService` references the p
 - License: MIT
 - Copyright: Copyright (c) 2019 Serhiy Mytrovtsiy
 
-MIT License text:
+## PureMac similar-photo matching
+
+The similar-photo review matcher in `DuplicateFileScanner` adapts the perceptual
+hash, colour-distance, and aspect-ratio comparison approach from PureMac. It
+does not copy PureMac's deletion workflow or artwork.
+
+- Project: https://github.com/momenbasel/PureMac
+- License: MIT
+- Copyright: Copyright (c) 2026 PureMac Contributors
+
+MIT License text for the two projects above:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -35,3 +45,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## MacMiniMode power policy reference
+
+The Mac mini mode power-source reconciliation and closed-lid sleep restoration
+design references MacMiniMode. StorageCleanerMac implements its own policy,
+XPC transport, root-owned recovery journal and lifecycle; no upstream source
+code was copied.
+
+- Project: https://github.com/Pama-Lee/MacMiniMode
+- Reference commit: `f21aad039bc517f396e31f3612059bafec4d1008`
+- License: MIT
+- Copyright: Copyright (c) 2026 MacMiniMode contributors
+- The MIT permission and warranty text printed above also applies to this notice.

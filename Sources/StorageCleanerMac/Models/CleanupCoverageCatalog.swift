@@ -1,5 +1,10 @@
 import Foundation
 
+/// A cache or log folder whose exact path and owning app are known. These are
+/// green and move to Trash, and are preselected while their app is closed
+/// (D22, D47). Developer caches (`isRecommended == false`) keep "optional,
+/// unselected" here only as a placeholder: the developer activity bands
+/// replace both, and their green band (unused for over a year) is selected.
 struct KnownRegenerableCacheDefinition: Sendable {
     let id: String
     let ownerDisplayName: String
@@ -10,11 +15,17 @@ struct KnownRegenerableCacheDefinition: Sendable {
     let candidateNames: [String]
     let minimumBytes: Int64
     let requiredClosedBundleIDs: [String]
+    var reasonKey = "cleanup.reason.knownRegenerableCache"
+    var isRecommended = true
+    var revision = 1
+    var checkedAt = "2026-10-12"
+    var impact = "应用会重新生成缓存，首次打开可能稍慢或需要联网"
+    var evidenceURLs: [String] = []
 
     var cleanupRule: CleanupRule {
         CleanupRule(
             id: id,
-            selectionPolicyVersion: 1,
+            selectionPolicyVersion: isRecommended ? 2 : 1,
             categoryID: categoryID,
             categoryTitleKey: categoryTitleKey,
             titleKey: titleKey,
@@ -36,65 +47,17 @@ struct KnownRegenerableCacheDefinition: Sendable {
             ),
             cloudPolicy: .excludeCloudRoots,
             risk: .safe,
-            recommendation: .optional,
-            defaultSelection: .unselected,
+            recommendation: isRecommended ? .recommended : .optional,
+            defaultSelection: isRecommended ? .selected : .unselected,
             executionEligibility: .eligible,
             measurementRequirement: .complete,
             allowsManualSelection: true,
             action: .moveToTrash,
             requiredClosedBundleIDs: requiredClosedBundleIDs,
-            reasonKey: "cleanup.reason.knownRegenerableCache",
-            ownerDisplayName: ownerDisplayName
-        )
-    }
-}
-
-struct KnownReadOnlyCoverageDefinition: Sendable {
-    let id: String
-    let ownerDisplayName: String
-    let categoryID: String
-    let categoryTitleKey: String
-    let titleKey: String
-    let reasonKey: String
-    let rootPath: String
-    let candidateNames: [String]
-    let minimumBytes: Int64
-    let requiredClosedBundleIDs: [String]
-
-    var cleanupRule: CleanupRule {
-        CleanupRule(
-            id: id,
-            selectionPolicyVersion: 1,
-            categoryID: categoryID,
-            categoryTitleKey: categoryTitleKey,
-            titleKey: titleKey,
-            root: CleanupRuleRoot(kind: .homeRelative, path: rootPath),
-            maximumDepth: 32,
-            minimumAgeDays: 0,
-            minimumBytes: minimumBytes,
-            include: CleanupRuleMatch(
-                entryKinds: [.directory],
-                extensions: [],
-                nameMatcher: CleanupNameMatcher(
-                    mode: .exact,
-                    values: candidateNames
-                )
-            ),
-            exclude: CleanupRuleExclusion(
-                relativePrefixes: [],
-                extensions: []
-            ),
-            cloudPolicy: .skipPlaceholder,
-            risk: .reviewOnly,
-            recommendation: .advisoryOnly,
-            defaultSelection: .forbidden,
-            executionEligibility: .advisoryOnly,
-            measurementRequirement: .bestEffort,
-            allowsManualSelection: false,
-            action: .revealOnly,
-            requiredClosedBundleIDs: requiredClosedBundleIDs,
             reasonKey: reasonKey,
-            ownerDisplayName: ownerDisplayName
+            ownerDisplayName: ownerDisplayName,
+            maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: revision,
+                checkedAt: checkedAt, impact: reasonKey.contains("Logs") ? "应用会重新生成日志，旧诊断记录将移入废纸篓" : impact, evidenceURLs: evidenceURLs)
         )
     }
 }
@@ -234,7 +197,8 @@ enum CleanupCoverageCatalog {
             rootPath: "Library/Caches",
             candidateNames: ["ms-playwright-mcp"],
             minimumBytes: mib,
-            requiredClosedBundleIDs: []
+            requiredClosedBundleIDs: [],
+            isRecommended: false
         ),
         .init(
             id: "developer.pip-cache",
@@ -245,7 +209,8 @@ enum CleanupCoverageCatalog {
             rootPath: "Library/Caches",
             candidateNames: ["pip"],
             minimumBytes: mib,
-            requiredClosedBundleIDs: []
+            requiredClosedBundleIDs: [],
+            isRecommended: false
         ),
         .init(
             id: "developer.swiftpm-cache",
@@ -256,7 +221,8 @@ enum CleanupCoverageCatalog {
             rootPath: "Library/Caches",
             candidateNames: ["org.swift.swiftpm"],
             minimumBytes: mib,
-            requiredClosedBundleIDs: []
+            requiredClosedBundleIDs: [],
+            isRecommended: false
         ),
         .init(
             id: "developer.clang-cache",
@@ -267,7 +233,8 @@ enum CleanupCoverageCatalog {
             rootPath: "Library/Caches",
             candidateNames: ["clang"],
             minimumBytes: mib,
-            requiredClosedBundleIDs: []
+            requiredClosedBundleIDs: [],
+            isRecommended: false
         ),
         .init(
             id: "developer.bun-cache",
@@ -278,34 +245,64 @@ enum CleanupCoverageCatalog {
             rootPath: "Library/Caches",
             candidateNames: ["bun"],
             minimumBytes: mib,
-            requiredClosedBundleIDs: []
+            requiredClosedBundleIDs: [],
+            isRecommended: false
         ),
-    ]
+    ] + developerToolCacheDefinitions
 
-    static let readOnlyDefinitions: [KnownReadOnlyCoverageDefinition] = [
-        .init(
-            id: "system-cache.cloudkit",
-            ownerDisplayName: "macOS CloudKit",
-            categoryID: "system",
-            categoryTitleKey: "cleanup.category.system",
-            titleKey: "cleanup.rule.systemManagedCache.title",
-            reasonKey: "cleanup.reason.systemManagedCache",
+    /// D47 supplement (review P1-1a): caches that command-line developer tools
+    /// keep in `~/Library/Caches` under their own exact names. They are graded
+    /// by developer activity (D22): written within the threshold, red; within
+    /// a year, yellow; only unchanged for over a year, green and preselected.
+    /// Without these rules they were green user-cache rows whose owner could
+    /// not be identified, so D47 preselected them even while in use.
+    private static let developerToolCacheDefinitions: [KnownRegenerableCacheDefinition] = [
+        ("developer.go-build-cache", "Go", ["go-build"]),
+        ("developer.gopls-cache", "gopls", ["gopls"]),
+        ("developer.golangci-lint-cache", "golangci-lint", ["golangci-lint"]),
+        ("developer.playwright-browsers", "Playwright", ["ms-playwright", "ms-playwright-go"]),
+        ("developer.pnpm-cache", "pnpm", ["pnpm"]),
+        ("developer.yarn-cache", "Yarn", ["Yarn"]),
+        ("developer.node-gyp-cache", "node-gyp", ["node-gyp"]),
+        ("developer.typescript-cache", "TypeScript", ["typescript"]),
+        ("developer.deno-cache", "Deno", ["deno"]),
+        ("developer.electron-cache", "Electron", ["electron", "electron-builder"]),
+        ("developer.cypress-cache", "Cypress", ["Cypress"]),
+        ("developer.poetry-cache", "Poetry", ["pypoetry"]),
+        ("developer.cocoapods-cache", "CocoaPods", ["CocoaPods"]),
+        ("developer.carthage-cache", "Carthage", ["org.carthage.CarthageKit"]),
+        ("developer.sccache-cache", "sccache", ["Mozilla.sccache"]),
+        ("developer.flutter-cache", "Flutter", ["flutter_engine"]),
+    ].map { id, owner, names in
+        KnownRegenerableCacheDefinition(
+            id: id,
+            ownerDisplayName: owner,
+            categoryID: "developer",
+            categoryTitleKey: "cleanup.category.developer",
+            titleKey: "cleanup.rule.developerCache.title",
             rootPath: "Library/Caches",
-            candidateNames: ["CloudKit"],
+            candidateNames: names,
             minimumBytes: mib,
-            requiredClosedBundleIDs: []
-        ),
+            requiredClosedBundleIDs: [],
+            isRecommended: false
+        )
+    }
+
+    /// D19/D22/D47: diagnostic and app logs are green and preselected while
+    /// their app is closed, also when written in the last 7 days (the row
+    /// says so). macOS diagnostics have no owning app.
+    static let logDefinitions: [KnownRegenerableCacheDefinition] = [
         .init(
             id: "system-log.diagnostics",
             ownerDisplayName: "macOS",
             categoryID: "system",
             categoryTitleKey: "cleanup.category.system",
             titleKey: "cleanup.rule.diagnosticLogs.title",
-            reasonKey: "cleanup.reason.diagnosticLogs",
             rootPath: "Library/Logs",
             candidateNames: ["com.apple.diagnosticextensionsd"],
             minimumBytes: mib,
-            requiredClosedBundleIDs: []
+            requiredClosedBundleIDs: [],
+            reasonKey: "cleanup.reason.diagnosticLogs"
         ),
         .init(
             id: "application-log.codex",
@@ -313,17 +310,53 @@ enum CleanupCoverageCatalog {
             categoryID: "application-cache",
             categoryTitleKey: "cleanup.category.applicationCaches",
             titleKey: "cleanup.rule.applicationLogs.title",
-            reasonKey: "cleanup.reason.applicationLogs",
             rootPath: "Library/Logs",
             candidateNames: ["com.openai.codex"],
             minimumBytes: mib,
-            requiredClosedBundleIDs: ["com.openai.codex"]
+            requiredClosedBundleIDs: ["com.openai.codex"],
+            reasonKey: "cleanup.reason.applicationLogs"
         ),
     ]
 
+    /// D19/D22: CloudKit caches can be cleaned but need judgment, so they are
+    /// yellow and never preselected.
+    static let cloudKitCacheRule = CleanupRule(
+        id: "system-cache.cloudkit",
+        selectionPolicyVersion: 2,
+        categoryID: "system",
+        categoryTitleKey: "cleanup.category.system",
+        titleKey: "cleanup.rule.systemManagedCache.title",
+        root: CleanupRuleRoot(kind: .homeRelative, path: "Library/Caches"),
+        maximumDepth: 32,
+        minimumAgeDays: 0,
+        minimumBytes: mib,
+        include: CleanupRuleMatch(
+            entryKinds: [.directory],
+            extensions: [],
+            nameMatcher: CleanupNameMatcher(mode: .exact, values: ["CloudKit"])
+        ),
+        exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
+        cloudPolicy: .excludeCloudRoots,
+        risk: .reviewOnly,
+        recommendation: .optional,
+        defaultSelection: .unselected,
+        executionEligibility: .eligibleAfterReview,
+        measurementRequirement: .complete,
+        allowsManualSelection: true,
+        action: .moveToTrashAfterReview,
+        requiredClosedBundleIDs: [],
+        reasonKey: "cleanup.reason.systemManagedCache",
+        ownerDisplayName: "macOS CloudKit",
+        maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: 1,
+            checkedAt: "2026-10-12", impact: "系统会重新生成缓存，首次同步可能稍慢")
+    )
+
+    /// D24: "Mail Downloads" holds copies the system saved when attachments
+    /// were opened. Yellow, selectable, never preselected; Mail must be
+    /// closed. Attachments inside the mail library are not listed.
     static let mailDownloadedAttachmentsRule = CleanupRule(
         id: "mail.downloaded-attachments",
-        selectionPolicyVersion: 1,
+        selectionPolicyVersion: 2,
         categoryID: "mail",
         categoryTitleKey: "cleanup.category.mail",
         titleKey: "cleanup.rule.mailDownloads.title",
@@ -345,53 +378,24 @@ enum CleanupCoverageCatalog {
         exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
         cloudPolicy: .skipPlaceholder,
         risk: .reviewOnly,
-        recommendation: .advisoryOnly,
-        defaultSelection: .forbidden,
-        executionEligibility: .advisoryOnly,
-        measurementRequirement: .bestEffort,
-        allowsManualSelection: false,
-        action: .revealOnly,
+        recommendation: .optional,
+        defaultSelection: .unselected,
+        executionEligibility: .eligibleAfterReview,
+        measurementRequirement: .complete,
+        allowsManualSelection: true,
+        action: .moveToTrashAfterReview,
         requiredClosedBundleIDs: ["com.apple.mail"],
-        reasonKey: "cleanup.reason.mailAttachments",
-        ownerDisplayName: "Apple Mail"
+        reasonKey: "cleanup.reason.mailDownloads",
+        ownerDisplayName: "Apple Mail",
+        maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: 1,
+            checkedAt: "2026-10-12", impact: "已打开附件的下载副本将移入废纸篓，邮件原件不受影响")
     )
 
-    static let mailLibraryAttachmentsRule = CleanupRule(
-        id: "mail.library-attachments",
-        selectionPolicyVersion: 1,
-        categoryID: "mail",
-        categoryTitleKey: "cleanup.category.mail",
-        titleKey: "cleanup.rule.mailLibraryAttachments.title",
-        root: CleanupRuleRoot(kind: .homeRelative, path: "Library/Mail"),
-        candidateScope: .descendantAggregate,
-        maximumDepth: 32,
-        minimumAgeDays: 0,
-        minimumBytes: 1,
-        include: CleanupRuleMatch(
-            entryKinds: [.directory],
-            extensions: [],
-            nameMatcher: CleanupNameMatcher(
-                mode: .exact,
-                values: ["Attachments"]
-            )
-        ),
-        exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
-        cloudPolicy: .skipPlaceholder,
-        risk: .reviewOnly,
-        recommendation: .advisoryOnly,
-        defaultSelection: .forbidden,
-        executionEligibility: .advisoryOnly,
-        measurementRequirement: .bestEffort,
-        allowsManualSelection: false,
-        action: .revealOnly,
-        requiredClosedBundleIDs: ["com.apple.mail"],
-        reasonKey: "cleanup.reason.mailAttachments",
-        ownerDisplayName: "Apple Mail"
-    )
-
+    /// D23: one separate item that permanently deletes the top-level entries
+    /// that were in the Trash when the scan ran. Never preselected.
     static let userTrashRule = CleanupRule(
         id: "trash.user-trash",
-        selectionPolicyVersion: 1,
+        selectionPolicyVersion: 2,
         categoryID: "trash",
         categoryTitleKey: "cleanup.category.trash",
         titleKey: "cleanup.rule.userTrash.title",
@@ -407,29 +411,31 @@ enum CleanupCoverageCatalog {
         ),
         exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
         cloudPolicy: .skipPlaceholder,
-        risk: .reviewOnly,
-        recommendation: .advisoryOnly,
-        defaultSelection: .forbidden,
-        executionEligibility: .advisoryOnly,
-        measurementRequirement: .bestEffort,
-        allowsManualSelection: false,
-        action: .revealOnly,
+        risk: .protected,
+        recommendation: .notRecommended,
+        defaultSelection: .unselected,
+        executionEligibility: .eligibleAfterProtectedReview,
+        measurementRequirement: .complete,
+        allowsManualSelection: true,
+        action: .emptyTrash,
         requiredClosedBundleIDs: [],
-        reasonKey: "cleanup.reason.userTrash"
+        reasonKey: "cleanup.reason.userTrash",
+        maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: 1,
+            checkedAt: "2026-10-12", impact: "将永久删除扫描时已有的废纸篓项目，无法通过本应用恢复")
     )
 
     static var cleanupRules: [CleanupRule] {
         regenerableCacheDefinitions.map(\.cleanupRule)
-            + readOnlyDefinitions.map(\.cleanupRule)
+            + logDefinitions.map(\.cleanupRule)
             + [
+                cloudKitCacheRule,
                 mailDownloadedAttachmentsRule,
-                mailLibraryAttachmentsRule,
                 userTrashRule,
             ]
     }
 
     static func permitsAutomaticRule(_ rule: CleanupRule) -> Bool {
-        regenerableCacheDefinitions.contains { definition in
+        (regenerableCacheDefinitions + logDefinitions).contains { definition in
             definition.id == rule.id
                 && definition.ownerDisplayName == rule.ownerDisplayName
                 && definition.categoryID == rule.categoryID
@@ -444,13 +450,5 @@ enum CleanupCoverageCatalog {
                 && rule.effectiveCandidateScope == .immediateChildren
                 && rule.include.nameMatcher.mode == .exact
         }
-    }
-
-    static func permitsDescendantAggregateRule(_ rule: CleanupRule) -> Bool {
-        rule.id == mailLibraryAttachmentsRule.id
-            && rule.root.path == mailLibraryAttachmentsRule.root.path
-            && rule.ownerDisplayName == mailLibraryAttachmentsRule.ownerDisplayName
-            && rule.include.nameMatcher.mode == .exact
-            && Set(rule.include.nameMatcher.values) == Set(["Attachments"])
     }
 }

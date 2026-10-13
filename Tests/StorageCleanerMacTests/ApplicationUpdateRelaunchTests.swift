@@ -179,7 +179,7 @@ final class ApplicationUpdateRelaunchTests: XCTestCase {
             ),
             executor: RelaunchSuccessfulExecutor()
         )
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: RelaunchInventoryScanner(
                 applications: [application]
             ),

@@ -3,6 +3,29 @@
 @preconcurrency import VideoToolbox
 import Foundation
 
+/// v11 codec selection is separate from the frozen H.264 suite entry point.
+enum VideoMediaBenchmarkV11Codec: String, CaseIterable, Sendable {
+    case h264, hevc, proRes422
+
+    var codecType: CMVideoCodecType {
+        switch self {
+        case .h264: kCMVideoCodecType_H264
+        case .hevc: kCMVideoCodecType_HEVC
+        case .proRes422: kCMVideoCodecType_AppleProRes422
+        }
+    }
+
+    var name: String {
+        switch self { case .h264: "H.264"; case .hevc: "HEVC Main 8-bit"; case .proRes422: "ProRes 422" }
+    }
+
+    /// Codec/profile is fixed by codecType. ProRes has no synthetic 12 Mbps cap.
+    var averageBitRate: Int { self == .proRes422 ? 0 : 12_000_000 }
+    var maximumElapsedSeconds: Double { self == .proRes422 ? 20 : 15 }
+    var collectionDeadlineSeconds: Double { self == .proRes422 ? 80 : 60 }
+    var fixtureVersion: String { "procedural-\(rawValue)-1080p60-nv12-semantic-v11.1" }
+}
+
 enum VideoMediaBenchmarkCapability: Equatable, Sendable {
     case h264HardwareEncoder
     case h264HardwareDecoder
@@ -229,17 +252,69 @@ struct VideoMediaBenchmarkKernel: Sendable {
             }
         }
     }
+
+    /// One fixed v11 encode/decode pair. Callers collect exactly three pairs,
+    /// passing warmUp only for the first. Session creation/readback is preparation.
+    /// The injected driver never falls back to the production factory.
+    func runV11(
+        codec: VideoMediaBenchmarkV11Codec,
+        warmUp: Bool = true,
+        maximumEncodedBytes: Int = Self.maximumEncodedBytes,
+        v11DriverFactory: (@Sendable () -> any VideoMediaBenchmarkDriving)? = nil
+    ) async throws -> RunResult {
+        try Task.checkCancellation()
+        let limits = Limits(
+            width: 1_920, height: 1_080, frameCount: 60, framesPerSecond: 60,
+            averageBitRate: codec.averageBitRate,
+            maximumEncodedBytes: maximumEncodedBytes,
+            maximumElapsedSeconds: codec.maximumElapsedSeconds
+        )
+        try Self.validate(limits, profile: .standard, codec: codec)
+        let liveBudget = v11DriverFactory == nil ? MSeriesHardware.capture().sharedBudgetBytes : nil
+        if let liveBudget {
+            let fixedInput = UInt64(1920 * 1080 * 3 / 2 * 60)
+            guard liveBudget > fixedInput, UInt64(maximumEncodedBytes) <= liveBudget - fixedInput else {
+                throw VideoMediaBenchmarkError.resourceLimit
+            }
+        }
+        let driver = v11DriverFactory?() ?? SystemVideoMediaBenchmarkDriver(codec: codec, v11: true, liveSharedBudget: liveBudget)
+        let clock = clock
+        let worker = Task.detached(priority: .userInitiated) {
+            try await Self.runDetached(
+                limits: limits, clock: clock, driver: driver, codec: codec, warmUp: warmUp
+            )
+        }
+        let cancellationDrain = V11MediaCancellationDrain()
+        do {
+            let result = try await withTaskCancellationHandler {
+                let result = try await worker.value
+                try Task.checkCancellation()
+                return result
+            } onCancel: {
+                worker.cancel()
+                cancellationDrain.request(driver: driver)
+            }
+            await cancellationDrain.wait()
+            return result
+        } catch {
+            await cancellationDrain.wait()
+            throw error
+        }
+    }
 }
 
 private extension VideoMediaBenchmarkKernel {
-    static func validate(_ limits: Limits, profile: BenchmarkProfile) throws {
+    static func validate(
+        _ limits: Limits, profile: BenchmarkProfile,
+        codec: VideoMediaBenchmarkV11Codec = .h264
+    ) throws {
         guard limits.width > 0,
               limits.height > 0,
               limits.width.isMultiple(of: 2),
               limits.height.isMultiple(of: 2),
               limits.frameCount > 0,
               limits.framesPerSecond > 0,
-              limits.averageBitRate > 0,
+              (limits.averageBitRate > 0 || (codec == .proRes422 && limits.averageBitRate == 0)),
               limits.maximumEncodedBytes > 0,
               limits.maximumElapsedSeconds.isFinite,
               limits.maximumElapsedSeconds > 0
@@ -291,7 +366,9 @@ private extension VideoMediaBenchmarkKernel {
     static func runDetached(
         limits: Limits,
         clock: any BenchmarkKernelClock,
-        driver: any VideoMediaBenchmarkDriving
+        driver: any VideoMediaBenchmarkDriving,
+        codec: VideoMediaBenchmarkV11Codec = .h264,
+        warmUp: Bool = true
     ) async throws -> RunResult {
         let safetyStartedAt = clock.nowNanoseconds()
         let workload = VideoMediaBenchmarkWorkload(
@@ -316,6 +393,7 @@ private extension VideoMediaBenchmarkKernel {
                 return true
             }
 
+            if warmUp {
             _ = try await performWithinRemainingTime(
                 driver: driver,
                 clock: clock,
@@ -325,6 +403,7 @@ private extension VideoMediaBenchmarkKernel {
             ) {
                 try await driver.warmUp()
                 return true
+            }
             }
 
             let encodeStartedAt = clock.nowNanoseconds()
@@ -379,7 +458,8 @@ private extension VideoMediaBenchmarkKernel {
             let summary = try semanticSummary(
                 workload: workload,
                 encodeEvidence: encodeEvidence,
-                decodeEvidence: decodeEvidence
+                decodeEvidence: decodeEvidence,
+                codec: codec
             )
             try Task.checkCancellation()
 
@@ -527,7 +607,8 @@ private extension VideoMediaBenchmarkKernel {
     static func semanticSummary(
         workload: VideoMediaBenchmarkWorkload,
         encodeEvidence: VideoMediaBenchmarkEncodeEvidence,
-        decodeEvidence: VideoMediaBenchmarkDecodeEvidence
+        decodeEvidence: VideoMediaBenchmarkDecodeEvidence,
+        codec: VideoMediaBenchmarkV11Codec = .h264
     ) throws -> VideoMediaBenchmarkSemanticSummary {
         guard encodeEvidence.usedHardware else {
             throw VideoMediaBenchmarkError.unsupported(.h264HardwareEncoder)
@@ -573,10 +654,12 @@ private extension VideoMediaBenchmarkKernel {
             workload: workload,
             evidence: decodeEvidence.frameContentEvidence
         )
-        let contractChecksum = semanticChecksum(for: workload)
+        let legacyContractChecksum = semanticChecksum(for: workload)
+        let contractChecksum = codec == .h264 ? legacyContractChecksum
+            : legacyContractChecksum ^ UInt64(codec.codecType)
 
         return VideoMediaBenchmarkSemanticSummary(
-            codec: "H.264",
+            codec: codec.name,
             width: workload.width,
             height: workload.height,
             frameCount: workload.frameCount,
@@ -855,20 +938,51 @@ private final class SystemVideoMediaBenchmarkDriver: VideoMediaBenchmarkDriving,
 
     private let lock = NSLock()
     private var state = State()
+    private let codec: VideoMediaBenchmarkV11Codec
+    private let v11: Bool
+    private let liveSharedBudget: UInt64?
+
+    init(codec: VideoMediaBenchmarkV11Codec = .h264, v11: Bool = false, liveSharedBudget: UInt64? = nil) {
+        self.codec = codec
+        self.v11 = v11
+        self.liveSharedBudget = liveSharedBudget
+    }
 
     func prepare(workload: VideoMediaBenchmarkWorkload) async throws {
         try checkCancellation()
-        let inputFrames = try Self.makeInputFrames(workload: workload) {
+        let inputFrames = try Self.makeInputFrames(workload: workload,
+            maximumResidentBytes: liveSharedBudget.map { $0 - min($0, UInt64(workload.maximumEncodedBytes)) }) {
             try self.checkCancellation()
         }
         try checkCancellation()
 
-        let encoderSession = try Self.makeEncoderSession(workload: workload)
+        let encoderSession = try Self.makeEncoderSession(workload: workload, codec: codec)
+        // All v11 samples verify the session before timing. This is required
+        // preparation even when the collection's single warmup has completed.
+        var usedHardware = false
+        if v11 {
+            do {
+                let status = VTCompressionSessionPrepareToEncodeFrames(encoderSession)
+                try Self.throwIfFailed(status, capability: .h264HardwareEncoder)
+                usedHardware = try Self.hardwareProperty(
+                    session: encoderSession,
+                    key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                    capability: .h264HardwareEncoder
+                )
+                guard usedHardware else {
+                    throw VideoMediaBenchmarkError.invalidOutput(.hardwarePath)
+                }
+            } catch {
+                VTCompressionSessionInvalidate(encoderSession)
+                throw error
+            }
+        }
         let retained = lock.withLock {
             guard !state.cancelled else { return false }
             state.workload = workload
             state.inputFrames = inputFrames
             state.encoderSession = encoderSession
+            state.encoderUsedHardware = usedHardware
             return true
         }
         guard retained else {
@@ -980,7 +1094,7 @@ private final class SystemVideoMediaBenchmarkDriver: VideoMediaBenchmarkDriving,
 
     func prepareDecoder() async throws {
         try checkCancellation()
-        guard VTIsHardwareDecodeSupported(kCMVideoCodecType_H264) else {
+        guard VTIsHardwareDecodeSupported(codec.codecType) else {
             throw VideoMediaBenchmarkError.unsupported(.h264HardwareDecoder)
         }
         guard let resources = lock.withLock({ () -> (
@@ -995,6 +1109,9 @@ private final class SystemVideoMediaBenchmarkDriver: VideoMediaBenchmarkDriving,
         let formatDescription = CMSampleBufferGetFormatDescription(
             resources.1[0].sampleBuffer
         ) else {
+            throw VideoMediaBenchmarkError.invalidOutput(.encodedPayload)
+        }
+        guard CMFormatDescriptionGetMediaSubType(formatDescription) == codec.codecType else {
             throw VideoMediaBenchmarkError.invalidOutput(.encodedPayload)
         }
 
@@ -1333,6 +1450,7 @@ private extension SystemVideoMediaBenchmarkDriver {
 
     static func makeInputFrames(
         workload: VideoMediaBenchmarkWorkload,
+        maximumResidentBytes: UInt64? = nil,
         checkCancellation: () throws -> Void
     ) throws -> [CVPixelBuffer] {
         let attributes = [
@@ -1344,6 +1462,7 @@ private extension SystemVideoMediaBenchmarkDriver {
         ] as CFDictionary
 
         var frames: [CVPixelBuffer] = []
+        var residentBytes: UInt64 = 0
         frames.reserveCapacity(workload.frameCount)
         for frameIndex in 0..<workload.frameCount {
             try checkCancellation()
@@ -1361,6 +1480,10 @@ private extension SystemVideoMediaBenchmarkDriver {
                     throw VideoMediaBenchmarkError.resourceLimit
                 }
                 throw VideoMediaBenchmarkError.systemFailure(status)
+            }
+            residentBytes += UInt64(CVPixelBufferGetDataSize(pixelBuffer))
+            if let maximumResidentBytes, residentBytes > maximumResidentBytes {
+                throw VideoMediaBenchmarkError.resourceLimit
             }
             try fill(
                 pixelBuffer: pixelBuffer,
@@ -1499,7 +1622,8 @@ private extension SystemVideoMediaBenchmarkDriver {
     }
 
     static func makeEncoderSession(
-        workload: VideoMediaBenchmarkWorkload
+        workload: VideoMediaBenchmarkWorkload,
+        codec: VideoMediaBenchmarkV11Codec = .h264
     ) throws -> VTCompressionSession {
         let encoderSpecification = [
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true
@@ -1517,7 +1641,7 @@ private extension SystemVideoMediaBenchmarkDriver {
             allocator: nil,
             width: Int32(workload.width),
             height: Int32(workload.height),
-            codecType: kCMVideoCodecType_H264,
+            codecType: codec.codecType,
             encoderSpecification: encoderSpecification,
             imageBufferAttributes: imageBufferAttributes,
             compressedDataAllocator: nil,
@@ -1537,6 +1661,7 @@ private extension SystemVideoMediaBenchmarkDriver {
                 value: kCFBooleanFalse,
                 capability: .h264HardwareEncoder
             )
+            if codec != .proRes422 {
             try setProperty(
                 session: session,
                 key: kVTCompressionPropertyKey_AllowFrameReordering,
@@ -1546,15 +1671,18 @@ private extension SystemVideoMediaBenchmarkDriver {
             try setProperty(
                 session: session,
                 key: kVTCompressionPropertyKey_ProfileLevel,
-                value: kVTProfileLevel_H264_Main_AutoLevel,
+                value: codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel
+                    : kVTProfileLevel_H264_Main_AutoLevel,
                 capability: .h264HardwareEncoder
             )
+            }
             try setProperty(
                 session: session,
                 key: kVTCompressionPropertyKey_ExpectedFrameRate,
                 value: NSNumber(value: workload.framesPerSecond),
                 capability: .h264HardwareEncoder
             )
+            if codec != .proRes422 {
             try setProperty(
                 session: session,
                 key: kVTCompressionPropertyKey_AverageBitRate,
@@ -1567,6 +1695,7 @@ private extension SystemVideoMediaBenchmarkDriver {
                 value: NSNumber(value: workload.frameCount),
                 capability: .h264HardwareEncoder
             )
+            }
         } catch {
             VTCompressionSessionInvalidate(session)
             throw error
@@ -1681,5 +1810,20 @@ private extension SystemVideoMediaBenchmarkDriver {
         if ownsSession {
             VTDecompressionSessionInvalidate(session)
         }
+    }
+}
+
+/// Tracks the asynchronous VT cancellation action so it cannot outlive v11's lease.
+private final class V11MediaCancellationDrain: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+    func request(driver: any VideoMediaBenchmarkDriving) {
+        lock.withLock {
+            if task == nil { task = Task.detached(priority: .userInitiated) { await driver.cancel() } }
+        }
+    }
+    func wait() async {
+        let pending = lock.withLock { task }
+        await pending?.value
     }
 }

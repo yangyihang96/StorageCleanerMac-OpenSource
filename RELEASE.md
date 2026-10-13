@@ -56,6 +56,18 @@ signature verification passed. Full previous-version Sparkle replacement and
 failure recovery remain separately unverified. See
 [the validation record](docs/RELEASE_VALIDATION_1.9.13.md).
 
+### 2.0.0 authorization (2026-10-13)
+
+After checking the installed 2.0.0 beta and replying "合格", the owner chose a
+full public release of `2.0.0` under the same terms as 1.9.13: Apple
+Development signing without notarization or stapling, disclosed in the GitHub
+Release, packaged README and appcast item. The owner chose to publish the
+source release and the appcast item together, and authorized using the local
+production install (`/Applications/存储清理助手.app`, public 1.10.1) for the
+real Sparkle update acceptance. This applies only to 2.0.0 and does not change
+hardware safety checks or future distribution defaults. See
+[the validation record](docs/RELEASE_VALIDATION_2.0.0.md).
+
 ## 4. Sparkle and publication
 
 After notarized artifacts exist:

@@ -1,3 +1,4 @@
+import { readBoundedJSON } from "./bounded-json";
 import {
   ACTIVE_BASELINE_VERSION,
   API_SCHEMA_VERSION,
@@ -326,23 +327,7 @@ async function deleteScore(request: Request, env: Env): Promise<Response> {
 }
 
 async function readJSONBody(request: Request): Promise<unknown> {
-  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!contentType.startsWith("application/json")) {
-    throw new SubmissionValidationError("body", "unsupported_media_type");
-  }
-  const declaredLength = Number(request.headers.get("content-length") ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
-    throw new SubmissionValidationError("body", "payload_too_large");
-  }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_REQUEST_BYTES) {
-    throw new SubmissionValidationError("body", "payload_too_large");
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new SubmissionValidationError("body");
-  }
+  return readBoundedJSON(request, MAX_REQUEST_BYTES, reason => new SubmissionValidationError("body", reason));
 }
 
 function publicEntry(row: RankedRow) {

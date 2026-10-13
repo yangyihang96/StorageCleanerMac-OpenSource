@@ -692,9 +692,10 @@ final class BenchmarkV7CoordinatorWorkloadIntegrationTests: XCTestCase {
 
     func testCancellingV7IgnoresLateProgressAndNeverPublishesSuccess() async throws {
         let runner = ScriptedV7Runner(blockedRuns: [1])
+        let heavyWork = HeavyWorkCoordinator()
         let coordinator = BenchmarkV7Coordinator(
             workloadRunner: runner,
-            heavyWorkCoordinator: HeavyWorkCoordinator(),
+            heavyWorkCoordinator: heavyWork,
             preflightService: FixedV7Preflight(report: fixturePreflight()),
             environmentProvider: FixedEnvironmentProvider()
         )
@@ -714,8 +715,17 @@ final class BenchmarkV7CoordinatorWorkloadIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(store.v7State.phase, .cancelling)
 
+        // Give cancellation and the rejected late callback ample scheduling
+        // opportunities. The non-cooperative fixture has not ended yet.
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(store.v7State.phase, .cancelling)
+        XCTAssertTrue(store.isV7BenchmarkRunning)
+        let ownerWhileDraining = await heavyWork.activeOwner
+        XCTAssertEqual(ownerWhileDraining, .benchmark)
         await runner.releaseRun(1)
         await store.waitUntilIdle()
+        let ownerAfterDrain = await heavyWork.activeOwner
+        XCTAssertNil(ownerAfterDrain)
         XCTAssertEqual(store.v7State.phase, .cancelled)
         XCTAssertEqual(store.v7LatestResult?.failure, .cancelled)
         XCTAssertNil(store.v7LatestResult?.coreScore)
@@ -724,6 +734,36 @@ final class BenchmarkV7CoordinatorWorkloadIntegrationTests: XCTestCase {
             store.v7LatestResult?.workloadExecutions?.first?.status,
             .cancelled
         )
+    }
+
+    /// BOARD N22 (live 2026-10-07): a run cancelled in its extension phase did
+    /// not appear in the history, while earlier cancellations did. The
+    /// record was saved (the Beta's history file had it), but the save and
+    /// the history reload ran in the cancelled run's own task, so both came
+    /// back "cancelled" and the list was not reloaded until the next launch.
+    func testACancelledRunIsSavedAndListedAtOnce() async throws {
+        let runner = ScriptedV7Runner(blockedRuns: [1])
+        let coordinator = BenchmarkV7Coordinator(
+            workloadRunner: runner,
+            heavyWorkCoordinator: HeavyWorkCoordinator(),
+            preflightService: FixedV7Preflight(report: fixturePreflight()),
+            environmentProvider: FixedEnvironmentProvider()
+        )
+        let history = InMemoryV7History()
+        let store = try makeStore(v7Coordinator: coordinator, v7HistoryRepository: history)
+
+        store.startV7(plan: .custom(categories: [.cpu]))
+        await runner.waitUntilRunStarts(1)
+        store.cancelV7()
+        await runner.releaseRun(1)
+        await store.waitUntilIdle()
+
+        XCTAssertEqual(store.v7State.phase, .cancelled)
+        let records = await history.load()
+        XCTAssertEqual(records.map(\.failure), [.cancelled], "the cancelled run is saved")
+        XCTAssertEqual(store.v7History.map(\.recordID), records.map(\.recordID),
+                       "and listed when the run ends, not after the next launch")
+        XCTAssertEqual(store.v7HistoryStatus, .loaded)
     }
 
     func testPersistencePhaseLatchesResultAndIgnoresLateCancellation() async throws {
@@ -760,9 +800,9 @@ final class BenchmarkV7CoordinatorWorkloadIntegrationTests: XCTestCase {
     func testPromotionTimeoutRequiresRelaunchAndNeverLeavesStorePersisting() async throws {
         let runner = ScriptedV7Runner()
         let history = BlockingFirstSaveV7History(blockReplacement: true)
-        let defaultsName = "BenchmarkV7PromotionTimeout.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let defaultsName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: defaultsName))
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsName) }
         let store = try makeStore(
             v7Coordinator: BenchmarkV7Coordinator(
                 workloadRunner: runner,
@@ -1059,7 +1099,7 @@ final class BenchmarkV7CoordinatorWorkloadIntegrationTests: XCTestCase {
     private func makeStore(
         v7Coordinator: BenchmarkV7Coordinator,
         v7HistoryRepository: any BenchmarkV7HistoryPersisting = InMemoryV7History(),
-        v7PromotionRevocationDefaults: UserDefaults = .standard,
+        v7PromotionRevocationDefaults: UserDefaults? = nil,
         v7PersistenceTimeout: Duration = BenchmarkV7TimeoutPolicy.standard.persistence
     ) throws -> MacBenchmarkStore {
         let catalog = try MacBenchmarkBaselineCatalog(
@@ -1073,7 +1113,8 @@ final class BenchmarkV7CoordinatorWorkloadIntegrationTests: XCTestCase {
             historyRepository: InMemoryV6History(),
             v7Coordinator: v7Coordinator,
             v7HistoryRepository: v7HistoryRepository,
-            v7PromotionRevocationDefaults: v7PromotionRevocationDefaults,
+            // Review P1-2: never the real standard domain (D48).
+            v7PromotionRevocationDefaults: v7PromotionRevocationDefaults ?? TestPreferenceDomain.make(for: self),
             v7PersistenceTimeout: v7PersistenceTimeout
         )
     }

@@ -72,6 +72,7 @@ enum HomebrewCommandEnvironment {
         "HOMEBREW_NO_AUTO_UPDATE",
         "HOMEBREW_NO_ENV_HINTS",
         "HOMEBREW_NO_INSTALL_CLEANUP",
+        "HOMEBREW_CASK_OPTS",
         "LANG",
         "LC_ALL",
         "LOGNAME",
@@ -87,13 +88,11 @@ enum HomebrewCommandEnvironment {
     ) -> [String: String] {
         let prefix = executableURL.deletingLastPathComponent().deletingLastPathComponent()
         let pathEntries = [
-            executableURL.deletingLastPathComponent().path,
-            prefix.appendingPathComponent("sbin", isDirectory: true).path,
             "/usr/bin",
             "/bin",
             "/usr/sbin",
             "/sbin",
-            "/usr/local/bin",
+            prefix.appendingPathComponent("bin", isDirectory: true).path,
         ]
         var allowlist: [String: String] = [
             "HOME": environment["HOME"]?.trimmed.nonEmpty
@@ -170,23 +169,25 @@ struct HomebrewInventoryScanner: Sendable {
     private let runner: any HomebrewCommandRunning
     private let fileManagerFactory: @Sendable () -> FileManager
     private let environmentProvider: @Sendable () -> [String: String]
+    private let caskConfigurationProvider: @Sendable (String, URL, [String: String]) -> HomebrewCaskConfiguration
 
     init(
         runner: any HomebrewCommandRunning = ShellHomebrewCommandRunner(),
         fileManagerFactory: @escaping @Sendable () -> FileManager = { FileManager() },
         environmentProvider: @escaping @Sendable () -> [String: String] = {
             ProcessInfo.processInfo.environment
-        }
+        },
+        caskConfigurationProvider: @escaping @Sendable (String, URL, [String: String]) -> HomebrewCaskConfiguration = { HomebrewCaskConfiguration.installed(token: $0, prefix: $1, environment: $2) }
     ) {
         self.runner = runner
         self.fileManagerFactory = fileManagerFactory
         self.environmentProvider = environmentProvider
+        self.caskConfigurationProvider = caskConfigurationProvider
     }
 
-    /// Scans the normal inventory without Homebrew's `--greedy` opt-in. The
-    /// latter includes casks whose own updater is responsible for releases and
-    /// must only be requested by an explicit caller.
-    func scan(includeGreedyCasks: Bool = false) async throws -> HomebrewInventory? {
+    /// Both plain and greedy outdated evidence are collected for Update All.
+    /// The separate provenance selects the exact upgrade flags at execution.
+    func scan(includeGreedyCasks: Bool = true) async throws -> HomebrewInventory? {
         let processEnvironment = environmentProvider()
         guard let executableURL = locateHomebrewExecutable(environment: processEnvironment) else {
             return nil
@@ -217,10 +218,8 @@ struct HomebrewInventoryScanner: Sendable {
             throw ApplicationScanningError.invalidHomebrewOutput("brew --prefix")
         }
 
-        // The normal query is the only source allowed to authorize automatic
-        // updates. If the user opts into self-updating cask discovery, retain a
-        // second greedy result solely so those items can be shown for manual
-        // review without losing which query produced the match.
+        // Retain plain and greedy provenance separately: both are actionable,
+        // and only greedy-discovered items require --greedy at execution.
         let outdatedData = try await optionalOutdatedData(
             executableURL: executableURL,
             arguments: ["outdated", "--json=v2"],
@@ -234,11 +233,19 @@ struct HomebrewInventoryScanner: Sendable {
             )
             : nil
 
+        let prefixURL = URL(fileURLWithPath: prefixString, isDirectory: true)
+        let root = try JSONSerialization.jsonObject(with: infoData) as? [String: Any]
+        let casks = root?["casks"] as? [[String: Any]] ?? []
+        var configurations = [String: HomebrewCaskConfiguration]()
+        for cask in casks {
+            if let token = cask["token"] as? String { configurations[token] = caskConfigurationProvider(token, prefixURL, commandEnvironment) }
+        }
         let packages = try HomebrewInventoryParser.parse(
             installedData: infoData,
             outdatedData: outdatedData,
             greedyOutdatedData: greedyOutdatedData,
-            prefixURL: URL(fileURLWithPath: prefixString, isDirectory: true)
+            prefixURL: prefixURL,
+            caskConfigurations: configurations
         )
         return HomebrewInventory(
             executableURL: executableURL,
@@ -345,12 +352,12 @@ enum HomebrewPackageTokenPolicy {
               !token.contains("//") else {
             return false
         }
-        let allowed = CharacterSet(
-            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@+_./-"
-        )
-        return token.unicodeScalars.allSatisfy(allowed.contains)
-            && token.split(separator: "/", omittingEmptySubsequences: false)
-                .allSatisfy { !$0.isEmpty }
+        // A short package name or owner/tap/name. Never a Ruby file/path.
+        let parts = token.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 1 || parts.count == 3 else { return false }
+        let pattern = #"^[A-Za-z0-9][A-Za-z0-9@+_.-]*$"#
+        return parts.allSatisfy { $0.range(of: pattern, options: .regularExpression) != nil }
+            && !token.lowercased().hasSuffix(".rb")
     }
 }
 
@@ -398,9 +405,9 @@ enum HomebrewExecutableTrustPolicy {
                   let permissions = attributes[.posixPermissions] as? NSNumber else {
                 return false
             }
-            let ownerID = owner.uint32Value
-            let mode = permissions.uint16Value
-            return (ownerID == 0 || ownerID == getuid()) && (mode & 0o002) == 0
+            return AppUpdateSourcePermissions.isTrusted(owner: owner.uint32Value,
+                group: (attributes[.groupOwnerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max,
+                mode: permissions.uint16Value)
         }
     }
 
@@ -449,7 +456,8 @@ enum HomebrewInventoryParser {
         installedData: Data,
         outdatedData: Data?,
         greedyOutdatedData: Data? = nil,
-        prefixURL: URL
+        prefixURL: URL,
+        caskConfigurations: [String: HomebrewCaskConfiguration] = [:]
     ) throws -> [HomebrewInventoryPackage] {
         guard let installedRoot = try jsonRoot(installedData, label: "installed JSON root") else {
             throw ApplicationScanningError.invalidHomebrewOutput("installed JSON root")
@@ -497,7 +505,8 @@ enum HomebrewInventoryParser {
                 isDeprecated: bool(dictionary["deprecated"]),
                 autoUpdates: false,
                 requiresManualInstaller: false,
-                appBundlePaths: []
+                appBundlePaths: [],
+                prefixPath: prefixURL.standardizedFileURL.path
             )
             packages.append(
                 HomebrewInventoryPackage(
@@ -511,7 +520,8 @@ enum HomebrewInventoryParser {
         for dictionary in dictionaries(installedRoot["casks"]) {
             guard let token = string(dictionary["token"]) else { continue }
             let artifacts = dictionaries(dictionary["artifacts"])
-            let applicationPaths = appBundlePaths(from: artifacts)
+            let configuration = caskConfigurations[token] ?? .resolve(prefix: prefixURL)
+            let applicationPaths = appBundlePaths(from: artifacts, configuration: configuration)
             // Preserve Homebrew's raw version. A comma can represent either an
             // artifact digest or a general CSV version tuple; only the strict
             // automatic-comparison layer may project a narrowly proven digest.
@@ -543,7 +553,9 @@ enum HomebrewInventoryParser {
                 requiresManualInstaller: artifacts.contains {
                     $0.keys.contains("pkg") || $0.keys.contains("installer")
                 },
-                appBundlePaths: applicationPaths
+                appBundlePaths: applicationPaths,
+                administratorReasons: HomebrewArtifactAuthorization.reasons(artifacts: artifacts, configuration: configuration),
+                prefixPath: prefixURL.standardizedFileURL.path
             )
             let exactPaths = Set(applicationPaths.flatMap { path -> [String] in
                 let originalURL = URL(fileURLWithPath: path, isDirectory: true)
@@ -569,10 +581,10 @@ enum HomebrewInventoryParser {
         }
     }
 
-    private static func appBundlePaths(from artifacts: [[String: Any]]) -> [String] {
+    private static func appBundlePaths(from artifacts: [[String: Any]], configuration: HomebrewCaskConfiguration) -> [String] {
         var paths = Set<String>()
         for artifact in artifacts {
-            guard let rawValue = artifact["app"] else { continue }
+            guard let rawValue = artifact["app"] ?? artifact["suite"] else { continue }
             for entry in artifactEntries(rawValue) {
                 let sourceName = entry.source
                 let targetName = entry.target ?? URL(fileURLWithPath: sourceName).lastPathComponent
@@ -580,12 +592,18 @@ enum HomebrewInventoryParser {
                 if targetName.hasPrefix("/") {
                     path = targetName
                 } else {
-                    path = URL(fileURLWithPath: "/Applications", isDirectory: true)
+                    guard let appdir = configuration.directories["app"] else { continue }
+                    path = URL(fileURLWithPath: appdir, isDirectory: true)
                         .appendingPathComponent(targetName, isDirectory: true)
                         .path
                 }
                 if URL(fileURLWithPath: path).pathExtension.caseInsensitiveCompare("app") == .orderedSame {
                     paths.insert(path)
+                } else if artifact["suite"] != nil,
+                    let children = FileManager.default.enumerator(at: URL(fileURLWithPath: path), includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsPackageDescendants]) {
+                    for case let bundle as URL in children where bundle.pathExtension.caseInsensitiveCompare("app") == .orderedSame {
+                        paths.insert(bundle.path)
+                    }
                 }
             }
         }

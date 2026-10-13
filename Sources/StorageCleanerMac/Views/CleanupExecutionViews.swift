@@ -1,5 +1,21 @@
 import SwiftUI
 
+/// The binding ContentView presents the confirmation sheet with; tests use
+/// the same one. It reads the store's single test, so the sheet also opens
+/// when nothing passed the check (P1-1, round 3).
+@MainActor
+enum CleanupPlanConfirmationPresentation {
+    static func binding(for store: ScanStore) -> Binding<Bool> {
+        Binding {
+            store.isV2CleanupConfirmationPresented
+        } set: { isPresented in
+            if !isPresented {
+                store.cancelV2CleanupConfirmation()
+            }
+        }
+    }
+}
+
 struct CleanupPlanConfirmationSheet: View {
     @Environment(\.moduleTheme) private var theme
     @ObservedObject var store: ScanStore
@@ -9,8 +25,12 @@ struct CleanupPlanConfirmationSheet: View {
     @State private var acknowledgesReviewedItems = false
     @State private var acknowledgesProtectedIdentity = false
     @State private var acknowledgesProtectedTrashMove = false
+    @State private var acknowledgesPermanentDeletion = false
+    @State private var acknowledgesTrashContentsReviewed = false
 
     var body: some View {
+        // P2-11: built once per body refresh (it queries running apps and walks the plan).
+        let facts = confirmationFacts
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
             HStack(spacing: AppDesignTokens.Spacing.medium) {
                 Image(systemName: confirmationSystemImage)
@@ -18,13 +38,13 @@ struct CleanupPlanConfirmationSheet: View {
                     .foregroundStyle(confirmationTint)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(L10n.text(
-                        "清理 \(plan.items.count) 个项目？",
-                        "Clean \(plan.items.count) Item(s)?"
+                    Text(facts.cleanupPlanTitle(
+                        planHasMoves: !plan.trashMoveItems.isEmpty,
+                        planHasPermanentDeletion: !plan.permanentDeletionItems.isEmpty
                     ))
                     .font(AppDesignTokens.Typography.sectionTitle)
                     .monospacedDigit()
-                    Text(dispositionSummary)
+                    Text(dispositionSummary(facts))
                         .font(AppDesignTokens.Typography.metadata)
                         .foregroundStyle(.secondary)
                 }
@@ -32,27 +52,34 @@ struct CleanupPlanConfirmationSheet: View {
             }
 
             HStack(spacing: AppDesignTokens.Spacing.medium) {
-                compactMetric(L10n.items(plan.items.count), L10n.text("项目", "Items"))
+                // D93 P1-1/P2-1/P2-12: the same item set and bytes as the title and the six
+                // fields below — all planned items, then only the ones that will run.
+                compactMetric(L10n.items(facts.itemCount), L10n.text("项目", "Items"))
                 Divider().frame(height: 28)
                 compactMetric(
-                    ByteFormat.string(plan.estimatedMovableBytes),
+                    ByteFormat.string(facts.trashBytes + facts.quarantineBytes),
                     plan.disposition == .trash
                         ? L10n.text("将移入废纸篓", "Move to Trash")
                         : L10n.text("将移入隔离区", "Move to Quarantine")
                 )
+                if !plan.permanentDeletionItems.isEmpty {
+                    Divider().frame(height: 28)
+                    compactMetric(
+                        ByteFormat.string(facts.permanentDeletionBytes),
+                        L10n.text("将永久删除", "Delete Permanently")
+                    )
+                }
                 Divider().frame(height: 28)
-                compactMetric(L10n.items(preflight.readyCount), L10n.text("检查通过", "Ready"))
+                compactMetric(L10n.items(facts.readyCount), L10n.text("将执行", "Will Run"))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if plan.disposition == .trash {
-                Label(
-                    L10n.text(
-                        "清空废纸篓后最多可释放 \(ByteFormat.string(plan.estimatedMovableBytes))；当前立即释放取决于废纸篓和文件系统状态。",
-                        "Up to \(ByteFormat.string(plan.estimatedMovableBytes)) may be released after Trash is emptied; immediate release depends on Trash and file-system state."
-                    ),
-                    systemImage: "trash"
-                )
+            // D93: the six fixed fields every cleanup confirmation lists.
+            OperationConfirmationFactsView(facts: facts)
+
+            if plan.disposition == .trash,
+               let trashNote = facts.cleanupTrashReleaseNote(planHasTrashMoves: !plan.trashMoveItems.isEmpty) {
+                Label(trashNote, systemImage: "trash")
                 .font(AppDesignTokens.Typography.metadata)
                 .foregroundStyle(.secondary)
             }
@@ -77,8 +104,17 @@ struct CleanupPlanConfirmationSheet: View {
                 reviewedItemsConfirmation
             }
 
-            if !plan.protectedItems.isEmpty {
+            if !plan.protectedMoveItems.isEmpty {
                 protectedItemsConfirmation
+            }
+
+            // D23: emptying the Trash is shown and confirmed on its own.
+            if !plan.permanentDeletionItems.isEmpty {
+                permanentDeletionConfirmation
+            }
+
+            if !skippedItems.isEmpty {
+                skippedItemsSection
             }
 
             DisclosureGroup(L10n.text("查看详情", "Show Details"), isExpanded: $showsDetails) {
@@ -132,10 +168,9 @@ struct CleanupPlanConfirmationSheet: View {
                 Button {
                     store.confirmV2Cleanup(
                         reviewRiskAcknowledged: plan.reviewItems.isEmpty || acknowledgesReviewedItems,
-                        protectedRiskAcknowledged: plan.protectedItems.isEmpty
-                            || acknowledgesProtectedIdentity,
-                        protectedTrashMoveAcknowledged: plan.protectedItems.isEmpty
-                            || acknowledgesProtectedTrashMove
+                        protectedRiskAcknowledged: protectedRiskAcknowledged,
+                        protectedTrashMoveAcknowledged: protectedTrashMoveAcknowledged,
+                        permanentDeletionAcknowledged: permanentDeletionAcknowledged
                     )
                 } label: {
                     Label(confirmTitle, systemImage: dispositionSystemImage)
@@ -144,14 +179,32 @@ struct CleanupPlanConfirmationSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(
                     !preflight.isConfirmable
+                        || isBusy
                         || (!plan.reviewItems.isEmpty && !acknowledgesReviewedItems)
-                        || (!plan.protectedItems.isEmpty
-                            && (!acknowledgesProtectedIdentity
-                                || !acknowledgesProtectedTrashMove))
+                        || !protectedRiskAcknowledged
+                        || !protectedTrashMoveAcknowledged
+                        || !permanentDeletionAcknowledged
                 )
             }
         }
         .padding(20)
+        .confirmationDialog(
+            L10n.text("正常退出这些应用？", "Quit These Apps Normally?"),
+            isPresented: Binding(
+                get: { store.cleanupOwnerQuitRequest?.isFromConfirmation == true },
+                set: { if !$0 { store.cancelQuitCleanupOwners() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(L10n.text("正常退出并清理", "Quit Normally and Clean")) {
+                store.quitOwnersAndRecheckCleanup()
+            }
+            Button(L10n.text("取消", "Cancel"), role: .cancel) {
+                store.cancelQuitCleanupOwners()
+            }
+        } message: {
+            Text(CleanupOwnerQuitPresentation.message(for: store.cleanupOwnerQuitRequest))
+        }
         .frame(width: plan.reviewItems.isEmpty && plan.protectedItems.isEmpty ? 416 : 480)
         .background(ModuleBackground(theme: theme))
         .foregroundStyle(theme.primaryText)
@@ -204,7 +257,7 @@ struct CleanupPlanConfirmationSheet: View {
                     }
                 }
             }
-            .frame(height: min(CGFloat(plan.reviewItems.count) * 66, 190))
+            .frame(height: min(CGFloat(plan.reviewItems.count) * 66, sectionListHeightLimit(190)))
 
             Toggle(isOn: $acknowledgesReviewedItems) {
                 Text(L10n.text(
@@ -237,15 +290,15 @@ struct CleanupPlanConfirmationSheet: View {
             .foregroundStyle(AppDesignTokens.Palette.destructive)
 
             Text(L10n.text(
-                "已手动选择 \(plan.protectedItems.count) 个红色项目（\(ByteFormat.string(plan.protectedItemBytes))）。其中可能包含近期开发产物或应用；请确认当前任务不再使用，重复应用还必须保留一个可用副本。",
-                "You manually selected \(plan.protectedItems.count) red item(s) (\(ByteFormat.string(plan.protectedItemBytes))). These may be recent developer artifacts or apps; confirm no current task uses them, and retain a usable copy of duplicate apps."
+                "已手动选择 \(plan.protectedMoveItems.count) 个红色项目（\(ByteFormat.string(plan.protectedMoveItemBytes))）。其中可能包含近期开发产物或重复的应用副本；请确认当前任务不再使用。重复应用整组勾选时已自动保留一份，保留的副本不在下面的列表中。",
+                "You manually selected \(plan.protectedMoveItems.count) red item(s) (\(ByteFormat.string(plan.protectedMoveItemBytes))). These may be recent developer artifacts or duplicate app copies; confirm no current task uses them. When a whole duplicate-app group was checked, one copy was kept automatically and is not listed below."
             ))
             .font(AppDesignTokens.Typography.metadata)
             .foregroundStyle(.secondary)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                    ForEach(plan.protectedItems) { item in
+                    ForEach(plan.protectedMoveItems) { item in
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: AppDesignTokens.Spacing.small) {
                                 Text(item.sourceURL.lastPathComponent)
@@ -266,7 +319,7 @@ struct CleanupPlanConfirmationSheet: View {
                     }
                 }
             }
-            .frame(height: min(CGFloat(plan.protectedItems.count) * 52, 156))
+            .frame(height: min(CGFloat(plan.protectedMoveItems.count) * 52, sectionListHeightLimit(156)))
 
             Toggle(isOn: $acknowledgesProtectedIdentity) {
                 Text(L10n.text(
@@ -292,6 +345,210 @@ struct CleanupPlanConfirmationSheet: View {
             tint: AppDesignTokens.Palette.destructive,
             prominence: .quiet
         )
+    }
+
+    /// D23: permanent deletion has its own section and its own two
+    /// confirmations, separate from items that only move to Trash.
+    private var permanentDeletionConfirmation: some View {
+        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+            Label(
+                L10n.text("清空废纸篓 · 不可恢复", "Empty Trash · Cannot Be Undone"),
+                systemImage: "trash.slash.fill"
+            )
+            .font(AppDesignTokens.Typography.compactLabelEmphasis)
+            .foregroundStyle(AppDesignTokens.Palette.destructive)
+
+            Text(L10n.text(
+                "将永久删除扫描时废纸篓里的 \(plan.permanentDeletionItems.count) 项（\(ByteFormat.string(plan.permanentDeletionBytes))），删除后无法从废纸篓恢复；其中如有早先清理移入的文件，之后也无法再从“操作记录”恢复。扫描后放入废纸篓的项目，包括本次移入的文件，不会被删除。",
+                "This permanently deletes the \(plan.permanentDeletionItems.count) item(s) that were in the Trash during the scan (\(ByteFormat.string(plan.permanentDeletionBytes))). They cannot be restored from the Trash afterwards, and files an earlier cleanup moved there can no longer be restored from Operation History. Items put in the Trash after the scan, including this cleanup's files, are not deleted."
+            ))
+            .font(AppDesignTokens.Typography.metadata)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(plan.permanentDeletionItems.prefix(5))) { item in
+                    HStack(spacing: AppDesignTokens.Spacing.small) {
+                        Text(item.sourceURL.lastPathComponent)
+                            .font(AppDesignTokens.Typography.metadata)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        Text(ByteFormat.string(item.estimatedSizeBytes))
+                            .font(AppDesignTokens.Typography.metadata)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .help(item.sourceURL.path)
+                }
+                if plan.permanentDeletionItems.count > 5 {
+                    Text(L10n.text(
+                        "另有 \(plan.permanentDeletionItems.count - 5) 项",
+                        "\(plan.permanentDeletionItems.count - 5) more item(s)"
+                    ))
+                    .font(AppDesignTokens.Typography.metadata)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            Toggle(isOn: $acknowledgesPermanentDeletion) {
+                Text(L10n.text(
+                    "我了解这些项目会被永久删除，无法恢复",
+                    "I understand these items will be permanently deleted and cannot be restored"
+                ))
+                .font(AppDesignTokens.Typography.metadata)
+            }
+            .toggleStyle(.checkbox)
+
+            Toggle(isOn: $acknowledgesTrashContentsReviewed) {
+                Text(L10n.text(
+                    "我已确认废纸篓里没有需要保留的文件",
+                    "I confirmed the Trash holds nothing I need to keep"
+                ))
+                .font(AppDesignTokens.Typography.metadata)
+            }
+            .toggleStyle(.checkbox)
+        }
+        .padding(AppDesignTokens.Layout.compactPadding)
+        .glassPanel(
+            cornerRadius: AppDesignTokens.Layout.rowRadius,
+            tint: AppDesignTokens.Palette.destructive,
+            prominence: .quiet
+        )
+    }
+
+    /// The store requires both red confirmations for red items that move to
+    /// Trash, and (A2) its own two confirmations for emptying the Trash.
+    private var protectedRiskAcknowledged: Bool {
+        plan.protectedMoveItems.isEmpty || acknowledgesProtectedIdentity
+    }
+
+    private var protectedTrashMoveAcknowledged: Bool {
+        plan.protectedMoveItems.isEmpty || acknowledgesProtectedTrashMove
+    }
+
+    private var permanentDeletionAcknowledged: Bool {
+        plan.permanentDeletionItems.isEmpty
+            || (acknowledgesPermanentDeletion && acknowledgesTrashContentsReviewed)
+    }
+
+    /// A2: items that did not pass the check, each with its reason.
+    private var skippedItems: [(item: CleanPlanItem, reason: CleanSkipReason)] {
+        let reasons = Dictionary(uniqueKeysWithValues: preflight.items.compactMap { item -> (UUID, CleanSkipReason)? in
+            guard case let .skipped(reason) = item.status else { return nil }
+            return (item.planItemID, reason)
+        })
+        return plan.items.compactMap { item in reasons[item.id].map { (item, $0) } }
+    }
+
+    private var hasItemsWaitingForRunningApps: Bool {
+        skippedItems.contains { $0.reason == .relatedAppStillRunning }
+    }
+
+    /// Round 3 (P2-1): which of those apps can be asked to quit.
+    private var waitingOwnerOptions: CleanupOwnerQuitService.Options {
+        hasItemsWaitingForRunningApps ? store.pendingCleanupOwnerQuitOptions : .init()
+    }
+
+    private var isBusy: Bool {
+        store.isRecheckingCleanup || store.isQuittingCleanupOwners
+    }
+
+    /// A2: every item that did not pass, with its reason; running apps can be
+    /// asked to quit normally from here.
+    private var skippedItemsSection: some View {
+        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+            Label(
+                preflight.isConfirmable
+                    ? L10n.text("以下项目未通过检查，不会执行", "These items did not pass the check and will not run")
+                    : L10n.text("所有项目都未通过检查，暂不能执行", "No item passed the check, so nothing can run yet"),
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(AppDesignTokens.Typography.compactLabelEmphasis)
+            .foregroundStyle(AppDesignTokens.Palette.warning)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(skippedItems, id: \.item.id) { entry in
+                        HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.small) {
+                            Text(entry.item.sourceURL.lastPathComponent)
+                                .font(AppDesignTokens.Typography.metadata)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            Text(CleanSkipReasonPresentation.title(entry.reason))
+                                .font(AppDesignTokens.Typography.metadata)
+                                .foregroundStyle(AppDesignTokens.Palette.warning)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        .help(entry.item.sourceURL.path)
+                    }
+                }
+            }
+            .frame(height: min(CGFloat(skippedItems.count) * 22, sectionListHeightLimit(132)))
+
+            let ownerOptions = waitingOwnerOptions
+            if !ownerOptions.quittable.isEmpty {
+                HStack(spacing: AppDesignTokens.Spacing.small) {
+                    Button(L10n.text("正常退出并清理", "Quit Normally and Clean")) {
+                        store.requestQuitCleanupOwnersForPendingPlan()
+                    }
+                    .appButtonChrome(.secondary)
+                    .disabled(isBusy)
+                    Text(L10n.text(
+                        "先列出将退出的应用并请你确认；只发送正常退出请求，不强制结束。",
+                        "Lists the apps first for your confirmation; only a normal quit request is sent, never a force quit."
+                    ))
+                    .font(AppDesignTokens.Typography.metadata)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if !ownerOptions.manual.isEmpty {
+                Label(
+                    CleanupOwnerQuitPresentation.manualQuitText(for: ownerOptions.manual),
+                    systemImage: "hand.raised"
+                )
+                .font(AppDesignTokens.Typography.metadata)
+                .foregroundStyle(AppDesignTokens.Palette.warning)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            if isBusy {
+                ProgressView(store.isQuittingCleanupOwners
+                    ? L10n.text("正在等待应用退出…", "Waiting for the apps to quit…")
+                    : L10n.text("正在重新检查…", "Checking again…"))
+                    .controlSize(.small)
+                    .font(AppDesignTokens.Typography.metadata)
+            }
+        }
+        .padding(AppDesignTokens.Layout.compactPadding)
+        .glassPanel(
+            cornerRadius: AppDesignTokens.Layout.rowRadius,
+            tint: AppDesignTokens.Palette.warning,
+            prominence: .quiet
+        )
+    }
+
+    /// D93: action, items, space (D84 local usage), apps to quit, recovery
+    /// and permission coverage for this frozen plan.
+    private var confirmationFacts: OperationConfirmationFacts {
+        .cleanupPlan(
+            plan,
+            preflight: preflight,
+            surface: .inferred(for: plan, session: store.cleanupScanSession),
+            appsToQuit: OperationQuitNotice.appNames(store.pendingCleanupOwnerQuitOptions),
+            permission: .from(store.scanReadinessSummary)
+        )
+    }
+
+    /// Keeps the sheet within a window when several confirmation sections show.
+    private func sectionListHeightLimit(_ single: CGFloat) -> CGFloat {
+        let sections = [
+            !plan.reviewItems.isEmpty,
+            !plan.protectedMoveItems.isEmpty,
+            !plan.permanentDeletionItems.isEmpty,
+        ].filter { $0 }.count
+        return sections > 1 ? min(single, 104) : single
     }
 
     private func compactMetric(_ value: String, _ title: String) -> some View {
@@ -327,10 +584,27 @@ struct CleanupPlanConfirmationSheet: View {
             : L10n.text("移入 App 专用隔离区", "Move to the app's quarantine")
     }
 
-    private var dispositionSummary: String {
-        plan.disposition == .trash
+    private func dispositionSummary(_ facts: OperationConfirmationFacts) -> String {
+        if plan.trashMoveItems.isEmpty {
+            return L10n.text(
+                "废纸篓中扫描时已有的项目将被永久删除，无法恢复。",
+                "Items that were in the Trash during the scan will be permanently deleted and cannot be recovered."
+            )
+        }
+        // D93 P2-12: when no move will run, the subtitle must not promise one.
+        let moveAction: OperationActionKind = plan.disposition == .trash ? .moveToTrash : .moveToQuarantine
+        guard facts.actions.contains(moveAction) else {
+            return L10n.text("选中的移动项目都不会执行，本次不会移动任何项目。",
+                             "None of the selected moves will run; nothing will be moved this time.")
+        }
+        let moves = plan.disposition == .trash
             ? L10n.text("选中项目将移入废纸篓，可在需要时恢复。", "Selected items move to Trash and can be recovered if needed.")
             : L10n.text("选中项目将移入隔离区，可在需要时恢复。", "Selected items move to quarantine and can be recovered if needed.")
+        guard !plan.permanentDeletionItems.isEmpty else { return moves }
+        return moves + L10n.text(
+            "清空废纸篓的部分不可恢复。",
+            " Emptying the Trash cannot be undone."
+        )
     }
 
     private var preflightSummary: String {
@@ -341,7 +615,12 @@ struct CleanupPlanConfirmationSheet: View {
     }
 
     private var confirmTitle: String {
-        plan.disposition == .trash
+        if !plan.permanentDeletionItems.isEmpty {
+            return plan.trashMoveItems.isEmpty
+                ? L10n.text("确认永久清空", "Confirm Permanent Deletion")
+                : L10n.text("确认清理并清空废纸篓", "Confirm Cleanup and Empty Trash")
+        }
+        return plan.disposition == .trash
             ? L10n.text("确认移入废纸篓", "Confirm Move to Trash")
             : L10n.text("确认移入隔离区", "Confirm Quarantine")
     }
@@ -409,14 +688,19 @@ struct SmartScanCleanupProgressPage: View {
         guard let progress else {
             return L10n.text("正在冻结计划并进行安全检查。", "Freezing the plan and running safety checks.")
         }
-        return L10n.text(
+        let processed = L10n.text(
             "已处理 \(progress.processedItemCount) / \(progress.totalItemCount) 项；已移动 \(progress.movedItemCount)，跳过 \(progress.skippedItemCount)，失败 \(progress.failedItemCount)。",
             "Processed \(progress.processedItemCount) of \(progress.totalItemCount); \(progress.movedItemCount) moved, \(progress.skippedItemCount) skipped, \(progress.failedItemCount) failed."
+        )
+        guard progress.deletedItemCount > 0 else { return processed }
+        return processed + L10n.text(
+            "已从废纸篓永久删除 \(progress.deletedItemCount) 项。",
+            " \(progress.deletedItemCount) permanently deleted from Trash."
         )
     }
 
     var body: some View {
-        FeatureRuntimePage(
+        LegacyFeatureRuntimePage(
             module: .green, title: title, subtitle: detail,
             state: isCancelling ? .stopping : .running,
             fraction: progressFraction,
@@ -453,74 +737,83 @@ struct SmartScanCleanupCompletedPage: View {
 
     private var didMoveToTrash: Bool { report.disposition == .trash }
 
-    private var title: String {
-        switch report.outcome {
-        case .completed:
-            return didMoveToTrash
-                ? L10n.text("已移入废纸篓", "Moved to Trash")
-                : L10n.text("已安全隔离", "Safely Quarantined")
-        case .partiallyCompleted:
-            return L10n.text("安全清理部分完成", "Safe Cleanup Partially Complete")
-        case .cancelled:
-            return L10n.text("安全清理已取消", "Safe Cleanup Cancelled")
-        case .failed:
-            return L10n.text("安全清理未完成", "Safe Cleanup Not Completed")
+    private var result: OperationResultPresentation { OperationResultPresentation(report: report) }
+    private var title: String { result.title }
+    private var summary: String { result.summary }
+    private var outcomeState: RuntimeWorkflowState {
+        switch result.state {
+        case .completed, .restored: .completed
+        case .failed, .recoveryFailed: .failed
+        case .cancelled, .retained: .cancelled
+        default: .attention
         }
     }
 
-    private var summary: String {
-        guard report.outcome == .completed else {
-            return L10n.text(
-                "已移动 \(report.summary.movedItemCount) 项，跳过 \(report.summary.skippedItemCount) 项，失败 \(report.summary.failedItemCount) 项。",
-                "\(report.summary.movedItemCount) moved, \(report.summary.skippedItemCount) skipped, \(report.summary.failedItemCount) failed."
-            )
+    private var deletedItemCount: Int { report.summary.deletedItemCount ?? 0 }
+
+    private var metrics: [RuntimeWorkflowMetric] {
+        var metrics: [RuntimeWorkflowMetric] = [
+            .init(title: L10n.text("原操作移走体积", "Originally Moved Size"),
+                  value: ByteFormat.string(report.summary.movedToRecoverableLocationBytes)),
+            .init(title: L10n.text("已移动", "Moved"), value: String(report.summary.movedItemCount)),
+            .init(title: L10n.text("跳过 / 失败", "Skipped / Failed"),
+                  value: "\(report.summary.skippedItemCount) / \(report.summary.failedItemCount)")
+        ]
+        if deletedItemCount > 0 {
+            metrics.insert(.init(
+                title: L10n.text("永久删除", "Permanently Deleted"),
+                value: ByteFormat.string(report.summary.permanentlyFreedBytes)
+            ), at: 2)
+        }
+        return metrics
+    }
+
+    private var trustText: String {
+        if result.restoredCount > 0 {
+            return L10n.text("移动体积保留为历史记录，已恢复项目不计为可回收空间。", "Moved size is historical; restored items are not reclaimable space.")
+        }
+        if report.summary.movedItemCount == 0 {
+            return deletedItemCount > 0
+                ? L10n.text("废纸篓中的项目已永久删除，无法恢复", "Trash items were permanently deleted and cannot be restored")
+                : L10n.text("未移动任何文件", "No files were moved")
+        }
+        if deletedItemCount > 0 {
+            return L10n.text("移入的文件可从废纸篓恢复 · 已清空的废纸篓项目无法恢复", "Moved files can be restored from Trash · Emptied Trash items cannot")
         }
         return didMoveToTrash
-            ? L10n.text(
-                "文件仍可恢复；清空废纸篓后最多可释放这些空间。",
-                "Items remain restorable; empty Trash to reclaim up to this amount."
-            )
-            : L10n.text("项目已移至隔离区，可在需要时恢复。", "Items moved to quarantine and can be restored if needed.")
-    }
-
-    private var outcomeState: RuntimeWorkflowState {
-        switch report.outcome {
-        case .completed: .completed
-        case .partiallyCompleted: .attention
-        case .cancelled: .cancelled
-        case .failed: .failed
-        }
+            ? L10n.text("文件可从废纸篓恢复 · 清空后才会释放空间", "Restore files from Trash · Space is reclaimed when Trash is emptied")
+            : L10n.text("文件已安全隔离，可恢复", "Quarantined files can be restored")
     }
 
     var body: some View {
-        FeatureRuntimePage(
+        LegacyFeatureRuntimePage(
             module: .green, title: title, subtitle: summary, state: outcomeState,
-            metrics: [
-                .init(title: didMoveToTrash ? L10n.text("已移入废纸篓", "Moved to Trash") : L10n.text("已移入隔离区", "Quarantined"),
-                      value: ByteFormat.string(report.summary.movedToRecoverableLocationBytes)),
-                .init(title: L10n.text("已移动", "Moved"), value: String(report.summary.movedItemCount)),
-                .init(title: L10n.text("跳过 / 失败", "Skipped / Failed"),
-                      value: "\(report.summary.skippedItemCount) / \(report.summary.failedItemCount)")
-            ],
-            trustText: report.summary.movedItemCount == 0
-                ? L10n.text("未移动任何文件", "No files were moved")
-                : didMoveToTrash
-                ? L10n.text("文件可从废纸篓恢复 · 清空后才会释放空间", "Restore files from Trash · Space is reclaimed when Trash is emptied")
-                : L10n.text("文件已安全隔离，可恢复", "Quarantined files can be restored")
+            metrics: metrics,
+            trustText: trustText
         ) {
             if report.persistenceFailure != nil {
                 Text(L10n.text("部分回执尚未保存；已发生的移动仍列在下方，请保留本次结果。", "Some receipts could not be saved. Completed moves remain listed below; keep this result."))
                     .foregroundStyle(AppDesignTokens.Palette.warning)
                     .accessibilityLabel(L10n.text("回执保存失败", "Receipt saving failed"))
             }
+            // D93: completed / skipped / failed / needs verification, and
+            // space moved to Trash is never called freed.
+            // The receipt warning is already shown above; not repeated (P2-7).
+            OperationCompletionTallyView(tally: OperationCompletionTally(report: report), showsEntryDetails: false,
+                                         showsReceiptNote: false)
+                .frame(maxWidth: 430, alignment: .leading)
+            // Every skipped or failed item with its reason, so nothing is
+            // silently left behind after a cleanup.
+            CleanupReportIssueList(report: report)
+                .frame(maxWidth: 430, alignment: .leading)
             DisclosureGroup(L10n.text("清理详情", "Cleanup Details"), isExpanded: $showsDetails) {
                 VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
                     CleanupReportDetailRow(
-                        title: L10n.text("已移动体积", "Moved Size"),
+                        title: L10n.text("原操作移走体积", "Originally Moved Size"),
                         value: ByteFormat.string(report.summary.movedToRecoverableLocationBytes)
                     )
                     CleanupReportDetailRow(
-                        title: L10n.text("清空废纸篓后最多可释放", "Reclaimable After Emptying Trash"),
+                        title: L10n.text("原回执预计可回收", "Original Estimated Reclaimable"),
                         value: report.summary.reclaimableAfterEmptyingTrashBytes.map {
                             ByteFormat.string($0)
                         } ?? L10n.text("不适用", "Not Applicable")
@@ -575,6 +868,16 @@ struct SmartScanCleanupCompletedPage: View {
                 }
                 .appButtonChrome(.secondary)
                 }
+
+                // "完成" returns to the rows this scan still lists; a fresh
+                // scan is this separate action (live test 2026-10-06).
+                Button {
+                    store.rescanAfterV2Cleanup()
+                } label: {
+                    Label(L10n.text("重新扫描", "Scan Again"), systemImage: "arrow.clockwise")
+                }
+                .appButtonChrome(.secondary)
+                .disabled(store.isRestoringV2Cleanup || store.isPreparingScan)
 
                 Button(L10n.text("完成", "Done")) {
                     (onDone ?? store.dismissV2CleanupReport)()
@@ -736,28 +1039,26 @@ struct CleanupV2OperationOverlay: View {
     }
 
     private func reportContent(_ report: CleanReport) -> some View {
-        VStack(spacing: AppDesignTokens.Spacing.large) {
+        let current = OperationResultPresentation(report: report)
+        return VStack(spacing: AppDesignTokens.Spacing.large) {
             AppStateIconRing(
-                systemImage: report.outcome == .completed
-                    ? "checkmark.shield.fill"
-                    : "exclamationmark.shield.fill",
-                tint: report.outcome == .completed
+                systemImage: current.systemImage,
+                tint: [.completed, .restored].contains(current.state)
                     ? AppDesignTokens.Palette.success
                     : AppDesignTokens.Palette.warning
             )
 
             Text(reportTitle(report))
                 .font(AppDesignTokens.Typography.sheetTitle)
-            Text(L10n.text(
-                "已移动 \(report.summary.movedItemCount) 项，跳过 \(report.summary.skippedItemCount) 项，失败 \(report.summary.failedItemCount) 项，未处理 \(report.summary.notProcessedItemCount) 项。",
-                "\(report.summary.movedItemCount) moved, \(report.summary.skippedItemCount) skipped, \(report.summary.failedItemCount) failed, \(report.summary.notProcessedItemCount) not processed."
-            ))
+            Text(OperationResultPresentation(report: report).summary)
             .font(AppDesignTokens.Typography.body)
             .foregroundStyle(.secondary)
 
+            OperationCompletionTallyView(tally: OperationCompletionTally(report: report), showsEntryDetails: false)
+
             HStack(spacing: AppDesignTokens.Spacing.medium) {
                 reportMetric(
-                    title: L10n.text("已移动体积", "Moved Size"),
+                    title: L10n.text("原操作移走体积", "Originally Moved Size"),
                     value: ByteFormat.string(report.summary.movedToRecoverableLocationBytes)
                 )
                 reportMetric(
@@ -774,7 +1075,7 @@ struct CleanupV2OperationOverlay: View {
                 )
             }
 
-            if report.disposition == .trash {
+            if report.disposition == .trash && (report.recoveryAttempts ?? []).isEmpty {
                 let reclaimableText = report.summary.reclaimableAfterEmptyingTrashBytes
                     .map(ByteFormat.string) ?? L10n.text("未知", "Unknown")
                 Label(
@@ -800,48 +1101,11 @@ struct CleanupV2OperationOverlay: View {
                 .foregroundStyle(AppDesignTokens.Palette.warning)
             }
 
-            let issueItems = report.items.filter {
-                if case .moved = $0.outcome { return false }
-                return true
-            }
-            if !issueItems.isEmpty {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(issueItems) { item in
-                            HStack(spacing: AppDesignTokens.Spacing.small) {
-                                Image(systemName: "exclamationmark.circle")
-                                    .foregroundStyle(AppDesignTokens.Palette.warning)
-                                    .accessibilityHidden(true)
-                                Text(URL(fileURLWithPath: item.sourcePath).lastPathComponent)
-                                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Spacer()
-                                Text(reportIssueDetail(item.outcome))
-                                    .font(AppDesignTokens.Typography.metadata)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 7)
-                            if item.id != issueItems.last?.id {
-                                Divider()
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 150)
-                .padding(.horizontal, 12)
-                .glassPanel(
-                    cornerRadius: AppDesignTokens.Layout.rowRadius,
-                    tint: AppDesignTokens.Palette.warning,
-                    prominence: .quiet
-                )
-            }
+            CleanupReportIssueList(report: report)
 
             if let recovery = store.cleanupRecoveryReport {
                 Label(
-                    L10n.text(
-                        "恢复完成：成功 \(recovery.restoredCount) 项，其余项目因冲突、缺失或身份变化保持原状。",
-                        "Restore finished: \(recovery.restoredCount) item(s) restored; conflicts, missing items, or identity changes were left untouched."
-                    ),
+                    recovery.resultMessage,
                     systemImage: "arrow.uturn.backward.circle.fill"
                 )
                 .font(AppDesignTokens.Typography.metadata)
@@ -907,22 +1171,128 @@ struct CleanupV2OperationOverlay: View {
         return ByteFormat.string(bytes)
     }
 
-    private func reportIssueDetail(_ outcome: CleanItemOutcome) -> String {
+    private var progressTitle: String {
+        if case .cancellingExecution = store.cleanupWorkflowState {
+            return L10n.text("正在安全停止", "Stopping Safely")
+        }
+        return L10n.text("正在执行冻结计划", "Executing Frozen Plan")
+    }
+
+    private func reportTitle(_ report: CleanReport) -> String {
+        OperationResultPresentation(report: report).title
+    }
+}
+
+/// D52 的保守跳过属于仍在使用，实际失败及其他未执行原因保留原分组。
+enum CleanupReportIssueGroup: CaseIterable, Hashable {
+    case stillInUse, notCompleted
+
+    static func group(for outcome: CleanItemOutcome) -> Self? {
+        switch outcome {
+        case .moved, .deleted: nil
+        case let .skipped(reason):
+            CleanSkipReasonPresentation.isStillInUse(reason) ? .stillInUse : .notCompleted
+        case .failed, .notProcessed: .notCompleted
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .stillInUse: L10n.text("仍在使用，已跳过", "Skipped: still in use")
+        case .notCompleted: L10n.text("未完成的项目", "Items Not Completed")
+        }
+    }
+
+    var systemImage: String { self == .stillInUse ? "minus.circle" : "exclamationmark.circle" }
+    var tint: Color { self == .stillInUse ? .secondary : AppDesignTokens.Palette.warning }
+}
+
+/// 完成页保留原跳过或失败原因；清理浮层的视图实现尚未接入产品流程。
+struct CleanupReportIssueList: View {
+    let report: CleanReport
+
+    var body: some View {
+        ForEach(CleanupReportIssueGroup.allCases, id: \.self) { group in
+            let items = report.items.filter { CleanupReportIssueGroup.group(for: $0.outcome) == group }
+            if !items.isEmpty { issueGroup(group, items: items) }
+        }
+    }
+
+    private func issueGroup(_ group: CleanupReportIssueGroup, items: [CleanReportItem]) -> some View {
+        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+            Text(L10n.text(
+                "\(group.title)（\(items.count)）",
+                "\(group.title) (\(items.count))"
+            ))
+            .font(AppDesignTokens.Typography.compactLabelEmphasis)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(items) { item in
+                        HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.small) {
+                            Image(systemName: group.systemImage)
+                                .foregroundStyle(group.tint)
+                                .accessibilityHidden(true)
+                            Text(URL(fileURLWithPath: item.sourcePath).lastPathComponent)
+                                .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(item.sourcePath)
+                            Spacer(minLength: AppDesignTokens.Spacing.small)
+                            Text(Self.detail(item.outcome))
+                                .font(AppDesignTokens.Typography.metadata)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.vertical, 7)
+                        .accessibilityElement(children: .combine)
+                        if item.id != items.last?.id {
+                            Divider()
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 150)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassPanel(
+            cornerRadius: AppDesignTokens.Layout.rowRadius,
+            tint: group.tint,
+            prominence: .quiet
+        )
+    }
+
+    static func detail(_ outcome: CleanItemOutcome) -> String {
         switch outcome {
         case .moved:
             return L10n.text("已移动", "Moved")
+        case .deleted:
+            return L10n.text("已永久删除", "Permanently deleted")
         case let .skipped(reason):
-            return CleanSkipReasonPresentation.title(reason)
+            // Review r3 P2-5: under “Skipped: still in use” the row gives only
+            // the cause, so “skipped” is not said twice.
+            return CleanSkipReasonPresentation.isStillInUse(reason)
+                ? CleanSkipReasonPresentation.stillInUseCause(reason)
+                : CleanSkipReasonPresentation.title(reason)
         case let .failed(failure):
-            return failureTitle(failure)
+            return CleanFailurePresentation.title(failure)
         case .notProcessed:
             return L10n.text("取消后未处理", "Not processed after cancellation")
         }
     }
+}
 
-    private func failureTitle(_ failure: CleanFailure) -> String {
+/// Localized failure text shared by the cleanup report and Operation History;
+/// raw failure codes are never shown as a status.
+enum CleanFailurePresentation {
+    static func title(_ failure: CleanFailure) -> String {
         if let detailCode = failure.detailCode {
             switch detailCode {
+            case "cancelled":
+                return L10n.text("已取消", "Cancelled")
+            case "item-still-present":
+                return L10n.text("删除后项目仍在，未完成", "The item is still present after deletion")
             case "permission-denied":
                 return L10n.text("权限不足", "Permission denied")
             case "volume-or-item-unavailable":
@@ -940,6 +1310,8 @@ struct CleanupV2OperationOverlay: View {
             return L10n.text("回执保存失败，已停止后续操作", "Receipt saving failed; further operations stopped")
         case .moveOutcomeUnknown:
             return L10n.text("移动结果待核实，禁止自动重试", "Move outcome needs verification; automatic retry blocked")
+        case .deletionOutcomeUnknown:
+            return L10n.text("永久删除未完成，部分内容可能已删除", "Permanent deletion did not finish; some content may be gone")
         case .trashMoveRejected:
             return L10n.text("系统拒绝移入废纸篓", "Trash move rejected")
         case .trashMoveFailed:
@@ -958,29 +1330,30 @@ struct CleanupV2OperationOverlay: View {
             return L10n.text("发生未知错误", "An unexpected error occurred")
         }
     }
-
-    private var progressTitle: String {
-        if case .cancellingExecution = store.cleanupWorkflowState {
-            return L10n.text("正在安全停止", "Stopping Safely")
-        }
-        return L10n.text("正在执行冻结计划", "Executing Frozen Plan")
-    }
-
-    private func reportTitle(_ report: CleanReport) -> String {
-        switch report.outcome {
-        case .completed:
-            L10n.text("安全清理完成", "Safe Cleanup Complete")
-        case .partiallyCompleted:
-            L10n.text("安全清理部分完成", "Safe Cleanup Partially Complete")
-        case .cancelled:
-            L10n.text("安全清理已取消", "Safe Cleanup Cancelled")
-        case .failed:
-            L10n.text("安全清理未完成", "Safe Cleanup Failed")
-        }
-    }
 }
 
 enum CleanSkipReasonPresentation {
+    static func isStillInUse(_ reason: CleanSkipReason) -> Bool {
+        reason == .candidateBecameActive || reason == .relatedAppStillRunning
+    }
+
+    /// The cause alone, for rows already grouped under “Skipped: still in use”.
+    static func stillInUseCause(_ reason: CleanSkipReason) -> String {
+        reason == .candidateBecameActive
+            ? L10n.text("扫描后有新写入或变化，如需清理请重新扫描", "Written or changed after the scan; scan again to clean it")
+            : title(reason)
+    }
+
+    static func recordLabel(_ reason: CleanSkipReason) -> String {
+        if isStillInUse(reason) {
+            let detail = reason == .candidateBecameActive
+                ? L10n.text("扫描后有新写入或变化", "Written or changed after the scan")
+                : title(reason)
+            return CleanupReportIssueGroup.stillInUse.title + " · " + detail
+        }
+        return L10n.text("已跳过：", "Skipped: ") + title(reason)
+    }
+
     static func title(_ reason: CleanSkipReason) -> String {
         switch reason {
         case .preflightNotApproved: L10n.text("未通过本次执行前检查", "Not approved by this preflight")
@@ -995,6 +1368,12 @@ enum CleanSkipReasonPresentation {
         case .permissionChanged: L10n.text("权限已变化", "Permission changed")
         case .excludedByUser: L10n.text("当前已被排除", "Currently excluded")
         case .cloudStateChanged: L10n.text("云文件状态已变化", "Cloud state changed")
+        case .contentCloudOnly: FileContentReadError.cloudOnly.localizedDescription
+        case .contentDownloading: FileContentReadError.downloading.localizedDescription
+        case .contentReadTimedOut: FileContentReadError.timedOut.localizedDescription
+        case .contentReadUnavailable:
+            L10n.text("无法安全读取文件，已跳过；请稍后重试。", "The file could not be read safely and was skipped. Try again later.")
+        case .contentReadCancelled: L10n.text("已取消读取，未处理原件。", "Reading was cancelled; the original was not handled.")
         case .relatedAppStillRunning: L10n.text("相关应用仍在运行", "Related app is still running")
         case .rulesChanged: L10n.text("清理规则已变化", "Cleanup rules changed")
         case .measurementIncomplete:
@@ -1006,7 +1385,51 @@ enum CleanSkipReasonPresentation {
         case .duplicateContentChanged:
             L10n.text("文件内容已变化，不再确认相同", "File content changed and is no longer confirmed identical")
         case .candidateBecameActive:
-            L10n.text("开发文件在扫描后发生变化，请重新扫描", "Developer files changed after the scan; scan again")
+            // Developer files (D22) and, since the D47 supplement, rows whose
+            // app could not be identified share this recheck.
+            L10n.text("扫描后仍有新写入或变化，可能正在使用；已跳过，如需清理请重新扫描",
+                      "Written or changed after the scan and may be in use; skipped. Scan again to clean it")
+        case .changedSinceAnalysis:
+            L10n.text("分析后已修改或替换，请重新分析", "Changed or replaced after the analysis; analyze again")
+        case .containsMountPoint:
+            L10n.text("含挂载点", "Holds a mount point")
         }
+    }
+}
+
+/// A2: the confirmation text that names the apps before they are asked to quit.
+enum CleanupOwnerQuitPresentation {
+    /// Round 3 (P2-2): every running instance that will be asked to quit; an
+    /// app open more than once shows how many instances.
+    static func message(for request: CleanupOwnerQuitRequest?) -> String {
+        let names = names(request?.owners ?? [])
+        let seconds = Int(CleanupOwnerQuitService.waitSeconds)
+        return L10n.text(
+            "将请求以下应用正常退出：\(names)。应用可能会提示保存未保存的内容；不会强制结束。退出后会重新检查这些项目，最长等待 \(seconds) 秒。",
+            "These apps will be asked to quit normally: \(names). They may ask you to save unsaved work; nothing is force-quit. The items are checked again after they quit, waiting up to \(seconds) seconds."
+        )
+    }
+
+    /// Round 3 (P2-1): owners that run but cannot be asked to quit.
+    static func manualQuitText(for owners: [CleanupOwnerQuitService.RunningOwner]) -> String {
+        let names = names(owners)
+        return L10n.text("需手动退出：\(names)", "Quit manually: \(names)")
+    }
+
+    /// Names in order, each once; an app open more than once shows a count.
+    static func names(_ owners: [CleanupOwnerQuitService.RunningOwner]) -> String {
+        var order = [String]()
+        var counts = [String: Int]()
+        for owner in owners {
+            if counts[owner.displayName] == nil { order.append(owner.displayName) }
+            counts[owner.displayName, default: 0] += 1
+        }
+        return order.map { name in
+            let count = counts[name] ?? 1
+            return count > 1
+                ? L10n.text("\(name)（\(count) 个实例）", "\(name) (\(count) instances)")
+                : name
+        }
+        .joined(separator: L10n.text("、", ", "))
     }
 }

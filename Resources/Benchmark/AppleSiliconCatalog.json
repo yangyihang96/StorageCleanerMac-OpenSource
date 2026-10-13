@@ -1,0 +1,4687 @@
+{
+  "schemaVersion": "apple-silicon-catalog-v2",
+  "catalogVersion": "2026-10-10-b1-review-r2",
+  "verifiedAsOf": "2026-10-10",
+  "scope": "Mac configurations; Apple-published historical maxima, not current store availability",
+  "reviewStatus": "draft-needs-main-session-field-review",
+  "units": {
+    "memoryBandwidthGBps": "decimal GB/s",
+    "maxUnifiedMemoryGB": "Apple marketed GB",
+    "neuralEngineTOPS": "trillion operations/s; precision unspecified unless source states it"
+  },
+  "sourcePolicy": "Apple technical specifications for SKU bandwidth and memory; original official provenance retained for other fields. Null means unverified. Chip-level fallback never fills an unknown SKU.",
+  "chips": [
+    {
+      "id": "m1",
+      "marketingName": "Apple M1",
+      "year": 2020,
+      "process": null,
+      "processDescription": "5 nm",
+      "cpu": [
+        {
+          "performanceCores": 4,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 8
+        }
+      ],
+      "gpuCoreOptions": [
+        7,
+        8
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": 11,
+      "mediaEngine": {
+        "proResEncode": null,
+        "proResDecode": null,
+        "av1Decode": null,
+        "h264": {
+          "encode": null,
+          "decode": null
+        },
+        "hevc": {
+          "encode": null,
+          "decode": null
+        },
+        "videoDecodeEngines": null,
+        "videoEncodeEngines": null,
+        "proResEncodeDecodeEngines": null
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 16,
+      "typicalMacs": [
+        {
+          "model": "MacBook Air (M1, 2020)",
+          "cooling": "passive"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/neuralEngineTOPS": [
+          "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+        ],
+        "/mediaEngine/proResEncode": [],
+        "/mediaEngine/proResDecode": [],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [],
+        "/mediaEngine/h264/decode": [],
+        "/mediaEngine/hevc/encode": [],
+        "/mediaEngine/hevc/decode": [],
+        "/mediaEngine/videoDecodeEngines": [],
+        "/mediaEngine/videoEncodeEngines": [],
+        "/mediaEngine/proResEncodeDecodeEngines": [],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://www.apple.com/newsroom/2020/11/introducing-the-next-generation-of-mac/"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/skus/0/memoryBandwidthGBps": [],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/skus/1/memoryBandwidthGBps": [],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111883"
+        ],
+        "/memoryBandwidthGBps": []
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResEncode",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResDecode",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/h264/encode",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/h264/decode",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/hevc/encode",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/hevc/decode",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/videoDecodeEngines",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/videoEncodeEngines",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResEncodeDecodeEngines",
+          "reason": "本型号官方材料未明确此字段；引擎数量不从 Max/Ultra 倍数或同系列型号估算。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883",
+            "https://www.apple.com/newsroom/2020/11/apple-unleashes-m1/"
+          ]
+        },
+        {
+          "field": "/skus/0/memoryBandwidthGBps",
+          "reason": "官方技术规格未公布M1带宽数字，不采用第三方68.25/68.3GB/s。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883"
+          ]
+        },
+        {
+          "field": "/skus/1/memoryBandwidthGBps",
+          "reason": "官方技术规格未公布M1带宽数字，不采用第三方68.25/68.3GB/s。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883"
+          ]
+        },
+        {
+          "field": "/memoryBandwidthGBps",
+          "reason": "没有可用的官方芯片级带宽单值；具体SKU数据缺失仍保持未知。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111883"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m1-8c-7g",
+          "cpuOption": 0,
+          "gpuCores": 7,
+          "memoryBandwidthGBps": null,
+          "maxUnifiedMemoryGB": 16
+        },
+        {
+          "id": "m1-8c-8g",
+          "cpuOption": 0,
+          "gpuCores": 8,
+          "memoryBandwidthGBps": null,
+          "maxUnifiedMemoryGB": 16
+        }
+      ],
+      "memoryBandwidthGBps": null
+    },
+    {
+      "id": "m1-pro",
+      "marketingName": "Apple M1 Pro",
+      "year": 2021,
+      "process": null,
+      "processDescription": "5 nm",
+      "cpu": [
+        {
+          "performanceCores": 6,
+          "efficiencyCores": 2,
+          "superCores": 0,
+          "totalCores": 8
+        },
+        {
+          "performanceCores": 8,
+          "efficiencyCores": 2,
+          "superCores": 0,
+          "totalCores": 10
+        }
+      ],
+      "gpuCoreOptions": [
+        14,
+        16
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": null,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 32,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, 2021)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://www.apple.com/au/newsroom/2021/10/apple-unveils-game-changing-macbook-pro/"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/1/memoryBandwidthGBps": [],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111902"
+        ],
+        "/skus/2/id": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/2/cpuOption": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/2/gpuCores": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/2/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/2/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111902"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/skus/1/memoryBandwidthGBps",
+          "reason": "官方页面未明确给出此CPU/GPU配置的独立带宽；芯片级单值不能自动当成本SKU的已核实带宽。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902"
+          ]
+        },
+        {
+          "field": "/memoryBandwidthGBps/skuCoverage",
+          "reason": "只保留芯片级单值作为未分配置的来源记录；不能作为缺值SKU的实际带宽。缺少明确分配置证据：m1-pro-10c-14g",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://support.apple.com/en-us/111901"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m1-pro-8c-14g",
+          "cpuOption": 0,
+          "gpuCores": 14,
+          "memoryBandwidthGBps": 200,
+          "maxUnifiedMemoryGB": 32
+        },
+        {
+          "id": "m1-pro-10c-14g",
+          "cpuOption": 1,
+          "gpuCores": 14,
+          "memoryBandwidthGBps": null,
+          "maxUnifiedMemoryGB": 32
+        },
+        {
+          "id": "m1-pro-10c-16g",
+          "cpuOption": 1,
+          "gpuCores": 16,
+          "memoryBandwidthGBps": 200,
+          "maxUnifiedMemoryGB": 32
+        }
+      ],
+      "memoryBandwidthGBps": 200
+    },
+    {
+      "id": "m1-max",
+      "marketingName": "Apple M1 Max",
+      "year": 2021,
+      "process": null,
+      "processDescription": "5 nm",
+      "cpu": [
+        {
+          "performanceCores": 8,
+          "efficiencyCores": 2,
+          "superCores": 0,
+          "totalCores": 10
+        }
+      ],
+      "gpuCoreOptions": [
+        24,
+        32
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": null,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 2,
+        "proResEncodeDecodeEngines": 2
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 64,
+      "typicalMacs": [
+        {
+          "model": "Mac Studio (2022)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://www.apple.com/newsroom/2022/03/apple-unveils-all-new-mac-studio-and-studio-display/"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111901"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111901"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111902",
+            "https://www.apple.com/newsroom/2021/10/apple-unveils-game-changing-m1-pro-and-m1-max/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m1-max-10c-24g",
+          "cpuOption": 0,
+          "gpuCores": 24,
+          "memoryBandwidthGBps": 400,
+          "maxUnifiedMemoryGB": 64
+        },
+        {
+          "id": "m1-max-10c-32g",
+          "cpuOption": 0,
+          "gpuCores": 32,
+          "memoryBandwidthGBps": 400,
+          "maxUnifiedMemoryGB": 64
+        }
+      ]
+    },
+    {
+      "id": "m1-ultra",
+      "marketingName": "Apple M1 Ultra",
+      "year": 2022,
+      "process": null,
+      "processDescription": null,
+      "cpu": [
+        {
+          "performanceCores": 16,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 20
+        }
+      ],
+      "gpuCoreOptions": [
+        48,
+        64
+      ],
+      "neuralEngineCores": 32,
+      "neuralEngineTOPS": 22,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": null,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 2,
+        "videoEncodeEngines": 4,
+        "proResEncodeDecodeEngines": 4
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 128,
+      "typicalMacs": [
+        {
+          "model": "Mac Studio (2022)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+        ],
+        "/process": [],
+        "/processDescription": [],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/neuralEngineTOPS": [
+          "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+        ],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://www.apple.com/newsroom/2022/03/apple-unveils-all-new-mac-studio-and-studio-display/"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/skus/1/memoryBandwidthGBps": [],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111900"
+        ],
+        "/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111900"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111900",
+            "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/processDescription",
+          "reason": "本轮已取得的本型号官方材料没有明确制程代际；不从封装内其他芯片推导。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111900",
+            "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111900",
+            "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111900",
+            "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111900",
+            "https://www.apple.com/newsroom/2022/03/apple-unveils-m1-ultra-the-worlds-most-powerful-chip-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/skus/1/memoryBandwidthGBps",
+          "reason": "官方页面未明确给出此CPU/GPU配置的独立带宽；芯片级单值不能自动当成本SKU的已核实带宽。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111900"
+          ]
+        },
+        {
+          "field": "/memoryBandwidthGBps/skuCoverage",
+          "reason": "只保留芯片级单值作为未分配置的来源记录；不能作为缺值SKU的实际带宽。缺少明确分配置证据：m1-ultra-20c-64g",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111900"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m1-ultra-20c-48g",
+          "cpuOption": 0,
+          "gpuCores": 48,
+          "memoryBandwidthGBps": 800,
+          "maxUnifiedMemoryGB": 128
+        },
+        {
+          "id": "m1-ultra-20c-64g",
+          "cpuOption": 0,
+          "gpuCores": 64,
+          "memoryBandwidthGBps": null,
+          "maxUnifiedMemoryGB": 128
+        }
+      ],
+      "memoryBandwidthGBps": 800
+    },
+    {
+      "id": "m2",
+      "marketingName": "Apple M2",
+      "year": 2022,
+      "process": null,
+      "processDescription": "second-generation 5 nm",
+      "cpu": [
+        {
+          "performanceCores": 4,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 8
+        }
+      ],
+      "gpuCoreOptions": [
+        8,
+        10
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": 15.8,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": null,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 24,
+      "typicalMacs": [
+        {
+          "model": "MacBook Air (M2, 2022)",
+          "cooling": "passive"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/neuralEngineTOPS": [
+          "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+        ],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://www.apple.com/au/newsroom/2022/06/apple-unveils-all-new-macbook-air-supercharged-by-the-new-m2-chip/"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111867"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111869"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111869"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111869"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111869"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111867"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111867",
+            "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111867",
+            "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111867",
+            "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111867",
+            "https://www.apple.com/newsroom/2022/06/apple-unveils-m2-with-breakthrough-performance-and-capabilities/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m2-8c-8g",
+          "cpuOption": 0,
+          "gpuCores": 8,
+          "memoryBandwidthGBps": 100,
+          "maxUnifiedMemoryGB": 24
+        },
+        {
+          "id": "m2-8c-10g",
+          "cpuOption": 0,
+          "gpuCores": 10,
+          "memoryBandwidthGBps": 100,
+          "maxUnifiedMemoryGB": 24
+        }
+      ]
+    },
+    {
+      "id": "m2-pro",
+      "marketingName": "Apple M2 Pro",
+      "year": 2023,
+      "process": null,
+      "processDescription": "second-generation 5 nm",
+      "cpu": [
+        {
+          "performanceCores": 6,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 10
+        },
+        {
+          "performanceCores": 8,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 12
+        }
+      ],
+      "gpuCoreOptions": [
+        16,
+        19
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": 15.8,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": null,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 32,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, 2023)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/neuralEngineTOPS": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/103912"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111838"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m2-pro-10c-16g",
+          "cpuOption": 0,
+          "gpuCores": 16,
+          "memoryBandwidthGBps": 200,
+          "maxUnifiedMemoryGB": 32
+        },
+        {
+          "id": "m2-pro-12c-19g",
+          "cpuOption": 1,
+          "gpuCores": 19,
+          "memoryBandwidthGBps": 200,
+          "maxUnifiedMemoryGB": 32
+        }
+      ]
+    },
+    {
+      "id": "m2-max",
+      "marketingName": "Apple M2 Max",
+      "year": 2023,
+      "process": null,
+      "processDescription": "second-generation 5 nm",
+      "cpu": [
+        {
+          "performanceCores": 8,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 12
+        }
+      ],
+      "gpuCoreOptions": [
+        30,
+        38
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": 15.8,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": null,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 2,
+        "proResEncodeDecodeEngines": 2
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 96,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, 2023)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/neuralEngineTOPS": [
+          "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+        ],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/103912"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111340"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111838"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111838"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111340",
+            "https://www.apple.com/newsroom/2023/01/apple-unveils-m2-pro-and-m2-max-next-generation-chips-for-next-level-workflows/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m2-max-12c-30g",
+          "cpuOption": 0,
+          "gpuCores": 30,
+          "memoryBandwidthGBps": 400,
+          "maxUnifiedMemoryGB": 64
+        },
+        {
+          "id": "m2-max-12c-38g",
+          "cpuOption": 0,
+          "gpuCores": 38,
+          "memoryBandwidthGBps": 400,
+          "maxUnifiedMemoryGB": 96
+        }
+      ]
+    },
+    {
+      "id": "m2-ultra",
+      "marketingName": "Apple M2 Ultra",
+      "year": 2023,
+      "process": null,
+      "processDescription": null,
+      "cpu": [
+        {
+          "performanceCores": 16,
+          "efficiencyCores": 8,
+          "superCores": 0,
+          "totalCores": 24
+        }
+      ],
+      "gpuCoreOptions": [
+        60,
+        76
+      ],
+      "neuralEngineCores": 32,
+      "neuralEngineTOPS": 31.6,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": null,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 2,
+        "videoEncodeEngines": 4,
+        "proResEncodeDecodeEngines": 4
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 192,
+      "typicalMacs": [
+        {
+          "model": "Mac Studio (2023)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+        ],
+        "/process": [],
+        "/processDescription": [],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/neuralEngineTOPS": [
+          "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+        ],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/104061"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111835"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/111343"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/111343"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/111343"
+        ],
+        "/skus/1/memoryBandwidthGBps": [],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/111343"
+        ],
+        "/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/111835"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111835",
+            "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+          ]
+        },
+        {
+          "field": "/processDescription",
+          "reason": "本轮已取得的本型号官方材料没有明确制程代际；不从封装内其他芯片推导。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111835",
+            "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "本型号材料未明确声明 AV1 硬件解码；省略不等于不支持。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111835",
+            "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "本型号已核对材料没有肯定或否定的完整声明；以运行时能力探测决定，不按代号推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111835",
+            "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111835",
+            "https://www.apple.com/newsroom/2023/06/apple-introduces-m2-ultra/"
+          ]
+        },
+        {
+          "field": "/skus/1/memoryBandwidthGBps",
+          "reason": "官方页面未明确给出此CPU/GPU配置的独立带宽；芯片级单值不能自动当成本SKU的已核实带宽。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111343"
+          ]
+        },
+        {
+          "field": "/memoryBandwidthGBps/skuCoverage",
+          "reason": "只保留芯片级单值作为未分配置的来源记录；不能作为缺值SKU的实际带宽。缺少明确分配置证据：m2-ultra-24c-76g",
+          "checkedSources": [
+            "https://support.apple.com/en-us/111835",
+            "https://support.apple.com/en-us/111343"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m2-ultra-24c-60g",
+          "cpuOption": 0,
+          "gpuCores": 60,
+          "memoryBandwidthGBps": 800,
+          "maxUnifiedMemoryGB": 192
+        },
+        {
+          "id": "m2-ultra-24c-76g",
+          "cpuOption": 0,
+          "gpuCores": 76,
+          "memoryBandwidthGBps": null,
+          "maxUnifiedMemoryGB": 192
+        }
+      ],
+      "memoryBandwidthGBps": 800
+    },
+    {
+      "id": "m3",
+      "marketingName": "Apple M3",
+      "year": 2023,
+      "process": null,
+      "processDescription": "3 nm",
+      "cpu": [
+        {
+          "performanceCores": 4,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 8
+        }
+      ],
+      "gpuCoreOptions": [
+        8,
+        10
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": true,
+      "maxUnifiedMemoryGB": 24,
+      "typicalMacs": [
+        {
+          "model": "MacBook Air (13-inch, M3, 2024)",
+          "cooling": "passive"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/dynamicCaching": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://www.apple.com/newsroom/2024/03/apple-unveils-the-new-13-and-15-inch-macbook-air-with-the-powerful-m3-chip/"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/118551"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/118551"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/118551",
+            "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/118551",
+            "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m3-8c-8g",
+          "cpuOption": 0,
+          "gpuCores": 8,
+          "memoryBandwidthGBps": 100,
+          "maxUnifiedMemoryGB": 24
+        },
+        {
+          "id": "m3-8c-10g",
+          "cpuOption": 0,
+          "gpuCores": 10,
+          "memoryBandwidthGBps": 100,
+          "maxUnifiedMemoryGB": 24
+        }
+      ]
+    },
+    {
+      "id": "m3-pro",
+      "marketingName": "Apple M3 Pro",
+      "year": 2023,
+      "process": null,
+      "processDescription": "3 nm",
+      "cpu": [
+        {
+          "performanceCores": 5,
+          "efficiencyCores": 6,
+          "superCores": 0,
+          "totalCores": 11
+        },
+        {
+          "performanceCores": 6,
+          "efficiencyCores": 6,
+          "superCores": 0,
+          "totalCores": 12
+        }
+      ],
+      "gpuCoreOptions": [
+        14,
+        18
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": true,
+      "maxUnifiedMemoryGB": 36,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, Nov 2023)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/dynamicCaching": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/103944"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/117736"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/117736",
+            "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/117736",
+            "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m3-pro-11c-14g",
+          "cpuOption": 0,
+          "gpuCores": 14,
+          "memoryBandwidthGBps": 150,
+          "maxUnifiedMemoryGB": 36
+        },
+        {
+          "id": "m3-pro-12c-18g",
+          "cpuOption": 1,
+          "gpuCores": 18,
+          "memoryBandwidthGBps": 150,
+          "maxUnifiedMemoryGB": 36
+        }
+      ]
+    },
+    {
+      "id": "m3-max",
+      "marketingName": "Apple M3 Max",
+      "year": 2023,
+      "process": null,
+      "processDescription": "3 nm",
+      "cpu": [
+        {
+          "performanceCores": 10,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 14
+        },
+        {
+          "performanceCores": 12,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 16
+        }
+      ],
+      "gpuCoreOptions": [
+        30,
+        40
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 2,
+        "proResEncodeDecodeEngines": 2
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": true,
+      "maxUnifiedMemoryGB": 128,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, Nov 2023)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/dynamicCaching": [
+          "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+        ],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/103944"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/117736"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/117736"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/117736",
+            "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/117736",
+            "https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m3-max-14c-30g",
+          "cpuOption": 0,
+          "gpuCores": 30,
+          "memoryBandwidthGBps": 300,
+          "maxUnifiedMemoryGB": 96
+        },
+        {
+          "id": "m3-max-16c-40g",
+          "cpuOption": 1,
+          "gpuCores": 40,
+          "memoryBandwidthGBps": 400,
+          "maxUnifiedMemoryGB": 128
+        }
+      ]
+    },
+    {
+      "id": "m3-ultra",
+      "marketingName": "Apple M3 Ultra",
+      "year": 2025,
+      "process": null,
+      "processDescription": null,
+      "cpu": [
+        {
+          "performanceCores": 20,
+          "efficiencyCores": 8,
+          "superCores": 0,
+          "totalCores": 28
+        },
+        {
+          "performanceCores": 24,
+          "efficiencyCores": 8,
+          "superCores": 0,
+          "totalCores": 32
+        }
+      ],
+      "gpuCoreOptions": [
+        60,
+        80
+      ],
+      "neuralEngineCores": 32,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 2,
+        "videoEncodeEngines": 4,
+        "proResEncodeDecodeEngines": 4
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 512,
+      "typicalMacs": [
+        {
+          "model": "Mac Studio (2025)",
+          "cooling": null
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/process": [],
+        "/processDescription": [],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/typicalMacs/0/cooling": [],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/122211"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/122211"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/122211",
+            "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+          ]
+        },
+        {
+          "field": "/processDescription",
+          "reason": "本轮已取得的本型号官方材料没有明确制程代际；不从封装内其他芯片推导。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/122211",
+            "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/122211",
+            "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+          ]
+        },
+        {
+          "field": "/maxUnifiedMemoryGB/currentAvailability",
+          "reason": "512 GB 为发布时官方宣称上限；本轮技术规格索引出现仅 96/256 GB 配置，当前可售上限待主会话核对，不能当作现售承诺。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/122211",
+            "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+          ]
+        },
+        {
+          "field": "/typicalMacs/0/cooling",
+          "reason": "本轮未取得明确对应此机型风扇/无风扇的官方材料；不由Ultra或台式机身份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/122211"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已取得的M3 Ultra官方技术规格未明确列出动态缓存，不从M3 Max结构或代号继承推定。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/122211",
+            "https://www.apple.com/newsroom/2025/03/apple-reveals-m3-ultra-taking-apple-silicon-to-a-new-extreme/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m3-ultra-28c-60g",
+          "cpuOption": 0,
+          "gpuCores": 60,
+          "memoryBandwidthGBps": 819,
+          "maxUnifiedMemoryGB": 256
+        },
+        {
+          "id": "m3-ultra-32c-80g",
+          "cpuOption": 1,
+          "gpuCores": 80,
+          "memoryBandwidthGBps": 819,
+          "maxUnifiedMemoryGB": 256
+        }
+      ]
+    },
+    {
+      "id": "m4",
+      "marketingName": "Apple M4",
+      "year": 2024,
+      "process": null,
+      "processDescription": "second-generation 3 nm",
+      "cpu": [
+        {
+          "performanceCores": 4,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 8
+        },
+        {
+          "performanceCores": 4,
+          "efficiencyCores": 6,
+          "superCores": 0,
+          "totalCores": 10
+        }
+      ],
+      "gpuCoreOptions": [
+        8,
+        10
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": 38,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 32,
+      "typicalMacs": [
+        {
+          "model": "iMac (24-inch, 2024, Two ports)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/neuralEngineTOPS": [
+          "https://www.apple.com/newsroom/2024/05/apple-introduces-m4-chip/"
+        ],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/121562"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/121523"
+        ],
+        "/skus/0/memoryBandwidthGBps": [],
+        "/skus/0/maxUnifiedMemoryGB": [],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/121552"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/121552"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/121552"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/121552"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121552"
+        ],
+        "/memoryBandwidthGBps": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121523",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121523",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        },
+        {
+          "field": "/skus/0/memoryBandwidthGBps",
+          "reason": "官方页面未明确给出此CPU/GPU配置的独立带宽；芯片级单值不能自动当成本SKU的已核实带宽。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121523"
+          ]
+        },
+        {
+          "field": "/skus/0/maxUnifiedMemoryGB",
+          "reason": "本轮未取得直接对应此CPU/GPU配置内存上限的可回读官方表述，保留芯片级历史值但不灌入SKU。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121523"
+          ]
+        },
+        {
+          "field": "/memoryBandwidthGBps/skuCoverage",
+          "reason": "只保留芯片级单值作为未分配置的来源记录；不能作为缺值SKU的实际带宽。缺少明确分配置证据：m4-8c-8g",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121523",
+            "https://support.apple.com/en-us/121552"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m4-8c-8g",
+          "cpuOption": 0,
+          "gpuCores": 8,
+          "memoryBandwidthGBps": null,
+          "maxUnifiedMemoryGB": null
+        },
+        {
+          "id": "m4-10c-10g",
+          "cpuOption": 1,
+          "gpuCores": 10,
+          "memoryBandwidthGBps": 120,
+          "maxUnifiedMemoryGB": 32
+        }
+      ],
+      "memoryBandwidthGBps": 120
+    },
+    {
+      "id": "m4-pro",
+      "marketingName": "Apple M4 Pro",
+      "year": 2024,
+      "process": null,
+      "processDescription": "second-generation 3 nm",
+      "cpu": [
+        {
+          "performanceCores": 8,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 12
+        },
+        {
+          "performanceCores": 10,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 14
+        }
+      ],
+      "gpuCoreOptions": [
+        16,
+        20
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 64,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, M4 Pro or M4 Max, 2024)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/121582"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121555"
+        ],
+        "/skus/0/memoryLimitsByMac/0/model": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/memoryLimitsByMac/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/memoryLimitsByMac/1/model": [
+          "https://support.apple.com/en-us/121555"
+        ],
+        "/skus/0/memoryLimitsByMac/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121555"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121555"
+        ],
+        "/skus/1/memoryLimitsByMac/0/model": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/memoryLimitsByMac/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/memoryLimitsByMac/1/model": [
+          "https://support.apple.com/en-us/121555"
+        ],
+        "/skus/1/memoryLimitsByMac/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121555"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121553",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121553",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121553",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m4-pro-12c-16g",
+          "cpuOption": 0,
+          "gpuCores": 16,
+          "memoryBandwidthGBps": 273,
+          "maxUnifiedMemoryGB": 64,
+          "memoryLimitsByMac": [
+            {
+              "model": "MacBook Pro (14-inch, M4 Pro or M4 Max, 2024)",
+              "maxUnifiedMemoryGB": 48
+            },
+            {
+              "model": "Mac mini (2024)",
+              "maxUnifiedMemoryGB": 64
+            }
+          ]
+        },
+        {
+          "id": "m4-pro-14c-20g",
+          "cpuOption": 1,
+          "gpuCores": 20,
+          "memoryBandwidthGBps": 273,
+          "maxUnifiedMemoryGB": 64,
+          "memoryLimitsByMac": [
+            {
+              "model": "MacBook Pro (14-inch, M4 Pro or M4 Max, 2024)",
+              "maxUnifiedMemoryGB": 48
+            },
+            {
+              "model": "Mac mini (2024)",
+              "maxUnifiedMemoryGB": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m4-max",
+      "marketingName": "Apple M4 Max",
+      "year": 2024,
+      "process": null,
+      "processDescription": "second-generation 3 nm",
+      "cpu": [
+        {
+          "performanceCores": 10,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 14
+        },
+        {
+          "performanceCores": 12,
+          "efficiencyCores": 4,
+          "superCores": 0,
+          "totalCores": 16
+        }
+      ],
+      "gpuCoreOptions": [
+        32,
+        40
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 2,
+        "proResEncodeDecodeEngines": 2
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 128,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, M4 Pro or M4 Max, 2024)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/0/superCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/0/totalCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/121582"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/121553"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/121553"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121553",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121553",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/121553",
+            "https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m4-max-14c-32g",
+          "cpuOption": 0,
+          "gpuCores": 32,
+          "memoryBandwidthGBps": 410,
+          "maxUnifiedMemoryGB": 36
+        },
+        {
+          "id": "m4-max-16c-40g",
+          "cpuOption": 1,
+          "gpuCores": 40,
+          "memoryBandwidthGBps": 546,
+          "maxUnifiedMemoryGB": 128
+        }
+      ]
+    },
+    {
+      "id": "m5",
+      "marketingName": "Apple M5",
+      "year": 2025,
+      "process": null,
+      "processDescription": "third-generation 3 nm",
+      "cpu": [
+        {
+          "performanceCores": 0,
+          "efficiencyCores": 6,
+          "superCores": 4,
+          "totalCores": 10
+        }
+      ],
+      "gpuCoreOptions": [
+        8,
+        10
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 32,
+      "typicalMacs": [
+        {
+          "model": "MacBook Air (13-inch, M5)",
+          "cooling": "passive"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/cpu/0/superCores": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/cpu/0/totalCores": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/neuralEngineCores": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/hardwareRayTracing": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/typicalMacs/0/model": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://www.apple.com/newsroom/2026/03/apple-introduces-macbook-air-with-m5/"
+        ],
+        "/skus/0/id": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/0/cpuOption": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/0/gpuCores": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/1/id": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/1/cpuOption": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/1/gpuCores": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://www.apple.com/macbook-air/specs/"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://www.apple.com/macbook-air/specs/"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://www.apple.com/macbook-air/specs/",
+            "https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://www.apple.com/macbook-air/specs/",
+            "https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://www.apple.com/macbook-air/specs/",
+            "https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m5-10c-8g",
+          "cpuOption": 0,
+          "gpuCores": 8,
+          "memoryBandwidthGBps": 153,
+          "maxUnifiedMemoryGB": 32
+        },
+        {
+          "id": "m5-10c-10g",
+          "cpuOption": 0,
+          "gpuCores": 10,
+          "memoryBandwidthGBps": 153,
+          "maxUnifiedMemoryGB": 32
+        }
+      ]
+    },
+    {
+      "id": "m5-pro",
+      "marketingName": "Apple M5 Pro",
+      "year": 2026,
+      "process": null,
+      "processDescription": "third-generation 3 nm",
+      "cpu": [
+        {
+          "performanceCores": 10,
+          "efficiencyCores": 0,
+          "superCores": 5,
+          "totalCores": 15
+        },
+        {
+          "performanceCores": 12,
+          "efficiencyCores": 0,
+          "superCores": 6,
+          "totalCores": 18
+        }
+      ],
+      "gpuCoreOptions": [
+        16,
+        20
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 1,
+        "proResEncodeDecodeEngines": 1
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 64,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, M5 Pro or M5 Max, 2026)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/0/superCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/0/totalCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/1/performanceCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/1/efficiencyCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/1/superCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/125819"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/128108"
+        ],
+        "/skus/0/memoryLimitsByMac/0/model": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/memoryLimitsByMac/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/memoryLimitsByMac/1/model": [
+          "https://support.apple.com/en-us/128108"
+        ],
+        "/skus/0/memoryLimitsByMac/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/128108"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/128108"
+        ],
+        "/skus/1/memoryLimitsByMac/0/model": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/memoryLimitsByMac/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/memoryLimitsByMac/1/model": [
+          "https://support.apple.com/en-us/128108"
+        ],
+        "/skus/1/memoryLimitsByMac/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/128108"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/126318",
+            "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/126318",
+            "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/126318",
+            "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m5-pro-15c-16g",
+          "cpuOption": 0,
+          "gpuCores": 16,
+          "memoryBandwidthGBps": 307,
+          "maxUnifiedMemoryGB": 64,
+          "memoryLimitsByMac": [
+            {
+              "model": "MacBook Pro (14-inch, M5 Pro or M5 Max, 2026)",
+              "maxUnifiedMemoryGB": 48
+            },
+            {
+              "model": "Mac mini (M6 or M5 Pro)",
+              "maxUnifiedMemoryGB": 64
+            }
+          ]
+        },
+        {
+          "id": "m5-pro-18c-20g",
+          "cpuOption": 1,
+          "gpuCores": 20,
+          "memoryBandwidthGBps": 307,
+          "maxUnifiedMemoryGB": 64,
+          "memoryLimitsByMac": [
+            {
+              "model": "MacBook Pro (14-inch, M5 Pro or M5 Max, 2026)",
+              "maxUnifiedMemoryGB": 64
+            },
+            {
+              "model": "Mac mini (M6 or M5 Pro)",
+              "maxUnifiedMemoryGB": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m5-max",
+      "marketingName": "Apple M5 Max",
+      "year": 2026,
+      "process": null,
+      "processDescription": "third-generation 3 nm",
+      "cpu": [
+        {
+          "performanceCores": 12,
+          "efficiencyCores": 0,
+          "superCores": 6,
+          "totalCores": 18
+        }
+      ],
+      "gpuCoreOptions": [
+        32,
+        40
+      ],
+      "neuralEngineCores": 16,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": true,
+        "proResDecode": true,
+        "av1Decode": true,
+        "h264": {
+          "encode": true,
+          "decode": true
+        },
+        "hevc": {
+          "encode": true,
+          "decode": true
+        },
+        "videoDecodeEngines": 1,
+        "videoEncodeEngines": 2,
+        "proResEncodeDecodeEngines": 2
+      },
+      "hardwareRayTracing": true,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 128,
+      "typicalMacs": [
+        {
+          "model": "MacBook Pro (14-inch, M5 Pro or M5 Max, 2026)",
+          "cooling": "active"
+        }
+      ],
+      "reviewStatus": "draft-needs-field-review",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/year": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/process": [],
+        "/processDescription": [
+          "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+        ],
+        "/cpu/0/performanceCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/0/superCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/cpu/0/totalCores": [
+          "https://www.apple.com/macbook-pro/specs/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/neuralEngineCores": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/proResDecode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/av1Decode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/h264/encode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/h264/decode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/hevc/encode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/hevc/decode": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/videoDecodeEngines": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/videoEncodeEngines": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/mediaEngine/proResEncodeDecodeEngines": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/hardwareRayTracing": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/typicalMacs/0/cooling": [
+          "https://support.apple.com/en-us/125819"
+        ],
+        "/skus/0/id": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/cpuOption": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/gpuCores": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/id": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/cpuOption": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/gpuCores": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://support.apple.com/en-us/126318"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://support.apple.com/en-us/126318"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "Apple 官方只公开纳米级及代际，未确认 TSMC N5/N3B/N3E/N3P 等精确节点标识；不得按年份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/126318",
+            "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "本型号官方材料未给出明确 TOPS 数字；不把相对倍数或其他芯片数据换算成绝对值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/126318",
+            "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "已核对本型号材料未明确说明动态缓存；不从同代 GPU 或后续型号反推。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/126318",
+            "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m5-max-18c-32g",
+          "cpuOption": 0,
+          "gpuCores": 32,
+          "memoryBandwidthGBps": 460,
+          "maxUnifiedMemoryGB": 36
+        },
+        {
+          "id": "m5-max-18c-40g",
+          "cpuOption": 0,
+          "gpuCores": 40,
+          "memoryBandwidthGBps": 614,
+          "maxUnifiedMemoryGB": 128
+        }
+      ]
+    },
+    {
+      "id": "m6",
+      "marketingName": "Apple M6",
+      "year": 2026,
+      "process": null,
+      "processDescription": null,
+      "cpu": [],
+      "gpuCoreOptions": [],
+      "neuralEngineCores": null,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": null,
+        "proResDecode": null,
+        "av1Decode": null,
+        "h264": {
+          "encode": null,
+          "decode": null
+        },
+        "hevc": {
+          "encode": null,
+          "decode": null
+        },
+        "videoDecodeEngines": null,
+        "videoEncodeEngines": null,
+        "proResEncodeDecodeEngines": null
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": null,
+      "typicalMacs": [
+        {
+          "model": "Mac mini (M6 or M5 Pro)",
+          "cooling": null
+        }
+      ],
+      "reviewStatus": "partial-conflicting-official-sources",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+        ],
+        "/year": [
+          "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+        ],
+        "/process": [],
+        "/processDescription": [],
+        "/neuralEngineCores": [],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [],
+        "/mediaEngine/proResDecode": [],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [],
+        "/mediaEngine/h264/decode": [],
+        "/mediaEngine/hevc/encode": [],
+        "/mediaEngine/hevc/decode": [],
+        "/mediaEngine/videoDecodeEngines": [],
+        "/mediaEngine/videoEncodeEngines": [],
+        "/mediaEngine/proResEncodeDecodeEngines": [],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/maxUnifiedMemoryGB": [],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/128108"
+        ],
+        "/typicalMacs/0/cooling": [],
+        "/memoryBandwidthGBps": []
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/processDescription",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/cpu",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/gpuCoreOptions",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/neuralEngineCores",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResEncode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResDecode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/h264/encode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/h264/decode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/hevc/encode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/hevc/decode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/videoDecodeEngines",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/videoEncodeEngines",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResEncodeDecodeEngines",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/maxUnifiedMemoryGB",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/typicalMacs/0/cooling",
+          "reason": "本轮未取得明确对应此机型风扇/无风扇的官方材料；不由Ultra或台式机身份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108"
+          ]
+        },
+        {
+          "field": "/memoryBandwidthGBps",
+          "reason": "没有可用的官方芯片级带宽单值；具体SKU数据缺失仍保持未知。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108"
+          ]
+        },
+        {
+          "field": "/skus",
+          "reason": "沿用上一轮未确认的配置全集；本轮没有将内存容量相关带宽变体强制归为唯一CPU/GPU SKU。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128108"
+          ]
+        }
+      ],
+      "skus": [],
+      "memoryBandwidthGBps": null
+    },
+    {
+      "id": "m5-ultra",
+      "marketingName": "Apple M5 Ultra",
+      "year": 2026,
+      "process": null,
+      "processDescription": null,
+      "cpu": [
+        {
+          "performanceCores": 20,
+          "efficiencyCores": 0,
+          "superCores": 10,
+          "totalCores": 30
+        },
+        {
+          "performanceCores": null,
+          "efficiencyCores": null,
+          "superCores": null,
+          "totalCores": 36
+        }
+      ],
+      "gpuCoreOptions": [
+        64,
+        80
+      ],
+      "neuralEngineCores": null,
+      "neuralEngineTOPS": null,
+      "mediaEngine": {
+        "proResEncode": null,
+        "proResDecode": null,
+        "av1Decode": null,
+        "h264": {
+          "encode": null,
+          "decode": null
+        },
+        "hevc": {
+          "encode": null,
+          "decode": null
+        },
+        "videoDecodeEngines": null,
+        "videoEncodeEngines": null,
+        "proResEncodeDecodeEngines": null
+      },
+      "hardwareRayTracing": null,
+      "dynamicCaching": null,
+      "maxUnifiedMemoryGB": 512,
+      "typicalMacs": [
+        {
+          "model": "Mac Studio (M5 Max or M5 Ultra)",
+          "cooling": null
+        }
+      ],
+      "reviewStatus": "partial-cpu-topology-unverified",
+      "sources": {
+        "/id": [
+          "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+        ],
+        "/marketingName": [
+          "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+        ],
+        "/year": [
+          "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+        ],
+        "/process": [],
+        "/processDescription": [],
+        "/neuralEngineCores": [],
+        "/neuralEngineTOPS": [],
+        "/mediaEngine/proResEncode": [],
+        "/mediaEngine/proResDecode": [],
+        "/mediaEngine/av1Decode": [],
+        "/mediaEngine/h264/encode": [],
+        "/mediaEngine/h264/decode": [],
+        "/mediaEngine/hevc/encode": [],
+        "/mediaEngine/hevc/decode": [],
+        "/mediaEngine/videoDecodeEngines": [],
+        "/mediaEngine/videoEncodeEngines": [],
+        "/mediaEngine/proResEncodeDecodeEngines": [],
+        "/hardwareRayTracing": [],
+        "/dynamicCaching": [],
+        "/typicalMacs/0/model": [
+          "https://support.apple.com/en-us/128107"
+        ],
+        "/typicalMacs/0/cooling": [],
+        "/cpu/0/performanceCores": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/cpu/0/efficiencyCores": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/cpu/0/superCores": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/cpu/0/totalCores": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/cpu/1/performanceCores": [],
+        "/cpu/1/efficiencyCores": [],
+        "/cpu/1/superCores": [],
+        "/cpu/1/totalCores": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/gpuCoreOptions/0": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/gpuCoreOptions/1": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/maxUnifiedMemoryGB": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/0/id": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/0/cpuOption": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/0/gpuCores": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/0/memoryBandwidthGBps": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/0/maxUnifiedMemoryGB": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/1/id": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/1/cpuOption": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/1/gpuCores": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/1/memoryBandwidthGBps": [
+          "https://www.apple.com/mac-studio/specs/"
+        ],
+        "/skus/1/maxUnifiedMemoryGB": [
+          "https://www.apple.com/mac-studio/specs/"
+        ]
+      },
+      "unverified": [
+        {
+          "field": "/process",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/processDescription",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/neuralEngineCores",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/neuralEngineTOPS",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResEncode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResDecode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/av1Decode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/h264/encode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/h264/decode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/hevc/encode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/hevc/decode",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/videoDecodeEngines",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/videoEncodeEngines",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/mediaEngine/proResEncodeDecodeEngines",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/hardwareRayTracing",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/dynamicCaching",
+          "reason": "官方美区/澳区新闻稿与技术规格出现 CPU、GPU、内存或带宽等冲突；逐字段重新打开并核对修订时间前不填值。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107",
+            "https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/",
+            "https://www.apple.com/au/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/"
+          ]
+        },
+        {
+          "field": "/typicalMacs/0/cooling",
+          "reason": "本轮未取得明确对应此机型风扇/无风扇的官方材料；不由Ultra或台式机身份推断。",
+          "checkedSources": [
+            "https://support.apple.com/en-us/128107"
+          ]
+        },
+        {
+          "field": "/cpu/1/performanceCores",
+          "reason": "当前官方规格明确36核总数，但未在该配置处列出超级/性能/效率核心拆分；不按30核配置比例估算。",
+          "checkedSources": [
+            "https://www.apple.com/mac-studio/specs/",
+            "https://support.apple.com/en-us/128107"
+          ]
+        },
+        {
+          "field": "/cpu/1/efficiencyCores",
+          "reason": "当前官方规格明确36核总数，但未在该配置处列出超级/性能/效率核心拆分；不按30核配置比例估算。",
+          "checkedSources": [
+            "https://www.apple.com/mac-studio/specs/",
+            "https://support.apple.com/en-us/128107"
+          ]
+        },
+        {
+          "field": "/cpu/1/superCores",
+          "reason": "当前官方规格明确36核总数，但未在该配置处列出超级/性能/效率核心拆分；不按30核配置比例估算。",
+          "checkedSources": [
+            "https://www.apple.com/mac-studio/specs/",
+            "https://support.apple.com/en-us/128107"
+          ]
+        }
+      ],
+      "skus": [
+        {
+          "id": "m5-ultra-30c-64g",
+          "cpuOption": 0,
+          "gpuCores": 64,
+          "memoryBandwidthGBps": 1200,
+          "maxUnifiedMemoryGB": 256
+        },
+        {
+          "id": "m5-ultra-36c-80g",
+          "cpuOption": 1,
+          "gpuCores": 80,
+          "memoryBandwidthGBps": 1200,
+          "maxUnifiedMemoryGB": 512
+        }
+      ]
+    }
+  ],
+  "skuPolicy": {
+    "cpuOption": "zero-based index into chip.cpu",
+    "memoryBandwidthGBps": "SKU value; optional chip.memoryBandwidthGBps is chip-only fallback, not inherited",
+    "maxUnifiedMemoryGB": "SKU maximum among explicitly confirmed example Macs; use memoryLimitsByMac when model is known; family maximum can be historical",
+    "uniqueMatch": "brand + named CPU physical tiers/total + GPU; Metal is optional corroboration and must not conflict; unknown topology or multiple candidates does not justify guessing"
+  }
+}

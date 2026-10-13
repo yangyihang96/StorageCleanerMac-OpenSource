@@ -1,2 +1,4 @@
 "CFBundleDisplayName" = "存储清理助手";
 "CFBundleName" = "存储清理助手";
+"NSAppBundlesUsageDescription" = "Manage only the app you choose to uninstall so it can be moved safely to Trash.";
+"NSPhotoLibraryUsageDescription" = "Read photo metadata and small local thumbnails to find duplicate or similar photos. Read/write access creates a review album and adds selected photos; no deletion, uploads, or cloud original downloads.";

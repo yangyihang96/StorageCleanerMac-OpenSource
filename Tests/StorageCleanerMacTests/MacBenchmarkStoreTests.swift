@@ -618,6 +618,7 @@ final class MacBenchmarkStoreTests: XCTestCase {
             acceleratorService: acceleratorService,
             acceleratorHistoryRepository: acceleratorHistory,
             sustainedService: sustainedService,
+            v7PromotionRevocationDefaults: TestPreferenceDomain.make(for: self),
             onCompletedResult: onCompletedResult
         )
     }

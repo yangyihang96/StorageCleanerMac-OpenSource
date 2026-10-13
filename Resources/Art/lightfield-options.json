@@ -1,0 +1,1012 @@
+{
+  "format": "png",
+  "pointSize": 28,
+  "variants": [
+    56,
+    84
+  ],
+  "icons": [
+    {
+      "name": "opt-benchmark-cpu",
+      "files": [
+        "opt-benchmark-cpu-56.png",
+        "opt-benchmark-cpu-84.png"
+      ]
+    },
+    {
+      "name": "opt-benchmark-gpu",
+      "files": [
+        "opt-benchmark-gpu-56.png",
+        "opt-benchmark-gpu-84.png"
+      ]
+    },
+    {
+      "name": "opt-benchmark-memory",
+      "files": [
+        "opt-benchmark-memory-56.png",
+        "opt-benchmark-memory-84.png"
+      ]
+    },
+    {
+      "name": "opt-benchmark-storage",
+      "files": [
+        "opt-benchmark-storage-56.png",
+        "opt-benchmark-storage-84.png"
+      ]
+    },
+    {
+      "name": "opt-cleanup-download-remnants",
+      "files": [
+        "opt-cleanup-download-remnants-56.png",
+        "opt-cleanup-download-remnants-84.png"
+      ]
+    },
+    {
+      "name": "opt-cleanup-logs",
+      "files": [
+        "opt-cleanup-logs-56.png",
+        "opt-cleanup-logs-84.png"
+      ]
+    },
+    {
+      "name": "opt-cleanup-system-cache",
+      "files": [
+        "opt-cleanup-system-cache-56.png",
+        "opt-cleanup-system-cache-84.png"
+      ]
+    },
+    {
+      "name": "opt-cleanup-temporary-files",
+      "files": [
+        "opt-cleanup-temporary-files-56.png",
+        "opt-cleanup-temporary-files-84.png"
+      ]
+    },
+    {
+      "name": "opt-devcaches-activity-threshold",
+      "files": [
+        "opt-devcaches-activity-threshold-56.png",
+        "opt-devcaches-activity-threshold-84.png"
+      ]
+    },
+    {
+      "name": "opt-devcaches-agent",
+      "files": [
+        "opt-devcaches-agent-56.png",
+        "opt-devcaches-agent-84.png"
+      ]
+    },
+    {
+      "name": "opt-devcaches-artifacts",
+      "files": [
+        "opt-devcaches-artifacts-56.png",
+        "opt-devcaches-artifacts-84.png"
+      ]
+    },
+    {
+      "name": "opt-devcaches-projects",
+      "files": [
+        "opt-devcaches-projects-56.png",
+        "opt-devcaches-projects-84.png"
+      ]
+    },
+    {
+      "name": "opt-devcaches-sessions",
+      "files": [
+        "opt-devcaches-sessions-56.png",
+        "opt-devcaches-sessions-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-add-folder",
+      "files": [
+        "opt-duplicates-add-folder-56.png",
+        "opt-duplicates-add-folder-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-audio",
+      "files": [
+        "opt-duplicates-audio-56.png",
+        "opt-duplicates-audio-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-external-volume",
+      "files": [
+        "opt-duplicates-external-volume-56.png",
+        "opt-duplicates-external-volume-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-photos",
+      "files": [
+        "opt-duplicates-photos-56.png",
+        "opt-duplicates-photos-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-selected-location",
+      "files": [
+        "opt-duplicates-selected-location-56.png",
+        "opt-duplicates-selected-location-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-user-data",
+      "files": [
+        "opt-duplicates-user-data-56.png",
+        "opt-duplicates-user-data-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-user-files",
+      "files": [
+        "opt-duplicates-user-files-56.png",
+        "opt-duplicates-user-files-84.png"
+      ]
+    },
+    {
+      "name": "opt-duplicates-videos",
+      "files": [
+        "opt-duplicates-videos-56.png",
+        "opt-duplicates-videos-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-attribution",
+      "files": [
+        "opt-energy-attribution-56.png",
+        "opt-energy-attribution-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-background",
+      "files": [
+        "opt-energy-background-56.png",
+        "opt-energy-background-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-baseline",
+      "files": [
+        "opt-energy-baseline-56.png",
+        "opt-energy-baseline-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-battery",
+      "files": [
+        "opt-energy-battery-56.png",
+        "opt-energy-battery-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-energy",
+      "files": [
+        "opt-energy-energy-56.png",
+        "opt-energy-energy-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-preview",
+      "files": [
+        "opt-energy-preview-56.png",
+        "opt-energy-preview-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-processes",
+      "files": [
+        "opt-energy-processes-56.png",
+        "opt-energy-processes-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-sampling",
+      "files": [
+        "opt-energy-sampling-56.png",
+        "opt-energy-sampling-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-summary",
+      "files": [
+        "opt-energy-summary-56.png",
+        "opt-energy-summary-84.png"
+      ]
+    },
+    {
+      "name": "opt-energy-thermals",
+      "files": [
+        "opt-energy-thermals-56.png",
+        "opt-energy-thermals-84.png"
+      ]
+    },
+    {
+      "name": "opt-fileanalysis-archives",
+      "files": [
+        "opt-fileanalysis-archives-56.png",
+        "opt-fileanalysis-archives-84.png"
+      ]
+    },
+    {
+      "name": "opt-fileanalysis-documents",
+      "files": [
+        "opt-fileanalysis-documents-56.png",
+        "opt-fileanalysis-documents-84.png"
+      ]
+    },
+    {
+      "name": "opt-fileanalysis-media",
+      "files": [
+        "opt-fileanalysis-media-56.png",
+        "opt-fileanalysis-media-84.png"
+      ]
+    },
+    {
+      "name": "opt-fileanalysis-other",
+      "files": [
+        "opt-fileanalysis-other-56.png",
+        "opt-fileanalysis-other-84.png"
+      ]
+    },
+    {
+      "name": "opt-health-battery",
+      "files": [
+        "opt-health-battery-56.png",
+        "opt-health-battery-84.png"
+      ]
+    },
+    {
+      "name": "opt-health-disk",
+      "files": [
+        "opt-health-disk-56.png",
+        "opt-health-disk-84.png"
+      ]
+    },
+    {
+      "name": "opt-health-system-state",
+      "files": [
+        "opt-health-system-state-56.png",
+        "opt-health-system-state-84.png"
+      ]
+    },
+    {
+      "name": "opt-memory-application",
+      "files": [
+        "opt-memory-application-56.png",
+        "opt-memory-application-84.png"
+      ]
+    },
+    {
+      "name": "opt-memory-memory",
+      "files": [
+        "opt-memory-memory-56.png",
+        "opt-memory-memory-84.png"
+      ]
+    },
+    {
+      "name": "opt-memory-pressure",
+      "files": [
+        "opt-memory-pressure-56.png",
+        "opt-memory-pressure-84.png"
+      ]
+    },
+    {
+      "name": "opt-memory-swap",
+      "files": [
+        "opt-memory-swap-56.png",
+        "opt-memory-swap-84.png"
+      ]
+    },
+    {
+      "name": "opt-migration-application",
+      "files": [
+        "opt-migration-application-56.png",
+        "opt-migration-application-84.png"
+      ]
+    },
+    {
+      "name": "opt-migration-destination-drive",
+      "files": [
+        "opt-migration-destination-drive-56.png",
+        "opt-migration-destination-drive-84.png"
+      ]
+    },
+    {
+      "name": "opt-migration-documents",
+      "files": [
+        "opt-migration-documents-56.png",
+        "opt-migration-documents-84.png"
+      ]
+    },
+    {
+      "name": "opt-migration-item-type",
+      "files": [
+        "opt-migration-item-type-56.png",
+        "opt-migration-item-type-84.png"
+      ]
+    },
+    {
+      "name": "opt-migration-move",
+      "files": [
+        "opt-migration-move-56.png",
+        "opt-migration-move-84.png"
+      ]
+    },
+    {
+      "name": "opt-migration-source-folder",
+      "files": [
+        "opt-migration-source-folder-56.png",
+        "opt-migration-source-folder-84.png"
+      ]
+    },
+    {
+      "name": "opt-migration-verification",
+      "files": [
+        "opt-migration-verification-56.png",
+        "opt-migration-verification-84.png"
+      ]
+    },
+    {
+      "name": "opt-privacy-confirm",
+      "files": [
+        "opt-privacy-confirm-56.png",
+        "opt-privacy-confirm-84.png"
+      ]
+    },
+    {
+      "name": "opt-privacy-grouping",
+      "files": [
+        "opt-privacy-grouping-56.png",
+        "opt-privacy-grouping-84.png"
+      ]
+    },
+    {
+      "name": "opt-privacy-privacy",
+      "files": [
+        "opt-privacy-privacy-56.png",
+        "opt-privacy-privacy-84.png"
+      ]
+    },
+    {
+      "name": "opt-privacy-search",
+      "files": [
+        "opt-privacy-search-56.png",
+        "opt-privacy-search-84.png"
+      ]
+    },
+    {
+      "name": "opt-privacy-timeline",
+      "files": [
+        "opt-privacy-timeline-56.png",
+        "opt-privacy-timeline-84.png"
+      ]
+    },
+    {
+      "name": "opt-privacy-website",
+      "files": [
+        "opt-privacy-website-56.png",
+        "opt-privacy-website-84.png"
+      ]
+    },
+    {
+      "name": "opt-scan-cleanup-candidates",
+      "files": [
+        "opt-scan-cleanup-candidates-56.png",
+        "opt-scan-cleanup-candidates-84.png"
+      ]
+    },
+    {
+      "name": "opt-scan-health-check",
+      "files": [
+        "opt-scan-health-check-56.png",
+        "opt-scan-health-check-84.png"
+      ]
+    },
+    {
+      "name": "opt-scan-review-files",
+      "files": [
+        "opt-scan-review-files-56.png",
+        "opt-scan-review-files-84.png"
+      ]
+    },
+    {
+      "name": "opt-startup-background",
+      "files": [
+        "opt-startup-background-56.png",
+        "opt-startup-background-84.png"
+      ]
+    },
+    {
+      "name": "opt-startup-login",
+      "files": [
+        "opt-startup-login-56.png",
+        "opt-startup-login-84.png"
+      ]
+    },
+    {
+      "name": "opt-startup-startup-agent",
+      "files": [
+        "opt-startup-startup-agent-56.png",
+        "opt-startup-startup-agent-84.png"
+      ]
+    },
+    {
+      "name": "opt-startup-system-items",
+      "files": [
+        "opt-startup-system-items-56.png",
+        "opt-startup-system-items-84.png"
+      ]
+    },
+    {
+      "name": "opt-uninstall-application",
+      "files": [
+        "opt-uninstall-application-56.png",
+        "opt-uninstall-application-84.png"
+      ]
+    },
+    {
+      "name": "opt-uninstall-containers",
+      "files": [
+        "opt-uninstall-containers-56.png",
+        "opt-uninstall-containers-84.png"
+      ]
+    },
+    {
+      "name": "opt-uninstall-related-files",
+      "files": [
+        "opt-uninstall-related-files-56.png",
+        "opt-uninstall-related-files-84.png"
+      ]
+    },
+    {
+      "name": "opt-uninstall-support-files",
+      "files": [
+        "opt-uninstall-support-files-56.png",
+        "opt-uninstall-support-files-84.png"
+      ]
+    },
+    {
+      "name": "opt-updater-packages",
+      "files": [
+        "opt-updater-packages-56.png",
+        "opt-updater-packages-84.png"
+      ]
+    },
+    {
+      "name": "opt-updater-store",
+      "files": [
+        "opt-updater-store-56.png",
+        "opt-updater-store-84.png"
+      ]
+    },
+    {
+      "name": "opt-updater-update-feed",
+      "files": [
+        "opt-updater-update-feed-56.png",
+        "opt-updater-update-feed-84.png"
+      ]
+    },
+    {
+      "name": "opt-updater-website",
+      "files": [
+        "opt-updater-website-56.png",
+        "opt-updater-website-84.png"
+      ]
+    }
+  ],
+  "mappings": [
+    {
+      "feature": "智能扫描",
+      "option": "可清理垃圾",
+      "file": "opt-scan-cleanup-candidates.png",
+      "color": "#2E8CFF"
+    },
+    {
+      "feature": "智能扫描",
+      "option": "需确认文件",
+      "file": "opt-scan-review-files.png",
+      "color": "#2E8CFF"
+    },
+    {
+      "feature": "智能扫描",
+      "option": "健康状态检查",
+      "file": "opt-scan-health-check.png",
+      "color": "#2E8CFF"
+    },
+    {
+      "feature": "智能扫描",
+      "option": "可清理",
+      "file": "opt-scan-cleanup-candidates.png",
+      "color": "#2E8CFF"
+    },
+    {
+      "feature": "智能扫描",
+      "option": "需复核",
+      "file": "opt-scan-review-files.png",
+      "color": "#2E8CFF"
+    },
+    {
+      "feature": "智能扫描",
+      "option": "健康状态",
+      "file": "opt-scan-health-check.png",
+      "color": "#2E8CFF"
+    },
+    {
+      "feature": "安全清理",
+      "option": "系统缓存",
+      "file": "opt-cleanup-system-cache.png",
+      "color": "#FF7A2F"
+    },
+    {
+      "feature": "安全清理",
+      "option": "日志文件",
+      "file": "opt-cleanup-logs.png",
+      "color": "#FF7A2F"
+    },
+    {
+      "feature": "安全清理",
+      "option": "临时文件",
+      "file": "opt-cleanup-temporary-files.png",
+      "color": "#FF7A2F"
+    },
+    {
+      "feature": "安全清理",
+      "option": "下载残留",
+      "file": "opt-cleanup-download-remnants.png",
+      "color": "#FF7A2F"
+    },
+    {
+      "feature": "安全清理",
+      "option": "缓存",
+      "file": "opt-cleanup-system-cache.png",
+      "color": "#FF7A2F"
+    },
+    {
+      "feature": "安全清理",
+      "option": "日志",
+      "file": "opt-cleanup-logs.png",
+      "color": "#FF7A2F"
+    },
+    {
+      "feature": "开发工具与产物",
+      "option": "代码工程",
+      "file": "opt-devcaches-projects.png",
+      "color": "#FFB340"
+    },
+    {
+      "feature": "开发工具与产物",
+      "option": "Agent",
+      "file": "opt-devcaches-agent.png",
+      "color": "#FFB340"
+    },
+    {
+      "feature": "开发工具与产物",
+      "option": "会话",
+      "file": "opt-devcaches-sessions.png",
+      "color": "#FFB340"
+    },
+    {
+      "feature": "开发工具与产物",
+      "option": "产物",
+      "file": "opt-devcaches-artifacts.png",
+      "color": "#FFB340"
+    },
+    {
+      "feature": "开发工具与产物",
+      "option": "开发文件活动阈值",
+      "file": "opt-devcaches-activity-threshold.png",
+      "color": "#FFB340"
+    },
+    {
+      "feature": "系统健康",
+      "option": "磁盘",
+      "file": "opt-health-disk.png",
+      "color": "#34C77B"
+    },
+    {
+      "feature": "系统健康",
+      "option": "电池",
+      "file": "opt-health-battery.png",
+      "color": "#34C77B"
+    },
+    {
+      "feature": "系统健康",
+      "option": "系统状态",
+      "file": "opt-health-system-state.png",
+      "color": "#34C77B"
+    },
+    {
+      "feature": "浏览器隐私",
+      "option": "隐私",
+      "file": "opt-privacy-privacy.png",
+      "color": "#2FBF71"
+    },
+    {
+      "feature": "浏览器隐私",
+      "option": "网站",
+      "file": "opt-privacy-website.png",
+      "color": "#2FBF71"
+    },
+    {
+      "feature": "浏览器隐私",
+      "option": "时间",
+      "file": "opt-privacy-timeline.png",
+      "color": "#2FBF71"
+    },
+    {
+      "feature": "浏览器隐私",
+      "option": "确认",
+      "file": "opt-privacy-confirm.png",
+      "color": "#2FBF71"
+    },
+    {
+      "feature": "浏览器隐私",
+      "option": "日期范围",
+      "file": "opt-privacy-timeline.png",
+      "color": "#2FBF71"
+    },
+    {
+      "feature": "浏览器隐私",
+      "option": "分组",
+      "file": "opt-privacy-grouping.png",
+      "color": "#2FBF71"
+    },
+    {
+      "feature": "浏览器隐私",
+      "option": "搜索网站或记录",
+      "file": "opt-privacy-search.png",
+      "color": "#2FBF71"
+    },
+    {
+      "feature": "内存管理",
+      "option": "内存",
+      "file": "opt-memory-memory.png",
+      "color": "#8B6CFF"
+    },
+    {
+      "feature": "内存管理",
+      "option": "应用",
+      "file": "opt-memory-application.png",
+      "color": "#8B6CFF"
+    },
+    {
+      "feature": "内存管理",
+      "option": "压力",
+      "file": "opt-memory-pressure.png",
+      "color": "#8B6CFF"
+    },
+    {
+      "feature": "内存管理",
+      "option": "交换",
+      "file": "opt-memory-swap.png",
+      "color": "#8B6CFF"
+    },
+    {
+      "feature": "内存管理",
+      "option": "刷新以读取内存状态",
+      "file": "opt-memory-memory.png",
+      "color": "#8B6CFF"
+    },
+    {
+      "feature": "卸载",
+      "option": "/Applications",
+      "file": "opt-uninstall-application.png",
+      "color": "#A07BFF"
+    },
+    {
+      "feature": "卸载",
+      "option": "~/Applications",
+      "file": "opt-uninstall-application.png",
+      "color": "#A07BFF"
+    },
+    {
+      "feature": "卸载",
+      "option": "关联文件线索",
+      "file": "opt-uninstall-related-files.png",
+      "color": "#A07BFF"
+    },
+    {
+      "feature": "卸载",
+      "option": "应用本体",
+      "file": "opt-uninstall-application.png",
+      "color": "#A07BFF"
+    },
+    {
+      "feature": "卸载",
+      "option": "关联文件",
+      "file": "opt-uninstall-related-files.png",
+      "color": "#A07BFF"
+    },
+    {
+      "feature": "卸载",
+      "option": "支持文件",
+      "file": "opt-uninstall-support-files.png",
+      "color": "#A07BFF"
+    },
+    {
+      "feature": "卸载",
+      "option": "容器",
+      "file": "opt-uninstall-containers.png",
+      "color": "#A07BFF"
+    },
+    {
+      "feature": "应用更新",
+      "option": "App Store",
+      "file": "opt-updater-store.png",
+      "color": "#9B7BFF"
+    },
+    {
+      "feature": "应用更新",
+      "option": "Sparkle",
+      "file": "opt-updater-update-feed.png",
+      "color": "#9B7BFF"
+    },
+    {
+      "feature": "应用更新",
+      "option": "官网",
+      "file": "opt-updater-website.png",
+      "color": "#9B7BFF"
+    },
+    {
+      "feature": "应用更新",
+      "option": "Homebrew",
+      "file": "opt-updater-packages.png",
+      "color": "#9B7BFF"
+    },
+    {
+      "feature": "文件分析",
+      "option": "文档",
+      "file": "opt-fileanalysis-documents.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "文件分析",
+      "option": "媒体",
+      "file": "opt-fileanalysis-media.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "文件分析",
+      "option": "归档",
+      "file": "opt-fileanalysis-archives.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "文件分析",
+      "option": "其他",
+      "file": "opt-fileanalysis-other.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "来源",
+      "file": "opt-migration-source-folder.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "目标位置",
+      "file": "opt-migration-destination-drive.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "类型",
+      "file": "opt-migration-item-type.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "文件",
+      "file": "opt-migration-documents.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "应用",
+      "file": "opt-migration-application.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "验证",
+      "file": "opt-migration-verification.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "搬移",
+      "file": "opt-migration-move.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "文件搬家",
+      "option": "目标",
+      "file": "opt-migration-destination-drive.png",
+      "color": "#3DD6E0"
+    },
+    {
+      "feature": "重复文件",
+      "option": "文档",
+      "file": "opt-fileanalysis-documents.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "照片",
+      "file": "opt-duplicates-photos.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "视频",
+      "file": "opt-duplicates-videos.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "音频",
+      "file": "opt-duplicates-audio.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "用户文件",
+      "file": "opt-duplicates-user-files.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "用户数据区",
+      "file": "opt-duplicates-user-data.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "仅所选位置",
+      "file": "opt-duplicates-selected-location.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "添加文件夹",
+      "file": "opt-duplicates-add-folder.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "重复文件",
+      "option": "选择外接卷",
+      "file": "opt-duplicates-external-volume.png",
+      "color": "#2CC9D6"
+    },
+    {
+      "feature": "登录项与后台任务",
+      "option": "登录时打开",
+      "file": "opt-startup-login.png",
+      "color": "#FF4F8B"
+    },
+    {
+      "feature": "登录项与后台任务",
+      "option": "后台任务",
+      "file": "opt-startup-background.png",
+      "color": "#FF4F8B"
+    },
+    {
+      "feature": "登录项与后台任务",
+      "option": "启动代理",
+      "file": "opt-startup-startup-agent.png",
+      "color": "#FF4F8B"
+    },
+    {
+      "feature": "登录项与后台任务",
+      "option": "系统项",
+      "file": "opt-startup-system-items.png",
+      "color": "#FF4F8B"
+    },
+    {
+      "feature": "登录项与后台任务",
+      "option": "登录项",
+      "file": "opt-startup-login.png",
+      "color": "#FF4F8B"
+    },
+    {
+      "feature": "登录项与后台任务",
+      "option": "后台项",
+      "file": "opt-startup-background.png",
+      "color": "#FF4F8B"
+    },
+    {
+      "feature": "登录项与后台任务",
+      "option": "代理",
+      "file": "opt-startup-startup-agent.png",
+      "color": "#FF4F8B"
+    },
+    {
+      "feature": "性能测试",
+      "option": "CPU",
+      "file": "opt-benchmark-cpu.png",
+      "color": "#FF3D8B"
+    },
+    {
+      "feature": "性能测试",
+      "option": "GPU",
+      "file": "opt-benchmark-gpu.png",
+      "color": "#FF3D8B"
+    },
+    {
+      "feature": "性能测试",
+      "option": "内存",
+      "file": "opt-benchmark-memory.png",
+      "color": "#FF3D8B"
+    },
+    {
+      "feature": "性能测试",
+      "option": "存储",
+      "file": "opt-benchmark-storage.png",
+      "color": "#FF3D8B"
+    },
+    {
+      "feature": "能耗",
+      "option": "进程",
+      "file": "opt-energy-processes.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "归属",
+      "file": "opt-energy-attribution.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "基线",
+      "file": "opt-energy-baseline.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "初算",
+      "file": "opt-energy-preview.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "采样",
+      "file": "opt-energy-sampling.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "汇总",
+      "file": "opt-energy-summary.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "能耗",
+      "file": "opt-energy-energy.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "续航",
+      "file": "opt-energy-battery.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "发热",
+      "file": "opt-energy-thermals.png",
+      "color": "#FF7A8A"
+    },
+    {
+      "feature": "能耗",
+      "option": "后台",
+      "file": "opt-energy-background.png",
+      "color": "#FF7A8A"
+    }
+  ]
+}

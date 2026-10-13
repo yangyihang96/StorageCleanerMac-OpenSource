@@ -61,7 +61,7 @@ enum ApplicationUpdateScanState: Equatable, Sendable {
 
 struct ApplicationUpdateTask: Identifiable, Codable, Hashable, Sendable {
     let id: UUID
-    let sessionID: UUID
+    var sessionID: UUID
     let applicationID: String
     let providerIdentifier: ApplicationUpdateProviderIdentifier
     let originalIdentity: ApplicationIdentity
@@ -74,6 +74,10 @@ struct ApplicationUpdateTask: Identifiable, Codable, Hashable, Sendable {
     var createdAt: Date
     var updatedAt: Date
     var attemptCount: Int
+    var recoveryEvidence: ApplicationUpdateRecoveryEvidence?
+    var originalSessionID: UUID?
+    var installationIsolated: Bool?
+    var requiresInstallationReconciliation: Bool { state == .needsReconciliation || installationIsolated == true }
 
     init(
         id: UUID = UUID(),
@@ -138,7 +142,7 @@ struct ApplicationUpdatePlan: Identifiable, Codable, Hashable, Sendable {
 
 struct ApplicationUpdateQueueSnapshot: Codable, Hashable, Sendable {
     let schemaVersion: Int
-    let plan: ApplicationUpdatePlan
+    var plan: ApplicationUpdatePlan
     var tasks: [ApplicationUpdateTask]
     var isPaused: Bool
     var updatedAt: Date
@@ -424,6 +428,11 @@ struct ApplicationUpdateInstallResult: Hashable, Sendable {
     let state: ApplicationUpdateTaskState
     let observedVersion: ApplicationVersion?
     let detail: String
+    /// Only a bounded native command/helper stop acknowledgement can set this.
+    /// Task cancellation or a progress event supplies no stop evidence.
+    var confirmedStopped = false
+    var recoveryEvidence: ApplicationUpdateRecoveryEvidence? = nil
+    var installationIsolated = false
 }
 
 struct ApplicationUpdateProgressEvent: Hashable, Sendable {

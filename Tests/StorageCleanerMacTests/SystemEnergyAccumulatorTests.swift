@@ -86,7 +86,7 @@ final class SystemEnergyAccumulatorTests: XCTestCase {
             fileURL: url,
             boot: boot,
             now: date(120),
-            sampleProvider: { nil }
+            samplingGaps: MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self)), sampleProvider: { nil }
         )
 
         XCTAssertEqual(accumulator.snapshot.acWattHours, 1, accuracy: 0.000_1)
@@ -106,7 +106,7 @@ final class SystemEnergyAccumulatorTests: XCTestCase {
             fileURL: url,
             boot: bootIdentity(id: "new-boot"),
             now: date(120),
-            sampleProvider: { nil }
+            samplingGaps: MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self)), sampleProvider: { nil }
         )
 
         XCTAssertEqual(accumulator.snapshot.totalWattHours, 0)
@@ -156,7 +156,7 @@ final class SystemEnergyAccumulatorTests: XCTestCase {
             fileURL: nil,
             boot: bootIdentity(id: "sleep-test"),
             now: date(0),
-            sampleProvider: { nil }
+            samplingGaps: MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self)), sampleProvider: { nil }
         )
         accumulator.record(sample(at: 0, watts: 60, source: .battery))
         accumulator.markSleep(at: date(30))
@@ -169,7 +169,7 @@ final class SystemEnergyAccumulatorTests: XCTestCase {
     @MainActor
     func testConcurrentRequestsCoalesceAndStopDrainsBeforeIgnoringOldResult() async {
         let gate = EnergySamplingGate()
-        let accumulator = SystemEnergyAccumulator(fileURL: nil, sampleProvider: { await gate.read() })
+        let accumulator = SystemEnergyAccumulator(fileURL: nil, samplingGaps: MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self)), sampleProvider: { await gate.read() })
         let first = Task { await accumulator.sampleNow() }
         while await gate.calls == 0 { await Task.yield() }
         let second = Task { await accumulator.sampleNow() }
@@ -188,7 +188,7 @@ final class SystemEnergyAccumulatorTests: XCTestCase {
     @MainActor
     func testPassiveProductionModeDoesNotStartItsOwnSampler() async {
         let gate = EnergySamplingGate()
-        let accumulator = SystemEnergyAccumulator(fileURL: nil, sampleProvider: { await gate.read() })
+        let accumulator = SystemEnergyAccumulator(fileURL: nil, samplingGaps: MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self)), sampleProvider: { await gate.read() })
         accumulator.start(passive: true)
         for _ in 0..<20 { await Task.yield() }
         let calls = await gate.calls

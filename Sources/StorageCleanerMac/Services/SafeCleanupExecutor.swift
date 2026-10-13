@@ -10,6 +10,8 @@ struct CleanupExecutionContext: Sendable {
     let userHomeURL: URL
     let excludedURLs: [URL]
     let approvedPlanItemIDs: Set<UUID>?
+    // Presentation evidence only: these reasons never approve an item to move.
+    var preflightSkipReasons: [UUID: CleanSkipReason] = [:]
 }
 
 protocol CleanupMoving: Sendable {
@@ -34,30 +36,208 @@ protocol CleanupCapacityReading: Sendable {
     func availableCapacity(at url: URL) async -> Int64?
 }
 
+/// D23: one frozen Trash entry to delete permanently, with the identities
+/// recorded at scan time.
+struct CleanupTrashEntryDeletion: Sendable {
+    let trashURL: URL
+    /// The Trash folder as the scan saw it.
+    let trashIdentity: FileIdentity
+    /// The entry's own name directly inside the Trash.
+    let entryName: String
+    let entryIdentity: FileIdentity
+}
+
+/// Thrown before anything is deleted.
+enum CleanupTrashDeletionRefusal: Error, Equatable {
+    /// The Trash folder is a link, or not the folder the scan saw.
+    case trashChanged
+    /// The entry is not the one frozen at scan time.
+    case entryChanged
+    /// The entry is on another volume than the Trash.
+    case otherVolume
+}
+
+/// Thrown after part of an entry may already be gone.
+enum CleanupTrashDeletionFailure: Error, Equatable {
+    case system(Int32)
+    /// A folder inside the entry is another volume (a mount point).
+    case crossesVolume
+    case tooDeep
+    case changedDuringDeletion
+}
+
+/// D23: permanently removes one frozen Trash entry. A symbolic link is removed
+/// itself; links inside a removed folder are unlinked, never followed.
+protocol CleanupPermanentDeleting: Sendable {
+    func removeTrashEntry(_ deletion: CleanupTrashEntryDeletion) async throws
+}
+
+/// P2-3: opens the Trash without following links, checks it is the folder the
+/// scan saw, then deletes the entry relative to that open folder: every level
+/// is opened without following links and must stay on the Trash's volume.
+struct FoundationCleanupPermanentDeleter: CleanupPermanentDeleting {
+    private static let maximumDepth = 128
+
+    func removeTrashEntry(_ deletion: CleanupTrashEntryDeletion) async throws {
+        try Self.remove(deletion)
+    }
+
+    static func remove(_ deletion: CleanupTrashEntryDeletion) throws {
+        let name = Array(deletion.entryName.utf8CString)
+        guard name.count > 1, deletion.entryName != ".", deletion.entryName != "..",
+              !deletion.entryName.contains("/") else {
+            throw CleanupTrashDeletionRefusal.entryChanged
+        }
+        let trash = deletion.trashURL.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard trash >= 0 else { throw CleanupTrashDeletionRefusal.trashChanged }
+        defer { close(trash) }
+        var trashStatus = stat()
+        guard fstat(trash, &trashStatus) == 0,
+              identity(of: trashStatus) == deletion.trashIdentity else {
+            throw CleanupTrashDeletionRefusal.trashChanged
+        }
+        var entryStatus = stat()
+        guard name.withUnsafeBufferPointer({
+            fstatat(trash, $0.baseAddress!, &entryStatus, AT_SYMLINK_NOFOLLOW)
+        }) == 0 else {
+            throw CleanupTrashDeletionRefusal.entryChanged
+        }
+        guard identity(of: entryStatus) == deletion.entryIdentity else {
+            throw CleanupTrashDeletionRefusal.entryChanged
+        }
+        guard entryStatus.st_dev == trashStatus.st_dev else {
+            throw CleanupTrashDeletionRefusal.otherVolume
+        }
+        if entryStatus.st_mode & S_IFMT == S_IFDIR {
+            try removeDirectory(
+                named: name,
+                in: trash,
+                expected: entryStatus,
+                device: trashStatus.st_dev,
+                depth: 0
+            )
+        } else {
+            try unlink(name, in: trash, flags: 0)
+        }
+    }
+
+    private static func removeDirectory(
+        named name: [CChar],
+        in parent: Int32,
+        expected: stat,
+        device: dev_t,
+        depth: Int
+    ) throws {
+        guard depth < maximumDepth else { throw CleanupTrashDeletionFailure.tooDeep }
+        let directory = name.withUnsafeBufferPointer {
+            openat(parent, $0.baseAddress!, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard directory >= 0 else { throw CleanupTrashDeletionFailure.system(errno) }
+        defer { close(directory) }
+        var status = stat()
+        guard fstat(directory, &status) == 0,
+              status.st_dev == expected.st_dev,
+              status.st_ino == expected.st_ino else {
+            throw CleanupTrashDeletionFailure.changedDuringDeletion
+        }
+        guard status.st_dev == device else { throw CleanupTrashDeletionFailure.crossesVolume }
+        for child in try childNames(of: directory) {
+            var childStatus = stat()
+            let found = child.withUnsafeBufferPointer {
+                fstatat(directory, $0.baseAddress!, &childStatus, AT_SYMLINK_NOFOLLOW)
+            }
+            guard found == 0 else {
+                if errno == ENOENT { continue }
+                throw CleanupTrashDeletionFailure.system(errno)
+            }
+            if childStatus.st_mode & S_IFMT == S_IFDIR {
+                guard childStatus.st_dev == device else {
+                    throw CleanupTrashDeletionFailure.crossesVolume
+                }
+                try removeDirectory(
+                    named: child,
+                    in: directory,
+                    expected: childStatus,
+                    device: device,
+                    depth: depth + 1
+                )
+            } else {
+                // Files and links are unlinked; a link's target is never read.
+                try unlink(child, in: directory, flags: 0)
+            }
+        }
+        try unlink(name, in: parent, flags: AT_REMOVEDIR)
+    }
+
+    private static func unlink(_ name: [CChar], in directory: Int32, flags: Int32) throws {
+        let result = name.withUnsafeBufferPointer {
+            unlinkat(directory, $0.baseAddress!, flags)
+        }
+        guard result == 0 || errno == ENOENT else {
+            throw CleanupTrashDeletionFailure.system(errno)
+        }
+    }
+
+    /// Names as raw bytes, so any name the file system holds is passed back
+    /// unchanged.
+    private static func childNames(of directory: Int32) throws -> [[CChar]] {
+        let duplicate = dup(directory)
+        guard duplicate >= 0 else { throw CleanupTrashDeletionFailure.system(errno) }
+        guard let stream = fdopendir(duplicate) else {
+            let code = errno
+            close(duplicate)
+            throw CleanupTrashDeletionFailure.system(code)
+        }
+        defer { closedir(stream) }
+        var names = [[CChar]]()
+        errno = 0
+        while let entry = readdir(stream) {
+            var raw = entry.pointee.d_name
+            let length = Int(entry.pointee.d_namlen)
+            let name: [CChar] = withUnsafeBytes(of: &raw) { bytes in
+                bytes.prefix(length).map { CChar(bitPattern: $0) } + [0]
+            }
+            let isDot = length == 1 && name[0] == 0x2E
+            let isDotDot = length == 2 && name[0] == 0x2E && name[1] == 0x2E
+            if !isDot && !isDotDot { names.append(name) }
+            errno = 0
+        }
+        guard errno == 0 else { throw CleanupTrashDeletionFailure.system(errno) }
+        return names
+    }
+
+    private static func identity(of status: stat) -> FileIdentity {
+        let kind: FileEntryKind
+        switch status.st_mode & S_IFMT {
+        case S_IFREG: kind = .regularFile
+        case S_IFDIR: kind = .directory
+        case S_IFLNK: kind = .symbolicLink
+        default: kind = .other
+        }
+        let birth = status.st_birthtimespec
+        return FileIdentity(
+            deviceID: UInt64(status.st_dev),
+            inode: UInt64(status.st_ino),
+            entryKind: kind,
+            creationTimeNanoseconds: birth.tv_sec > 0
+                ? Int64(birth.tv_sec) * 1_000_000_000 + Int64(birth.tv_nsec)
+                : nil
+        )
+    }
+}
+
 protocol CleanupContentDigestReading: Sendable {
     func sha256(at url: URL) throws -> Data
 }
 
 struct FoundationCleanupContentDigestReader: CleanupContentDigestReading {
-    private static let chunkSize = 1024 * 1024
+    var reader = GuardedFileContentReader(priority: .userInitiated)
 
     func sha256(at url: URL) throws -> Data {
-        let descriptor = url.path.withCString {
-            Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        }
-        guard descriptor >= 0 else {
-            if errno == ENOENT { throw CleanupFileSystemError.vanished }
-            if errno == EACCES || errno == EPERM { throw CleanupFileSystemError.permissionDenied }
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while let data = try handle.read(upToCount: Self.chunkSize), !data.isEmpty {
-            hasher.update(data: data)
-        }
-        return Data(hasher.finalize())
+        try reader.sha256(url)
     }
 }
 
@@ -215,9 +395,14 @@ actor SafeCleanupExecutor {
     private let volumeChecker: any CleanupVolumeChecking
     private let runningApplicationChecker: any CleanupRunningApplicationChecking
     private let capacityReader: any CleanupCapacityReading
+    private let deleter: any CleanupPermanentDeleting
     private let coordinator: HeavyWorkCoordinator
     private let persistReport: @Sendable (CleanReport, [String: FileIdentity]) throws -> Void
     private var consumedPlanIDs = Set<CleanPlanID>()
+    // ScanStore already uses this same executor for preflight and execution.
+    // Retain reasons by immutable plan ID, without caching write-probe results
+    // for approved items or changing the confirmation/authorization route.
+    private var preflightReports: [CleanPlanID: CleanPreflightReport] = [:]
 
     init(
         metadataReader: any ReadOnlyFileSystem = FoundationReadOnlyFileSystem(),
@@ -227,6 +412,7 @@ actor SafeCleanupExecutor {
         runningApplicationChecker: any CleanupRunningApplicationChecking =
             FoundationCleanupRunningApplicationChecker(),
         capacityReader: any CleanupCapacityReading = FoundationCleanupCapacityReader(),
+        deleter: any CleanupPermanentDeleting = FoundationCleanupPermanentDeleter(),
         coordinator: HeavyWorkCoordinator,
         persistReport: @escaping @Sendable (CleanReport, [String: FileIdentity]) throws -> Void = { _, _ in }
     ) {
@@ -236,6 +422,7 @@ actor SafeCleanupExecutor {
         self.volumeChecker = volumeChecker
         self.runningApplicationChecker = runningApplicationChecker
         self.capacityReader = capacityReader
+        self.deleter = deleter
         self.coordinator = coordinator
         self.persistReport = persistReport
     }
@@ -244,6 +431,7 @@ actor SafeCleanupExecutor {
         plan: CleanPlan,
         context: CleanupExecutionContext
     ) async -> CleanPreflightReport {
+        preflightReports.removeValue(forKey: plan.id)
         if context.featureConfiguration.mode != .v2Full {
             return CleanPreflightReport(
                 planID: plan.id,
@@ -254,7 +442,8 @@ actor SafeCleanupExecutor {
         }
         guard !consumedPlanIDs.contains(plan.id),
               plan.sessionID == context.activeSessionID,
-              plan.rulesVersion == context.activeRules.rulesVersion else {
+              plan.rulesVersion == context.activeRules.rulesVersion,
+              plan.rulesProvenance == context.activeRules.effectiveProvenance else {
             return CleanPreflightReport(
                 planID: plan.id,
                 checkedAt: Date(),
@@ -266,17 +455,24 @@ actor SafeCleanupExecutor {
         var results = [CleanPreflightItem]()
         for item in plan.items {
             let reason = await skipReason(for: item, context: context)
+            // 取消的遍历没有完整结论，不能把已读取的部分批准为可执行。
+            if Task.isCancelled {
+                return CleanPreflightReport(planID: plan.id, checkedAt: Date(), items: [],
+                    failure: CleanFailure(code: .unexpected, detailCode: "cancelled"))
+            }
             results.append(CleanPreflightItem(
                 planItemID: item.id,
                 status: reason.map(CleanPreflightItemStatus.skipped) ?? .ready
             ))
         }
-        return CleanPreflightReport(
+        let report = CleanPreflightReport(
             planID: plan.id,
             checkedAt: Date(),
             items: results,
             failure: nil
         )
+        preflightReports[plan.id] = report
+        return report
     }
 
     func execute(
@@ -294,6 +490,7 @@ actor SafeCleanupExecutor {
         }
         guard plan.sessionID == context.activeSessionID,
               plan.rulesVersion == context.activeRules.rulesVersion,
+              plan.rulesProvenance == context.activeRules.effectiveProvenance,
               !consumedPlanIDs.contains(plan.id) else {
             return terminalFailureReport(
                 plan: plan,
@@ -312,6 +509,15 @@ actor SafeCleanupExecutor {
             )
         }
 
+        var context = context
+        if let preflight = preflightReports.removeValue(forKey: plan.id),
+           preflight.failure == nil {
+            for entry in preflight.items {
+                if case let .skipped(reason) = entry.status {
+                    context.preflightSkipReasons[entry.planItemID] = reason
+                }
+            }
+        }
         consumedPlanIDs.insert(plan.id)
         let lease: HeavyWorkCoordinator.Lease
         do {
@@ -348,6 +554,13 @@ actor SafeCleanupExecutor {
                 reportItems.append(contentsOf: plan.items[index...].map {
                     reportItem(for: $0, outcome: .notProcessed)
                 })
+                do {
+                    try persistReport(makeReport(plan: plan, startedAt: startedAt,
+                        items: reportItems, cancelled: true,
+                        availableSpaceDeltaBytes: nil), identities)
+                } catch {
+                    persistenceFailed = true
+                }
                 break
             }
 
@@ -367,7 +580,12 @@ actor SafeCleanupExecutor {
                 break
             }
 
-            if let reason = await skipReason(for: item, context: context) {
+            if let reason = await skipReason(for: item, context: context, rechecksWrites: false) {
+                if Task.isCancelled {
+                    cancelled = true
+                    reportItems.append(contentsOf: plan.items[index...].map { reportItem(for: $0, outcome: .notProcessed) })
+                    break
+                }
                 reportItems.append(reportItem(for: item, outcome: .skipped(reason)))
                 await progress(progressSnapshot(
                     plan: plan,
@@ -377,10 +595,14 @@ actor SafeCleanupExecutor {
                 continue
             }
 
-            // The second read is deliberately adjacent to the system move.
-            // The public Trash API is path based, so this narrows but cannot
-            // eliminate the same-user replacement window.
-            if let reason = await skipReason(for: item, context: context) {
+            // 保留身份、路径、卷和运行状态核对；写入遍历留到持久化意图之后，
+            // 避免对同一目录重复走三遍。系统移动仍是基于路径的 API。
+            if let reason = await skipReason(for: item, context: context, rechecksWrites: false) {
+                if Task.isCancelled {
+                    cancelled = true
+                    reportItems.append(contentsOf: plan.items[index...].map { reportItem(for: $0, outcome: .notProcessed) })
+                    break
+                }
                 reportItems.append(reportItem(for: item, outcome: .skipped(reason)))
                 await progress(progressSnapshot(
                     plan: plan,
@@ -403,9 +625,11 @@ actor SafeCleanupExecutor {
             // If a crash occurs during the system call, retain its identity and
             // explicitly mark the outcome unknown; never replay this intent.
             do {
-                let pending = reportItems + [reportItem(for: item, outcome: .failed(
-                    CleanFailure(code: .moveOutcomeUnknown, detailCode: "interrupted-move-needs-verification")
-                ))] + plan.items.dropFirst(index + 1).map { reportItem(for: $0, outcome: .notProcessed) }
+                let interrupted = item.action.permanentlyDeletes
+                    ? CleanFailure(code: .deletionOutcomeUnknown, detailCode: "interrupted-deletion-needs-verification")
+                    : CleanFailure(code: .moveOutcomeUnknown, detailCode: "interrupted-move-needs-verification")
+                let pending = reportItems + [reportItem(for: item, outcome: .failed(interrupted))]
+                    + plan.items.dropFirst(index + 1).map { reportItem(for: $0, outcome: .notProcessed) }
                 try persistReport(makeReport(plan: plan, startedAt: startedAt, items: pending,
                     cancelled: false, availableSpaceDeltaBytes: nil), identities)
             } catch {
@@ -417,51 +641,99 @@ actor SafeCleanupExecutor {
                 })
                 break
             }
+            // Durable intent creation can block on storage. Re-run the complete
+            // authorization and identity preflight after it, not only before it.
+            let finalReason = await skipReason(for: item, context: context)
+            if Task.isCancelled {
+                cancelled = true
+                reportItems.append(contentsOf: plan.items[index...].map {
+                    reportItem(for: $0, outcome: .notProcessed)
+                })
+                // No move was invoked. Replace the durable unknown intent now,
+                // before the capacity read or the final receipt can fail.
+                do {
+                    try persistReport(makeReport(plan: plan, startedAt: startedAt,
+                        items: reportItems, cancelled: true,
+                        availableSpaceDeltaBytes: nil), identities)
+                } catch {
+                    persistenceFailed = true
+                }
+                break
+            }
+            if let reason = finalReason {
+                reportItems.append(reportItem(for: item, outcome: .skipped(reason)))
+                do {
+                    let remaining = plan.items.dropFirst(index + 1).map {
+                        reportItem(for: $0, outcome: .notProcessed)
+                    }
+                    try persistReport(makeReport(plan: plan, startedAt: startedAt,
+                        items: reportItems + remaining, cancelled: false,
+                        availableSpaceDeltaBytes: nil), identities)
+                } catch {
+                    persistenceFailed = true
+                    reportItems.append(contentsOf: plan.items.dropFirst(index + 1).map {
+                        reportItem(for: $0, outcome: .notProcessed)
+                    })
+                    break
+                }
+                await progress(progressSnapshot(plan: plan, items: reportItems, currentRuleID: item.ruleID))
+                continue
+            }
             var invokedMove = false
+            let unknownOutcomeCode: CleanFailureCode = item.action.permanentlyDeletes
+                ? .deletionOutcomeUnknown
+                : .moveOutcomeUnknown
             do {
                 try await coordinator.requireValid(lease, owner: .cleanup)
                 try Task.checkCancellation()
-                let resultingURL: URL
-                invokedMove = true
-                switch plan.disposition {
-                case .trash:
-                    resultingURL = try await mover.moveToTrash(item.sourceURL)
-                case .quarantine:
-                    resultingURL = try await mover.moveToQuarantine(
-                        item.sourceURL,
-                        planID: plan.id,
-                        itemID: item.id
-                    )
-                }
-
-                let movedSnapshot = try? metadataReader.snapshot(at: resultingURL)
-                let verification: CleanupMoveVerification
-                if let movedSnapshot {
-                    verification = movedSnapshot.identity == item.expectedSnapshot.identity
-                        ? .identityVerified
-                        : .identityMismatch
+                if item.action.permanentlyDeletes {
+                    reportItems.append(reportItem(
+                        for: item,
+                        outcome: try await deleteFrozenTrashEntry(item, invoked: &invokedMove)
+                    ))
                 } else {
-                    verification = .destinationMetadataUnavailable
+                    let resultingURL: URL
+                    invokedMove = true
+                    switch plan.disposition {
+                    case .trash:
+                        resultingURL = try await mover.moveToTrash(item.sourceURL)
+                    case .quarantine:
+                        resultingURL = try await mover.moveToQuarantine(
+                            item.sourceURL,
+                            planID: plan.id,
+                            itemID: item.id
+                        )
+                    }
+
+                    let movedSnapshot = try? metadataReader.snapshot(at: resultingURL)
+                    let verification: CleanupMoveVerification
+                    if let movedSnapshot {
+                        verification = movedSnapshot.identity == item.expectedSnapshot.identity
+                            ? .identityVerified
+                            : .identityMismatch
+                    } else {
+                        verification = .destinationMetadataUnavailable
+                    }
+                    let receipt = CleanupMoveReceipt(
+                        originalPath: item.expectedSnapshot.standardizedPath,
+                        resultingItemURL: resultingURL.standardizedFileURL,
+                        disposition: plan.disposition,
+                        movedIdentity: movedSnapshot?.identity,
+                        verification: verification,
+                        movedAt: Date()
+                    )
+                    reportItems.append(reportItem(for: item, outcome: .moved(receipt)))
                 }
-                let receipt = CleanupMoveReceipt(
-                    originalPath: item.expectedSnapshot.standardizedPath,
-                    resultingItemURL: resultingURL.standardizedFileURL,
-                    disposition: plan.disposition,
-                    movedIdentity: movedSnapshot?.identity,
-                    verification: verification,
-                    movedAt: Date()
-                )
-                reportItems.append(reportItem(for: item, outcome: .moved(receipt)))
             } catch is CancellationError {
                 cancelled = true
                 reportItems.append(reportItem(for: item, outcome: invokedMove
-                    ? .failed(CleanFailure(code: .moveOutcomeUnknown, detailCode: "cancelled-during-move"))
+                    ? .failed(CleanFailure(code: unknownOutcomeCode, detailCode: "cancelled-during-move"))
                     : .notProcessed))
             } catch {
                 reportItems.append(reportItem(
                     for: item,
                     outcome: .failed(invokedMove
-                        ? CleanFailure(code: .moveOutcomeUnknown, detailCode: "move-threw-needs-verification")
+                        ? CleanFailure(code: unknownOutcomeCode, detailCode: "move-threw-needs-verification")
                         : cleanFailure(for: error, disposition: plan.disposition))
                 ))
             }
@@ -496,29 +768,75 @@ actor SafeCleanupExecutor {
             availableSpaceDeltaBytes: capacityDelta(before: capacityBefore, after: capacityAfter)
         )
         // A failed final write cannot erase already persisted per-item receipts.
+        let changedAnything = report.summary.movedItemCount
+            + (report.summary.deletedItemCount ?? 0) > 0
         if persistenceFailed {
             report.persistenceFailure = "result-write-failed"
-            report.outcome = report.summary.movedItemCount > 0 ? .partiallyCompleted : .failed
+            report.outcome = changedAnything ? .partiallyCompleted : .failed
         }
         do { try persistReport(report, identities) }
         catch {
             report.persistenceFailure = "final-write-failed"
-            report.outcome = report.summary.movedItemCount > 0 ? .partiallyCompleted : .failed
+            report.outcome = changedAnything ? .partiallyCompleted : .failed
         }
         await coordinator.release(lease)
         return report
     }
 
+    /// D23/P2-3: deletes one frozen entry relative to the Trash folder the
+    /// scan saw. A refusal before anything is deleted is a skip; any other
+    /// error after the call leaves the outcome unknown.
+    private func deleteFrozenTrashEntry(
+        _ item: CleanPlanItem,
+        invoked: inout Bool
+    ) async throws -> CleanItemOutcome {
+        guard let trashIdentity = item.allowedRootIdentity else {
+            return .skipped(.rulesChanged)
+        }
+        invoked = true
+        do {
+            try await deleter.removeTrashEntry(CleanupTrashEntryDeletion(
+                trashURL: item.allowedRootURL,
+                trashIdentity: trashIdentity,
+                entryName: item.sourceURL.lastPathComponent,
+                entryIdentity: item.expectedSnapshot.identity
+            ))
+        } catch let refusal as CleanupTrashDeletionRefusal {
+            switch refusal {
+            case .trashChanged: return .skipped(.pathOutsideAllowedRoot)
+            case .entryChanged: return .skipped(.identityChanged)
+            case .otherVolume: return .skipped(.volumeChanged)
+            }
+        }
+        if let remaining = try? metadataReader.snapshot(at: item.sourceURL),
+           remaining.identity == item.expectedSnapshot.identity {
+            return .failed(CleanFailure(
+                code: .deletionOutcomeUnknown,
+                detailCode: "item-still-present"
+            ))
+        }
+        return .deleted(CleanupDeletionReceipt(
+            originalPath: item.expectedSnapshot.standardizedPath,
+            deletedIdentity: item.expectedSnapshot.identity,
+            deletedAt: Date()
+        ))
+    }
+
     private func skipReason(
         for item: CleanPlanItem,
-        context: CleanupExecutionContext
+        context: CleanupExecutionContext,
+        rechecksWrites: Bool = true
     ) async -> CleanSkipReason? {
         if let approvedPlanItemIDs = context.approvedPlanItemIDs,
            !approvedPlanItemIDs.contains(item.id) {
-            return .preflightNotApproved
+            return context.preflightSkipReasons[item.id] ?? .preflightNotApproved
         }
-        guard item.measurementCompleteness.isComplete else {
+        // D19: lower-bound items run; only the item's own root is moved.
+        guard !item.measurementCompleteness.isFailed else {
             return .measurementIncomplete
+        }
+        if item.action.permanentlyDeletes {
+            return await permanentDeletionSkipReason(for: item, context: context)
         }
         if let evidence = item.verifiedDuplicateEvidence {
             return verifiedDuplicateSkipReason(
@@ -532,6 +850,7 @@ actor SafeCleanupExecutor {
               rule.measurementRequirement == .complete,
               rule.allowsManualSelection,
               rule.selectionPolicyVersion == item.ruleSelectionPolicyVersion,
+              item.ruleRevision == rule.maintenance?.revision,
               rule.requiredClosedBundleIDs == item.requiredClosedBundleIDs,
               !item.reasonCodes.isEmpty,
               item.reasonCodes.contains(item.reasonCode) else {
@@ -676,20 +995,73 @@ actor SafeCleanupExecutor {
               current.isCloudItem == item.expectedSnapshot.isCloudItem else {
             return .cloudStateChanged
         }
-        for bundleIdentifier in item.requiredClosedBundleIDs {
+        for bundleIdentifier in item.requiredClosedBundleIDs + item.inferredOwnerBundleIDs {
             if await runningApplicationChecker.isRunning(bundleIdentifier: bundleIdentifier) {
                 return .relatedAppStillRunning
             }
         }
-        if developerDecision != nil,
+        // D92: repeat manifest/ignore/tracked/protected-tree evidence at preflight
+        // and after the durable move intent, using the same bounded reader.
+        if rechecksWrites, let requirement = rule.projectArtifact {
+            let scanner = ProjectArtifactScanner(fileSystem: metadataReader, home: context.userHomeURL, excludedURLs: context.excludedURLs)
+            let project = item.allowedRootURL
+            guard item.sourceURL.standardizedFileURL == project.appendingPathComponent(requirement.relativeArtifact).standardizedFileURL,
+                  (try? scanner.requirements(at: project).contains(where: {
+                      $0.ecosystem == requirement.ecosystem && $0.manifest == requirement.manifest
+                          && $0.lockEvidence == requirement.lockEvidence
+                          && ($0.relativeArtifact == requirement.relativeArtifact
+                              || (requirement.ecosystem == "Python" && ["__pycache__", ".pytest_cache", ".mypy_cache"].contains(item.sourceURL.lastPathComponent)))
+                  })) == true else { return .rulesChanged }
+            let assessment = scanner.assess(artifact: item.sourceURL, project: project, requirement: requirement)
+            guard assessment.reason == nil, let measured = assessment.snapshot else { return .rulesChanged }
+            guard measured.modificationTimeNanoseconds == item.latestContentModificationTimeNanoseconds,
+                  measured.logicalSizeBytes == item.expectedSnapshot.logicalSizeBytes,
+                  measured.allocatedSizeBytes == item.expectedSnapshot.allocatedSizeBytes else { return .candidateBecameActive }
+        }
+        // D83 (repair 1): AI tool rules, including logs that have no
+        // activity probe, re-check entry names before moving. A session,
+        // profile, configuration or model that appeared after the scan keeps
+        // the whole row in place. Names and kinds only; contents are not read.
+        if rechecksWrites,
+           CleanupProtectedContentPolicy.protectsPersistentAgentState(ruleID: rule.id),
+           let reason = persistentAgentStateSkipReason(
+               for: item,
+               maximumDepth: rule.maximumDepth,
+               current: current,
+               rootPath: rootPath,
+               homePath: homePath,
+               excludedPaths: excludedPaths
+           ) {
+            return reason
+        }
+        if rechecksWrites, developerDecision != nil,
            let reason = developerActivitySkipReason(
                for: item,
                rule: rule,
                current: current,
                rootPath: rootPath,
-               homePath: homePath
+               homePath: homePath,
+               excludedPaths: excludedPaths
            ) {
             return reason
+        }
+        // D47 supplement (review P1-1b): a row whose owner app could not be
+        // identified gets the same write recheck as developer files.
+        if rechecksWrites, item.rechecksWritesAfterScan, developerDecision == nil {
+            guard let expectedLatest = item.latestContentModificationTimeNanoseconds else {
+                return .candidateBecameActive
+            }
+            if let reason = writesAfterScanSkipReason(
+                for: item,
+                expectedLatest: expectedLatest,
+                maximumDepth: rule.maximumDepth,
+                current: current,
+                rootPath: rootPath,
+                homePath: homePath,
+                excludedPaths: excludedPaths
+            ) {
+                return reason
+            }
         }
         if isProtectedApplication {
             if await runningApplicationChecker.isRunning(applicationURL: item.sourceURL) {
@@ -723,7 +1095,8 @@ actor SafeCleanupExecutor {
         rule: CleanupRule,
         current: FileSnapshot,
         rootPath: String,
-        homePath: String
+        homePath: String,
+        excludedPaths: [String]
     ) -> CleanSkipReason? {
         guard let expectedLatest = item.latestContentModificationTimeNanoseconds,
               item.developerInactivityThresholdDays != nil,
@@ -731,18 +1104,47 @@ actor SafeCleanupExecutor {
               DeveloperCleanupAgePolicy.applies(to: rule) else {
             return .rulesChanged
         }
+        return writesAfterScanSkipReason(
+            for: item,
+            expectedLatest: expectedLatest,
+            maximumDepth: rule.maximumDepth,
+            current: current,
+            rootPath: rootPath,
+            homePath: homePath,
+            excludedPaths: excludedPaths
+        )
+    }
+
+    /// Reads the item's latest readable write again exactly as the scan did;
+    /// any difference means it was written or changed after the scan.
+    private func writesAfterScanSkipReason(
+        for item: CleanPlanItem,
+        expectedLatest: Int64,
+        maximumDepth: Int,
+        current: FileSnapshot,
+        rootPath: String,
+        homePath: String,
+        excludedPaths: [String]
+    ) -> CleanSkipReason? {
         var seenIdentities = Set<String>()
+        var visitedEntryCount = 0
         do {
-            let latest = try latestModificationTime(
+            let latest = try latestReadableModificationTime(
                 at: item.sourceURL,
                 snapshot: current,
                 depth: 0,
-                maximumDepth: rule.maximumDepth,
+                maximumDepth: maximumDepth,
                 rootPath: rootPath,
                 homePath: homePath,
-                seenIdentities: &seenIdentities
+                excludedPaths: excludedPaths,
+                seenIdentities: &seenIdentities,
+                visitedEntryCount: &visitedEntryCount
             )
             return latest == expectedLatest ? nil : .candidateBecameActive
+        } catch is CancellationError {
+            // An injected reader can throw CancellationError without cancelling
+            // this task. Only real cancellation goes to the caller's cancel path.
+            return Task.isCancelled ? nil : .permissionChanged
         } catch let error as DeveloperActivityProbeError {
             return error.reason
         } catch CleanupFileSystemError.permissionDenied {
@@ -754,56 +1156,230 @@ actor SafeCleanupExecutor {
         }
     }
 
-    private func latestModificationTime(
+    /// D83: walks the candidate the way the scan measured it (same depth, no
+    /// links followed, exclusions skipped) and looks only at entry names and
+    /// kinds. Unreadable children are skipped like the scan's lower bound.
+    private func persistentAgentStateSkipReason(
+        for item: CleanPlanItem,
+        maximumDepth: Int,
+        current: FileSnapshot,
+        rootPath: String,
+        homePath: String,
+        excludedPaths: [String]
+    ) -> CleanSkipReason? {
+        var seenIdentities = Set<String>()
+        var pending: [(url: URL, snapshot: FileSnapshot, depth: Int)] = [(item.sourceURL, current, 0)]
+        var visitedEntryCount = 0
+        while let next = pending.popLast() {
+            guard seenIdentities.insert(next.snapshot.identity.deduplicationKey).inserted,
+                  next.snapshot.identity.entryKind == .directory,
+                  next.depth < maximumDepth else { continue }
+            if Task.isCancelled { return .permissionChanged }
+            guard let childURLs = try? metadataReader.children(of: next.url) else {
+                if next.depth == 0 { return .permissionChanged }
+                continue
+            }
+            for childURL in childURLs {
+                visitedEntryCount += 1
+                if visitedEntryCount.isMultiple(of: 512), Task.isCancelled { return .permissionChanged }
+                guard !excludedPaths.contains(where: {
+                    PathSafety.isContained(childURL.path, in: $0, resolvingSymlinks: false)
+                }) else { continue }
+                guard let child = try? metadataReader.aggregateSnapshot(at: childURL),
+                      child.identity.entryKind != .symbolicLink,
+                      !child.hasSymbolicLinkComponent else { continue }
+                if CleanupProtectedContentPolicy.isProtectedAgentEntry(named: childURL.lastPathComponent)
+                    || (child.identity.entryKind == .directory
+                        && CleanupProtectedContentPolicy.isProtectedDataFolder(named: childURL.lastPathComponent)) {
+                    return .candidateBecameActive
+                }
+                guard PathSafety.isContained(child.standardizedPath, in: rootPath, resolvingSymlinks: true),
+                      PathSafety.isContained(child.standardizedPath, in: homePath, resolvingSymlinks: true) else {
+                    continue
+                }
+                pending.append((childURL, child, next.depth + 1))
+            }
+        }
+        return nil
+    }
+
+    /// 按扫描时同样的方式重读最近修改时间（D19）：不跟随符号链接，排除项和
+    /// 不可读部分不计入，到深度上限只取目录本身的时间。只比较最大修改时间，
+    /// 不保证发现所有内容变化。项目根本身必须仍是允许范围内的真实目录。
+    private func latestReadableModificationTime(
         at url: URL,
         snapshot: FileSnapshot,
         depth: Int,
         maximumDepth: Int,
         rootPath: String,
         homePath: String,
-        seenIdentities: inout Set<String>
+        excludedPaths: [String],
+        seenIdentities: inout Set<String>,
+        visitedEntryCount: inout Int
     ) throws -> Int64? {
-        guard snapshot.identity.entryKind != .symbolicLink,
-              !snapshot.hasSymbolicLinkComponent else {
-            throw DeveloperActivityProbeError(reason: .symbolicLinkDetected)
-        }
-        guard PathSafety.isContained(
+        if depth == 0 { try Task.checkCancellation() }
+        let isContained = PathSafety.isContained(
             snapshot.standardizedPath,
             in: rootPath,
             resolvingSymlinks: true
-        ), PathSafety.isContained(
+        ) && PathSafety.isContained(
             snapshot.standardizedPath,
             in: homePath,
             resolvingSymlinks: true
-        ) else {
-            throw DeveloperActivityProbeError(reason: .pathOutsideAllowedRoot)
-        }
-        guard seenIdentities.insert(snapshot.identity.deduplicationKey).inserted else {
+        )
+        if depth == 0 {
+            guard snapshot.identity.entryKind != .symbolicLink,
+                  !snapshot.hasSymbolicLinkComponent else {
+                throw DeveloperActivityProbeError(reason: .symbolicLinkDetected)
+            }
+            guard isContained else {
+                throw DeveloperActivityProbeError(reason: .pathOutsideAllowedRoot)
+            }
+        } else if !isContained {
             return snapshot.modificationTimeNanoseconds
         }
-        guard snapshot.identity.entryKind == .directory else {
+        guard seenIdentities.insert(snapshot.identity.deduplicationKey).inserted,
+              snapshot.identity.entryKind == .directory,
+              depth < maximumDepth else {
             return snapshot.modificationTimeNanoseconds
-        }
-        guard depth < maximumDepth else {
-            throw DeveloperActivityProbeError(reason: .measurementIncomplete)
         }
 
+        let childURLs: [URL]
+        try Task.checkCancellation()
+        do {
+            childURLs = try metadataReader.children(of: url)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if depth == 0 { throw error }
+            return snapshot.modificationTimeNanoseconds
+        }
+        try Task.checkCancellation()
         var latest = snapshot.modificationTimeNanoseconds
-        for childURL in try metadataReader.children(of: url) {
-            let child = try metadataReader.aggregateSnapshot(at: childURL)
-            if let childLatest = try latestModificationTime(
+        for childURL in childURLs {
+            visitedEntryCount += 1
+            if visitedEntryCount.isMultiple(of: 512) { try Task.checkCancellation() }
+            guard !excludedPaths.contains(where: {
+                PathSafety.isContained(childURL.path, in: $0, resolvingSymlinks: false)
+            }) else { continue }
+            let child: FileSnapshot
+            do {
+                child = try metadataReader.aggregateSnapshot(at: childURL)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Preserve the scan's lower-bound handling of unreadable children.
+                continue
+            }
+            guard child.identity.entryKind != .symbolicLink,
+                  !child.hasSymbolicLinkComponent else {
+                continue
+            }
+            if let childLatest = try latestReadableModificationTime(
                 at: childURL,
                 snapshot: child,
                 depth: depth + 1,
                 maximumDepth: maximumDepth,
                 rootPath: rootPath,
                 homePath: homePath,
-                seenIdentities: &seenIdentities
+                excludedPaths: excludedPaths,
+                seenIdentities: &seenIdentities,
+                visitedEntryCount: &visitedEntryCount
             ) {
                 latest = max(latest ?? childLatest, childLatest)
             }
         }
         return latest
+    }
+
+    /// D23: each frozen Trash entry is re-read right before deletion. It must
+    /// still be the same file, directly inside the user's own `~/.Trash`; a
+    /// symbolic link is only removed while it points back inside the Trash.
+    private func permanentDeletionSkipReason(
+        for item: CleanPlanItem,
+        context: CleanupExecutionContext
+    ) async -> CleanSkipReason? {
+        guard let rule = context.activeRules.rules.first(where: { $0.id == item.ruleID }),
+              rule.action == .emptyTrash,
+              rule.risk == .protected,
+              rule.allowsManualSelection,
+              rule.measurementRequirement == .complete,
+              rule.selectionPolicyVersion == item.ruleSelectionPolicyVersion,
+              rule.executionEligibility == item.executionEligibility,
+              rule.reasonKey == item.reasonCode,
+              item.riskLevel == .protected,
+              item.requiredClosedBundleIDs.isEmpty,
+              item.explicitUserSelection else {
+            return .rulesChanged
+        }
+        let homeURL = context.userHomeURL
+        let trashURL = homeURL.appendingPathComponent(rule.root.path, isDirectory: true)
+        let trashPath = PathSafety.lexicalPath(trashURL.path)
+        let sourcePath = PathSafety.lexicalPath(item.sourceURL.path)
+        guard item.sourceURL.isFileURL,
+              PathSafety.lexicalPath(item.allowedRootURL.path) == trashPath,
+              PathSafety.lexicalPath(item.sourceURL.deletingLastPathComponent().path) == trashPath,
+              sourcePath != trashPath,
+              PathSafety.isContained(trashPath, in: PathSafety.lexicalPath(homeURL.path), resolvingSymlinks: false) else {
+            return .pathOutsideAllowedRoot
+        }
+        if ScanExclusionService.intersectsExcludedTree(
+            sourcePath,
+            excludedPaths: context.excludedURLs.map { PathSafety.lexicalPath($0.path) }
+        ) {
+            return .excludedByUser
+        }
+        // P2-3: still a real folder, and the very Trash folder the scan saw.
+        guard let trash = try? metadataReader.snapshot(at: trashURL),
+              trash.identity.entryKind == .directory,
+              !trash.hasSymbolicLinkComponent,
+              let scannedTrash = item.allowedRootIdentity,
+              trash.identity == scannedTrash else {
+            return .pathOutsideAllowedRoot
+        }
+
+        let current: FileSnapshot
+        do {
+            current = try metadataReader.snapshot(at: item.sourceURL)
+        } catch CleanupFileSystemError.vanished {
+            return await volumeChecker.isAvailable(
+                volumeIdentifier: item.expectedSnapshot.volumeIdentifier
+            ) ? .itemMissing : .volumeUnavailable
+        } catch {
+            return .permissionChanged
+        }
+        guard current.identity.entryKind == item.expectedSnapshot.identity.entryKind else {
+            return .entryKindChanged
+        }
+        guard current.identity == item.expectedSnapshot.identity else {
+            return .identityChanged
+        }
+        guard current.volumeIdentifier == item.expectedSnapshot.volumeIdentifier else {
+            return .volumeChanged
+        }
+        guard current.isWritableVolume else {
+            return .volumeReadOnly
+        }
+        // P2-5: an entry that became a cloud placeholder is left alone.
+        guard !current.isCloudPlaceholder,
+              current.isCloudItem == item.expectedSnapshot.isCloudItem else {
+            return .cloudStateChanged
+        }
+        if current.identity.entryKind == .symbolicLink {
+            guard CleanupTrashEntryPolicy.symbolicLinkStaysInside(
+                item.sourceURL,
+                trashPath: trashPath,
+                fileSystem: metadataReader
+            ) else {
+                return .symbolicLinkDetected
+            }
+        } else {
+            guard !current.hasSymbolicLinkComponent,
+                  PathSafety.isContained(current.standardizedPath, in: trashPath, resolvingSymlinks: true) else {
+                return .pathOutsideAllowedRoot
+            }
+        }
+        return nil
     }
 
     private func isApprovedProtectedApplication(
@@ -835,11 +1411,25 @@ actor SafeCleanupExecutor {
     }
 
 
+    private func boundedDuplicateSnapshot(at url: URL) throws -> FileSnapshot? {
+        let metadata = metadataReader
+        return try FileContentReadPool.shared.read(at: url, priority: .userInitiated) { _ in try? metadata.snapshot(at: url) }
+    }
+
     private func verifiedDuplicateSkipReason(
+        for item: CleanPlanItem, evidence: VerifiedDuplicateEvidence, context: CleanupExecutionContext
+    ) -> CleanSkipReason? {
+        do { return try checkedDuplicateSkipReason(for: item, evidence: evidence, context: context) }
+        catch let error as FileContentReadError { return contentReadSkipReason(error) }
+        catch is CancellationError { return .contentReadCancelled }
+        catch { return .permissionChanged }
+    }
+
+    private func checkedDuplicateSkipReason(
         for item: CleanPlanItem,
         evidence: VerifiedDuplicateEvidence,
         context: CleanupExecutionContext
-    ) -> CleanSkipReason? {
+    ) throws -> CleanSkipReason? {
         let sentinelRule = context.activeRules.rules.first {
             $0.id == VerifiedDuplicateCleanPlanBuilder.ruleID
         }
@@ -874,7 +1464,7 @@ actor SafeCleanupExecutor {
             return .excludedByUser
         }
 
-        guard let sourceSnapshot = try? metadataReader.snapshot(at: item.sourceURL) else {
+        guard let sourceSnapshot = try boundedDuplicateSnapshot(at: item.sourceURL) else {
             return .itemMissing
         }
         if let reason = verifiedSourceSnapshotSkipReason(
@@ -885,10 +1475,8 @@ actor SafeCleanupExecutor {
         ) {
             return reason
         }
-        guard (try? contentDigestReader.sha256(at: item.sourceURL)) == evidence.digest else {
-            return .duplicateContentChanged
-        }
-        guard (try? metadataReader.snapshot(at: item.sourceURL)) == item.expectedSnapshot else {
+        if let reason = digestSkipReason(at: item.sourceURL, expected: evidence.digest) { return reason }
+        guard (try boundedDuplicateSnapshot(at: item.sourceURL)) == item.expectedSnapshot else {
             return .identityChanged
         }
 
@@ -905,21 +1493,42 @@ actor SafeCleanupExecutor {
                   retainedIdentities.insert(retained.expectedSnapshot.identity).inserted else {
                 return .duplicateEvidenceInvalid
             }
-            guard let current = try? metadataReader.snapshot(at: retained.url),
+            guard let current = try boundedDuplicateSnapshot(at: retained.url),
                   current == retained.expectedSnapshot,
                   current.identity.entryKind == .regularFile,
                   !current.hasSymbolicLinkComponent,
                   !current.isCloudPlaceholder else {
                 return .duplicateRetainedCopyChanged
             }
-            guard (try? contentDigestReader.sha256(at: retained.url)) == evidence.digest else {
-                return .duplicateContentChanged
-            }
-            guard (try? metadataReader.snapshot(at: retained.url)) == retained.expectedSnapshot else {
+            if let reason = digestSkipReason(at: retained.url, expected: evidence.digest) { return reason }
+            guard (try boundedDuplicateSnapshot(at: retained.url)) == retained.expectedSnapshot else {
                 return .duplicateRetainedCopyChanged
             }
         }
         return nil
+    }
+
+    private func digestSkipReason(at url: URL, expected: Data) -> CleanSkipReason? {
+        do {
+            return try contentDigestReader.sha256(at: url) == expected ? nil : .duplicateContentChanged
+        } catch let error as FileContentReadError {
+            return contentReadSkipReason(error)
+        } catch is CancellationError {
+            return .contentReadCancelled
+        } catch {
+            return .duplicateContentChanged
+        }
+    }
+
+    private func contentReadSkipReason(_ error: FileContentReadError) -> CleanSkipReason {
+        switch error {
+        case .cloudOnly: .contentCloudOnly
+        case .downloading: .contentDownloading
+        case .timedOut, .copyTimedOut, .writingTimedOut: .contentReadTimedOut
+        case .busy, .protectionUnavailable: .contentReadUnavailable
+        case .changed: .duplicateContentChanged
+        case .invalidPath, .unsupportedType, .tooDeep, .fileTooLarge: .contentReadUnavailable
+        }
     }
 
     private func verifiedSourceSnapshotSkipReason(
@@ -958,12 +1567,13 @@ actor SafeCleanupExecutor {
         outcome: CleanItemOutcome
     ) -> CleanReportItem {
         CleanReportItem(
-            id: UUID(),
+            id: item.id,
             planItemID: item.id,
             ruleID: item.ruleID,
             sourcePath: item.expectedSnapshot.standardizedPath,
             estimatedBytes: item.estimatedSizeBytes,
-            outcome: outcome
+            outcome: outcome,
+            ruleRevision: item.ruleRevision
         )
     }
 
@@ -991,7 +1601,11 @@ actor SafeCleanupExecutor {
                 if case .failed = $0.outcome { return true }
                 return false
             }.count,
-            currentRuleID: currentRuleID
+            currentRuleID: currentRuleID,
+            deletedItemCount: items.filter {
+                if case .deleted = $0.outcome { return true }
+                return false
+            }.count
         )
     }
 
@@ -1063,8 +1677,16 @@ actor SafeCleanupExecutor {
             if case .notProcessed = $0.outcome { return true }
             return false
         }.count
+        let deleted = items.filter {
+            if case .deleted = $0.outcome { return true }
+            return false
+        }.count
         let movedBytes = CleanupByteCount.sum(items.compactMap {
             if case .moved = $0.outcome { return $0.estimatedBytes }
+            return nil
+        })
+        let deletedBytes = CleanupByteCount.sum(items.compactMap {
+            if case .deleted = $0.outcome { return $0.estimatedBytes }
             return nil
         })
         let movedPlanItemIDs = Set(items.compactMap { item -> UUID? in
@@ -1081,7 +1703,7 @@ actor SafeCleanupExecutor {
         let outcome: CleanReportOutcome
         if cancelled || notProcessed > 0 {
             outcome = .cancelled
-        } else if moved.isEmpty && failed > 0 {
+        } else if moved.isEmpty && deleted == 0 && failed > 0 {
             outcome = .failed
         } else if skipped > 0 || failed > 0 || unverified > 0 {
             outcome = .partiallyCompleted
@@ -1090,7 +1712,7 @@ actor SafeCleanupExecutor {
         }
 
         return CleanReport(
-            id: UUID(),
+            id: plan.id.rawValue,
             planID: plan.id,
             sessionID: plan.sessionID,
             rulesVersion: plan.rulesVersion,
@@ -1110,9 +1732,16 @@ actor SafeCleanupExecutor {
                 plannedBytes: plan.estimatedMovableBytes,
                 movedToRecoverableLocationBytes: movedBytes,
                 reclaimableAfterEmptyingTrashBytes: reclaimableAfterEmptyingTrashBytes,
-                permanentlyFreedBytes: 0,
-                availableSpaceDeltaBytes: availableSpaceDeltaBytes
-            )
+                permanentlyFreedBytes: deletedBytes,
+                availableSpaceDeltaBytes: availableSpaceDeltaBytes,
+                deletedItemCount: deleted
+            ),
+            restoreAuthorizations: Dictionary(uniqueKeysWithValues: plan.items.map { item in
+                (item.sourceURL.path, CleanupRestoreAuthorization(
+                    sourcePath: item.sourceURL.path, allowedRootPath: item.allowedRootURL.path,
+                    sourceIdentity: item.fileIdentity, ruleID: item.ruleID, planItemID: item.id))
+            }),
+            rulesProvenance: plan.rulesProvenance
         )
     }
 
@@ -1158,7 +1787,8 @@ actor CleanupRecoveryService {
         trashURL: URL,
         quarantineRootURL: URL,
         allowedApplicationPaths: Set<String>,
-        beforeMove: @Sendable () async throws -> Void = {}
+        beforeMove: @escaping @Sendable () async throws -> Void = {},
+        onUncertainMove: @Sendable () async -> Void = {}
     ) async -> CleanupRecoveryItem {
         let fallback = CleanupRecoveryItem(
             id: UUID(),
@@ -1278,8 +1908,21 @@ actor CleanupRecoveryService {
             } catch CleanupFileSystemError.vanished {
                 // Expected immediately before the non-overwriting move.
             }
+            do {
+                try ExclusiveRecoveryMove.perform(source: sourceURL, destination: destinationURL, expectedIdentity: movedIdentity)
+            } catch {
+                // renameatx_np is atomic, so a thrown error means nothing moved
+                // and the receipt stays retryable instead of becoming unknown.
+                guard restoringApplication, UninstallErrorEvidence.isPermissionDenied(error) else { throw error }
+                do { try await AuthorizedApplicationMover.shared.restore(receipt, beforeMove: beforeMove) }
+                catch AuthorizedMoveError.connectionLost {
+                    // Only a commit without a reply leaves the move unconfirmed.
+                    invoked = true
+                    await onUncertainMove()
+                    throw AuthorizedMoveError.connectionLost
+                }
+            }
             invoked = true
-            try ExclusiveRecoveryMove.perform(source: sourceURL, destination: destinationURL, expectedIdentity: movedIdentity)
             let restored = try metadataReader.snapshot(at: destinationURL)
             guard restored.identity == movedIdentity, !restored.hasSymbolicLinkComponent else {
                 return CleanupRecoveryItem(
@@ -1298,7 +1941,17 @@ actor CleanupRecoveryService {
                                        outcome: invoked ? .outcomeUnknown : .notProcessed)
         } catch {
             return CleanupRecoveryItem(id: fallback.id, originalPath: receipt.originalPath,
-                                       outcome: invoked ? .outcomeUnknown : .failed)
+                                       outcome: invoked ? .outcomeUnknown : Self.unmovedRestoreOutcome(error))
         }
+    }
+
+    /// Classify a restore that provably moved nothing, so it can be retried.
+    static func unmovedRestoreOutcome(_ error: Error) -> CleanupRecoveryItemOutcome {
+        if let failure = error as? CleanupReportJournal.Failure, failure == .invalidEntry { return .identityChanged }
+        if case AppUninstallError.identityChanged = error { return .identityChanged }
+        let existing = UninstallErrorEvidence.chain(error).contains {
+            $0.domain == NSPOSIXErrorDomain && [Int(EEXIST), Int(ENOTEMPTY)].contains($0.code)
+        }
+        return existing ? .conflict : .failed
     }
 }

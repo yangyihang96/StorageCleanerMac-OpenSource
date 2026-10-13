@@ -161,6 +161,7 @@ final class ComputerHealthModelsTests: XCTestCase {
         let capacityRepository = LateRefreshCapacityRepository()
         let store = ComputerHealthStore(
             probe: probe,
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController(),
             historyRepository: historyRepository,
             capacityHistoryRepository: capacityRepository
         )
@@ -209,7 +210,7 @@ final class ComputerHealthModelsTests: XCTestCase {
             generatedAt: Date(timeIntervalSince1970: 300)
         )
         let probe = SuspendedSequencedHealthProbe(results: [snapshot, snapshot])
-        let store = ComputerHealthStore(probe: probe)
+        let store = ComputerHealthStore(probe: probe, batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
 
         let firstRefresh = Task { @MainActor in
             await store.refresh()
@@ -249,7 +250,7 @@ final class ComputerHealthModelsTests: XCTestCase {
             generatedAt: Date(timeIntervalSince1970: 320)
         )
         let probe = SeedThenSuspendedHealthProbe(seed: oldSnapshot, suspended: newSnapshot)
-        let store = ComputerHealthStore(probe: probe, freshnessTTL: 300)
+        let store = ComputerHealthStore(probe: probe, freshnessTTL: 300, batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
 
         await store.refresh(force: true)
 
@@ -304,7 +305,8 @@ final class ComputerHealthModelsTests: XCTestCase {
         let store = ComputerHealthStore(
             probe: probe,
             freshnessTTL: 300,
-            now: { clock.value }
+            now: { clock.value },
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.refresh()
@@ -343,7 +345,8 @@ final class ComputerHealthModelsTests: XCTestCase {
         let store = ComputerHealthStore(
             probe: probe,
             freshnessTTL: 300,
-            now: { clock.value }
+            now: { clock.value },
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.refresh(force: true)
@@ -370,7 +373,7 @@ final class ComputerHealthModelsTests: XCTestCase {
     func testUnknownProbeErrorDoesNotPublishSensitiveDescription() async {
         let secret = "/Users/secret/Private Volume SERIAL-12345"
         let probe = ScriptedHealthProbe(steps: [.unknownFailure(secret)])
-        let store = ComputerHealthStore(probe: probe)
+        let store = ComputerHealthStore(probe: probe, batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
 
         await store.refresh(force: true)
 
@@ -393,7 +396,7 @@ final class ComputerHealthModelsTests: XCTestCase {
             battery: .fixture(sampledAt: Date(timeIntervalSince1970: 500))
         )
         let probe = ScriptedHealthProbe(steps: [.success(snapshot)])
-        let store = ComputerHealthStore(probe: probe)
+        let store = ComputerHealthStore(probe: probe, batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
 
         XCTAssertNil(store.menuBarSummary)
         let callsBeforeSummaryRead = await probe.numberOfCalls()
@@ -432,7 +435,8 @@ final class ComputerHealthModelsTests: XCTestCase {
             )
         )
         let store = ComputerHealthStore(
-            probe: ScriptedHealthProbe(steps: [.success(snapshot)])
+            probe: ScriptedHealthProbe(steps: [.success(snapshot)]),
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.refresh(force: true)
@@ -454,7 +458,8 @@ final class ComputerHealthModelsTests: XCTestCase {
             backupSummaryText: "\n\t "
         )
         let store = ComputerHealthStore(
-            probe: ScriptedHealthProbe(steps: [.success(snapshot)])
+            probe: ScriptedHealthProbe(steps: [.success(snapshot)]),
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.refresh(force: true)
@@ -479,7 +484,7 @@ final class ComputerHealthModelsTests: XCTestCase {
                 diskRemainingLifePercent: 89
             )),
         ])
-        let store = ComputerHealthStore(probe: probe)
+        let store = ComputerHealthStore(probe: probe, batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
 
         await store.refresh(force: true)
         XCTAssertEqual(store.menuBarSummary?.diskRemainingLifePercent, 91)
@@ -514,6 +519,7 @@ final class ComputerHealthModelsTests: XCTestCase {
         )
         let store = ComputerHealthStore(
             probe: ScriptedHealthProbe(steps: [.success(currentSnapshot)]),
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController(),
             historyRepository: SeededHealthHistoryRepository(entries: [historyEntry])
         )
 
@@ -541,6 +547,7 @@ final class ComputerHealthModelsTests: XCTestCase {
         )
         let store = ComputerHealthStore(
             probe: ScriptedHealthProbe(steps: [.typedFailure(.timedOut)]),
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController(),
             historyRepository: SeededHealthHistoryRepository(entries: [historyEntry])
         )
 
@@ -575,6 +582,7 @@ final class ComputerHealthModelsTests: XCTestCase {
         ])
         let store = ComputerHealthStore(
             probe: probe,
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController(),
             historyRepository: SeededHealthHistoryRepository(entries: [historyEntry])
         )
 
@@ -604,7 +612,7 @@ final class ComputerHealthModelsTests: XCTestCase {
         let probe = ScriptedHealthProbe(steps: [
             .success(.fixture(generatedAt: Date(timeIntervalSince1970: 700)))
         ])
-        let store = ComputerHealthStore(probe: probe)
+        let store = ComputerHealthStore(probe: probe, batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
 
         _ = store.menuBarSummary
 
@@ -618,7 +626,8 @@ final class ComputerHealthModelsTests: XCTestCase {
             generatedAt: Date(timeIntervalSince1970: 800)
         )
         let store = ComputerHealthStore(
-            probe: ScriptedHealthProbe(steps: [.success(snapshot)])
+            probe: ScriptedHealthProbe(steps: [.success(snapshot)]),
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
         await store.refresh(force: true)
 

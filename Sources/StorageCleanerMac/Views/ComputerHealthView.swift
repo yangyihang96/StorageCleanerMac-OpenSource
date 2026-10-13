@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 
 struct ComputerHealthView: View {
-    @Environment(\.windowLayoutMetrics) private var layout
     @ObservedObject var scanStore: ScanStore
     @ObservedObject var healthStore: ComputerHealthStore
     @ObservedObject var networkStore: NetworkSpeedTestStore
@@ -24,41 +23,7 @@ struct ComputerHealthView: View {
             if healthStore.evaluation == nil {
                 healthEmptyState
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: AppDesignTokens.Layout.pageSpacing) {
-                        if healthStore.isRefreshing {
-                            RuntimeInlineStatus(
-                                title: L10n.text("正在更新健康检查", "Updating Health Check"),
-                                detail: L10n.text("当前保留上次检查结果", "Previous results remain visible")
-                            )
-                        }
-                        if healthStore.evaluation != nil {
-                            if layout.density == .compact {
-                                healthScoreHero
-                                HealthFactorGrid(evaluation: healthStore.evaluation, snapshot: healthStore.snapshot)
-                            } else {
-                                HStack(alignment: .top, spacing: 18) {
-                                    HealthFactorGrid(evaluation: healthStore.evaluation, snapshot: healthStore.snapshot, usesTwoColumns: true)
-                                        .frame(maxWidth: .infinity)
-                                    healthScoreHero.frame(width: 340)
-                                }
-                            }
-
-                            if !dashboardActions.isEmpty {
-                                HealthActionList(
-                                    actions: dashboardActions,
-                                    batterySettingsState: healthStore.batterySettingsAdjustmentState,
-                                    perform: perform
-                                )
-                            }
-
-                            environmentSection
-                            scoreEvidenceDisclosure
-                        }
-                    }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                }
+                lightfieldResults
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -83,21 +48,13 @@ struct ComputerHealthView: View {
     }
 
     private var healthEmptyState: some View {
-        HeroScanPage(
-            title: ReviewFilter.healthHub.title,
-            subtitle: ReviewFilter.healthHub.pageSubtitle,
-            headerSystemImage: ReviewFilter.healthHub.systemImage,
-            actionTitle: healthStore.snapshot == nil
-                ? L10n.text("检查", "Check")
-                : L10n.text("重新检查", "Check Again"),
-            actionDetail: L10n.text("磁盘、电池与系统状态", "Disk, battery, and system status"),
-            actionSystemImage: healthStore.error == nil ? "waveform.path.ecg" : "arrow.clockwise",
-            status: healthHeroStatus,
-            isLoading: healthStore.isRefreshing,
-            isActionDisabled: healthStore.isRefreshing,
-            trustText: L10n.text("只读取系统状态，不会修改设置", "System status is read only; no settings are changed")
-        ) {
-            Task { await healthStore.refresh(force: healthStore.snapshot != nil) }
+        FeatureLightfieldPage(module: .healthHub, phase: .landing, title: ReviewFilter.healthHub.title,
+            status: healthHeroStatus.title,
+            safety: L10n.text("只读取系统状态，不会修改设置", "System status is read only; no settings are changed"),
+            actionTitle: healthStore.snapshot == nil ? L10n.text("检查", "Check") : L10n.text("重新检查", "Check Again"),
+            actionEnabled: !healthStore.isRefreshing,
+            action: { Task { await healthStore.refresh(force: healthStore.snapshot != nil) } }) {
+            FeatureLightfieldHealthOptions(availability: scanStore.menuBarAuxiliaryMonitorState.internalBatteryAvailability)
         }
     }
 
@@ -114,19 +71,40 @@ struct ComputerHealthView: View {
         return .idle(L10n.text("尚未生成健康评估", "Health evaluation is not ready"))
     }
 
-    private var healthScoreHero: some View {
-        HealthScoreHero(
-            evaluation: healthStore.evaluation,
-            checkedAt: healthStore.lastRefreshAt,
-            isRefreshing: healthStore.isRefreshing,
-            errorText: healthStore.error.map(healthErrorText),
-            refreshTitle: healthStore.snapshot == nil
-                ? L10n.text("开始健康检查", "Start Health Check")
-                : L10n.text("重新检查", "Check Again"),
-            isPortrait: layout.density != .compact
-        ) {
-            Task { await healthStore.refresh(force: healthStore.snapshot != nil) }
+    private var lightfieldResults: some View {
+        FeatureLightfieldPage(module: .healthHub, phase: .result, title: ReviewFilter.healthHub.title,
+            status: healthStore.error.map(healthErrorText) ?? L10n.text("检查完成", "Check complete"),
+            safety: L10n.text("只读检查 · 不会更改系统设置", "Read-only check · System settings stay unchanged"),
+            actionTitle: L10n.text("重新检查", "Check Again"),
+            actionEnabled: !healthStore.isRefreshing,
+            action: { Task { await healthStore.refresh(force: healthStore.snapshot != nil) } }) {
+            FeatureLightfieldResults(module: .healthHub, label: healthResultLabel,
+                value: healthStore.evaluation?.score, unit: "/ 100") {
+                HealthFactorGrid(evaluation: healthStore.evaluation, snapshot: healthStore.snapshot)
+                HealthSecurityChecksView(snapshot: healthStore.snapshot?.security)
+                if !dashboardActions.isEmpty {
+                    HealthActionList(actions: dashboardActions,
+                        batterySettingsState: healthStore.batterySettingsAdjustmentState, perform: perform)
+                }
+                environmentSection
+                HealthRecentChangesView(events: healthStore.snapshot?.recentChanges ?? [],
+                    readFailed: healthStore.snapshot?.changeLogReadFailed ?? false,
+                    journalReset: healthStore.snapshot?.changeLogWasReset ?? false)
+                scoreEvidenceDisclosure
+            }
         }
+    }
+
+    private var healthResultLabel: String {
+        guard let evaluation = healthStore.evaluation else { return L10n.text("健康评分 · 数据不足", "Health Score · Insufficient Data") }
+        let state: String
+        switch evaluation.status {
+        case .healthy: state = L10n.text("核心状态良好", "Core status healthy")
+        case .attention: state = L10n.text("需要关注", "Needs attention")
+        case .actionRequired: state = L10n.text("需要处理", "Action required")
+        case .dataInsufficient: state = L10n.text("数据不足", "Insufficient data")
+        }
+        return L10n.text("健康评分 · \(state)", "Health Score · \(state)")
     }
 
     private var isShowingSpeedTestConsent: Binding<Bool> {
@@ -182,28 +160,39 @@ struct ComputerHealthView: View {
     }
 
     private var environmentSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(
-                    L10n.text("保护与当前状态（不计分）", "Protection & Current State (Not Scored)"),
-                    systemImage: "gauge.with.dots.needle.50percent"
-                )
-                    .font(AppDesignTokens.Typography.sectionTitle)
-                Spacer()
-                Text(L10n.text(
-                    "备份、FileVault、当前电量、温度与网络独立呈现",
-                    "Backup, FileVault, charge, thermal state, and network stay separate"
-                ))
-                .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.tertiary)
-            }
-
-            LazyVGrid(columns: environmentColumns, alignment: .leading, spacing: 14) {
+        VStack(spacing: 0) {
+            Text(L10n.text("保护与当前状态（不计分）", "Protection & Current State (Not Scored)"))
+                .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
+            FeatureLightfieldStatusDisclosure(title: L10n.text("当前电源", "Current Power"),
+                    detail: currentPowerStatusText, value: currentPowerStatusText, status: healthStore.snapshot?.battery == nil ? .unknown : .normal) {
                 currentPowerCard
+            }
+            FeatureLightfieldStatusDisclosure(title: L10n.text("数据保护", "Data Protection"),
+                    detail: healthStore.snapshot.map { destinationText($0.backup.destinationState) } ?? L10n.text("未提供", "Unavailable"),
+                    value: L10n.text("独立检查", "Separate Check"),
+                    status: healthStore.snapshot?.security?.findings.contains(where: { $0.state == .disabled }) == true
+                        || healthStore.snapshot?.backup.destinationState == .unconfigured ? .warning : .unknown) {
                 protectionReadinessCard
+            }
+            FeatureLightfieldStatusDisclosure(title: L10n.text("网络体验", "Network Experience"),
+                    detail: networkSummary, value: networkStatusText, status: .unknown) {
                 networkEnvironmentCard
+            }
+            FeatureLightfieldStatusDisclosure(title: L10n.text("热与性能", "Thermal & Performance"),
+                    detail: L10n.text("环境状态 · 不计分", "Environment · Not Scored"),
+                    value: thermalReadinessText(ThermalReadinessResolver.resolve(healthStore.thermalReadiness,
+                        checkedAt: healthStore.lastRefreshAt, now: Date())), status: thermalLightfieldStatus) {
                 thermalReadinessCard
             }
+        }
+    }
+
+    private var thermalLightfieldStatus: FeatureLightfieldStatus {
+        switch ThermalReadinessResolver.resolve(healthStore.thermalReadiness, checkedAt: healthStore.lastRefreshAt, now: Date()) {
+        case .current(.ready): .normal
+        case .current(.elevated), .current(.constrained): .warning
+        case .current(.critical): .failure
+        case .notChecked, .stale, .current(.unknown): .unknown
         }
     }
 
@@ -211,7 +200,6 @@ struct ComputerHealthView: View {
         VStack(alignment: .leading, spacing: 12) {
             environmentHeader(
                 title: L10n.text("当前电源", "Current Power"),
-                symbol: "battery.75",
                 status: currentPowerStatusText,
                 tint: currentPowerStatusColor
             )
@@ -247,13 +235,6 @@ struct ComputerHealthView: View {
                 }
             }
 
-            Text(L10n.text(
-                "当前电量和供电模式会随使用变化，不代表电池寿命，也不参与健康分。",
-                "Charge and power mode change during use; they are not battery lifespan and do not affect the health score."
-            ))
-            .font(AppDesignTokens.Typography.body)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
@@ -264,14 +245,10 @@ struct ComputerHealthView: View {
         VStack(alignment: .leading, spacing: 12) {
             environmentHeader(
                 title: L10n.text("数据保护", "Data Protection"),
-                symbol: "lock.shield",
                 status: L10n.text("独立检查", "Separate Check"),
                 tint: AppDesignTokens.Palette.information
             )
 
-            if let enabled = healthStore.snapshot?.disk.isFileVaultEnabled {
-                evidenceValueRow(label: "FileVault", value: enabledText(enabled))
-            }
             if let backup = healthStore.snapshot?.backup {
                 evidenceValueRow(
                     label: L10n.text("时间机器", "Time Machine"),
@@ -285,13 +262,21 @@ struct ComputerHealthView: View {
                 }
             }
 
-            Text(L10n.text(
-                "备份与磁盘加密很重要，但它们描述保护准备度，不会伪装成硬件寿命分。",
-                "Backup and disk encryption matter, but they describe protection readiness rather than hardware lifespan."
-            ))
-            .font(AppDesignTokens.Typography.body)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+            if let protectionSnapshot = healthStore.snapshot?.security {
+                ForEach(protectionSnapshot.findings) { finding in
+                    evidenceValueRow(
+                        label: finding.check.title,
+                        value: finding.state.displayText
+                    )
+                }
+                Text(L10n.text(
+                    "系统防护读取于 \(protectionSnapshot.checkedAt.formatted(date: .abbreviated, time: .shortened))",
+                    "Protection read at \(protectionSnapshot.checkedAt.formatted(date: .abbreviated, time: .shortened))"
+                ))
+                .font(AppDesignTokens.Typography.metadata)
+                .foregroundStyle(.secondary)
+            }
+
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
@@ -302,7 +287,6 @@ struct ComputerHealthView: View {
         VStack(alignment: .leading, spacing: 12) {
             environmentHeader(
                 title: L10n.text("网络体验", "Network Experience"),
-                symbol: "network",
                 status: networkStatusText,
                 tint: networkStatusColor
             )
@@ -340,12 +324,9 @@ struct ComputerHealthView: View {
 
                 HStack(spacing: 14) {
                     if let rpm = result.responsivenessRPM {
-                        Label(String(format: "%.0f RPM", rpm), systemImage: "bolt.horizontal")
+                        Text(String(format: "%.0f RPM", rpm))
                     }
-                    Label(
-                        String(format: "%.0f ms", result.idleLatencyMilliseconds),
-                        systemImage: "timer"
-                    )
+                    Text(String(format: "%.0f ms", result.idleLatencyMilliseconds))
                     Spacer()
                     Text(result.testedAt.formatted(date: .abbreviated, time: .shortened))
                 }
@@ -371,10 +352,10 @@ struct ComputerHealthView: View {
 
                 HStack(spacing: 14) {
                     if let transferredBytes = result.transferredBytes {
-                        Label(ByteFormat.string(Int64(clamping: transferredBytes)), systemImage: "arrow.up.arrow.down")
+                        Text(ByteFormat.string(Int64(clamping: transferredBytes)))
                     }
                     if result.durationSeconds > 0 {
-                        Label(String(format: "%.1f s", result.durationSeconds), systemImage: "clock")
+                        Text(String(format: "%.1f s", result.durationSeconds))
                     }
                     Spacer(minLength: 0)
                 }
@@ -433,7 +414,6 @@ struct ComputerHealthView: View {
         return VStack(alignment: .leading, spacing: 12) {
             environmentHeader(
                 title: L10n.text("热与性能就绪度", "Thermal & Performance Readiness"),
-                symbol: "thermometer.medium",
                 status: statusText,
                 tint: statusColor
             )
@@ -465,15 +445,6 @@ struct ComputerHealthView: View {
                 )
             }
 
-            Label(
-                L10n.text(
-                    "未知状态保持中性，不会显示为健康。",
-                    "Unknown remains neutral and is never shown as healthy."
-                ),
-                systemImage: "info.circle"
-            )
-            .font(AppTypography.body)
-            .foregroundStyle(.secondary)
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
@@ -484,14 +455,12 @@ struct ComputerHealthView: View {
         DisclosureGroup(isExpanded: $isEvidenceExpanded) {
             VStack(alignment: .leading, spacing: 14) {
                 if let evaluation = healthStore.evaluation {
+                    let coverage = evaluation.coverage.isFinite ? String(Int(min(1, max(0, evaluation.coverage)) * 100)) : "—"
+                    Text(L10n.text("评估可信度 \(evaluation.confidence.value)% · 核心证据 \(coverage)%",
+                        "Assessment confidence \(evaluation.confidence.value)% · Core evidence \(coverage)%"))
+                    Text(evaluation.evaluatedAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(HealthDashboardText.scoreScopeNote)
                     scoreBreakdown(evaluation)
-                } else {
-                    Text(L10n.text(
-                        "完成一次手动健康检查后，这里会显示每项证据、可用性、更新时间和加权扣分。",
-                        "After a manual health check, this area shows evidence, availability, timestamps, and weighted deductions."
-                    ))
-                    .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
                 }
 
                 if let snapshot = healthStore.snapshot {
@@ -502,17 +471,9 @@ struct ComputerHealthView: View {
             .padding(.top, 12)
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: "function")
-                    .foregroundStyle(AppDesignTokens.Palette.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(HealthDashboardText.scoreEvidenceTitle)
                         .font(AppDesignTokens.Typography.sectionTitle)
-                    Text(L10n.text(
-                        "查看算法版本、分项分数和系统原始值",
-                        "Review algorithm versions, component scores, and raw system values"
-                    ))
-                    .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
                 }
             }
         }
@@ -524,26 +485,15 @@ struct ComputerHealthView: View {
         let accounting = ComputerHealthScoring.accounting(for: evaluation.components)
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                MetadataPill(
-                    text: evaluation.modelVersion,
-                    systemImage: "number",
-                    tint: AppDesignTokens.Palette.secondary
-                )
-                MetadataPill(
-                    text: evaluation.confidence.modelVersion,
-                    systemImage: "checkmark.shield",
-                    tint: AppDesignTokens.Palette.information
-                )
+                Text(evaluation.modelVersion)
+                Text(evaluation.confidence.modelVersion)
                 Spacer()
             }
 
             ForEach(HealthFactor.allCases, id: \.self) { factor in
                 let component = evaluation.components.first { $0.factor == factor }
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Label(
-                        HealthDashboardVisuals.factorTitle(factor),
-                        systemImage: HealthDashboardVisuals.factorSymbol(factor)
-                    )
+                    Text(HealthDashboardVisuals.factorTitle(factor))
                     .frame(minWidth: 142, alignment: .leading)
 
                     Text(component.map { HealthDashboardVisuals.availabilityText($0.availability) }
@@ -580,8 +530,8 @@ struct ComputerHealthView: View {
         VStack(alignment: .leading, spacing: 10) {
             if !snapshot.actionRequiredIssues.isEmpty {
                 Text(L10n.text(
-                    "系统明确标记需处理：\(snapshot.actionRequiredIssues.count) 项；可执行入口已在顶部按因子去重。",
-                    "Explicit system action flags: \(snapshot.actionRequiredIssues.count); safe destinations are deduplicated at the top."
+                    "系统明确标记需处理：\(snapshot.actionRequiredIssues.count) 项",
+                    "Explicit system action flags: \(snapshot.actionRequiredIssues.count)"
                 ))
                 .font(AppTypography.body)
                 .foregroundStyle(.secondary)
@@ -590,7 +540,6 @@ struct ComputerHealthView: View {
             LazyVGrid(columns: environmentColumns, alignment: .leading, spacing: 12) {
                 evidencePanel(
                     title: L10n.text("磁盘可靠性证据", "Disk Reliability Evidence"),
-                    symbol: "internaldrive.fill",
                     updatedAt: snapshot.disk.checkedAt
                 ) {
                     diskEvidenceRows(snapshot.disk)
@@ -598,7 +547,6 @@ struct ComputerHealthView: View {
 
                 evidencePanel(
                     title: L10n.text("容量与预测证据", "Capacity & Forecast Evidence"),
-                    symbol: "chart.line.downtrend.xyaxis",
                     updatedAt: snapshot.capacity.recordedAt
                 ) {
                     if let value = snapshot.capacity.availableBytes {
@@ -633,7 +581,6 @@ struct ComputerHealthView: View {
 
                 evidencePanel(
                     title: L10n.text("备份证据", "Backup Evidence"),
-                    symbol: "clock.arrow.circlepath",
                     updatedAt: snapshot.backup.checkedAt
                 ) {
                     evidenceValueRow(
@@ -658,7 +605,6 @@ struct ComputerHealthView: View {
 
                 evidencePanel(
                     title: L10n.text("稳定性证据（最近 30 天）", "Stability Evidence (30 days)"),
-                    symbol: "waveform.path.ecg",
                     updatedAt: snapshot.stability.generatedAt
                 ) {
                     evidenceValueRow(
@@ -685,7 +631,6 @@ struct ComputerHealthView: View {
 
                 evidencePanel(
                     title: L10n.text("电池证据与安全引导", "Battery Evidence & Safe Guidance"),
-                    symbol: "battery.75",
                     updatedAt: snapshot.batteryEvidence.checkedAt
                 ) {
                     batteryEvidenceRows(snapshot.batteryEvidence)
@@ -713,7 +658,7 @@ struct ComputerHealthView: View {
             evidenceValueRow(label: "TRIM", value: enabledText(enabled))
         }
         if let enabled = snapshot.isFileVaultEnabled {
-            evidenceValueRow(label: "FileVault", value: enabledText(enabled))
+            evidenceValueRow(label: L10n.text("卷加密", "Volume Encryption"), value: enabledText(enabled))
         }
     }
 
@@ -808,12 +753,11 @@ struct ComputerHealthView: View {
 
     private func evidencePanel<Content: View>(
         title: String,
-        symbol: String,
         updatedAt: Date? = nil,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Label(title, systemImage: symbol)
+            Text(title)
                 .font(AppDesignTokens.Typography.cardTitle)
                 .foregroundStyle(AppDesignTokens.Palette.secondary)
             if let updatedAt {
@@ -829,21 +773,15 @@ struct ComputerHealthView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
-        .background(.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
     }
 
     private func environmentHeader(
         title: String,
-        symbol: String,
         status: String,
         tint: Color
     ) -> some View {
         HStack(spacing: 9) {
-            Image(systemName: symbol)
-                .font(AppDesignTokens.Typography.sectionSymbol)
-                .foregroundStyle(tint)
-                .frame(width: 32, height: 32)
-                .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
             Text(title)
                 .font(AppDesignTokens.Typography.cardTitle)
             Spacer()
@@ -852,14 +790,13 @@ struct ComputerHealthView: View {
                 .foregroundStyle(tint)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(tint.opacity(0.09), in: Capsule())
+
         }
     }
 
     private func environmentMetric(title: String, value: String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
-                Circle().fill(tint).frame(width: 7, height: 7)
                 Text(title).foregroundStyle(.secondary)
             }
             .font(AppTypography.body)
@@ -871,10 +808,7 @@ struct ComputerHealthView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            tint.opacity(0.055),
-            in: RoundedRectangle(cornerRadius: AppDesignTokens.Radius.settingsPanel)
-        )
+
     }
 
     private func evidenceValueRow(label: String, value: String) -> some View {
@@ -1262,265 +1196,3 @@ private enum ComputerHealthSystemActions {
         )
     }
 }
-
-#if DEBUG
-enum ComputerHealthDebugFixture: String, CaseIterable {
-    case fullScore
-    case dataInsufficient
-    case smartFailing
-    case noBattery
-    case longLocalizedText
-}
-
-struct ComputerHealthDashboardDebugView: View {
-    let fixture: ComputerHealthDebugFixture
-    private let evaluation: ComputerHealthEvaluation
-    private let history: [ComputerHealthHistoryEntry]
-    private let actions: [HealthDashboardAction]
-    private let batterySettingsState: BatterySettingsAdjustmentState
-
-    init(fixture: ComputerHealthDebugFixture) {
-        self.fixture = fixture
-        let data = Self.makeData(fixture)
-        self.evaluation = data.evaluation
-        self.history = data.history
-        self.actions = data.actions
-        self.batterySettingsState = data.batterySettingsState
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HealthScoreHero(
-                    evaluation: evaluation,
-                    checkedAt: evaluation.evaluatedAt,
-                    isRefreshing: false,
-                    errorText: nil,
-                    refreshTitle: L10n.text("重新检查", "Check Again"),
-                    onRefresh: {}
-                )
-                if !actions.isEmpty {
-                    HealthActionList(
-                        actions: actions,
-                        batterySettingsState: batterySettingsState,
-                        perform: { _ in }
-                    )
-                }
-                HealthTrendChart(evaluation: evaluation, history: history)
-                HealthFactorGrid(evaluation: evaluation)
-                debugEnvironmentSection
-                debugEvidenceSection
-                if fixture == .longLocalizedText {
-                    Text(L10n.text(
-                        "这是一段用于验证 980×680 窗口、超长中文说明和按钮标签不会互相覆盖的固定调试文本。",
-                        "This fixed debug sentence verifies that very long localized explanations and button labels remain readable in a 980×680 window without overlapping adjacent controls."
-                    ))
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .padding(22)
-            .frame(width: 980, alignment: .topLeading)
-        }
-        .frame(width: 980, height: 680)
-    }
-
-    private var debugEnvironmentSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(HealthDashboardText.environmentTitle, systemImage: "gauge.with.dots.needle.50percent")
-                    .font(AppDesignTokens.Typography.sectionTitle)
-                Spacer()
-                Text(L10n.text(
-                    "网络与即时热状态仅作环境参考，不改变核心健康分。",
-                    "Network and live thermal state are environmental context and never alter the core score."
-                ))
-                .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 320, maximum: 500), spacing: 14)],
-                alignment: .leading,
-                spacing: 14
-            ) {
-                debugEnvironmentCard(
-                    title: L10n.text("网络体验", "Network Experience"),
-                    symbol: "network",
-                    status: L10n.text("等待二次确认", "Awaiting Second Confirmation"),
-                    detail: L10n.text(
-                        "测速仅在再次确认后产生流量；这里同时验证很长的中英文环境说明可以自然换行。",
-                        "Traffic is generated only after a second confirmation; this card also verifies that long localized environment guidance wraps without colliding with adjacent content."
-                    )
-                )
-                debugEnvironmentCard(
-                    title: L10n.text("热与性能就绪度", "Thermal & Performance Readiness"),
-                    symbol: "thermometer.medium",
-                    status: L10n.text("尚未检查", "Not Checked"),
-                    detail: L10n.text(
-                        "未知与过期状态保持中性，必须重新检查后才能据此安排高负载操作。",
-                        "Unknown and stale readings stay neutral; run another check before using them to plan heavy work."
-                    )
-                )
-            }
-        }
-    }
-
-    private func debugEnvironmentCard(
-        title: String,
-        symbol: String,
-        status: String,
-        detail: String
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Label(title, systemImage: symbol)
-                    .font(AppDesignTokens.Typography.cardTitle)
-                Spacer(minLength: 8)
-                Text(status)
-                    .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-            }
-            Text(detail)
-                .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Divider()
-            Text(L10n.text("不计入核心健康分", "Excluded from Core Health Score"))
-                .font(AppTypography.body)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
-        .glassPanel(cornerRadius: AppDesignTokens.Layout.cardRadius)
-    }
-
-    private var debugEvidenceSection: some View {
-        DisclosureGroup(isExpanded: .constant(true)) {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(evaluation.components, id: \.factor) { component in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Label(
-                            HealthDashboardVisuals.factorTitle(component.factor),
-                            systemImage: HealthDashboardVisuals.factorSymbol(component.factor)
-                        )
-                        .frame(minWidth: 150, alignment: .leading)
-                        Text(HealthDashboardVisuals.availabilityText(component.availability))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text(component.score.map { "\(Int($0.rounded())) / 100" } ?? "—")
-                            .fontWeight(.semibold)
-                            .monospacedDigit()
-                    }
-                    .font(AppDesignTokens.Typography.secondary)
-                }
-
-                Divider()
-                Text(L10n.text(
-                    "原始证据示例：充电时显示预计充满，放电时才显示预计剩余；未知状态不会硬猜。",
-                    "Raw evidence example: charging shows time until full, discharging shows time remaining, and unknown states are never guessed."
-                ))
-                .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.top, 12)
-        } label: {
-            Label(HealthDashboardText.scoreEvidenceTitle, systemImage: "function")
-                .font(AppDesignTokens.Typography.sectionTitle)
-        }
-        .padding(16)
-        .glassPanel(cornerRadius: AppDesignTokens.Layout.cardRadius)
-    }
-
-    private struct DebugData {
-        let evaluation: ComputerHealthEvaluation
-        let history: [ComputerHealthHistoryEntry]
-        let actions: [HealthDashboardAction]
-        let batterySettingsState: BatterySettingsAdjustmentState
-    }
-
-    private static func makeData(_ fixture: ComputerHealthDebugFixture) -> DebugData {
-        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
-        let factorScores: [HealthFactor: (HealthEvidenceAvailability, Double?)] = switch fixture {
-        case .fullScore:
-            Dictionary(uniqueKeysWithValues: HealthFactor.allCases.map { ($0, (.available, 100)) })
-        case .dataInsufficient:
-            Dictionary(uniqueKeysWithValues: HealthFactor.allCases.map { ($0, (.unavailable, nil)) })
-        case .smartFailing:
-            [.diskReliability: (.available, 0), .capacity: (.available, 72), .stability: (.available, 90), .backup: (.available, 80), .battery: (.available, 88)]
-        case .noBattery:
-            [.diskReliability: (.available, 96), .capacity: (.available, 90), .stability: (.available, 92), .backup: (.available, 90), .battery: (.notApplicable, nil)]
-        case .longLocalizedText:
-            [.diskReliability: (.available, 88), .capacity: (.partial, 68), .stability: (.available, 75), .backup: (.available, 65), .battery: (.available, 40)]
-        }
-        let components = HealthFactor.allCases.map { factor in
-            let value = factorScores[factor] ?? (.unavailable, nil)
-            return HealthComponentEvaluation(
-                factor: factor,
-                availability: value.0,
-                score: value.1,
-                evaluatedAt: now,
-                modelVersion: ComputerHealthEvaluation.currentModelVersion
-            )
-        }
-        let numericScores = components.compactMap(\.score)
-        let score: Double? = if fixture == .dataInsufficient {
-            nil
-        } else if fixture == .smartFailing {
-            20
-        } else {
-            numericScores.reduce(0, +) / Double(max(numericScores.count, 1))
-        }
-        let status: ComputerHealthEvaluationStatus = if fixture == .dataInsufficient {
-            .dataInsufficient
-        } else if fixture == .smartFailing {
-            .actionRequired
-        } else if (score ?? 0) >= 85 {
-            .healthy
-        } else {
-            .attention
-        }
-        let evaluation = ComputerHealthEvaluation(
-            score: score,
-            status: status,
-            coverage: fixture == .dataInsufficient ? 0 : 1,
-            confidence: HealthConfidence(
-                value: fixture == .dataInsufficient ? 18 : 88,
-                level: fixture == .dataInsufficient ? .low : .high,
-                modelVersion: "health-confidence-v1"
-            ),
-            components: components,
-            evaluatedAt: now
-        )
-        let history = [7, 14, 30].map { days in
-            let date = now.addingTimeInterval(Double(-days) * 86_400)
-            let historical = ComputerHealthEvaluation(
-                score: score.map { min(100, max(0, $0 - Double(days) / 10)) },
-                status: status,
-                coverage: evaluation.coverage,
-                confidence: evaluation.confidence,
-                components: components,
-                evaluatedAt: date
-            )
-            return ComputerHealthHistoryEntry(recordedAt: date, evaluation: historical)
-        } + [ComputerHealthHistoryEntry(recordedAt: now, evaluation: evaluation)]
-        let context = HealthDashboardActionContext(
-            evaluation: evaluation,
-            smartIsFailing: fixture == .smartFailing,
-            isUnderCurrentCapacityPressure: false,
-            batteryServiceRecommended: false,
-            backupNeedsAttention: false,
-            hasRecentPanicOrRestart: false,
-            forecastDaysUntilPressure: nil
-        )
-        return DebugData(
-            evaluation: evaluation,
-            history: history,
-            actions: HealthDashboardActionSelector.select(from: context),
-            batterySettingsState: fixture == .longLocalizedText ? .unverifiable : .idle
-        )
-    }
-}
-#endif

@@ -12,23 +12,7 @@ enum GeekPanelContentProfile: Equatable, Sendable {
     func overviewModules(
         configuredModules: [GeekDashboardModuleConfiguration]
     ) -> [GeekDashboardModule] {
-        switch self {
-        case .reduced:
-            return [
-                .processorGraphics,
-                .coreMetrics,
-                .disk,
-                .network,
-                .sensors,
-                .power,
-            ]
-        case .full:
-            return configuredModules
-                .filter {
-                    $0.isVisible && $0.module.isAvailableInOverview
-                }
-                .map(\.module)
-        }
+        configuredModules.filter { $0.isVisible && $0.module.isAvailableInOverview }.map(\.module)
     }
 }
 
@@ -50,9 +34,10 @@ extension PanelDensity {
 
     func auxiliaryDemand(
         for section: PanelSection,
-        geekConfiguration: GeekDashboardConfiguration = .defaultValue
+        geekConfiguration: GeekDashboardConfiguration = .defaultValue,
+        tertiaryVisible: Bool = false
     ) -> MenuBarAuxiliaryMonitorDemand {
-        let needsComplexOverviewTelemetry = self == .complex && section == .overview
+        let isOverview = self == .geek || (self == .complex && section == .overview)
         let visibleGeekModules = Set(
             geekConfiguration.modules
                 .filter {
@@ -60,31 +45,52 @@ extension PanelDensity {
                 }
                 .map(\.module)
         )
-        let needsGeekOverviewDisk = self == .geek
+        let needsGeekOverviewDisk = isOverview
             && visibleGeekModules.contains(.disk)
-        let needsGeekOverviewProcessor = self == .geek
+        let needsGeekOverviewProcessor = isOverview
             && !visibleGeekModules.isDisjoint(with: [.processorGraphics, .sensors])
+        var primaryKinds: Set<MenuBarMetricKind> = []
+        if self == .simple { primaryKinds = MenuBarMetricKind.defaultSelection }
+        if isOverview {
+            if visibleGeekModules.contains(.coreMetrics) { primaryKinds.insert(.memoryUsage) }
+            if visibleGeekModules.contains(.processorGraphics) { primaryKinds.formUnion([.cpuUsage, .gpuUsage]) }
+            if visibleGeekModules.contains(.network) { primaryKinds.insert(.networkSpeed) }
+            if visibleGeekModules.contains(.sensors) { primaryKinds.formUnion([.chipTemperature, .fanSpeed]) }
+        }
+        switch section {
+        case .processor: primaryKinds.formUnion([.cpuUsage, .gpuUsage])
+        case .memory: primaryKinds.insert(.memoryUsage)
+        case .network: primaryKinds.insert(.networkSpeed)
+        case .sensors: primaryKinds.formUnion([.chipTemperature, .fanSpeed])
+        case .overview, .disk, .power, .cleanup: break
+        }
         return MenuBarAuxiliaryMonitorDemand(
             needsProcessorTelemetry: section == .processor
                 || section == .sensors
-                || needsComplexOverviewTelemetry
                 || needsGeekOverviewProcessor,
             needsDiskIOSampling: section == .disk
-                || needsComplexOverviewTelemetry
                 || needsGeekOverviewDisk,
             needsNetworkInterface: section == .network
-                || needsComplexOverviewTelemetry,
+                || (self == .complex && section == .overview && visibleGeekModules.contains(.network)),
             needsPublicNetworkAddress: self == .geek
                 && section == .network,
             needsNetworkProcesses: self == .geek
-                && section == .network,
-            needsStorageVolumes: section == .disk
+                && section == .network && tertiaryVisible,
+            needsStorageVolumes: section == .disk,
+            needsPowerTelemetry: section == .power,
+            needsChargeLimit: usesGeekLayout && section == .power,
+            needsStorageCapacity: section == .disk || needsGeekOverviewDisk,
+            needsBattery: section == .power || (isOverview && visibleGeekModules.contains(.power)),
+            primaryKinds: primaryKinds
         )
     }
 }
 
 struct MenuBarAdvancedStatusView: View {
+    // Retain the delivery across routing without subscribing the overview.
+    @State var cleanupDetailsModel = MiniWindowCleanupDetailsModel()
     @State private var historyDemandID = UUID()
+    @State var reportedInternalBatteryAvailability = InternalBatteryAvailability.unknown
     let store: ScanStore
     let computerHealthStore: ComputerHealthStore
     let monitorState: MenuBarMonitorState
@@ -97,14 +103,13 @@ struct MenuBarAdvancedStatusView: View {
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     @Environment(\.colorScheme) var colorScheme
     @Environment(\.panelChartAccentColor) var panelChartAccentColor
+    @Environment(\.panelMetricColors) var panelMetricColors
 
-    @State var selectedRailSection = PanelSection.overview
     @State var measuredDetailContentMeasurement: GeekDetailContentMeasurement?
     @State var activeTertiaryDetail: MenuBarTertiaryDetail?
     @State var activeInlineTertiaryRequest: GeekInlineTertiaryRequest?
     @State var measuredTertiaryContentMeasurement: GeekTertiaryContentMeasurement?
     @State var tertiaryHoverIntent: GeekPanelCoordinator.HoverIntent?
-    @State var hoveredTertiaryButton: MenuBarTertiaryDetail?
     @State var isTertiaryDetailSurfaceHovered = false
     @State var overviewPanelSize = GeekPanelPresentationMetrics.overviewSize
     @State private var geekPanelDismissIntent: GeekPanelCoordinator.HoverIntent?
@@ -122,7 +127,8 @@ struct MenuBarAdvancedStatusView: View {
         panelCoordinator: GeekPanelCoordinator? = nil,
         presentation: PanelDensity = .geek,
         initialSection: PanelSection = .overview,
-        onSectionChange: ((PanelSection) -> Void)? = nil
+        onSectionChange: ((PanelSection) -> Void)? = nil,
+        fanControl: FanControlCoordinator? = nil
     ) {
         self.store = store
         self.computerHealthStore = computerHealthStore
@@ -133,8 +139,8 @@ struct MenuBarAdvancedStatusView: View {
             wrappedValue: panelCoordinator
                 ?? GeekPanelCoordinator(initialSection: initialSection)
         )
-        fanControl = FanControlCoordinator.shared
-        _selectedRailSection = State(initialValue: initialSection)
+        // Tests pass their own coordinator (no hardware helper connection).
+        self.fanControl = fanControl ?? FanControlCoordinator.shared
         self.presentation = presentation
         self.onSectionChange = onSectionChange
     }
@@ -148,14 +154,17 @@ struct MenuBarAdvancedStatusView: View {
         activeInlineTertiaryRequest?.chartRangeMetric
     }
 
+    /// The history windows this page reads and their visible priority.
+    var historyDemandPlan: MenuBarHistoryDemandPlan {
+        MenuBarHistoryDemandPlan(
+            settings: panelSettingsState,
+            section: selectedSection,
+            inlineMetric: selectedChartRangeMetric
+        )
+    }
+
     var selectedChartRange: GeekChartRange {
-        if let metric = selectedChartRangeMetric {
-            return panelSettingsState.geekChartRange(
-                for: metric,
-                fallbackTo: selectedSection
-            )
-        }
-        return panelSettingsState.geekChartRange(for: selectedSection)
+        historyDemandPlan.selectedRange
     }
 
     var historyReferenceDate: Date {
@@ -165,42 +174,145 @@ struct MenuBarAdvancedStatusView: View {
         return Date()
     }
 
+    // MARK: History windows
+    //
+    // A chart draws a prepared window. Right after another range is selected
+    // that window does not exist yet, so every chart reads its points and the
+    // window they cover from one slice (`MenuBarMonitorState.displayHistorySlice`):
+    // the selected range once it is prepared, until then the range it drew
+    // before. `selectedChartRange` and `historyDemandPlan` stay the selection
+    // (the picker's label and the demand); the accessors below are what the
+    // charts draw.
+
     var history: [MenuBarTelemetryPoint] {
-        telemetryHistory(for: selectedChartRange)
+        selectedDisplayedHistory.points
+    }
+
+    /// Facts about `history` for the sensors pages: prepared with the window
+    /// off the main thread; computed here only without a prepared window
+    /// (demo data, tests).
+    var historySummary: MenuBarTelemetryWindowSummary {
+        let displayed = selectedDisplayedHistory
+        return displayed.summary ?? MenuBarTelemetryWindowSummary(points: displayed.points)
+    }
+
+    /// The open history's (or the page's) points and window.
+    var selectedDisplayedHistory: MenuBarDisplayedHistory {
+        displayedHistory(
+            slot: selectedChartRangeMetric?.storageKey ?? "section.\(selectedSection.rawValue)",
+            range: selectedChartRange
+        )
     }
 
     var cpuChartRange: GeekChartRange {
-        panelSettingsState.geekChartRange(for: .cpu, fallbackTo: .processor)
+        cpuDisplayedHistory.range
     }
 
     var cpuChartHistory: [MenuBarTelemetryPoint] {
-        telemetryHistory(for: cpuChartRange)
+        cpuDisplayedHistory.points
+    }
+
+    var cpuDisplayedHistory: MenuBarDisplayedHistory {
+        displayedHistory(slot: GeekChartRangeMetric.cpu.storageKey, range: historyDemandPlan.cpuRange)
+    }
+
+    /// The CPU reading shown as "now" (D39, `MenuBarDisplayedHistory.currentReading`).
+    var cpuCurrentReading: MenuBarTelemetryPoint? {
+        currentReading(of: cpuDisplayedHistory)
+    }
+
+    /// "Now" beside `displayed`: its last point while it is current, the live
+    /// snapshot while it is not prepared or still a kept/previous window (D39).
+    func currentReading(of displayed: MenuBarDisplayedHistory) -> MenuBarTelemetryPoint? {
+        displayed.currentReading(live: monitorSnapshot.map(MenuBarTelemetryPoint.init(snapshot:)))
     }
 
     var networkChartRange: GeekChartRange {
-        panelSettingsState.geekChartRange(for: .network, fallbackTo: .network)
+        networkDisplayedHistory.range
     }
 
     var networkChartHistory: [MenuBarTelemetryPoint] {
-        telemetryHistory(for: networkChartRange)
+        networkDisplayedHistory.points
     }
 
+    var networkDisplayedHistory: MenuBarDisplayedHistory {
+        displayedHistory(slot: GeekChartRangeMetric.network.storageKey, range: historyDemandPlan.networkRange)
+    }
+
+    /// The inline memory histories read the memory metric's own range.
     var memoryHistory: [MenuBarTelemetryPoint] {
-#if DEBUG || STORAGE_CLEANER_BETA
-        if MiniWindowDemoData.isEnabled { return monitorState.memoryHistory(within: selectedChartRange.duration, referenceDate: historyReferenceDate) }
-#endif
-        return monitorState.displayHistory(within: selectedChartRange.duration, memory: true)
+        metricDisplayedHistory(.memory).points
     }
 
+    /// A memory history opened by route reads the page's range, the one its
+    /// label and picker use (first review, P2-1).
+    var routedMemoryDisplayedHistory: MenuBarDisplayedHistory {
+        displayedHistory(slot: "route.memory", range: historyDemandPlan.routedMemoryRange, memory: true)
+    }
+
+    /// The window a metric's charts draw.
+    func geekMetricRange(_ metric: GeekChartRangeMetric) -> GeekChartRange {
+        metricDisplayedHistory(metric).range
+    }
+
+    func geekMetricHistory(_ metric: GeekChartRangeMetric) -> [MenuBarTelemetryPoint] {
+        metricDisplayedHistory(metric).points
+    }
+
+    /// The metric's charts still draw the previous window while the selected
+    /// one is prepared; the histories pass it to their plot block.
+    func geekMetricIsUpdating(_ metric: GeekChartRangeMetric) -> Bool {
+        metricDisplayedHistory(metric).isUpdating
+    }
+
+    private func metricDisplayedHistory(_ metric: GeekChartRangeMetric) -> MenuBarDisplayedHistory {
+        let selected = panelSettingsState.geekChartRange(for: metric, fallbackTo: selectedSection)
+        switch metric {
+        case .cpu:
+            return cpuDisplayedHistory
+        case .network:
+            return networkDisplayedHistory
+        case .gpu, .temperature, .fan:
+            return displayedHistory(slot: metric.storageKey, range: selected)
+        case .memory:
+            return displayedHistory(slot: metric.storageKey, range: selected, memory: true)
+        case .disk, .battery, .energy:
+            // These histories are read from their own stores; nothing is
+            // prepared for them, so they always draw the selected range.
+            return MenuBarDisplayedHistory(points: [], range: selected, isUpdating: false)
+        }
+    }
+
+    /// Exactly `range`, without a previous window to fall back to (the
+    /// snapshot-capture routes, which never switch ranges).
     private func telemetryHistory(for range: GeekChartRange) -> [MenuBarTelemetryPoint] {
-#if DEBUG || STORAGE_CLEANER_BETA
-        if MiniWindowDemoData.isEnabled { return monitorState.history(within: range.duration, referenceDate: historyReferenceDate) }
-#endif
-        return monitorState.displayHistory(within: range.duration)
+        displayedHistory(slot: "range.\(range.rawValue)", range: range).points
     }
 
-    private var displayHistoryDurations: Set<TimeInterval> {
-        [selectedChartRange.duration, cpuChartRange.duration, networkChartRange.duration]
+    private func displayedHistory(
+        slot: String,
+        range: GeekChartRange,
+        memory: Bool = false
+    ) -> MenuBarDisplayedHistory {
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled {
+            let points = memory
+                ? monitorState.memoryHistory(within: range.duration, referenceDate: historyReferenceDate)
+                : monitorState.history(within: range.duration, referenceDate: historyReferenceDate)
+            return MenuBarDisplayedHistory(points: points, range: range, isUpdating: false)
+        }
+#endif
+        let slice = monitorState.displayHistorySlice(slot: slot, within: range.duration, memory: memory)
+        return MenuBarDisplayedHistory(
+            points: slice.points,
+            range: GeekChartRange(rawValue: Int(slice.duration)) ?? range,
+            isUpdating: slice.isUpdating,
+            summary: slice.summary
+        )
+    }
+
+    private var displayHistoryDurations: [TimeInterval] {
+        historyDemandPlan.durations
     }
 
     var showsExtendedGeekDetails: Bool {
@@ -296,14 +408,26 @@ struct MenuBarAdvancedStatusView: View {
 #endif
         return auxiliaryState.batteryElectricalSnapshot
     }
+    /// D57: the power page's "功耗" readings.
+    var powerTelemetry: MenuBarPowerTelemetry? {
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled {
+            return MiniWindowDemoData.powerTelemetry
+        }
+#endif
+        return auxiliaryState.powerTelemetry
+    }
+    /// "Now" for the power readings' staleness (the demo's fixed date).
+    var powerTelemetryReferenceDate: Date {
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled { return MiniWindowDemoData.referenceDate }
+#endif
+        return Date()
+    }
     var batteryChargeLimitState: BatteryChargeLimitState? {
 #if DEBUG || STORAGE_CLEANER_BETA
         if MiniWindowDemoData.isEnabled {
-            return BatteryChargeLimitState.resolve(
-                manualLimitEnabled: true,
-                manualLimit: 80,
-                availableLimits: [80, 85, 90, 95, 100]
-            )
+            return MiniWindowDemoData.chargeLimitState()
         }
 #endif
         return auxiliaryState.batteryChargeLimitState
@@ -328,7 +452,8 @@ struct MenuBarAdvancedStatusView: View {
     var publicNetworkAddressSnapshot: PublicNetworkAddressSnapshot? {
 #if DEBUG || STORAGE_CLEANER_BETA
         if MiniWindowDemoData.isEnabled {
-            return MiniWindowDemoData.publicNetworkAddressSnapshot
+            return MiniWindowDemoData.publicNetworkAddressSnapshot(for:
+                MiniWindowDemoData.capturedMenuBarPanelScenario(arguments: ProcessInfo.processInfo.arguments))
         }
 #endif
         return auxiliaryState.publicNetworkAddressSnapshot
@@ -348,7 +473,8 @@ struct MenuBarAdvancedStatusView: View {
     var processorTelemetry: CPUPerformanceStateService.Snapshot? {
 #if DEBUG || STORAGE_CLEANER_BETA
         if MiniWindowDemoData.isEnabled {
-            return MiniWindowDemoData.processorTelemetry
+            return MiniWindowDemoData.processorTelemetry(for:
+                MiniWindowDemoData.capturedMenuBarPanelScenario(arguments: ProcessInfo.processInfo.arguments))
         }
 #endif
         return auxiliaryState.processorTelemetry
@@ -411,31 +537,31 @@ struct MenuBarAdvancedStatusView: View {
     // Paired series keep stable semantic colors so they remain distinguishable
     // even when the panel uses a custom accent color.
     var resolvedPrimaryTint: Color {
-        AppChartPalette.cpuUser
+        panelMetricColors.cpuUser
     }
 
     var resolvedSecondaryTint: Color {
-        AppChartPalette.cpuSystem
+        panelMetricColors.cpuSystem
     }
 
     var resolvedGPUTint: Color {
-        panelChartAccentColor ?? AppChartPalette.gpu
+        panelMetricColors.gpu(chartAccent: panelChartAccentColor)
     }
 
     var resolvedThermalTint: Color {
-        panelChartAccentColor ?? AppChartPalette.thermal
+        panelMetricColors.sensorGraph(chartAccent: panelChartAccentColor)
     }
 
     var resolvedEnergyTint: Color {
-        panelChartAccentColor ?? AppChartPalette.energy
+        panelChartAccentColor ?? panelMetricColors.battery
     }
 
     var resolvedUploadTint: Color {
-        MenuBarNetworkPalette.upload
+        panelMetricColors.networkUpload
     }
 
     var resolvedDownloadTint: Color {
-        MenuBarNetworkPalette.download
+        panelMetricColors.networkDownload
     }
 
     var body: some View {
@@ -453,15 +579,20 @@ struct MenuBarAdvancedStatusView: View {
         ) {
             panelSurface
         }
-        .background {
-            if MenuBarPresentationTrace.enabled {
-                MenuBarPresentationProbe(key: "presentation")
+        .menuBarPresentationProbe("presentation")
+        .environment(\.menuBarChartContext, rootChartContext)
+        .environment(\.menuBarCascadeDirection, panelSettingsState.cascadeDirection)
+        .onChange(of: panelSettingsState.geekDashboardConfiguration) {
+            panelCoordinator.reset()
+        }
+        .onReceive(auxiliaryState.internalBatteryAvailabilityPublisher) { availability in
+            reportedInternalBatteryAvailability = availability
+            if availability == .absent && selectedSection == .power {
+                panelCoordinator.reset()
             }
         }
-        .environment(\.menuBarChartContext, MenuBarChartContext(
-            page: selectedSection.rawValue, revision: MenuBarDisplayRevision(sampledAt: nil, version: 0)))
-        .environment(\.menuBarCascadeDirection, panelSettingsState.cascadeDirection)
         .environment(\.panelAutomaticRefreshPaused, store.isMenuBarRefreshPaused)
+        .environment(\.panelStoredSampleDate, monitorSnapshot?.generatedAt)
         .environment(\.geekPanelHoverCoordinator, panelCoordinator)
         .environment(
             \.geekPanelHoverEnvelopeActive,
@@ -480,7 +611,13 @@ struct MenuBarAdvancedStatusView: View {
             \.geekChartRangeSelection,
             GeekChartRangeSelection(
                 range: selectedChartRange,
-                select: selectGeekChartRange
+                select: selectGeekChartRange,
+                rangeForMetric: { metric in
+                    panelSettingsState.geekChartRange(for: metric, fallbackTo: selectedSection)
+                },
+                selectForMetric: { range, metric in
+                    panelSettingsState.setGeekChartRange(range, for: metric)
+                }
             )
         )
         .background {
@@ -490,31 +627,34 @@ struct MenuBarAdvancedStatusView: View {
                 auxiliaryState: auxiliaryState,
                 panelSettingsState: panelSettingsState,
                 presentation: presentation,
-                selectedSection: selectedSection
+                selectedSection: selectedSection,
+                tertiaryVisible: hasActiveTertiary
             )
         }
         .task(id: displayHistoryDurations) {
             monitorState.updateDisplayHistoryConsumer(historyDemandID, durations: displayHistoryDurations)
         }
         .onAppear {
+            let appearStartedAt = MenuBarPresentationTrace.uptime
+            defer { MenuBarPresentationTrace.span("root.onAppear", from: appearStartedAt) }
             isChartPanelVisible = true
             isChartDisplayAwake = true
             isChartLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
             chartThermalState = ProcessInfo.processInfo.thermalState
 #if DEBUG || STORAGE_CLEANER_BETA
             if !MiniWindowDemoData.isEnabled {
-                Task {
+                MenuBarSamplingContext.shared.refreshVisibleRead("helper.connection") { [fanControl] in
                     await fanControl.refreshConnection()
                 }
-                Task {
+                MenuBarSamplingContext.shared.refreshVisibleRead("power.modes-read") { [computerHealthStore] in
                     await computerHealthStore.refreshBatteryPowerModes()
                 }
             }
 #else
-            Task {
+            MenuBarSamplingContext.shared.refreshVisibleRead("helper.connection") { [fanControl] in
                 await fanControl.refreshConnection()
             }
-            Task {
+            MenuBarSamplingContext.shared.refreshVisibleRead("power.modes-read") { [computerHealthStore] in
                 await computerHealthStore.refreshBatteryPowerModes()
             }
 #endif
@@ -534,12 +674,10 @@ struct MenuBarAdvancedStatusView: View {
                 geekPanelHoverActivityState.reset()
             }
             if presentation.usesGeekLayout {
-                MenuBarStatusController.shared.setGeekPanelSection(selectedSection)
-                if selectedSection != .overview {
-                    MenuBarStatusController.shared.setGeekPanelDetailSize(
-                        activeDetailPreferredSize
-                    )
-                }
+                MenuBarStatusController.shared.setGeekPanelSection(
+                    selectedSection,
+                    preferredDetailSize: selectedSection == .overview ? nil : activeDetailPreferredSize
+                )
             }
             onSectionChange?(selectedSection)
         }
@@ -554,7 +692,6 @@ struct MenuBarAdvancedStatusView: View {
             }
             if !panelCoordinator.isPointerWithinHoverEnvelope,
                let detail = activeTertiaryDetail,
-               hoveredTertiaryButton != detail,
                !isTertiaryDetailSurfaceHovered {
                 scheduleTertiaryDetailDismissal(detail)
             }
@@ -629,7 +766,6 @@ struct MenuBarAdvancedStatusView: View {
 
     private func resetTertiaryHoverState() {
         cancelTertiaryHoverIntent()
-        hoveredTertiaryButton = nil
         isTertiaryDetailSurfaceHovered = false
     }
 
@@ -645,7 +781,6 @@ struct MenuBarAdvancedStatusView: View {
         activeTertiaryDetail = nil
         activeInlineTertiaryRequest = nil
         panelCoordinator.reset()
-        selectedRailSection = .overview
         geekPanelHoverActivityState.reset()
         MenuBarStatusController.shared.setGeekPanelSection(.overview)
     }
@@ -655,12 +790,18 @@ struct MenuBarAdvancedStatusView: View {
         activeTertiaryDetail = nil
         activeInlineTertiaryRequest = nil
         geekPanelHoverActivityState.reset()
-        MenuBarStatusController.shared.setGeekPanelSection(selectedSection)
-        if selectedSection != .overview {
-            MenuBarStatusController.shared.setGeekPanelDetailSize(
-                activeDetailPreferredSize
-            )
-        }
+        MenuBarStatusController.shared.setGeekPanelSection(
+            selectedSection,
+            preferredDetailSize: selectedSection == .overview ? nil : activeDetailPreferredSize
+        )
+    }
+
+    /// Charts outside live cards are prepared again only for a new window
+    /// (bounds and count are in the key). The level-three page keeps this
+    /// context inside its card, whose revision changes with every reading it
+    /// follows.
+    var rootChartContext: MenuBarChartContext {
+        MenuBarChartContext(page: selectedSection.rawValue, revision: MenuBarDisplayRevision(sampledAt: nil, version: 0))
     }
 
     @ViewBuilder
@@ -678,7 +819,8 @@ struct MenuBarAdvancedStatusView: View {
                 showsTertiary: hasActiveTertiary,
                 tertiaryPreferredSize: activeTertiaryPreferredSize,
                 tertiarySourceOffset: activeTertiarySourceOffset,
-                onHoverChange: geekAttachedPanelHoverChanged
+                onHoverChange: geekAttachedPanelHoverChanged,
+                detailOwnsScrolling: selectedSection == .cleanup && store.cleanupFeatureConfiguration.mode != .legacy
             ) {
                 tertiaryDetailRootHost {
                     liveCurrentContent
@@ -690,19 +832,19 @@ struct MenuBarAdvancedStatusView: View {
             }
             .environment(\.geekPanelHoverActivity, geekPanelHoverActivityChanged)
         } else {
-            let hidesChrome = presentation.usesGeekLayout
             PanelShell(
                 density: presentation,
-                preferredSize: presentation.usesGeekLayout ? overviewPanelSize : nil,
-                showsHeader: !hidesChrome,
-                showsNavigation: !hidesChrome
+                preferredSize: overviewPanelSize,
+                showsHeader: false,
+                showsNavigation: false
             ) {
-                liveHeader
+                EmptyView()
             } navigation: {
-                moduleRail
+                EmptyView()
             } content: {
                 liveCurrentContent
             }
+            .menuBarPresentationProbe("summary")
         }
     }
 
@@ -735,6 +877,15 @@ struct MenuBarAdvancedStatusView: View {
             guard !panelCoordinator.isHistoryPinned else { return false }
             activeInlineTertiaryRequest = nil
             panelCoordinator.dismissUnpinnedHierarchy()
+        case let .updateSourceOffset(id, offset):
+            guard GeekInlineTertiaryRequest.updateSourceOffset(
+                id: id,
+                offset: offset,
+                currentRequest: &activeInlineTertiaryRequest,
+                route: panelCoordinator.route
+            ) else { return false }
+            synchronizeTertiaryPresentation()
+            return true
         }
         synchronizeTertiaryPresentation()
         reconcileGeekPanelDismissal()
@@ -774,9 +925,6 @@ struct MenuBarAdvancedStatusView: View {
             resetTertiaryHoverState()
             activeTertiaryDetail = nil
             activeInlineTertiaryRequest = nil
-            if panelCoordinator.route == .summary {
-                selectedRailSection = .overview
-            }
         }
     }
 
@@ -826,7 +974,7 @@ struct MenuBarAdvancedStatusView: View {
         case .memoryComposition:
             content = AnyView(GeekMemoryCompositionHistoryDetail(
                 points: memoryHistory,
-                duration: geekChartDuration,
+                duration: geekMetricRange(.memory).duration,
                 composition: memorySnapshot?.ringComposition
             ))
             preferredSize = GeekMemoryCompositionHistoryDetail.preferredSize
@@ -835,7 +983,7 @@ struct MenuBarAdvancedStatusView: View {
         case .gpuActivityHistory:
             content = AnyView(GeekGPUHoverDetail(
                 points: geekChartHistory,
-                duration: geekChartDuration,
+                duration: geekTelemetryChartDuration,
                 isAvailable: metricAvailable(.gpuUsage),
                 currentValue: metricValue(.gpuUsage),
                 memoryValue: nil,
@@ -852,18 +1000,15 @@ struct MenuBarAdvancedStatusView: View {
                 applications: cpuBreakdown?.userPercent,
                 system: cpuBreakdown?.systemPercent,
                 points: geekChartHistory,
-                duration: geekChartDuration
+                duration: geekTelemetryChartDuration
             ))
             preferredSize = GeekHoverDetailMetrics.cpuUsageSize
             chartMetric = .cpu
             accessibilityLabel = L10n.text("CPU 使用率", "CPU Usage")
         case .cpuUptimeInspector:
-            let uptimeSeconds = monitorSnapshot?.systemUptimeSeconds ?? 0
-            let poweredOnAt = uptimeSeconds > 0
-                ? PanelTimestampFormat.monthDayAndTime(
-                    historyReferenceDate.addingTimeInterval(-uptimeSeconds)
-                )
-                : "--"
+            let poweredOnAt = monitorSnapshot?.systemBootAt.map {
+                PanelTimestampFormat.monthDayAndTime($0)
+            } ?? "—"
             content = AnyView(GeekProcessorUptimeHoverDetail(
                 uptime: uptimeText,
                 poweredOnAt: poweredOnAt
@@ -885,7 +1030,7 @@ struct MenuBarAdvancedStatusView: View {
         case .networkHistory:
             content = AnyView(GeekNetworkHistoryHoverDetail(
                 points: geekChartHistory,
-                duration: geekChartDuration,
+                duration: geekTelemetryChartDuration,
                 uploadValue: networkUpText,
                 downloadValue: networkDownText
             ))
@@ -931,7 +1076,6 @@ struct MenuBarAdvancedStatusView: View {
                 ? L10n.text("完整风扇控制", "Full Fan Control")
                 : L10n.text("紧凑风扇控制", "Compact Fan Control")
         case .powerModeAndChargeTarget:
-            let seventy = BatteryChargeTarget(rawValue: 70)!
             content = AnyView(
                 GeekEnergyModeHoverDetail(
                     batteryMode: .automatic,
@@ -942,14 +1086,12 @@ struct MenuBarAdvancedStatusView: View {
                     isCharging: true,
                     showsChargeTargetSetting: true,
                     showsFullChargeAction: true,
-                    chargeLimitState: BatteryChargeLimitState(
-                        target: .full,
-                        availableTargets: [seventy, .protected, .full]
-                    ),
+                    chargeLimitState: MiniWindowDemoData.chargeLimitState(),
                     batteryPowerWatts: 0,
                     adapterPowerWatts: 94,
                     adjustmentState: .idle,
-                    controlsEnabled: true,
+                    controlsEnabled: false,
+                    chargeLimitControlsEnabled: false,
                     onChargeToFull: { .unsupported },
                     onSetChargeTarget: { _ in .unsupported },
                     onOpenBatterySettings: {},
@@ -973,7 +1115,7 @@ struct MenuBarAdvancedStatusView: View {
                 unit: .temperature,
                 valueRange: 0...100,
                 tint: resolvedGPUTint,
-                duration: geekChartDuration,
+                duration: geekTelemetryChartDuration,
                 secondaryTitle: metricAvailable(.gpuUsage)
                     ? L10n.text("负载", "Load")
                     : nil,
@@ -993,7 +1135,7 @@ struct MenuBarAdvancedStatusView: View {
                 unit: .temperature,
                 valueRange: 0...100,
                 tint: temperatureTint,
-                duration: geekChartDuration,
+                duration: geekTelemetryChartDuration,
                 secondaryTitle: L10n.text("频率", "Frequency"),
                 secondaryValue: processorTelemetry?.clusters
                     .compactMap(\.frequencyMHz)
@@ -1003,11 +1145,71 @@ struct MenuBarAdvancedStatusView: View {
             preferredSize = GeekSensorPowerHoverDetailMetrics.sensorHistorySize
             chartMetric = .temperature
             accessibilityLabel = L10n.text("CPU 温度历史", "CPU Temperature History")
+        case .powerChipBreakdown, .powerBacklightDetail, .powerBatteryRowDetail,
+             .powerChipBreakdownUltra, .powerChipWithoutCPU, .powerSystemDetail:
+            let readouts = switch scenario {
+            case .powerChipBreakdownUltra:
+                geekDebugPowerReadouts(soc: MiniWindowDemoData.socPowerReading(
+                    channelWatts: MiniWindowDemoData.ultraPowerChannelWatts
+                ))
+            case .powerChipWithoutCPU:
+                geekDebugPowerReadouts(soc: MiniWindowDemoData.socPowerReading(
+                    channelWatts: MiniWindowDemoData.powerChannelWattsWithoutCPU
+                ))
+            default:
+                geekPowerReadouts
+            }
+            let id = switch scenario {
+            case .powerBacklightDetail: "power-backlight"
+            case .powerSystemDetail: "power-system"
+            case .powerBatteryRowDetail: "power-battery"
+            default: "power-chip"
+            }
+            guard let readout = readouts.first(where: { $0.id == id }) else { return }
+            content = AnyView(GeekSensorReadoutDetail(readout: readout))
+            preferredSize = GeekSensorReadoutLayout.detailSize(extraRowCount: readout.detailRows.count)
+            chartMetric = nil
+            accessibilityLabel = readout.title
+        case .powerBatteryDetail:
+            content = AnyView(GeekBatteryElectricalHoverDetail(
+                electrical: batteryElectricalSnapshot,
+                cycleCount: healthSummary?.batteryCycleCount ?? batteryElectricalSnapshot?.cycleCount,
+                condition: healthSummary?.batteryCondition.map(batteryConditionText),
+                chargePercent: batterySnapshot?.chargePercent,
+                healthPercent: healthSummary?.batteryCapacityPercent,
+                statusText: batteryStatusTitle,
+                isCharging: batterySnapshot?.isCharging,
+                chargeTargetPercent: batteryChargeLimitState?.target.rawValue,
+                remainingTimeMinutes: batterySnapshot?.remainingTimeMinutes,
+                runtimeEstimate: batteryRuntimeEstimate
+            ))
+            preferredSize = GeekSensorPowerHoverDetailMetrics.batterySize
+            chartMetric = nil
+            accessibilityLabel = L10n.text("电池与充电三级详情", "Battery and Charging Deep Detail")
+        case .sensorCPURowDetail, .sensorPalmRestDetail:
+            let zone: SystemTemperatureZone = scenario == .sensorCPURowDetail ? .chip : .palmRest
+            guard let detail = geekDebugTemperatureDetail(zone) else { return }
+            content = detail.view
+            preferredSize = detail.size
+            chartMetric = .temperature
+            accessibilityLabel = L10n.text("温度三级详情", "Temperature Deep Detail")
+        case .sensorHardwareProbes:
+            let detail = geekDebugHardwareProbesDetail
+            content = detail.view
+            preferredSize = detail.size
+            chartMetric = nil
+            accessibilityLabel = L10n.text("全部核心与硬件温度", "All Core & Hardware Temperatures")
+        case .sensorAmbientLightDetail:
+            guard let readout = geekDebugAmbientLightReadout else { return }
+            content = AnyView(GeekSensorReadoutDetail(readout: readout))
+            preferredSize = GeekSensorReadoutLayout.detailSize(extraRowCount: 0)
+            chartMetric = nil
+            accessibilityLabel = readout.title
         case .sensorFanSpeedHistory:
             let readings = geekFanTelemetry.readings
             content = AnyView(GeekFanHoverDetail(
                 points: geekChartHistory,
-                duration: geekChartDuration,
+                duration: geekTelemetryChartDuration,
                 currentValue: readings.first?.displayRPM ?? "--",
                 readings: readings,
                 valueRange: 0...fanTrendMaximum,
@@ -1143,141 +1345,14 @@ struct MenuBarAdvancedStatusView: View {
     }
 
     @ViewBuilder
-    private var liveHeader: some View {
-        MenuBarObservedObjectBoundary(model: store) {
-            MenuBarObservedObjectBoundary(model: monitorState) {
-                MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                    header
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var liveCurrentContent: some View {
-        if presentation.usesGeekLayout {
-            currentContent
-        } else {
-        switch selectedSection {
-        case .overview:
-            MenuBarObservedObjectBoundary(model: store) {
-                MenuBarObservedObjectBoundary(model: monitorState) {
-                    MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                        MenuBarObservedObjectBoundary(model: computerHealthStore) {
-                            MenuBarObservedObjectBoundary(model: fanControl) {
-                                currentContent
-                            }
-                        }
-                    }
-                }
-            }
-        case .processor:
-            MenuBarObservedObjectBoundary(model: store) {
-                MenuBarObservedObjectBoundary(model: monitorState) {
-                    MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                        currentContent
-                    }
-                }
-            }
-        case .memory:
-            MenuBarObservedObjectBoundary(model: store) {
-                MenuBarObservedObjectBoundary(model: monitorState) {
-                    currentContent
-                }
-            }
-        case .disk:
-            MenuBarObservedObjectBoundary(model: store) {
-                MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                    MenuBarObservedObjectBoundary(model: computerHealthStore) {
-                        currentContent
-                    }
-                }
-            }
-        case .network:
-            MenuBarObservedObjectBoundary(model: monitorState) {
-                MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                    MenuBarObservedObjectBoundary(model: computerHealthStore) {
-                        currentContent
-                    }
-                }
-            }
-        case .sensors:
-            MenuBarObservedObjectBoundary(model: monitorState) {
-                MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                    MenuBarObservedObjectBoundary(model: computerHealthStore) {
-                        MenuBarObservedObjectBoundary(model: fanControl) {
-                            currentContent
-                        }
-                    }
-                }
-            }
-        case .power:
-            MenuBarObservedObjectBoundary(model: store) {
-                MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                    MenuBarObservedObjectBoundary(model: computerHealthStore) {
-                        currentContent
-                    }
-                }
-            }
-        case .cleanup:
-            MenuBarObservedObjectBoundary(model: store) {
-                MenuBarObservedObjectBoundary(model: auxiliaryState) {
-                    currentContent
-                }
-            }
-        }
-        }
-    }
-
-    @ViewBuilder
     private var liveGeekOverview: some View {
-        liveCard(.availability) { geekOverviewPage }
+        liveCard(.availability, page: MenuBarCardIdentity.overviewPage) { geekOverviewPage }
     }
 
-    // Keep the legacy presentation's large generic type out of the live
-    // panel's host metadata. Only the requested presentation is constructed.
-    private var currentContent: AnyView {
-        if presentation.usesGeekLayout {
-            return AnyView(geekDetailPage)
-        } else {
-            return AnyView(detailPage)
-        }
-    }
-
-    @ViewBuilder
-    var detailPage: some View {
-        ScrollView(.vertical) {
-            VStack(spacing: AppDesignTokens.Spacing.small) {
-                switch selectedSection {
-                case .overview:
-                    overviewPage
-                case .processor:
-                    processorPage
-                case .memory:
-                    memoryPage
-                case .disk:
-                    diskPage
-                case .network:
-                    networkPage
-                case .sensors:
-                    sensorsPage
-                case .power:
-                    powerPage
-                case .cleanup:
-                    cleanupPage
-                }
-
-                if let detail = selectedSection.tertiaryDetail {
-                    HStack {
-                        Spacer(minLength: 0)
-                        tertiaryDetailButton(detail)
-                    }
-                }
-            }
-            .padding(AppDesignTokens.Spacing.small)
-        }
-        .scrollIndicators(.hidden)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    // Preserve the navigation erasure boundary and the per-card observation
+    // scopes; overview opening must not construct unused detail pages.
+    private var liveCurrentContent: AnyView {
+        geekDetailPage
     }
 
     func openApp(filter: ReviewFilter) {
@@ -1296,21 +1371,61 @@ private struct MenuBarObservedObjectBoundary<Model: ObservableObject, Content: V
     }
 }
 
-private struct MenuBarAdvancedSamplingCoordinator: View {
+// Internal so runtime regressions can host this exact coordinator, with an
+// isolated context rather than installing the resident status controller.
+struct MenuBarAdvancedSamplingCoordinator: View {
     @ObservedObject var store: ScanStore
     @ObservedObject var monitorState: MenuBarMonitorState
     let auxiliaryState: MenuBarAuxiliaryMonitorState
     @ObservedObject var panelSettingsState: MenuBarPanelSettingsState
     let presentation: PanelDensity
     let selectedSection: PanelSection
+    let tertiaryVisible: Bool
+    let samplingContext: MenuBarSamplingContext
+
+    init(store: ScanStore, monitorState: MenuBarMonitorState,
+         auxiliaryState: MenuBarAuxiliaryMonitorState,
+         panelSettingsState: MenuBarPanelSettingsState, presentation: PanelDensity,
+         selectedSection: PanelSection, tertiaryVisible: Bool,
+         samplingContext: MenuBarSamplingContext = .shared) {
+        self.store = store
+        self.monitorState = monitorState
+        self.auxiliaryState = auxiliaryState
+        self.panelSettingsState = panelSettingsState
+        self.presentation = presentation
+        self.selectedSection = selectedSection
+        self.tertiaryVisible = tertiaryVisible
+        self.samplingContext = samplingContext
+    }
+
+    private var processSection: PanelSection? {
+        guard hasPresentedFirstFrame,
+              samplingContext.plan?.panelVisible != false else { return nil }
+        return MenuBarProcessSamplingDemand.section(selectedSection, tertiaryVisible: tertiaryVisible)
+    }
 
     @State private var consumerID = UUID()
+    @State private var hasPresentedFirstFrame = false
+    @State private var firstFrameTask: Task<Void, Never>?
 
     private var demand: MenuBarAuxiliaryMonitorDemand {
         presentation.auxiliaryDemand(
             for: selectedSection,
-            geekConfiguration: panelSettingsState.geekDashboardConfiguration
+            geekConfiguration: panelSettingsState.geekDashboardConfiguration,
+            tertiaryVisible: tertiaryVisible && hasPresentedFirstFrame
         )
+    }
+
+    private func scheduleFirstFrameDemand() {
+        guard !hasPresentedFirstFrame, firstFrameTask == nil else { return }
+        firstFrameTask = Task { @MainActor in
+            await MenuBarSamplingContext.awaitPresentationTurn()
+            guard !Task.isCancelled else { return }
+            firstFrameTask = nil
+            guard auxiliaryState.isConsumerRegistered(consumerID),
+                  samplingContext.plan?.panelVisible != false else { return }
+            hasPresentedFirstFrame = true
+        }
     }
 
     var body: some View {
@@ -1320,12 +1435,18 @@ private struct MenuBarAdvancedSamplingCoordinator: View {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
-                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
-                auxiliaryState.registerConsumer(
-                    consumerID,
-                    demand: demand,
-                    paused: store.isMenuBarRefreshPaused
-                )
+                let appearStartedAt = MenuBarPresentationTrace.uptime
+                defer { MenuBarPresentationTrace.span("sampling.onAppear", from: appearStartedAt) }
+                // Declared after the first frame; it is nil unless a level-3
+                // process page is already open.
+                scheduleFirstFrameDemand()
+                MenuBarPresentationTrace.measure("aux.consumer") {
+                    auxiliaryState.registerConsumer(
+                        consumerID,
+                        demand: demand,
+                        paused: store.isMenuBarRefreshPaused
+                    )
+                }
                 if monitorState.needsRefresh(
                     interval: store.menuBarRefreshInterval.seconds
                 ) {
@@ -1334,21 +1455,64 @@ private struct MenuBarAdvancedSamplingCoordinator: View {
                     store.refreshMenuBarMonitor()
                 }
             }
+            .onChange(of: hasPresentedFirstFrame) {
+                guard hasPresentedFirstFrame else { return }
+                // Read the current route, not the view captured when the
+                // opening task was scheduled.
+                MenuBarPresentationTrace.measure("process.demand") {
+                    store.updateMenuBarProcessConsumer(consumerID, section: processSection)
+                }
+                auxiliaryState.updateConsumer(consumerID, demand: demand)
+            }
+            .onReceive(samplingContext.planChanges.removeDuplicates()) { plan in
+#if DEBUG || STORAGE_CLEANER_BETA
+                guard !MiniWindowDemoData.isEnabled else { return }
+#endif
+                guard let plan else { return }
+                if !plan.panelVisible {
+                    firstFrameTask?.cancel()
+                    firstFrameTask = nil
+                    hasPresentedFirstFrame = false
+                    store.updateMenuBarProcessConsumer(consumerID, section: nil)
+                    return
+                }
+                // Cached panels need the same first-frame gate on each reopen.
+                if !hasPresentedFirstFrame {
+                    scheduleFirstFrameDemand()
+                    return
+                }
+                store.updateMenuBarProcessConsumer(consumerID,
+                    section: plan.panelVisible ? MenuBarProcessSamplingDemand.section(
+                        selectedSection, tertiaryVisible: tertiaryVisible) : nil)
+            }
             .onChange(of: monitorState.snapshot?.generatedAt) {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
-                auxiliaryState.refreshFromPrimaryMonitorUpdate()
+                MenuBarPresentationTrace.measure("aux.refresh") {
+                    auxiliaryState.refreshFromPrimaryMonitorUpdate()
+                }
             }
             .onChange(of: selectedSection) {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
-                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
-                auxiliaryState.updateConsumer(consumerID, demand: demand)
+                MenuBarPresentationTrace.measure("process.demand") {
+                    store.updateMenuBarProcessConsumer(consumerID, section: processSection)
+                }
+                MenuBarPresentationTrace.measure("aux.consumer") {
+                    auxiliaryState.updateConsumer(consumerID, demand: demand)
+                }
                 if selectedSection == .sensors {
                     store.refreshMenuBarMonitor()
                 }
+            }
+            .onChange(of: tertiaryVisible) {
+#if DEBUG || STORAGE_CLEANER_BETA
+                guard !MiniWindowDemoData.isEnabled else { return }
+#endif
+                store.updateMenuBarProcessConsumer(consumerID, section: processSection)
+                auxiliaryState.updateConsumer(consumerID, demand: demand)
             }
             .onChange(of: presentation) {
 #if DEBUG || STORAGE_CLEANER_BETA
@@ -1366,7 +1530,7 @@ private struct MenuBarAdvancedSamplingCoordinator: View {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
-                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
+                store.updateMenuBarProcessConsumer(consumerID, section: processSection)
                 auxiliaryState.setPaused(store.isMenuBarRefreshPaused)
             }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
@@ -1376,15 +1540,22 @@ private struct MenuBarAdvancedSamplingCoordinator: View {
             }
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
                 .receive(on: DispatchQueue.main)) { _ in
-                store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)
+                store.updateMenuBarProcessConsumer(consumerID, section: processSection)
                 auxiliaryState.setPaused(store.isMenuBarRefreshPaused)
             }
             .onDisappear {
 #if DEBUG || STORAGE_CLEANER_BETA
                 guard !MiniWindowDemoData.isEnabled else { return }
 #endif
-                store.updateMenuBarProcessConsumer(consumerID, section: nil)
-                auxiliaryState.unregisterConsumer(consumerID)
+                firstFrameTask?.cancel()
+                firstFrameTask = nil
+                hasPresentedFirstFrame = false
+                MenuBarPresentationTrace.measure("process.demand") {
+                    store.updateMenuBarProcessConsumer(consumerID, section: nil)
+                }
+                MenuBarPresentationTrace.measure("aux.consumer") {
+                    auxiliaryState.unregisterConsumer(consumerID)
+                }
             }
     }
 }

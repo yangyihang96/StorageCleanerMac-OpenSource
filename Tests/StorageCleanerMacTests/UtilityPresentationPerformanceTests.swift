@@ -309,20 +309,17 @@ final class UtilityPresentationPerformanceTests: XCTestCase {
     }
 
     func testEnergyImpactViewCreatesOnePresentationAndHasNoLegacyComputedLists() throws {
-        let source = try sourceText(at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
-        let viewStart = try XCTUnwrap(source.range(of: "struct EnergyImpactView: View {"))
-        let sortModeStart = try XCTUnwrap(
-            source.range(
-                of: "enum EnergyImpactSortMode",
-                range: viewStart.upperBound..<source.endIndex
-            )
-        )
-        let viewSource = String(source[viewStart.lowerBound..<sortModeStart.lowerBound])
-
+        // D67 B3 renders the production result through the B2 adapter.
+        let source = try sourceText(at: "Sources/StorageCleanerMac/Views/LightfieldEnergyPage.swift")
+        let viewSource = try sourceSegment(source, from: "struct LightfieldEnergyPage<", to: "struct LightfieldEnergyAppRow:")
         XCTAssertEqual(
             viewSource.components(separatedBy: "EnergyImpactListPresenter.presentation(").count - 1,
             1
         )
+        XCTAssertTrue(viewSource.contains("let presentation = EnergyImpactListPresenter.presentation("))
+        XCTAssertTrue(viewSource.contains("let apps = presentation.apps"))
+        XCTAssertTrue(viewSource.contains("let maximum = maximumValue(presentation)"))
+        XCTAssertFalse(viewSource.contains("private var apps:"))
         XCTAssertFalse(viewSource.contains("private var visibleApps"))
         XCTAssertFalse(viewSource.contains("private var maxEstimatedEnergyWh"))
         XCTAssertFalse(viewSource.contains("private var maxCurrentPowerWatts"))
@@ -343,7 +340,7 @@ final class UtilityPresentationPerformanceTests: XCTestCase {
         let uninstallerSource = try sourceSegment(
             source,
             from: "struct AppUninstallerView: View {",
-            to: "struct UninstallPreviewSheet: View {"
+            to: "struct RelatedAppFilesReviewSheet: View {"
         )
         let uninstallPresentationSource = try sourceSegment(
             presentationSource,
@@ -358,9 +355,12 @@ final class UtilityPresentationPerformanceTests: XCTestCase {
         XCTAssertNil(
             uninstallerSource.range(of: #"\.last(?:\?|\b)"#, options: .regularExpression)
         )
-        XCTAssertTrue(uninstallerSource.contains("List(selection: $selectedApplicationID)"))
-        XCTAssertTrue(uninstallerSource.contains("ForEach(presentation.apps)"))
-        XCTAssertTrue(uninstallerSource.contains(".tag(app.id)"))
+        // D67 keeps a lazy stable-ID list in the bounded result viewport.
+        XCTAssertTrue(uninstallerSource.contains("FeatureLightfieldUninstallList(apps: presentation.apps"))
+        XCTAssertFalse(uninstallerSource.contains("VStack { ForEach(presentation.apps)"))
+        let rows = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldUninstallList.swift")
+        XCTAssertTrue(rows.contains("LazyVStack(spacing: 0)"))
+        XCTAssertTrue(rows.contains("id: \\.element.id"))
 
         XCTAssertEqual(
             updaterSource.components(
@@ -412,11 +412,26 @@ final class UtilityPresentationPerformanceTests: XCTestCase {
         let uninstallerSource = try sourceSegment(
             source,
             from: "struct AppUninstallerView: View {",
-            to: "struct UninstallPreviewSheet: View {"
+            to: "struct RelatedAppFilesReviewSheet: View {"
         )
 
-        XCTAssertTrue(energySource.contains("LazyVStack(spacing: 0)"))
-        XCTAssertTrue(uninstallerSource.contains("List(selection: $selectedApplicationID)"))
+        let energyPage = try sourceText(at: "Sources/StorageCleanerMac/Views/LightfieldEnergyPage.swift")
+        let shared = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldComponents.swift")
+        XCTAssertTrue(energySource.contains("LightfieldEnergyPage(snapshot: snapshot"))
+        XCTAssertTrue(energyPage.contains("LightfieldResultContent(listHeader:"))
+        // D77/fix round 1: the first app defaults to collapsed and owns its
+        // identity in the document header; every remaining stable app is lazy.
+        XCTAssertTrue(energyPage.contains("if let first = apps.first"))
+        XCTAssertTrue(energyPage.contains("initiallyExpanded: false)"))
+        XCTAssertTrue(energyPage.contains(".id(first.id)"))
+        XCTAssertTrue(energyPage.contains("ForEach(apps.dropFirst())"))
+        XCTAssertTrue(shared.contains("LazyVStack(spacing: 0) { rows }"))
+        // D67 keeps a lazy stable-ID list in the bounded result viewport.
+        XCTAssertTrue(uninstallerSource.contains("FeatureLightfieldUninstallList(apps: presentation.apps"))
+        XCTAssertFalse(uninstallerSource.contains("VStack { ForEach(presentation.apps)"))
+        let uninstallList = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldUninstallList.swift")
+        XCTAssertTrue(uninstallList.contains("LazyVStack(spacing: 0)"))
+        XCTAssertTrue(uninstallList.contains("ForEach(Array(apps.enumerated()), id: \\.element.id)"))
     }
 
     private func makeEnergyApp(

@@ -74,6 +74,7 @@ DIST_DIR="${DIST_DIR_OVERRIDE:-/tmp/storage-cleaner-run-dist}"
 APP_BUNDLE="$DIST_DIR/$PRODUCT_NAME.app"
 
 if [ "$BETA_MODE" -eq 1 ]; then
+  APP_VERSION="${BETA_APP_VERSION:-$DEFAULT_BETA_APP_VERSION}"
   APP_NAME="StorageCleanerMacBeta"
   APP_DISPLAY_NAME="测试版"
   BUNDLE_ID="com.local.StorageCleanerMac.beta"
@@ -93,11 +94,32 @@ if [ "$BETA_MODE" -eq 1 ]; then
   UPDATE_FEED_URL="https://raw.githubusercontent.com/yangyihang96/StorageCleanerMacUpdates/main/appcast-beta.xml"
 fi
 
+FILE_HELPER_NAME="StorageCleanerFileOperationHelper"
+FILE_HELPER_LABEL="$BUNDLE_ID.FileOperationHelper"
+FILE_HELPER_PLIST="$FILE_HELPER_LABEL.plist"
+# D88: Finder right-click entry. A thin Finder Sync extension that only hands
+# selected .app paths to this app's existing uninstall review, by opening them
+# with its host app (open-documents; there is no URL scheme). Only the
+# installed Beta (--beta --install) embeds it: run, --bundle-only and a Beta
+# assembled without --install never carry an extension, so no copy with the
+# release identity, and no uninstalled build, registers one. Inside the
+# extension the menu appears only when its host is /Applications/测试版.app.
+FINDER_EXTENSION_NAME="StorageCleanerFinderExtension"
+FINDER_EXTENSION_ID="$BUNDLE_ID.FinderUninstall"
+FINDER_EXTENSION_PRINCIPAL_CLASS="StorageCleanerFinderUninstallExtension"
+EMBED_FINDER_EXTENSION=0
+if [ "$BETA_MODE" -eq 1 ] && [ "$BETA_INSTALL" -eq 1 ]; then
+  EMBED_FINDER_EXTENSION=1
+fi
+
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_LAUNCH_DAEMONS="$APP_CONTENTS/Library/LaunchDaemons"
+APP_PLUGINS="$APP_CONTENTS/PlugIns"
+FINDER_EXTENSION_BUNDLE="$APP_PLUGINS/$FINDER_EXTENSION_NAME.appex"
+FINDER_EXTENSION_BINARY="$FINDER_EXTENSION_BUNDLE/Contents/MacOS/$FINDER_EXTENSION_NAME"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 APP_FAN_HELPER="$APP_RESOURCES/$FAN_HELPER_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
@@ -289,8 +311,8 @@ copy_resource_file() {
 }
 
 usage() {
-  echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--bundle-only]"
-  echo "       $0 --beta [--install] [--verify] [--screenshots] [--logs|--telemetry]"
+  echo "usage: $0 --beta [--install] [--verify] [--screenshots] [--logs|--telemetry]   (normal development loop)"
+  echo "       $0 [run|--debug|--logs|--telemetry|--verify|--bundle-only]   (release identity; shares the installed app's data)"
 }
 
 case "$MODE" in
@@ -306,8 +328,25 @@ case "$MODE" in
     ;;
 esac
 
-if [ "$BETA_MODE" -eq 0 ] && [ "$MODE" != "--bundle-only" ] && [ "$MODE" != "bundle" ]; then
-  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+# The non-Beta modes launch a build with the release bundle identifier, which
+# shares data and preferences with the installed app. Never kill a running
+# copy: it may be in the middle of a cleanup, restore or fan-control session.
+if [ "$BETA_MODE" -eq 0 ] && [ "$MODE" != "--bundle-only" ] && [ "$MODE" != "bundle" ] \
+  && pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+  if [ "${STORAGE_CLEANER_QUIT_RUNNING_APP:-0}" != "1" ]; then
+    echo "$APP_NAME is running. Quit it first, or use --beta for the development loop." >&2
+    echo "Set STORAGE_CLEANER_QUIT_RUNNING_APP=1 to ask it to quit normally." >&2
+    exit 3
+  fi
+  osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+  for _ in $(seq 1 40); do
+    pgrep -x "$APP_NAME" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    echo "$APP_NAME did not quit; it may be finishing work. Not forcing it." >&2
+    exit 3
+  fi
 fi
 
 case "${STORAGE_CLEANER_SKIP_TESTS:-0}" in
@@ -347,6 +386,16 @@ if [ "$BETA_MODE" -eq 1 ]; then
 fi
 "$SWIFT_TOOL" build "${swift_build_args[@]}"
 BUILD_BIN_DIR="$("$SWIFT_TOOL" build "${swift_build_args[@]}" --show-bin-path)"
+# Relink only this product with a signed, embedded helper-specific Info.plist.
+# The surrounding App/BuildInfo plist is never the helper's version authority.
+HELPER_SIGNED_INFO="$SWIFT_BUILD_DIR/helper-signed-info-$APP_BUILD.plist"
+python3 "$ROOT_DIR/script/helper_build_info.py" "$HELPER_SIGNED_INFO" "$APP_BUILD" "$FAN_HELPER_LABEL" "$FAN_HELPER_NAME"
+"$SWIFT_TOOL" build "${swift_build_args[@]}" --product "$FAN_HELPER_NAME" \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_SIGNED_INFO"
+FILE_HELPER_SIGNED_INFO="$SWIFT_BUILD_DIR/file-helper-signed-info-$APP_BUILD.plist"
+python3 "$ROOT_DIR/script/helper_build_info.py" "$FILE_HELPER_SIGNED_INFO" "$APP_BUILD" "$FILE_HELPER_LABEL" "$FILE_HELPER_NAME"
+"$SWIFT_TOOL" build "${swift_build_args[@]}" --product "$FILE_HELPER_NAME" \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$FILE_HELPER_SIGNED_INFO"
 BUILD_BINARY="$BUILD_BIN_DIR/$PRODUCT_NAME"
 FAN_HELPER_BINARY="$BUILD_BIN_DIR/$FAN_HELPER_NAME"
 SPARKLE_FRAMEWORK="$BUILD_BIN_DIR/Sparkle.framework"
@@ -369,10 +418,61 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS" "$APP_LAUNCH_DAEMONS"
 /usr/bin/ditto --norsrc "$BUILD_BINARY" "$APP_BINARY"
 /usr/bin/ditto --norsrc "$FAN_HELPER_BINARY" "$APP_FAN_HELPER"
+[ -x "$BUILD_BIN_DIR/StorageCleanerUpdateAskpass" ]
+/usr/bin/ditto --norsrc "$BUILD_BIN_DIR/StorageCleanerUpdateAskpass" "$APP_RESOURCES/StorageCleanerUpdateAskpass"
+[ -x "$BUILD_BIN_DIR/$FILE_HELPER_NAME" ]
+/usr/bin/ditto --norsrc "$BUILD_BIN_DIR/$FILE_HELPER_NAME" "$APP_RESOURCES/$FILE_HELPER_NAME"
+cat >"$APP_LAUNCH_DAEMONS/$FILE_HELPER_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$FILE_HELPER_LABEL</string>
+<key>BundleProgram</key><string>Contents/Resources/$FILE_HELPER_NAME</string>
+<key>MachServices</key><dict><key>$FILE_HELPER_LABEL</key><true/></dict>
+</dict></plist>
+PLIST
+chmod +x "$APP_RESOURCES/$FILE_HELPER_NAME"
+plutil -lint "$APP_LAUNCH_DAEMONS/$FILE_HELPER_PLIST" >/dev/null
+if [ "$EMBED_FINDER_EXTENSION" -eq 1 ]; then
+[ -x "$BUILD_BIN_DIR/$FINDER_EXTENSION_NAME" ]
+mkdir -p "$FINDER_EXTENSION_BUNDLE/Contents/MacOS"
+/usr/bin/ditto --norsrc "$BUILD_BIN_DIR/$FINDER_EXTENSION_NAME" "$FINDER_EXTENSION_BINARY"
+chmod +x "$FINDER_EXTENSION_BINARY"
+cat >"$FINDER_EXTENSION_BUNDLE/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>$FINDER_EXTENSION_NAME</string>
+<key>CFBundleIdentifier</key><string>$FINDER_EXTENSION_ID</string>
+<key>CFBundleName</key><string>$APP_DISPLAY_NAME</string>
+<key>CFBundleDisplayName</key><string>$APP_DISPLAY_NAME</string>
+<key>CFBundlePackageType</key><string>XPC!</string>
+<key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
+<key>CFBundleVersion</key><string>$APP_BUILD</string>
+<key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
+<key>NSExtension</key><dict>
+<key>NSExtensionAttributes</key><dict/>
+<key>NSExtensionPointIdentifier</key><string>com.apple.FinderSync</string>
+<key>NSExtensionPrincipalClass</key><string>$FINDER_EXTENSION_PRINCIPAL_CLASS</string>
+</dict>
+</dict></plist>
+PLIST
+FINDER_EXTENSION_ENTITLEMENTS="$SWIFT_BUILD_DIR/finder-extension.entitlements"
+cat >"$FINDER_EXTENSION_ENTITLEMENTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.app-sandbox</key><true/>
+</dict></plist>
+PLIST
+plutil -lint "$FINDER_EXTENSION_BUNDLE/Contents/Info.plist" "$FINDER_EXTENSION_ENTITLEMENTS" >/dev/null
+fi
 /usr/bin/ditto --norsrc "$SPARKLE_FRAMEWORK" "$APP_FRAMEWORKS/Sparkle.framework"
 copy_resource_file "$SPARKLE_LICENSE" "$APP_RESOURCES/Sparkle-LICENSE.txt"
 copy_resource_file "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$APP_RESOURCES/THIRD_PARTY_NOTICES.md"
 copy_resource_file "$ROOT_DIR/Resources/CleanupRules.v2.json" "$APP_RESOURCES/CleanupRules.v2.json"
+source "$ROOT_DIR/script/benchmark_resources.sh"
+copy_benchmark_resources
 if [ "$BETA_MODE" -eq 1 ]; then
   cat >"$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -402,10 +502,24 @@ if [ -f "$ROOT_DIR/Resources/$ICON_FILE" ]; then
   copy_resource_file "$ROOT_DIR/Resources/$ICON_FILE" "$APP_RESOURCES/$ICON_FILE"
 fi
 copy_resource_file "$ROOT_DIR/Resources/LandingArtwork-SafeCleanup-v1.png" "$APP_RESOURCES/LandingArtwork-SafeCleanup-v1.png"
+copy_resource_file "$ROOT_DIR/Resources/LandingArtwork-SafeCleanup-v1-Day.png" "$APP_RESOURCES/LandingArtwork-SafeCleanup-v1-Day.png"
 copy_resource_file "$ROOT_DIR/Resources/LandingArtwork-BrowserPrivacy-v1.png" "$APP_RESOURCES/LandingArtwork-BrowserPrivacy-v1.png"
 for artwork in "$ROOT_DIR"/Resources/GoldenArtwork-*.png; do
   [ -f "$artwork" ] || continue
   copy_resource_file "$artwork" "$APP_RESOURCES/$(basename "$artwork")"
+done
+# D58 module/state HEIC art and approved B2 benchmark option PNGs.
+# Masters stay outside the repository.
+mkdir -p "$APP_RESOURCES/Art"
+for artwork in "$ROOT_DIR"/Resources/Art/*.heic "$ROOT_DIR"/Resources/Art/opt-benchmark-*.png "$ROOT_DIR"/Resources/Art/scope-cleanup-*.png; do
+  [ -f "$artwork" ] || continue
+  copy_resource_file "$artwork" "$APP_RESOURCES/Art/$(basename "$artwork")"
+done
+# D70 option thumbnails: approved RGBA PNG fallback, 28 pt at 2x / 3x.
+# The option inventory JSON is source/test only; the app never reads it.
+for artwork in "$ROOT_DIR"/Resources/Art/opt-*.png; do
+  [ -f "$artwork" ] || continue
+  copy_resource_file "$artwork" "$APP_RESOURCES/Art/$(basename "$artwork")"
 done
 if [ -f "$ROOT_DIR/Resources/$ARTWORK_FILE" ]; then
   copy_resource_file "$ROOT_DIR/Resources/$ARTWORK_FILE" "$APP_RESOURCES/$ARTWORK_FILE"
@@ -420,6 +534,13 @@ if [ "$BETA_MODE" -eq 1 ]; then
     plutil -create xml1 "$localized_info"
     plutil -insert CFBundleName -string "$APP_DISPLAY_NAME" "$localized_info"
     plutil -insert CFBundleDisplayName -string "$APP_DISPLAY_NAME" "$localized_info"
+    if [[ "$localized_info" == */zh-Hans.lproj/* ]]; then
+      plutil -insert NSPhotoLibraryUsageDescription -string '仅读取照片元数据和本地小缩略图以查找重复或相似照片。读写权限仅用于创建待删除相册和加入您选中的照片；不删除、不上传、不下载云端原图。' "$localized_info"
+      plutil -insert NSAppBundlesUsageDescription -string '仅在您确认卸载时，请求管理所选应用的安装包，以安全移入废纸篓。' "$localized_info"
+    else
+      plutil -insert NSPhotoLibraryUsageDescription -string 'Read photo metadata and small local thumbnails to find duplicate or similar photos. Read/write access creates a review album and adds selected photos; no deletion, uploads, or cloud original downloads.' "$localized_info"
+      plutil -insert NSAppBundlesUsageDescription -string 'Manage only the app you choose to uninstall so it can be moved safely to Trash.' "$localized_info"
+    fi
   done < <(find "$APP_RESOURCES" -path '*.lproj/InfoPlist.strings' -print0)
 fi
 
@@ -487,6 +608,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$LEADERBOARD_API_URL</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSAppBundlesUsageDescription</key>
+  <string>Manage only the app you choose to uninstall so it can be moved safely to Trash.</string>
 PLIST
 
 if [ "$BETA_MODE" -eq 1 ]; then
@@ -528,6 +651,18 @@ cat >>"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+# The plist is assembled in pieces above; edit it only once it is complete.
+if [ "$BETA_MODE" -eq 1 ]; then
+  plutil -insert NSPhotoLibraryUsageDescription -string 'Read photo metadata and small local thumbnails to find duplicate or similar photos. Read/write access creates a review album and adds selected photos; no deletion, uploads, or cloud original downloads.' "$INFO_PLIST"
+fi
+
+# D88: the sandboxed Finder extension hands .app bundles over as documents;
+# Launch Services refuses that (kLSAppDoesNotClaimTypeErr) unless the host
+# claims the type. Alternate rank: listed under Open With, never the default.
+if [ "$EMBED_FINDER_EXTENSION" -eq 1 ]; then
+  plutil -insert CFBundleDocumentTypes -json '[{"CFBundleTypeName":"Application","CFBundleTypeRole":"Viewer","LSHandlerRank":"Alternate","LSItemContentTypes":["com.apple.application-bundle"]}]' "$INFO_PLIST"
+fi
+
 plutil -lint "$INFO_PLIST" "$BUILD_INFO_PLIST" "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST" >/dev/null
 
 clean_attrs "$APP_BUNDLE"
@@ -541,7 +676,32 @@ fi
 sign_sparkle_framework "$APP_FRAMEWORKS/Sparkle.framework"
 codesign "${sign_args[@]}" -i "$FAN_HELPER_LABEL" \
   --sign "$SIGN_IDENTITY" "$APP_FAN_HELPER" >/dev/null
-codesign "${sign_args[@]}" --sign "$SIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
+codesign "${sign_args[@]}" -i "$FILE_HELPER_LABEL" --sign "$SIGN_IDENTITY" "$APP_RESOURCES/$FILE_HELPER_NAME" >/dev/null
+codesign --verify --strict "$APP_RESOURCES/$FILE_HELPER_NAME"
+codesign "${sign_args[@]}" -i "$BUNDLE_ID.update-askpass" --sign "$SIGN_IDENTITY" "$APP_RESOURCES/StorageCleanerUpdateAskpass" >/dev/null
+codesign --verify --strict "$APP_RESOURCES/StorageCleanerUpdateAskpass"
+# Nested code is signed before the outer bundle; the extension is sandboxed.
+if [ "$EMBED_FINDER_EXTENSION" -eq 1 ]; then
+  codesign "${sign_args[@]}" -i "$FINDER_EXTENSION_ID" --entitlements "$FINDER_EXTENSION_ENTITLEMENTS" \
+    --sign "$SIGN_IDENTITY" "$FINDER_EXTENSION_BUNDLE" >/dev/null
+  codesign --verify --strict "$FINDER_EXTENSION_BUNDLE"
+fi
+# Photo library entitlement only for the beta (D89): run/bundle-only builds use the
+# release bundle ID and must not gain the photo source or a TCC record.
+main_entitlement_args=()
+if [ "$BETA_MODE" -eq 1 ]; then
+  main_entitlement_args=(--entitlements "$ROOT_DIR/Resources/Signing/StorageCleanerMac.entitlements")
+fi
+codesign "${sign_args[@]}" ${main_entitlement_args[@]+"${main_entitlement_args[@]}"} --sign "$SIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
+
+verify_photo_library_entitlement() {
+  # plistlib.load() seeks and fails on a pipe; read the bytes first.
+  codesign -d --entitlements - --xml "$1" 2>/dev/null \
+    | python3 -c 'import plistlib, sys; sys.exit(0 if plistlib.loads(sys.stdin.buffer.read()).get("com.apple.security.personal-information.photos-library") is True else 1)'
+}
+if [ "$BETA_MODE" -eq 1 ]; then
+  verify_photo_library_entitlement "$APP_BUNDLE"
+fi
 
 verify_sparkle_bundle() {
   local framework="$APP_FRAMEWORKS/Sparkle.framework"
@@ -585,6 +745,28 @@ verify_sparkle_bundle() {
   fi
   [ "$(/usr/libexec/PlistBuddy -c 'Print :SUVerifyUpdateBeforeExtraction' "$INFO_PLIST")" = "true" ]
   [ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$INFO_PLIST")" = "$MIN_SYSTEM_VERSION" ]
+  # D88: no public URL scheme in any build.
+  if /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$INFO_PLIST" >/dev/null 2>&1; then
+    echo "unexpected CFBundleURLTypes in $INFO_PLIST" >&2
+    return 1
+  fi
+  if [ "$EMBED_FINDER_EXTENSION" -eq 1 ]; then
+    [ -x "$FINDER_EXTENSION_BINARY" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$FINDER_EXTENSION_BUNDLE/Contents/Info.plist")" = "$FINDER_EXTENSION_ID" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$FINDER_EXTENSION_BUNDLE/Contents/Info.plist")" = "com.apple.FinderSync" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPrincipalClass' "$FINDER_EXTENSION_BUNDLE/Contents/Info.plist")" = "$FINDER_EXTENSION_PRINCIPAL_CLASS" ]
+    codesign -d --entitlements - "$FINDER_EXTENSION_BUNDLE" 2>/dev/null | grep -F 'com.apple.security.app-sandbox' >/dev/null
+    codesign --verify --strict --verbose=4 "$FINDER_EXTENSION_BUNDLE"
+    verify_executable_compatibility "$FINDER_EXTENSION_BINARY"
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSItemContentTypes:0' "$INFO_PLIST")" = "com.apple.application-bundle" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSHandlerRank' "$INFO_PLIST")" = "Alternate" ]
+  elif /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes' "$INFO_PLIST" >/dev/null 2>&1; then
+    echo "unexpected CFBundleDocumentTypes in a bundle without the Finder extension: $INFO_PLIST" >&2
+    return 1
+  elif [ -e "$APP_PLUGINS" ]; then
+    echo "unexpected PlugIns in a bundle that is not the installed Beta: $APP_PLUGINS" >&2
+    return 1
+  fi
   otool -L "$APP_BINARY" | grep -F '@rpath/Sparkle.framework/Versions/B/Sparkle' >/dev/null
   local fan_helper_signing_info
   fan_helper_signing_info="$(codesign -d --verbose=4 "$APP_FAN_HELPER" 2>&1)"
@@ -638,9 +820,13 @@ verify_beta_bundle_at() {
 
   [ -x "$contents/MacOS/$APP_NAME" ]
   [ -f "$contents/Resources/BuildInfo.plist" ]
+  verify_benchmark_resources "$contents/Resources"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$BUNDLE_ID" ]
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$plist")" = "$APP_DISPLAY_NAME" ]
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "$APP_BUILD" ]
+  [ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSAppBundlesUsageDescription' "$plist")" ]
+  [ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSPhotoLibraryUsageDescription' "$plist")" ]
+  verify_photo_library_entitlement "$bundle"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$daemon_plist")" = "$FAN_HELPER_LABEL" ]
   [ "$(/usr/libexec/PlistBuddy -c "Print :MachServices:$FAN_HELPER_LABEL" "$daemon_plist")" = "true" ]
   codesign --verify --strict --verbose=4 "$helper"
@@ -695,6 +881,14 @@ resolve_beta_install_path() {
   printf '%s\n' "$HOME/Applications/测试版.app"
 }
 
+# Outside a UTF-8 locale ps escapes non-ASCII bytes, so "测试版.app" comes
+# back as "M-fM-5M^K….app" and never matches the installed path. A shell
+# without LANG (an agent or CI shell) then failed the check below and rolled
+# back a Beta that had installed and launched correctly. Pin the locale here.
+process_command() {
+  LC_ALL=en_US.UTF-8 ps -p "$1" -o command=
+}
+
 verify_beta_runtime_path() {
   local bundle="$1"
   local executable="$bundle/Contents/MacOS/$APP_NAME"
@@ -707,7 +901,7 @@ verify_beta_runtime_path() {
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     local command
-    command="$(ps -p "$pid" -o command=)"
+    command="$(process_command "$pid")"
     [[ "$command" == "$executable"* ]] || {
       echo "PID $pid is not running from the installed Beta path: $command" >&2
       return 1
@@ -726,6 +920,8 @@ install_beta() {
   local stale
   local backup
   local had_backup=0
+  local helper_before
+  local helper_after
   target="$(resolve_beta_install_path)"
   parent="$(dirname "$target")"
   staging="$parent/.测试版.staging.$$.app"
@@ -739,6 +935,9 @@ install_beta() {
       ;;
   esac
 
+  # Snapshot only this daemon before replacing its executable. No sudo,
+  # kickstart, bootout, signals or launch of the helper itself is performed.
+  helper_before="$(python3 "$ROOT_DIR/script/helper_upgrade_status.py" capture "$FAN_HELPER_LABEL" "$target/Contents/Resources/$FAN_HELPER_NAME")"
   quit_existing_beta_safely "$target"
   # Remove stale staging bundles left behind by earlier interrupted installs;
   # each run stages under its own PID, so orphans are never reused.
@@ -752,6 +951,11 @@ install_beta() {
   verify_beta_bundle_at "$staging"
 
   if [ -e "$target" ]; then
+    [ -f "$target/Contents/Info.plist" ] \
+      && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$target/Contents/Info.plist")" = "$BUNDLE_ID" ] || {
+      echo "refusing to replace a non-Beta app at $target" >&2
+      return 1
+    }
     rm -rf -- "$backup"
     mv "$target" "$backup"
     had_backup=1
@@ -786,6 +990,11 @@ install_beta() {
     return 1
   fi
   verify_beta_bundle_at "$target"
+  if [ "$had_backup" -eq 1 ]; then
+    rm -rf -- "$backup"
+  fi
+  helper_after="$(python3 "$ROOT_DIR/script/helper_upgrade_status.py" capture "$FAN_HELPER_LABEL" "$target/Contents/Resources/$FAN_HELPER_NAME")"
+  python3 "$ROOT_DIR/script/helper_upgrade_status.py" compare "$helper_before" "$helper_after"
   echo "installed: $target"
 }
 
@@ -980,6 +1189,7 @@ tell application "System Events"
         set windowName to name of w
         if windowName contains "设置" or windowName contains "Settings" ¬
           or windowName is "通用" or windowName is "General" ¬
+          or windowName is "小窗" or windowName is "Mini Window" ¬
           or windowName is "扫描与安全" or windowName is "Scan & Safety" ¬
           or windowName is "权限" or windowName is "Access" ¬
           or windowName is "系统控制" or windowName is "System Control" ¬

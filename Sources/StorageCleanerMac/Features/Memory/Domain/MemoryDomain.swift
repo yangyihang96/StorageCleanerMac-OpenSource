@@ -210,7 +210,9 @@ struct MemoryOptimizationExecutionResult: Sendable {
     let estimatedApplicationReductionBytes: UInt64
     let observedApplicationMemoryDeltaBytes: Int64?
     let observedAvailableMemoryDeltaBytes: Int64?
-    let pressureBefore: MemoryPressureLevel
+    /// The level of the snapshots (D28: the system's level, or the percent
+    /// rule's estimate); nil when the snapshot had neither.
+    let pressureBefore: MemoryPressureLevel?
     let pressureAfter: MemoryPressureLevel?
     let swapUsedBeforeBytes: UInt64?
     let swapUsedAfterBytes: UInt64?
@@ -296,45 +298,4 @@ enum MemoryPressurePolicy {
         return .normal
     }
 
-    static func classify(
-        physicalBytes: Int64,
-        availableBytes: Int64,
-        compressedBytes: Int64,
-        swapUsedBytes: Int64?,
-        pressureFreePercentage: Int?
-    ) -> MemoryPressureLevel {
-        guard physicalBytes > 0 else { return .elevated }
-        let availableRatio = min(1, max(0, Double(availableBytes) / Double(physicalBytes)))
-        let compressedRatio = min(1, max(0, Double(compressedBytes) / Double(physicalBytes)))
-
-        if let pressureFreePercentage {
-            let pressureLevel = classify(
-                pressureFreePercentage: pressureFreePercentage
-            )
-            if pressureLevel == .critical { return .critical }
-        }
-        if availableRatio <= 0.05 {
-            return .critical
-        }
-        if let swapUsedBytes,
-           swapUsedBytes >= 4 * 1_024 * 1024 * 1024,
-           compressedRatio >= 0.30,
-           availableRatio <= 0.20 {
-            return .critical
-        }
-        if let pressureFreePercentage,
-           classify(pressureFreePercentage: pressureFreePercentage) == .elevated {
-            return .elevated
-        }
-        if availableRatio <= 0.125 {
-            return .elevated
-        }
-        if let swapUsedBytes,
-           swapUsedBytes >= 2 * 1_024 * 1024 * 1024,
-           compressedRatio >= 0.25,
-           availableRatio <= 0.30 {
-            return .elevated
-        }
-        return .normal
-    }
 }

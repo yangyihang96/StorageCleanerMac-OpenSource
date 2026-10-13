@@ -114,9 +114,9 @@ final class ControlPalettePresentationState: ObservableObject {
 }
 
 enum ControlPaletteMetrics {
-    static let gap: CGFloat = 4
+    static let gap: CGFloat = MiniWindowStyleTokens.cascadeGap
     static let connectionGap: CGFloat = MiniWindowStyleTokens.cascadeGap
-    static let fanSize = CGSize(width: 280, height: 340)
+    static let fanSize = CGSize(width: 280, height: 228)
     static let fanCurveSize = CGSize(width: 354, height: 410)
     static let powerSize = CGSize(width: 280, height: 240)
     static let networkConnectionSize = CGSize(width: 271, height: 435)
@@ -267,6 +267,7 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
     private var parentFrameAtPlacementUpdate: NSRect?
     private var isApplyingProgrammaticFrame = false
     private var needsRepositionAfterFrameUpdate = false
+    private var deferredReposition: Task<Void, Never>?
     var willPresent: ((ControlPaletteKind) -> Void)?
     var didDismiss: (() -> Void)?
     /// Forwards pointer motion inside the palette to the owning session so
@@ -505,6 +506,8 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
     }
 
     func dismiss(reason: String = #function) {
+        deferredReposition?.cancel()
+        deferredReposition = nil
 #if DEBUG || STORAGE_CLEANER_BETA
         logControlPaletteEvent("dismiss reason=\(reason) kind=\(state.kind) visible=\(panel.isVisible) pinned=\(isPinned) frame=\(NSStringFromRect(panel.frame))")
 #endif
@@ -700,6 +703,8 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
     }
 
     func teardown() {
+        deferredReposition?.cancel()
+        deferredReposition = nil
         dismiss()
         willPresent = nil
         didDismiss = nil
@@ -823,11 +828,20 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
             isApplyingProgrammaticFrame = false
             if needsRepositionAfterFrameUpdate {
                 needsRepositionAfterFrameUpdate = false
-                reposition()
+                // Coalesce layout feedback after AppKit finishes the current
+                // transaction. Never recurse from setFrame's resize callback.
+                if deferredReposition == nil {
+                    deferredReposition = Task { @MainActor [weak self] in
+                        await Task.yield()
+                        guard !Task.isCancelled, let self else { return }
+                        self.deferredReposition = nil
+                        self.reposition()
+                    }
+                }
             }
         }
-        panel.contentMinSize = frame.size
-        panel.contentMaxSize = frame.size
+        if panel.contentMinSize != frame.size { panel.contentMinSize = frame.size }
+        if panel.contentMaxSize != frame.size { panel.contentMaxSize = frame.size }
         guard !panel.frame.isApproximatelyEqual(to: frame) else { return }
 #if DEBUG || STORAGE_CLEANER_BETA
         logControlPaletteEvent("reposition kind=\(state.kind) anchor=\(NSStringFromRect(sourceAnchor)) frame=\(NSStringFromRect(frame))")

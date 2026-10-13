@@ -5,7 +5,7 @@ import XCTest
 final class StartupScanningTests: XCTestCase {
     func testLaunchdScannerParsesCustomDirectoryAndKeepsMalformedPlist() async throws {
         let root = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         let valid = root.appendingPathComponent("com.example.agent.plist")
         let malformed = root.appendingPathComponent("broken.plist")
         let executable = root.appendingPathComponent("helper")
@@ -164,7 +164,7 @@ final class StartupScanningTests: XCTestCase {
             ],
             secondaryScannerFactory: { _ in [] }
         )
-        let store = ScanStore(startupScanCoordinator: coordinator)
+        let store = try ScanStore.makeForTests(for: self, startupScanCoordinator: coordinator)
 
         store.refreshStartupItems()
         try await waitForStartupScan(store)
@@ -711,7 +711,7 @@ final class StartupScanningTests: XCTestCase {
 
     func testMissingExecutableDeclarationDoesNotBecomeOrphan() async throws {
         let root = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         let plistURL = root.appendingPathComponent("com.example.unresolved.plist")
         try PropertyListSerialization.data(
             fromPropertyList: ["Label": "com.example.unresolved"],
@@ -762,7 +762,7 @@ final class StartupScanningTests: XCTestCase {
 
     func testCoordinatorTreatsUnsafePlistPermissionsAsManagementAndAttentionEvidence() async throws {
         let root = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         let plistURL = launchAgents.appendingPathComponent("com.example.unsafe.plist")
@@ -809,7 +809,7 @@ final class StartupScanningTests: XCTestCase {
 
     func testCoordinatorDoesNotTreatAValidPlistAsANonExecutableTarget() async throws {
         let root = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         let plistURL = launchAgents.appendingPathComponent("com.example.verified.plist")
@@ -849,7 +849,7 @@ final class StartupScanningTests: XCTestCase {
 
     func testCoverageUsesVisibleComponentPopulationAndExplicitAvailability() async throws {
         let root = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         let plistURL = launchAgents.appendingPathComponent("com.example.direct.plist")

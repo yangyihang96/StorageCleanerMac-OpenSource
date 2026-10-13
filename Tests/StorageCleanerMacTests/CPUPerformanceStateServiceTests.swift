@@ -98,13 +98,35 @@ final class CPUPerformanceStateServiceTests: XCTestCase {
             ),
             encoding: .utf8
         )
-        let refresh = try XCTUnwrap(
-            source.components(separatedBy: "    private func refreshProcessorTelemetry").dropFirst().first?
-                .components(separatedBy: "    private func cancelProcessorTelemetryRefresh").first
-        )
+        let refresh = try r2SourceDeclaration("private func refreshProcessorTelemetry", in: source)
+        let sharedRead = try r2SourceDeclaration(
+            "let dynamicSnapshot = await MenuBarPresentationTrace.measureAsyncSample", in: refresh)
+        XCTAssertTrue(sharedRead.contains("await CPUPerformanceStateService.currentSnapshot()"))
+        XCTAssertFalse(sharedRead.contains("Task.detached"), "The IOReport caller must await the shared snapshot directly")
+        XCTAssertEqual(refresh.components(separatedBy: "CPUPerformanceStateService.currentSnapshot()").count - 1, 1,
+                       "A refresh must not create another IOReport waiter")
 
-        XCTAssertTrue(refresh.contains("await CPUPerformanceStateService.currentSnapshot()"))
-        XCTAssertFalse(refresh.contains("Task.detached"))
+        // D74 keeps static topology/sysctl fallback off MainActor. This one
+        // joined, finite worker is allowed; it must never wait for IOReport.
+        let staticRead = try r2SourceDeclaration("let resolvedSnapshot = await Task.detached", in: refresh)
+        let opening = try XCTUnwrap(staticRead.firstIndex(of: "{"))
+        let closing = try XCTUnwrap(staticRead.lastIndex(of: "}"))
+        let staticBody = String(staticRead[staticRead.index(after: opening)..<closing])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(staticBody, "dynamicSnapshot ?? CPUPerformanceStateService.staticSnapshot()",
+                       "The detached fallback may read static topology only")
+        XCTAssertTrue(refresh.contains(staticRead + ".value"), "Await the static worker before releasing the source gate")
+        let sharedRange = try XCTUnwrap(refresh.range(of: sharedRead))
+        let staticRange = try XCTUnwrap(refresh.range(of: staticRead))
+        XCTAssertLessThan(sharedRange.upperBound, staticRange.lowerBound,
+                          "The shared IOReport snapshot finishes before static fallback starts")
+        let withoutStaticFallback = refresh.replacingOccurrences(of: staticRead, with: "")
+        XCTAssertFalse(withoutStaticFallback.contains("Task.detached"),
+                       "No detached IOReport waiter is allowed outside the exact static fallback")
+        for independentPolling in ["Task.sleep", "Timer", "asyncAfter", "while ", "repeat {"] {
+            XCTAssertFalse(refresh.contains(independentPolling),
+                           "Processor refresh is one finite read on the resident clock: \(independentPolling)")
+        }
     }
 
     func testDecodesHzAndMillivoltDVFSRecords() throws {

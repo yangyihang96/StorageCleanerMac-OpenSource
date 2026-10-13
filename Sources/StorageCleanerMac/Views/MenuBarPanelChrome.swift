@@ -32,21 +32,14 @@ enum PanelTimestampFormat {
         return formatter
     }()
 
-    private static let chineseShortTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans")
-        formatter.timeZone = .autoupdatingCurrent
-        formatter.timeStyle = .short
-        return formatter
-    }()
-
-    private static let englishShortTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .autoupdatingCurrent
-        formatter.timeStyle = .short
-        return formatter
-    }()
+    /// D74 uses the existing relative-axis wording with the source's date,
+    /// never the date when a panel or a cached history window was opened.
+    static func age(_ date: Date, now: Date = Date()) -> String {
+        let elapsed = now.timeIntervalSince(date)
+        guard elapsed.isFinite, elapsed >= 0 else { return L10n.text("采样时间未知", "Sample time unknown") }
+        let seconds = Int(min(elapsed.rounded(.down), Double(Int.max / 2)))
+        return L10n.text("\(seconds) 秒前", "\(seconds) s ago")
+    }
 
     static func display(_ date: Date) -> String {
         displayFormatter.string(from: date)
@@ -63,16 +56,9 @@ enum PanelTimestampFormat {
         return formatter.string(from: date)
     }
 
-    static func shortTime(_ date: Date) -> String {
-        let formatter = L10n.usesChinese
-            ? chineseShortTimeFormatter
-            : englishShortTimeFormatter
-        return formatter.string(from: date)
-    }
 }
 
 enum PanelLayoutMetrics {
-    static let navigationWidth: CGFloat = 44
     static let primaryChartHeight: CGFloat = GeekPanelLayout.primaryChartHeight
 }
 
@@ -150,34 +136,123 @@ struct PanelShell<Header: View, Navigation: View, Content: View>: View {
     }
 }
 
-/// Attached levels touch without a layout gap, but remain independent rounded
-/// surfaces so every menu level keeps the same silhouette.
+/// Each touching level keeps its complete rounded outline. One neighbor owns
+/// each shared straight separator so that segment is never drawn twice.
 enum GeekAttachedPanelChromeGeometry {
+    private static let tolerance: CGFloat = 0.01
+
     static func cornerRadii(
-        for _: CGRect,
-        neighbors _: [CGRect],
+        for frame: CGRect,
+        neighbors: [CGRect],
         radius: CGFloat
     ) -> RectangleCornerRadii {
+        // Every menu is a complete rounded surface, even when its frame touches
+        // another menu. Only a shared straight border is suppressed below.
+        let resolvedRadius = max(0, min(radius, min(frame.width, frame.height) / 2))
         return RectangleCornerRadii(
-            topLeading: radius,
-            bottomLeading: radius,
-            bottomTrailing: radius,
-            topTrailing: radius
+            topLeading: resolvedRadius,
+            bottomLeading: resolvedRadius,
+            bottomTrailing: resolvedRadius,
+            topTrailing: resolvedRadius
         )
     }
 
-    /// Each attached shell owns its complete one-pixel border. This preserves
-    /// the rounded outline when neighboring levels have different heights.
+    /// In local (top-down) coordinates, the left/top pane owns the seam.
+    /// Preserve the entire continuous curve and uncovered edge segments when
+    /// the neighbor is shorter; a nominal 12 pt continuous curve extends further
+    /// than 12 pt along an edge, so use the actual SwiftUI path extent.
     static func exposedBorderEdges(
-        for _: CGRect,
-        neighbors _: [CGRect]
+        for frame: CGRect,
+        neighbors: [CGRect]
     ) -> MiniWindowBorderEdges {
-        .all
+        guard frame.width > 0, frame.height > 0 else { return .all }
+        func remaining(_ cuts: [ClosedRange<CGFloat>]) -> [ClosedRange<CGFloat>] {
+            var spans: [ClosedRange<CGFloat>] = [0 ... 1]
+            for cut in cuts {
+                spans = spans.flatMap { span -> [ClosedRange<CGFloat>] in
+                    guard cut.upperBound > span.lowerBound, cut.lowerBound < span.upperBound else { return [span] }
+                    var pieces: [ClosedRange<CGFloat>] = []
+                    if cut.lowerBound > span.lowerBound { pieces.append(span.lowerBound ... cut.lowerBound) }
+                    if cut.upperBound < span.upperBound { pieces.append(cut.upperBound ... span.upperBound) }
+                    return pieces
+                }
+            }
+            return spans
+        }
+        var leading: [ClosedRange<CGFloat>] = []
+        var top: [ClosedRange<CGFloat>] = []
+        for other in neighbors {
+            let verticalInset = min(frame.height / 2, MiniWindowStyleTokens.outerCornerExtent)
+            let otherVerticalInset = min(other.height / 2, MiniWindowStyleTokens.outerCornerExtent)
+            let y0 = max(frame.minY + verticalInset, other.minY + otherVerticalInset)
+            let y1 = min(frame.maxY - verticalInset, other.maxY - otherVerticalInset)
+            if abs(frame.minX - other.maxX) < tolerance, y1 - y0 > tolerance {
+                leading.append((y0 - frame.minY) / frame.height ... (y1 - frame.minY) / frame.height)
+            }
+            let horizontalInset = min(frame.width / 2, MiniWindowStyleTokens.outerCornerExtent)
+            let otherHorizontalInset = min(other.width / 2, MiniWindowStyleTokens.outerCornerExtent)
+            let x0 = max(frame.minX + horizontalInset, other.minX + otherHorizontalInset)
+            let x1 = min(frame.maxX - horizontalInset, other.maxX - otherHorizontalInset)
+            if abs(frame.minY - other.maxY) < tolerance, x1 - x0 > tolerance {
+                top.append((x0 - frame.minX) / frame.width ... (x1 - frame.minX) / frame.width)
+            }
+        }
+        return MiniWindowBorderEdges(top: remaining(top), leading: remaining(leading))
     }
 }
 
 struct GeekAttachedPanelShell<Detail: View, Overview: View, Tertiary: View>: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.geekPanelHoverCoordinator) private var hoverCoordinator
+
+    private func compactSurface(size: CGSize, detailSize: CGSize, tertiarySize: CGSize) -> some View {
+        MetricPanelShell {
+            VStack(spacing: 0) {
+                HStack {
+                    Button {
+                        if showsTertiary { hoverCoordinator?.dismissHistory() }
+                        else { hoverCoordinator?.reset() }
+                    } label: {
+                        Label(L10n.text("返回", "Back"), systemImage: "chevron.backward")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(ResponsivePlainButtonStyle())
+                    .font(AdvancedPanelTypography.captionStrong)
+                    .controlSize(.small)
+                    Spacer(minLength: 4)
+                    Text(showsTertiary ? L10n.text("详情", "Details") : section.title)
+                        .font(.caption).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Button(L10n.text("总览", "Overview")) { hoverCoordinator?.reset() }
+                }
+                .controlSize(.small)
+                .padding(8)
+                Divider()
+                // Scrolling is intentional here: never scale a full desktop
+                // page into unreadable text just to preserve three columns.
+                if detailOwnsScrolling && !showsTertiary {
+                    GeometryReader { viewport in
+                        detail
+                            .environment(\.geekCleanupAvailableHeight,
+                                         max(0, viewport.size.height - 2 * GeekPanelLayout.contentPadding))
+                            .frame(width: viewport.size.width, height: viewport.size.height, alignment: .top)
+                    }
+                } else {
+                    ScrollView([.horizontal, .vertical]) {
+                        Group {
+                            if showsTertiary { tertiary } else { detail }
+                        }
+                        .frame(width: showsTertiary ? tertiarySize.width : detailSize.width,
+                               alignment: .topLeading)
+                    }
+                }
+            }
+            .frame(width: size.width, height: size.height)
+        }
+        .contentShape(Rectangle())
+        .onHover { onHoverChange(showsTertiary ? .tertiary : .detail, $0) }
+        .accessibilityIdentifier("mini-window-compact-navigation")
+    }
 
     let section: PanelSection
     let density: PanelDensity
@@ -191,6 +266,7 @@ struct GeekAttachedPanelShell<Detail: View, Overview: View, Tertiary: View>: Vie
     let tertiaryPreferredSize: CGSize
     let tertiarySourceOffset: CGFloat?
     let onHoverChange: (GeekAttachedPanelRegion, Bool) -> Void
+    var detailOwnsScrolling = false
     @ViewBuilder let detail: Detail
     @ViewBuilder let overview: Overview
     @ViewBuilder let tertiary: Tertiary
@@ -210,7 +286,10 @@ struct GeekAttachedPanelShell<Detail: View, Overview: View, Tertiary: View>: Vie
             tertiaryPreferredSize
         )
         Group {
-            if presentationMode == .unavailable {
+            if let cascadeLayout, cascadeLayout.isCompact {
+                compactSurface(size: cascadeLayout.containerFrame.size,
+                               detailSize: detailSize, tertiarySize: tertiarySize)
+            } else if presentationMode == .unavailable {
                 MetricPanelShell {
                     overview
                         .frame(
@@ -327,8 +406,15 @@ struct GeekAttachedPanelShell<Detail: View, Overview: View, Tertiary: View>: Vie
                         borderEdges: detailBorderEdges,
                         showsShadow: false
                     ) {
-                        MiniWindowFittedPage(contentSize: detailSize, availableSize: detailFrame.size) {
+                        if detailOwnsScrolling {
                             detail
+                                .environment(\.geekCleanupAvailableHeight,
+                                             max(0, detailFrame.height - 2 * GeekPanelLayout.contentPadding))
+                                .frame(width: detailFrame.width, height: detailFrame.height, alignment: .top)
+                        } else {
+                            MiniWindowFittedPage(contentSize: detailSize, availableSize: detailFrame.size) {
+                                detail
+                            }
                         }
                         }
                         .contentShape(Rectangle())
@@ -463,7 +549,7 @@ struct GeekAttachedPanelShell<Detail: View, Overview: View, Tertiary: View>: Vie
 #endif
 }
 
-private extension View {
+extension View {
     func metricPanelShell() -> some View {
         MetricPanelShell { self }
     }
@@ -513,10 +599,7 @@ struct PanelRefreshControl: View {
         Button {
             refresh()
         } label: {
-            Label(
-                L10n.text("立即刷新", "Refresh Now"),
-                systemImage: AppSymbols.Action.refresh
-            )
+            Text(L10n.text("立即刷新", "Refresh Now"))
         }
         .disabled(isRefreshing)
 
@@ -536,6 +619,7 @@ struct PanelRefreshControl: View {
 }
 
 struct PanelToolbarActions: View {
+    @Environment(\.openSettings) private var openSettings
     @ObservedObject var store: ScanStore
     @ObservedObject var state: MenuBarPanelSettingsState
     let isRefreshing: Bool
@@ -580,9 +664,7 @@ struct PanelToolbarActions: View {
             .controlSize(.regular)
             .help(L10n.text("更多小窗操作", "More Panel Actions"))
             .accessibilityLabel(L10n.text("更多小窗操作", "More Panel Actions"))
-            .popover(isPresented: geekEditorBinding, arrowEdge: .trailing) {
-                GeekDashboardEditor(state: state)
-            }
+
         }
         .fixedSize()
         .accessibilityElement(children: .contain)
@@ -593,7 +675,7 @@ struct PanelToolbarActions: View {
     var contextMenuContents: some View {
         if showsLiveActions {
             Button(action: togglePause) {
-                Label(pauseTitle, systemImage: pauseSystemImage)
+                Text(pauseTitle)
             }
             refreshControl.menuContents
             Divider()
@@ -613,12 +695,10 @@ struct PanelToolbarActions: View {
     @ViewBuilder
     private var moreMenuContents: some View {
         Button {
-            state.presentGeekEditor()
+            UserDefaults.standard.set("miniWindow", forKey: "settings.selected-category.v1")
+            openSettings()
         } label: {
-            Label(
-                L10n.text("自定义极客概览…", "Customize Geek Overview…"),
-                systemImage: AppSymbols.Panel.settings
-            )
+            Text(L10n.text("小窗设置…", "Panel Settings…"))
         }
 
         Toggle(
@@ -643,19 +723,13 @@ struct PanelToolbarActions: View {
         Divider()
 
         Button(action: showMainWindow) {
-            Label(
-                L10n.text("打开主窗口", "Open Main Window"),
-                systemImage: AppSymbols.Action.showMainWindow
-            )
+            Text(L10n.text("打开主窗口", "Open Main Window"))
         }
 
         Button {
             MenuBarStatusController.shared.dismissPanel()
         } label: {
-            Label(
-                L10n.text("关闭小窗", "Close Panel"),
-                systemImage: AppSymbols.Action.dismiss
-            )
+            Text(L10n.text("关闭小窗", "Close Panel"))
         }
     }
 
@@ -797,144 +871,5 @@ struct PanelCircularGauge: View {
     private var helpText: String {
         guard let displayDetail else { return "\(title): \(accessibilityValue)" }
         return "\(title): \(accessibilityValue) · \(displayDetail)"
-    }
-}
-
-struct PanelHeader: View {
-    @ObservedObject var store: ScanStore
-    @ObservedObject var state: MenuBarPanelSettingsState
-    let title: String
-    let updatedAt: Date?
-    let unavailableText: String
-    let systemImage: String
-    let isConnected: Bool
-    let isRefreshing: Bool
-    let simpleSectionSelection: Binding<PanelSection>?
-    let showMainWindow: () -> Void
-    let togglePause: () -> Void
-    let refresh: () -> Void
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            headerRow(showsStatusTitle: true)
-            headerRow(showsStatusTitle: false)
-        }
-        .padding(.horizontal, AppDesignTokens.Spacing.small)
-        .padding(.vertical, AppDesignTokens.Spacing.compact)
-        .frame(minHeight: 50)
-        .background(.bar)
-    }
-
-    private func headerRow(showsStatusTitle: Bool) -> some View {
-        HStack(spacing: AppDesignTokens.Spacing.small) {
-            AppSymbolIcon(systemImage: systemImage, role: .panelHeader)
-                .accessibilityHidden(true)
-
-            identityBlock
-                .layoutPriority(1)
-
-            Spacer(minLength: AppDesignTokens.Spacing.small)
-
-            if showsStatusTitle {
-                Label(statusTitle, systemImage: statusImage)
-                    .font(AppPanelTypography.caption)
-                    .foregroundStyle(statusForeground)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .accessibilityLabel(statusAccessibilityLabel)
-            } else {
-                AppSymbolIcon(
-                    systemImage: statusImage,
-                    role: .toolbar,
-                    tint: statusForeground
-                )
-                .help(statusAccessibilityLabel)
-                .accessibilityLabel(statusAccessibilityLabel)
-            }
-
-            if isRefreshing {
-                ProgressView()
-                    .controlSize(.mini)
-                    .frame(width: 20, height: 20)
-                    .accessibilityLabel(L10n.text("正在刷新本机数据", "Refreshing local data"))
-            }
-
-            PanelToolbarActions(
-                store: store,
-                state: state,
-                isRefreshing: isRefreshing,
-                showMainWindow: showMainWindow,
-                togglePause: togglePause,
-                refresh: refresh
-            )
-        }
-    }
-
-    private var identityBlock: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if let simpleSectionSelection {
-                Picker(
-                    L10n.text("小窗分区", "Panel Section"),
-                    selection: simpleSectionSelection
-                ) {
-                    ForEach(PanelSection.simpleChoices) { section in
-                        Text(section.simpleTitle).tag(section)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .accessibilityLabel(L10n.text("小窗分区", "Panel Section"))
-            } else {
-                Text(title)
-                    .font(AppPanelTypography.header)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Text(updatedText)
-                .font(AppPanelTypography.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .fixedSize(horizontal: false, vertical: true)
-                .help(updatedDetailText)
-        }
-    }
-
-    private var updatedText: String {
-        guard let updatedAt else { return unavailableText }
-        return L10n.text(
-            "更新于 \(PanelTimestampFormat.display(updatedAt))",
-            "Updated \(PanelTimestampFormat.display(updatedAt))"
-        )
-    }
-
-    private var updatedDetailText: String {
-        guard let updatedAt else { return unavailableText }
-        return L10n.text(
-            "最后更新 \(PanelTimestampFormat.detail(updatedAt))",
-            "Last updated \(PanelTimestampFormat.detail(updatedAt))"
-        )
-    }
-
-    private var statusTitle: String {
-        if !isConnected { return L10n.text("已断开", "Disconnected") }
-        return store.isMenuBarRefreshPaused
-            ? L10n.text("已暂停", "Paused")
-            : L10n.text("实时", "Live")
-    }
-
-    private var statusImage: String {
-        if !isConnected { return "wifi.slash" }
-        return store.isMenuBarRefreshPaused ? AppSymbols.Action.pause : AppSymbols.Status.live
-    }
-
-    private var statusForeground: Color {
-        isConnected ? AppDesignTokens.Palette.secondaryText : AppDesignTokens.Palette.warning
-    }
-
-    private var statusAccessibilityLabel: String {
-        if !isConnected { return L10n.text("实时数据已断开", "Live data disconnected") }
-        return store.isMenuBarRefreshPaused
-            ? L10n.text("监控已暂停", "Monitoring paused")
-            : L10n.text("实时数据", "Live data")
     }
 }

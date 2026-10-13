@@ -46,29 +46,9 @@ struct BrowserPrivacySQLiteWriteAdapter: Equatable, Sendable {
     static let chromiumFixtureMarkerName = ".storage-cleaner-chromium-v70-fixture"
     static let chromiumFixtureMarkerContents = "StorageCleanerMac Chromium v70 fixture\n"
 
-    /// The adapters below are retained for bounded temporary fixtures. Product
-    /// providers do not opt into database writes; these reasons explain the
-    /// manual boundary shown for live profiles.
-    static func manualGuidanceReason(for engine: BrowserPrivacyEngine) -> String {
-        switch engine {
-        case .safari:
-            return L10n.text(
-                "Safari 私有 History schema 的 parent counters 与 derived indexes 更新语义尚未验证；当前版本不会修改数据库，请在 Safari 内手动处理。",
-                "Safari's private History schema has parent counters and derived indexes whose mutation semantics are not verified; this version will not modify the database. Process history manually in Safari."
-            )
-        case .chromium:
-            return L10n.text(
-                "此配置文件未通过当前 Chromium v70/兼容版本 16 的精确 Schema、签名、路径或 SQLite sidecar 检查；不会写入数据库，请在浏览器内手动处理。",
-                "This profile did not pass the exact Chromium v70/compatible-version 16 schema, signing, path, or SQLite-sidecar checks. The database will not be written; process it manually in the browser."
-            )
-        case .firefox:
-            return L10n.text(
-                "Firefox places.sqlite 包含 visit counts、last-visit/frecency metadata 与相关 indexes；完整更新计划尚未验证。当前版本不会修改数据库，请在 Firefox 内手动处理。",
-                "Firefox places.sqlite keeps visit counts, last-visit/frecency metadata, and related indexes; the complete mutation plan is not verified. This version will not modify the database. Process history manually in Firefox."
-            )
-        }
-    }
-
+    /// Minimal per-engine layouts. They describe what the read-only scanner
+    /// needs and back the temporary-database tests; registered providers use
+    /// `chromiumProduction` or no write adapter at all.
     static func verified(for engine: BrowserPrivacyEngine) -> Self {
         switch engine {
         case .chromium:
@@ -171,10 +151,11 @@ struct BrowserPrivacySQLiteWriteAdapter: Equatable, Sendable {
         mutationPlan: .chromiumV70Fixture
     )
 
-    /// Historical Chromium production contract retained only as an injected
-    /// temporary-fixture seam for transaction and rollback coverage. Registered
-    /// product providers never return this adapter: live SQLite sidecar state
-    /// cannot be held stable between inspection and a read-write open.
+    /// The write contract returned by the registered Chromium-family
+    /// providers. It is granted per database, not per brand: the processor
+    /// only writes when this exact table set, key layout and schema version
+    /// are present, the browser has quit, and no SQLite sidecar holds
+    /// unmerged writes.
     static let chromiumProduction = Self(
         engine: .chromium,
         visitTable: "visits",
@@ -257,6 +238,13 @@ struct BrowserPrivacySQLiteWriteAdapter: Equatable, Sendable {
                 name: "keyword_search_terms",
                 requiredColumns: ["keyword_id", "url_id", "term", "normalized_term"]
             ),
+        ], optionalTables: [
+            // Rows of a cluster that loses its last visit are removed by
+            // `cluster_id`, exactly as Chromium does. Only that key is used,
+            // so only that column is required; a database without these
+            // tables has nothing to clean there.
+            SQLiteTableAllowlist(name: "clusters", requiredColumns: ["cluster_id"]),
+            SQLiteTableAllowlist(name: "cluster_keywords", requiredColumns: ["cluster_id"]),
         ]),
         mutationPlan: .chromiumProduction
     )
@@ -336,16 +324,42 @@ struct BrowserPrivacySQLiteWriteAdapter: Equatable, Sendable {
             return false
         }
 
-        for table in schema.requiredTables where try Self.hasDeclaredForeignKey(
-            table: table.name,
+        var writableTables = schema.requiredTables.map(\.name)
+        for table in schema.optionalTables where try SQLiteRuntime.tableExists(
+            table.name,
+            database: database,
+            control: control,
+            busyDeadlineNanoseconds: busyDeadlineNanoseconds
+        ) {
+            // An optional table that exists must be an ordinary table with
+            // the key column the deletion uses; anything else is unknown.
+            guard try Self.tableUsesWithoutRowID(
+                table: table.name,
+                database: database,
+                control: control,
+                busyDeadlineNanoseconds: busyDeadlineNanoseconds
+            ) != nil,
+            table.requiredColumns.isSubset(of: try SQLiteRuntime.tableColumns(
+                table.name,
+                database: database,
+                control: control,
+                busyDeadlineNanoseconds: busyDeadlineNanoseconds
+            )) else {
+                return false
+            }
+            writableTables.append(table.name)
+        }
+
+        for table in writableTables where try Self.hasDeclaredForeignKey(
+            table: table,
             database: database,
             control: control,
             busyDeadlineNanoseconds: busyDeadlineNanoseconds
         ) {
             return false
         }
-        for table in schema.requiredTables where try Self.hasDeclaredTrigger(
-            table: table.name,
+        for table in writableTables where try Self.hasDeclaredTrigger(
+            table: table,
             database: database,
             control: control,
             busyDeadlineNanoseconds: busyDeadlineNanoseconds
@@ -629,14 +643,25 @@ struct BrowserPrivacyProviderDescriptor: Equatable, Sendable {
     let engine: BrowserPrivacyEngine
     let bundleIdentifiers: [String]
     let profileRootRelativePaths: [String]
+    /// The developer Team ID each bundle identifier must be signed with
+    /// before its profile may be written. A pin is added only after the
+    /// installed app's signature was read locally (`codesign -dv`); bundle
+    /// identifiers without a pin keep the identity, chain (D42) and bundle
+    /// checks below.
+    var teamIdentifiers: [String: String] = [:]
+    /// The bundle identifiers allowed to write a registered profile root
+    /// (review P2-11). A root without an entry may be written by any of the
+    /// provider's bundle identifiers.
+    var rootBundleIdentifiers: [String: Set<String>] = [:]
 
     func productionWriteRoot(
         browser: BrowserPrivacyBrowser,
         homeDirectory: URL,
         databaseURL: URL,
-        profileParentURL: URL? = nil
+        profileParentURL: URL? = nil,
+        allowsFirefoxData: Bool = false
     ) -> URL? {
-        guard engine == .chromium,
+        guard engine == .chromium || (allowsFirefoxData && engine == .firefox),
               browser.id == id,
               browser.engine == engine,
               let bundleIdentifier = browser.bundleIdentifier,
@@ -644,7 +669,8 @@ struct BrowserPrivacyProviderDescriptor: Equatable, Sendable {
               Self.isValidInstalledBundle(
                   browser.applicationURL,
                   bundleIdentifier: bundleIdentifier,
-                  signingIdentity: browser.signingIdentity
+                  signingIdentity: browser.signingIdentity,
+                  expectedTeamIdentifier: teamIdentifiers[bundleIdentifier]
               ) else {
             return nil
         }
@@ -653,7 +679,10 @@ struct BrowserPrivacyProviderDescriptor: Equatable, Sendable {
         let database = databaseURL.standardizedFileURL
         let profileParent = profileParentURL?.standardizedFileURL
         return profileRootRelativePaths.lazy.compactMap { relativePath -> URL? in
-            guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else { return nil }
+            guard !relativePath.isEmpty, !relativePath.hasPrefix("/"),
+                  rootBundleIdentifiers[relativePath].map({ $0.contains(bundleIdentifier) }) ?? true else {
+                return nil
+            }
             let root = home.appendingPathComponent(relativePath, isDirectory: true)
                 .standardizedFileURL
             guard Self.isDescendant(root, of: home),
@@ -668,13 +697,15 @@ struct BrowserPrivacyProviderDescriptor: Equatable, Sendable {
     private static func isValidInstalledBundle(
         _ applicationURL: URL?,
         bundleIdentifier: String,
-        signingIdentity: StartupApplicationSigningIdentity?
+        signingIdentity: StartupApplicationSigningIdentity?,
+        expectedTeamIdentifier: String?
     ) -> Bool {
         guard let applicationURL = applicationURL?.standardizedFileURL,
               applicationURL.isFileURL,
               applicationURL.pathExtension == "app",
               let signingIdentity,
-              signingIdentity.teamIdentifier?.trimmed.nonEmpty != nil,
+              let teamIdentifier = signingIdentity.teamIdentifier?.trimmed.nonEmpty,
+              expectedTeamIdentifier.map({ $0 == teamIdentifier }) ?? true,
               signingIdentity.codeSigningIdentifier == bundleIdentifier,
               signingIdentity.designatedRequirement?.trimmed.nonEmpty != nil else {
             return false
@@ -1678,7 +1709,13 @@ private extension RegisteredBrowserPrivacyProvider {
             "com.google.Chrome.beta",
             "com.google.Chrome.canary",
         ],
-        roots: ["Library/Application Support/Google/Chrome"]
+        roots: ["Library/Application Support/Google/Chrome"],
+        // Google LLC, read from the installed Chrome with `codesign -dv`
+        // (2026-10-07). Beta and Canary were not installed to check.
+        teamIdentifiers: ["com.google.Chrome": "EQHXZ8M8AV"],
+        // The stable profile belongs to the stable app; Beta and Canary keep
+        // theirs in "Chrome Beta" and "Chrome Canary" (review P2-11).
+        rootBundleIdentifiers: ["Library/Application Support/Google/Chrome": ["com.google.Chrome"]]
     )
 
     static let chromiumBrowser = chromium(
@@ -1777,7 +1814,9 @@ private extension RegisteredBrowserPrivacyProvider {
         id: String,
         name: String,
         bundleIDs: [String],
-        roots: [String]
+        roots: [String],
+        teamIdentifiers: [String: String] = [:],
+        rootBundleIdentifiers: [String: Set<String>] = [:]
     ) -> Self {
         Self(
             descriptor: .init(
@@ -1785,7 +1824,9 @@ private extension RegisteredBrowserPrivacyProvider {
                 displayName: name,
                 engine: .chromium,
                 bundleIdentifiers: bundleIDs,
-                profileRootRelativePaths: roots
+                profileRootRelativePaths: roots,
+                teamIdentifiers: teamIdentifiers,
+                rootBundleIdentifiers: rootBundleIdentifiers
             ),
             layout: .chromium,
             allowsProductionWrite: true

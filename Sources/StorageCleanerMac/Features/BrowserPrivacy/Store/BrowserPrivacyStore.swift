@@ -7,27 +7,55 @@ import Foundation
 @MainActor
 final class BrowserPrivacyStore: ObservableObject {
     @Published private(set) var state: BrowserPrivacyScanState = .idle
-    @Published private(set) var records: [BrowserPrivacyRecord] = []
+    @Published private(set) var records: [BrowserPrivacyRecord] = [] {
+        didSet { recordsVersion &+= 1; resultIndex = nil; filterCache.removeAll() }
+    }
     @Published private(set) var coverage: [BrowserPrivacyProviderCoverage] = []
     @Published var filters: BrowserPrivacyFilters = .empty {
-        didSet { rebuildFilteredRecords() }
+        didSet { if filters != oldValue { rebuildFilteredRecords() } }
     }
     @Published var groupsByWebsite = true
-    @Published var resultSort: BrowserPrivacyResultSort = .largestFirst {
-        didSet { rebuildFilteredRecords() }
+    @Published var resultSort: BrowserPrivacyResultSort = .newestFirst {
+        didSet { if resultSort != oldValue { rebuildFilteredRecords() } }
     }
     @Published private(set) var filteredRecords: [BrowserPrivacyRecord] = []
     @Published private(set) var filteredDisplayItems: [BrowserPrivacyDisplayItem] = []
     @Published private(set) var selectedRecordIDs = Set<UUID>()
+    /// Pages whose full address and individual visits are shown. Like the
+    /// rest of the session it lives in memory only.
+    @Published private(set) var expandedItemIDs = Set<BrowserPrivacyDisplayItemID>()
     @Published private(set) var runningBrowserIDs = Set<String>()
     @Published private(set) var processingReport: BrowserPrivacyProcessingReport?
     @Published private(set) var manualGuidanceRecords: [BrowserPrivacyRecord] = []
+    @Published private(set) var reportPresentationRecords: [BrowserPrivacyRecord] = []
     @Published private(set) var reverificationStatus: BrowserPrivacyReverificationStatus?
     @Published private(set) var isProcessing = false
     @Published private(set) var isRunningBrowserPreflight = false
     @Published private(set) var error: BrowserPrivacyScanError?
     @Published private(set) var resultRevision = 0
     @Published private(set) var scanSnapshot: BrowserPrivacyScanSnapshot?
+    @Published private(set) var resultPresentation: BrowserPrivacyResultSnapshot?
+    @Published private(set) var isFiltering = false
+    @Published private(set) var revealedSensitiveSites: Set<BrowserPrivacySiteID> = []
+    @Published var expandedSiteIDs: Set<BrowserPrivacySiteID> = []
+    private var knownSensitiveSites: Set<BrowserPrivacySiteID> = []
+    private var reportSensitiveSites: Set<BrowserPrivacySiteID> = []
+    private var recordsVersion = 0
+    private var resultIndex: BrowserPrivacyResultIndex?
+    private var filterTask: Task<Void, Never>?
+    private var filterGeneration = 0
+    private struct FilterKey: Equatable {
+        let version: Int
+        let filters: BrowserPrivacyFilters
+        let sort: BrowserPrivacyResultSort
+        let revealed: Set<BrowserPrivacySiteID>
+    }
+    private var lastFilterKey: FilterKey?
+    private var filterCache: [(FilterKey, BrowserPrivacyResultSnapshot)] = []
+#if DEBUG
+    private(set) var presentationBuildCount = 0
+    private(set) var presentationCacheHitCount = 0
+#endif
 
     private struct ScanOperation {
         let generation: UUID
@@ -61,101 +89,36 @@ final class BrowserPrivacyStore: ObservableObject {
         self.runningApplicationChecker = runningApplicationChecker
     }
 
-    private static func filter(
-        records: [BrowserPrivacyRecord],
-        filters: BrowserPrivacyFilters,
-        sort: BrowserPrivacyResultSort
-    ) -> [BrowserPrivacyRecord] {
-        let calendar = Calendar.current
-        let upperDate = filters.endDate.flatMap {
-            calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: $0))
-        }
-        let query = Self.normalizedSearch(filters.query)
-        let domain = filters.domain.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        let keyword = filters.keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-
-        return records.filter { record in
-            guard (filters.browserID == nil || record.browser.id == filters.browserID),
-                  (filters.profileID == nil || record.profileID == filters.profileID),
-                  (filters.category == nil || record.category == filters.category),
-                  (filters.source == nil || record.source == filters.source),
-                  (filters.confidence == nil || record.selectionConfidence == filters.confidence) else {
-                return false
-            }
-            if let startDate = filters.startDate,
-               let visitedAt = record.visitedAt,
-               visitedAt < calendar.startOfDay(for: startDate) {
-                return false
-            } else if filters.startDate != nil, record.visitedAt == nil {
-                return false
-            }
-            if let upperDate,
-               let visitedAt = record.visitedAt,
-               visitedAt >= upperDate {
-                return false
-            } else if filters.endDate != nil, record.visitedAt == nil {
-                return false
-            }
-            let normalizedDomain = record.domain?.folding(
-                options: [.caseInsensitive, .diacriticInsensitive],
-                locale: .current
-            ) ?? ""
-            guard domain.isEmpty || normalizedDomain.contains(domain) else {
-                return false
-            }
-            if !query.isEmpty {
-                let searchable = [
-                    record.browser.displayName,
-                    record.profileID,
-                    record.title ?? "",
-                    normalizedDomain,
-                    record.searchKeyword ?? "",
-                    record.source.rawValue,
-                    record.category.rawValue,
-                ]
-                .map(Self.normalizedSearch)
-                .joined(separator: " ")
-                guard searchable.contains(query) else { return false }
-            }
-            guard !keyword.isEmpty else { return true }
-            let searchableKeyword = record.searchKeyword?.folding(
-                options: [.caseInsensitive, .diacriticInsensitive],
-                locale: .current
-            ) ?? ""
-            return searchableKeyword.contains(keyword)
-        }
-        .sorted { lhs, rhs in
-            switch sort {
-            case .largestFirst:
-                let left = lhs.sizeBytes ?? -1
-                let right = rhs.sizeBytes ?? -1
-                if left != right { return left > right }
-                if lhs.visitedAt != rhs.visitedAt {
-                    return (lhs.visitedAt ?? .distantPast) > (rhs.visitedAt ?? .distantPast)
-                }
-            case .newestFirst:
-                if lhs.visitedAt != rhs.visitedAt {
-                    return (lhs.visitedAt ?? .distantPast) > (rhs.visitedAt ?? .distantPast)
-                }
-            case .browser:
-                let order = lhs.browser.displayName.localizedCaseInsensitiveCompare(
-                    rhs.browser.displayName
-                )
-                if order != .orderedSame { return order == .orderedAscending }
-            }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
-    }
-
-    private static func normalizedSearch(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-    }
-
     var selectedRecords: [BrowserPrivacyRecord] {
-        records.filter { selectedRecordIDs.contains($0.id) }
+        if let resultIndex { return selectedRecordIDs.compactMap { resultIndex.byID[$0] } }
+        return records.filter { selectedRecordIDs.contains($0.id) }
+    }
+
+    var disclosurePolicy: BrowserPrivacyDisclosurePolicy {
+        .init(sensitiveSites: knownSensitiveSites.union(reportSensitiveSites), revealedSites: revealedSensitiveSites)
+    }
+
+    func setSensitiveSiteRevealed(_ revealed: Bool, siteID: BrowserPrivacySiteID) {
+        if revealed { revealedSensitiveSites.insert(siteID) }
+        else { revealedSensitiveSites.remove(siteID) }
+        rebuildFilteredRecords()
+    }
+
+    func concealSensitiveSites(browserID: String) {
+        revealedSensitiveSites = revealedSensitiveSites.filter { $0.profile.browserID != browserID }
+        rebuildFilteredRecords()
+    }
+
+    func revealSensitiveSites(in records: [BrowserPrivacyRecord]) {
+        let sites = Set(records.filter(disclosurePolicy.isConcealed).map(BrowserPrivacyDisclosurePolicy.siteID))
+        guard !sites.isEmpty else { return }
+        revealedSensitiveSites.formUnion(sites)
+        rebuildFilteredRecords()
+    }
+
+    func records(for ids: Set<UUID>) -> [BrowserPrivacyRecord] {
+        if let resultIndex { return ids.compactMap { resultIndex.byID[$0] } }
+        return records.filter { ids.contains($0.id) }
     }
 
     var selectedKnownSizeBytes: Int64 {
@@ -174,6 +137,19 @@ final class BrowserPrivacyStore: ObservableObject {
         let selectedCount = selectedRecordIDs.intersection(selectableIDs).count
         if selectedCount == 0 { return .unchecked }
         return selectedCount == selectableIDs.count ? .checked : .mixed
+    }
+
+    /// True when a selected record comes from a profile the last scan did
+    /// not read completely, so older visits of the same page can exist that
+    /// a deletion will not reach.
+    var selectionIncludesIncompletelyReadProfiles: Bool {
+        let completeProfiles = Dictionary(
+            coverage.map { ($0.browser.id, $0.fullyScannedProfileIDs) },
+            uniquingKeysWith: { $0.union($1) }
+        )
+        return selectedRecords.contains { record in
+            completeProfiles[record.browser.id]?.contains(record.profileID) != true
+        }
     }
 
     var selectedVerifiedDeletionCandidateCount: Int {
@@ -333,6 +309,15 @@ final class BrowserPrivacyStore: ObservableObject {
         clearManualGuidanceSession()
     }
 
+    /// Expanding a row only changes what is shown; it never selects anything.
+    func setExpanded(_ expanded: Bool, itemID: BrowserPrivacyDisplayItemID) {
+        if expanded {
+            expandedItemIDs.insert(itemID)
+        } else {
+            expandedItemIDs.remove(itemID)
+        }
+    }
+
     /// Produces only a transparent manual-guidance plan.  No browser URL is
     /// opened here and no browser database is changed.
     func prepareManualGuidance() {
@@ -343,16 +328,7 @@ final class BrowserPrivacyStore: ObservableObject {
         }
         .values
         .map { records in
-            BrowserPrivacyProcessingEntry(
-                browser: records[0].browser,
-                profileID: records[0].profileID,
-                recordCount: records.count,
-                capability: .manualBrowserGuidance,
-                outcome: .manual,
-                detail: BrowserPrivacySQLiteWriteAdapter.manualGuidanceReason(
-                    for: records[0].browser.engine
-                )
-            )
+            BrowserPrivacyHistoryProcessor.manualEntry(records: records)
         }
         .sorted { lhs, rhs in
             if lhs.browser.displayName != rhs.browser.displayName {
@@ -365,6 +341,8 @@ final class BrowserPrivacyStore: ObservableObject {
             entries: entries
         )
         manualGuidanceRecords = selected
+        reportPresentationRecords = selected
+        reportSensitiveSites = knownSensitiveSites
         reverificationBaseline = BrowserPrivacyReverificationBaseline(records: selected)
         reverificationStatus = nil
     }
@@ -383,6 +361,8 @@ final class BrowserPrivacyStore: ObservableObject {
             snapshot: scanSnapshot,
             selectedIDs: selectedIDs
         ) else { return }
+        reportPresentationRecords = selected
+        reportSensitiveSites = knownSensitiveSites
 
         let generation = UUID()
         let processor = self.processor
@@ -431,11 +411,17 @@ final class BrowserPrivacyStore: ObservableObject {
     func waitUntilIdle() async {
         let task = scanOperation?.task
         await task?.value
+        await waitForFilteredResults()
     }
 
     func waitUntilProcessingCompletes() async {
         let task = processingOperation?.task
         await task?.value
+        await waitForFilteredResults()
+    }
+
+    func waitForFilteredResults() async {
+        while let task = filterTask { await task.value }
     }
 
     func waitUntilRunningStatusRefreshCompletes() async {
@@ -454,6 +440,8 @@ final class BrowserPrivacyStore: ObservableObject {
         switch result {
         case let .success(outcome):
             let previousSelection = Set(selectedRecords.map(\.selectionID))
+            revealedSensitiveSites.removeAll()
+            knownSensitiveSites.removeAll()
             records = outcome.records
             coverage = outcome.coverage
             scanSnapshot = BrowserPrivacyScanSnapshot(
@@ -525,10 +513,14 @@ final class BrowserPrivacyStore: ObservableObject {
     }
 
     private func clearSessionValues(keepingFilters: Bool) {
+        expandedSiteIDs.removeAll()
+        revealedSensitiveSites.removeAll()
+        knownSensitiveSites.removeAll()
         records = []
         coverage = []
         scanSnapshot = nil
         selectedRecordIDs.removeAll()
+        expandedItemIDs.removeAll()
         runningStatusTask?.cancel()
         runningStatusTask = nil
         runningBrowserIDs.removeAll()
@@ -542,12 +534,61 @@ final class BrowserPrivacyStore: ObservableObject {
     }
 
     private func rebuildFilteredRecords() {
-        filteredRecords = Self.filter(
-            records: records,
-            filters: filters,
-            sort: resultSort
-        )
-        filteredDisplayItems = BrowserPrivacyDisplayItem.aggregate(filteredRecords)
+        let key = FilterKey(version: recordsVersion, filters: filters, sort: resultSort, revealed: revealedSensitiveSites)
+        guard key != lastFilterKey else { return }
+        let previous = lastFilterKey
+        lastFilterKey = key
+        filterTask?.cancel()
+        filterGeneration &+= 1
+        let generation = filterGeneration
+        if let cached = filterCache.first(where: { $0.0 == key })?.1 {
+            publish(cached)
+            isFiltering = false; filterTask = nil
+#if DEBUG
+            presentationCacheHitCount &+= 1
+#endif
+            return
+        }
+        let records = self.records, existingIndex = self.resultIndex
+        let retainedSensitiveSites = knownSensitiveSites.union(reportSensitiveSites)
+        let debounce = previous?.filters.query != key.filters.query
+            || previous?.filters.domain != key.filters.domain || previous?.filters.keyword != key.filters.keyword
+        isFiltering = true
+        filterTask = Task { [weak self] in
+            do {
+                if debounce, previous != nil { try await Task.sleep(for: .milliseconds(200)) }
+                try Task.checkCancellation()
+                let worker = Task.detached(priority: .userInitiated) {
+                    let index = try existingIndex ?? BrowserPrivacyResultIndex(records: records, version: key.version)
+                    let snapshot = try index.snapshot(filters: key.filters, sort: key.sort, revealedSites: key.revealed,
+                        retainedSensitiveSites: retainedSensitiveSites)
+                    return (index, snapshot)
+                }
+                let (index, snapshot) = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                try Task.checkCancellation()
+                guard let self, self.filterGeneration == generation else { return }
+                self.resultIndex = index
+                self.knownSensitiveSites.formUnion(index.sensitiveSites)
+                self.filterCache.append((key, snapshot))
+                if self.filterCache.count > 4 { self.filterCache.removeFirst() }
+                self.publish(snapshot)
+                self.isFiltering = false; self.filterTask = nil
+#if DEBUG
+                self.presentationBuildCount &+= 1
+#endif
+            } catch {
+                guard let self, self.filterGeneration == generation else { return }
+                self.isFiltering = false; self.filterTask = nil
+            }
+        }
+    }
+
+    private func publish(_ snapshot: BrowserPrivacyResultSnapshot) {
+        filteredRecords = snapshot.records
+        filteredDisplayItems = snapshot.items
+        resultPresentation = snapshot
     }
 
     private func refreshRunningBrowserIDs(for records: [BrowserPrivacyRecord]) {
@@ -578,6 +619,8 @@ final class BrowserPrivacyStore: ObservableObject {
     private func clearManualGuidanceSession() {
         processingReport = nil
         manualGuidanceRecords = []
+        reportPresentationRecords = []
+        reportSensitiveSites.removeAll()
         reverificationBaseline = nil
         reverificationStatus = nil
     }
@@ -636,6 +679,7 @@ final class BrowserPrivacyStore: ObservableObject {
     }
 
     deinit {
+        filterTask?.cancel()
         scanOperation?.task.cancel()
         processingOperation?.task.cancel()
         runningStatusTask?.cancel()

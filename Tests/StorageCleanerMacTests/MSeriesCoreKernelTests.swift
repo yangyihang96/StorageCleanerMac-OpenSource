@@ -58,9 +58,8 @@ final class MSeriesCoreKernelTests: XCTestCase {
         XCTAssertTrue(try gpu.compute(halfPrecision: true, cancellation: cancellation).isValid)
     }
     func testStoragePrivateFixtureBudgetsAndLatencySeparation() throws {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-            "Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        defer { TestFileSystem.remove(root) }
         var disk: MSeriesStorageKernel? = try MSeriesStorageKernel(root: root, sessionID: UUID(),
             budget: 512 * 1024 * 1024, cancellation: MSeriesCancellation())
         for random in [false, true] { for write in [false, true] {
@@ -77,9 +76,11 @@ final class MSeriesCoreKernelTests: XCTestCase {
 
 extension MSeriesCoreKernelTests {
     func testProductionCoordinatorRunsAll18IntoExistingHistoryWithoutSyntheticScore() async throws {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-            "Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        guard ProcessInfo.processInfo.environment["STORAGE_CLEANER_RUN_SCHEDULED_CORE"] == "1" else {
+            throw XCTSkip("Full hardware Core18 session requires a scheduled run: STORAGE_CLEANER_RUN_SCHEDULED_CORE=1.")
+        }
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        defer { TestFileSystem.remove(root) }
         let leases = HeavyWorkCoordinator()
         let coordinator = BenchmarkV7Coordinator(workloadRunner: SystemBenchmarkV7WorkloadRunner(),
             heavyWorkCoordinator: leases, resourceJournal: CleanupReportJournal(directory: root.appendingPathComponent("receipts")))
@@ -94,7 +95,8 @@ extension MSeriesCoreKernelTests {
         XCTAssertFalse(result.isCurrentOfficialRankingEligible)
         XCTAssertEqual(raw.metrics.filter { $0.id.hasPrefix("cpu.multi") }.map(\.workers),
                        Array(repeating: raw.hardware.logicalCores, count: 4))
-        let repository = BenchmarkV7HistoryRepository(storageURL: root.appendingPathComponent("history.json"))
+        let historyRoot = try TestFileSystem.makeHome(for: self)
+        let repository = BenchmarkV7HistoryRepository(storageURL: historyRoot.appendingPathComponent("history.json"))
         try await repository.save(result)
         let reloaded = await repository.load()
         XCTAssertEqual(reloaded, [result])

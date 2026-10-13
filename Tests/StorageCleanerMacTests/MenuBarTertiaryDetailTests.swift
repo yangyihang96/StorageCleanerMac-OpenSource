@@ -52,11 +52,11 @@ final class MenuBarTertiaryDetailTests: XCTestCase {
         let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift")
         let geek = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift")
         let memory = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift")
-        let memoryPanel = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarMemoryPanel.swift")
+        let memoryPanel = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift")
         let network = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekNetworkView.swift")
 
         XCTAssertTrue(root.contains("@State var activeTertiaryDetail: MenuBarTertiaryDetail?"))
-        XCTAssertTrue(root.contains("tertiaryDetailButton(detail)"))
+        XCTAssertFalse(detail.contains("func tertiaryDetailButton("))
         XCTAssertFalse(geek.contains("tertiaryDetailButton(detail, compact: true)"))
         XCTAssertTrue(root.contains("activeTertiaryDetail = nil"))
         XCTAssertTrue(root.contains("tertiaryDetailRootHost {"))
@@ -73,9 +73,11 @@ final class MenuBarTertiaryDetailTests: XCTestCase {
         XCTAssertTrue(detail.contains("var tertiaryDetailColumnSurface"))
         XCTAssertTrue(detail.contains("tertiaryDetailSurface(detail)"))
         XCTAssertTrue(detail.contains("tertiaryRequestSurface(request)"))
-        XCTAssertTrue(detail.contains("panelSettingsState.tertiaryPresentationMode == .column"))
-        XCTAssertTrue(detail.contains("panelSettingsState.tertiaryPresentationMode == .unavailable"))
-        XCTAssertTrue(detail.contains(".disabled(panelSettingsState.tertiaryPresentationMode == .unavailable)"))
+        XCTAssertTrue(memoryPanel.contains("guard tertiaryPresentationMode == .column else { return }"))
+        XCTAssertTrue(memoryPanel.contains("if tertiaryPresentationMode == .unavailable"))
+        XCTAssertTrue(root.contains("if panelSettingsState.tertiaryPresentationMode == .unavailable"))
+        XCTAssertTrue(root.contains("guard panelCoordinator.presentHistory("))
+        XCTAssertTrue(root.contains(".inline(request.id)"))
         XCTAssertTrue(detail.contains(".onContinuousHover"))
         XCTAssertTrue(detail.contains("request.hoverChanged(true)"))
         XCTAssertTrue(detail.contains("request.hoverChanged(false)"))
@@ -86,7 +88,7 @@ final class MenuBarTertiaryDetailTests: XCTestCase {
         XCTAssertTrue(detail.contains("GeekPrecisionLineChart("))
         XCTAssertTrue(root.contains("var memoryHistory: [MenuBarTelemetryPoint]"))
         XCTAssertTrue(memory.contains("points: memoryHistory"))
-        XCTAssertTrue(memoryPanel.contains("points: memoryHistory"))
+        XCTAssertTrue(memoryPanel.contains("struct GeekMemoryHistoryHoverDetail:"))
         XCTAssertTrue(detail.contains("points: memoryHistory"))
         XCTAssertTrue(detail.contains("GeekMemoryHistoryHoverDetail("))
         XCTAssertTrue(detail.contains("channel: .gpuTemperature"))
@@ -123,18 +125,29 @@ final class MenuBarTertiaryDetailTests: XCTestCase {
     }
 
     func testOnDemandCPUAndRawVMCounterLabelsStayTruthful() throws {
-        let processor = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarProcessorPanel.swift")
-        let memory = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarMemoryPanel.swift")
-        let power = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarPowerPanel.swift")
-        let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift")
-
-        XCTAssertTrue(processor.contains("Latest On-Demand App Measurement"))
-        XCTAssertTrue(processor.contains("timestampText(measurement.generatedAt)"))
-        XCTAssertTrue(processor.contains("not a live process ranking"))
-        XCTAssertTrue(memory.contains("Raw VM Counters (May Overlap)"))
-        XCTAssertTrue(memory.contains("These counters must not be added together."))
-        XCTAssertTrue(power.contains("Current App Power"))
-        XCTAssertFalse(power.contains("Measured Power"))
+        // D64 drops dormant copy; retain the measurement provenance contract
+        // on the actual live CPU rows and memory detail sources.
+        let processor = try D64MenuBarSource.source("MenuBarAdvanced/GeekProcessorView.swift")
+        XCTAssertTrue(processor.contains("最近一次按需 CPU 测量"))
+        XCTAssertTrue(processor.contains("Latest on-demand CPU measurement"))
+        XCTAssertTrue(processor.contains("store.menuBarPreparedProcesses?.cpu"))
+        let memory = try D64MenuBarSource.source("MenuBarAdvanced/GeekMemoryView.swift")
+        XCTAssertTrue(memory.contains("row.help"))
+        XCTAssertTrue(memory.contains(".help(row.help)"))
+        XCTAssertTrue(memory.contains(".accessibilityHint(row.help)"))
+        let rows = try r2SourceDeclaration("enum GeekMemorySwapActivity", in: memory)
+        XCTAssertTrue(rows.contains("换入（累计）"))
+        XCTAssertTrue(rows.contains("Swapped In (Total)"))
+        XCTAssertTrue(rows.contains("Compressed data read back from the swap files since startup."))
+        XCTAssertTrue(rows.contains("Compressed data written to the swap files since startup."))
+        let composition = try String(contentsOf: D64MenuBarSource.root.appendingPathComponent(
+            "Sources/StorageCleanerMac/Models/SystemModels.swift"), encoding: .utf8)
+        let normalized = try r2SourceDeclaration("struct MemoryRingComposition:", in: composition)
+        XCTAssertTrue(normalized.contains("let wiredBytes = min(rawWiredBytes, usedBytes)"))
+        XCTAssertTrue(normalized.contains("let compressedBytes = min(rawCompressedBytes, usedBytes - wiredBytes)"))
+        let power = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarGeekPanel.swift")
+        XCTAssertTrue(power.contains("snapshot?.currentPowerWattsText"))
+        let detail = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarTertiaryDetail.swift")
         XCTAssertFalse(detail.contains("Measurement Source"))
         XCTAssertFalse(detail.contains("Measured Power"))
     }
@@ -152,7 +165,7 @@ final class MenuBarTertiaryDetailTests: XCTestCase {
 
     func testDiskDetailsSeparateUserAvailableStrictFreeAndReclaimableEstimate() throws {
         let sources = try [
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarDiskPanel.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDiskView.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift",
         ].map(source).joined(separator: "\n")

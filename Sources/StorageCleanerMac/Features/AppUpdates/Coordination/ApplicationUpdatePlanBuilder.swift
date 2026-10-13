@@ -93,6 +93,8 @@ struct ApplicationUpdatePlanBuilder: Sendable {
         }
         return isPreciseHomebrewCandidate(application)
             || isPreciseOfficialWebsiteCandidate(application)
+            || ([.macAppStore, .sparkle, .vendorUpdater].contains(application.updateProvider)
+                && application.canAutomaticallyUpdate && application.updateCapability == .automatic)
     }
 
     private static func isEligibleForAutomaticUpdateAfterNormalQuit(
@@ -116,11 +118,16 @@ struct ApplicationUpdatePlanBuilder: Sendable {
             return .skipped
         }
 
+        if application.requiresAdministratorAuthorization, [.sparkle, .officialWebsite].contains(application.updateProvider),
+           !AppUpdateProtectedReplacementPolicy.accepts(application) {
+            return application.updateProvider == .officialWebsite ? .website : .manual
+        }
         switch application.updateProvider {
         case .systemManaged:
             return .skipped
         case .macAppStore:
-            return .appStore
+            if !application.canAutomaticallyUpdate { return .appStore }
+            return automaticDestination(application, fallback: .appStore)
         case .officialWebsite:
             guard hasActionableUpdate(application) else { return .skipped }
             guard isPreciseOfficialWebsiteCandidate(application) else { return .website }
@@ -134,10 +141,9 @@ struct ApplicationUpdatePlanBuilder: Sendable {
         case .manual:
             return application.officialSource == nil ? .manual : .website
         case .sparkle, .vendorUpdater:
-            // External Sparkle and vendor adapters are intentionally excluded until
-            // their executor can prove identity, signature and on-disk version change.
-            return .manual
+            return automaticDestination(application, fallback: .manual)
         case .homebrew:
+            if let metadata = application.homebrewMetadata, metadata.isPinned || metadata.isDisabled || metadata.isDeprecated { return .skipped }
             guard hasActionableUpdate(application) else { return .skipped }
             guard isPreciseHomebrewCandidate(application) else { return .manual }
             if application.requiresUserInteraction { return .manual }
@@ -154,6 +160,17 @@ struct ApplicationUpdatePlanBuilder: Sendable {
             }
             return .manual
         }
+    }
+
+    private static func automaticDestination(_ application: InstalledApplication, fallback: ApplicationUpdatePlanDisposition) -> ApplicationUpdatePlanDisposition {
+        var ready = application
+        ready.isRunning = false
+        ready.requiresApplicationQuit = false
+        ready.requiresAdministratorAuthorization = false
+        guard isEligibleForAutomaticUpdate(ready) else { return fallback }
+        if application.requiresAdministratorAuthorization { return .requiresAuthorization }
+        if application.isRunning || application.requiresApplicationQuit { return .requiresQuit }
+        return .automatic
     }
 
     private static func hasActionableUpdate(_ application: InstalledApplication) -> Bool {
@@ -173,7 +190,11 @@ struct ApplicationUpdatePlanBuilder: Sendable {
     private static func hasConfirmedUpdateEvidence(_ application: InstalledApplication) -> Bool {
         application.effectiveSourceResolutionState == .resolved
             && application.effectiveVersionCheckState == .updateAvailable
-            && application.availableVersion.map { application.installedVersion < $0 } == true
+            && (application.availableVersion.map { SparkleAutomaticUpdateAdapter.isNewer($0, than: application.installedVersion) } == true
+                || (application.updateProvider == .homebrew
+                    && application.homebrewMetadata?.hasOutdatedEvidence == true)
+                || (application.updateProvider == .vendorUpdater && application.canAutomaticallyUpdate
+                    && application.sourceEvidence.contains("vendor-official-cli")))
     }
 
     private static func isPreciseHomebrewCandidate(_ application: InstalledApplication) -> Bool {
@@ -183,12 +204,11 @@ struct ApplicationUpdatePlanBuilder: Sendable {
               !application.isReadOnly,
               let metadata = application.homebrewMetadata,
               HomebrewPackageTokenPolicy.isValid(metadata.token),
-              metadata.hasPlainOutdatedEvidence,
+              metadata.hasOutdatedEvidence,
               !metadata.isPinned,
               !metadata.isDisabled,
               !metadata.isDeprecated,
-              !metadata.requiresManualInstaller,
-              let targetVersion = HomebrewAutomaticUpdateSafety.strictlyNewerCurrentVersion(
+              let targetVersion = HomebrewAutomaticUpdateSafety.batchTargetVersion(
                   metadata: metadata,
                   installedVersion: application.installedVersion
               ),
@@ -203,14 +223,6 @@ struct ApplicationUpdatePlanBuilder: Sendable {
             }
         }
 
-        if metadata.kind == .cask {
-            guard HomebrewAutomaticUpdateSafety.hasExactCaskArtifactPath(
-                application: application,
-                metadata: metadata
-            ), HomebrewAutomaticUpdateSafety.hasVerifiedCaskSigningIdentity(application) else {
-                return false
-            }
-        }
 
         switch application.updateStatus {
         case .updateAvailable, .automaticallyUpdatable, .queued, .failed:

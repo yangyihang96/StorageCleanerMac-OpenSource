@@ -156,7 +156,7 @@ final class CodexArtifactScannerTests: XCTestCase {
 
         let reviewPaths = Set(DiskScanner.knownAgentLogPaths.map(\.path))
         let expectedReviewPaths = Set(DeveloperToolArtifactCatalog.definitions
-            .filter { $0.policy == .reviewOnly }
+            .filter { $0.policy == .disposableLogs }
             .flatMap { definition in
                 definition.candidateNames.map { "~/\(definition.rootPath)/\($0)" }
             }).union(["/tmp/openclaw"])

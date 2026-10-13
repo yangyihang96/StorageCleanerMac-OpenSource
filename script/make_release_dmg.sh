@@ -12,6 +12,13 @@ BUNDLE_ID="com.local.StorageCleanerMac"
 FAN_HELPER_NAME="StorageCleanerFanControlHelper"
 FAN_HELPER_LABEL="com.local.StorageCleanerMac.FanControlHelper"
 FAN_HELPER_PLIST="$FAN_HELPER_LABEL.plist"
+# Parity with script/build_and_run.sh: every build embeds the file-operation
+# helper (authorized app moves) and the update askpass tool. The Finder Sync
+# extension (D88) and the photo-library entitlement (D89) stay Beta-only.
+FILE_HELPER_NAME="StorageCleanerFileOperationHelper"
+FILE_HELPER_LABEL="$BUNDLE_ID.FileOperationHelper"
+FILE_HELPER_PLIST="$FILE_HELPER_LABEL.plist"
+UPDATE_ASKPASS_NAME="StorageCleanerUpdateAskpass"
 MIN_SYSTEM_VERSION="14.0"
 REQUIRED_LINK_SDK_MAJOR="${REQUIRED_LINK_SDK_MAJOR:-26}"
 REQUIRED_ARCHITECTURE="${REQUIRED_ARCHITECTURE:-arm64}"
@@ -182,10 +189,33 @@ if [ "$REQUIRE_DEVELOPER_ID" = "1" ] && [[ "$SIGN_IDENTITY" != Developer\ ID\ Ap
 fi
 
 safe_remove_generated_build_path "$SWIFT_BUILD_DIR"
-"$SWIFT_TOOL" build -c "$BUILD_CONFIGURATION" --scratch-path "$SWIFT_BUILD_DIR" --jobs "$SWIFT_BUILD_JOBS" -Xswiftc -disable-batch-mode
-BUILD_BIN_DIR="$("$SWIFT_TOOL" build -c "$BUILD_CONFIGURATION" --scratch-path "$SWIFT_BUILD_DIR" --jobs "$SWIFT_BUILD_JOBS" --show-bin-path)"
+swift_build_args=(
+  -c "$BUILD_CONFIGURATION"
+  --scratch-path "$SWIFT_BUILD_DIR"
+  --jobs "$SWIFT_BUILD_JOBS"
+  -Xswiftc -disable-batch-mode
+  # Same as build_and_run.sh: Swift 6.4's driver can emit SDK=deployment-target
+  # despite compiling against Xcode's selected SDK. Supply the actual SDK version
+  # at link time; do not patch LC_BUILD_VERSION after linking.
+  -Xlinker -platform_version
+  -Xlinker macos
+  -Xlinker "$MIN_SYSTEM_VERSION"
+  -Xlinker "$BUILD_SDK_VERSION"
+)
+"$SWIFT_TOOL" build "${swift_build_args[@]}"
+BUILD_BIN_DIR="$("$SWIFT_TOOL" build "${swift_build_args[@]}" --show-bin-path)"
+HELPER_SIGNED_INFO="$SWIFT_BUILD_DIR/helper-signed-info-$APP_BUILD.plist"
+python3 "$ROOT_DIR/script/helper_build_info.py" "$HELPER_SIGNED_INFO" "$APP_BUILD" "$FAN_HELPER_LABEL" "$FAN_HELPER_NAME"
+"$SWIFT_TOOL" build "${swift_build_args[@]}" --product "$FAN_HELPER_NAME" \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_SIGNED_INFO"
+FILE_HELPER_SIGNED_INFO="$SWIFT_BUILD_DIR/file-helper-signed-info-$APP_BUILD.plist"
+python3 "$ROOT_DIR/script/helper_build_info.py" "$FILE_HELPER_SIGNED_INFO" "$APP_BUILD" "$FILE_HELPER_LABEL" "$FILE_HELPER_NAME"
+"$SWIFT_TOOL" build "${swift_build_args[@]}" --product "$FILE_HELPER_NAME" \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$FILE_HELPER_SIGNED_INFO"
 BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
 FAN_HELPER_BINARY="$BUILD_BIN_DIR/$FAN_HELPER_NAME"
+FILE_HELPER_BINARY="$BUILD_BIN_DIR/$FILE_HELPER_NAME"
+UPDATE_ASKPASS_BINARY="$BUILD_BIN_DIR/$UPDATE_ASKPASS_NAME"
 SPARKLE_FRAMEWORK="$BUILD_BIN_DIR/Sparkle.framework"
 SPARKLE_LICENSE="$SWIFT_BUILD_DIR/artifacts/sparkle/Sparkle/LICENSE"
 
@@ -199,6 +229,10 @@ if [ ! -f "$SPARKLE_LICENSE" ]; then
 fi
 if [ ! -x "$FAN_HELPER_BINARY" ]; then
   echo "missing fan-control helper at $FAN_HELPER_BINARY" >&2
+  exit 3
+fi
+if [ ! -x "$FILE_HELPER_BINARY" ] || [ ! -x "$UPDATE_ASKPASS_BINARY" ]; then
+  echo "missing file-operation helper or update askpass in $BUILD_BIN_DIR" >&2
   exit 3
 fi
 
@@ -270,6 +304,14 @@ sign_app_bundle() {
   clean_attrs "$app_path"
   sign_sparkle_framework "$app_path/Contents/Frameworks/Sparkle.framework"
   sign_fan_helper "$app_path/Contents/Resources/$FAN_HELPER_NAME"
+  clean_attrs "$app_path/Contents/Resources/$FILE_HELPER_NAME"
+  codesign "${sign_args[@]}" -i "$FILE_HELPER_LABEL" --sign "$SIGN_IDENTITY" \
+    "$app_path/Contents/Resources/$FILE_HELPER_NAME" >/dev/null
+  codesign --verify --strict "$app_path/Contents/Resources/$FILE_HELPER_NAME"
+  clean_attrs "$app_path/Contents/Resources/$UPDATE_ASKPASS_NAME"
+  codesign "${sign_args[@]}" -i "$BUNDLE_ID.update-askpass" --sign "$SIGN_IDENTITY" \
+    "$app_path/Contents/Resources/$UPDATE_ASKPASS_NAME" >/dev/null
+  codesign --verify --strict "$app_path/Contents/Resources/$UPDATE_ASKPASS_NAME"
   codesign "${sign_args[@]}" --sign "$SIGN_IDENTITY" "$app_path" >/dev/null
   codesign --verify --deep --strict --verbose=4 "$app_path"
 }
@@ -400,10 +442,23 @@ verify_app_metadata() {
     return 1
   fi
   # Verify every shipped illustration in extracted ZIPs and mounted DMGs too.
+  verify_benchmark_resources "$app_path/Contents/Resources" || return 1
   local artwork
   for artwork in "$ROOT_DIR"/Resources/GoldenArtwork-*.png "$ROOT_DIR"/Resources/LandingArtwork-*.png; do
     if [ ! -f "$artwork" ] || ! cmp -s "$artwork" "$app_path/Contents/Resources/$(basename "$artwork")"; then
       echo "$app_path: missing or changed artwork $(basename "$artwork")" >&2
+      return 1
+    fi
+  done
+  for artwork in "$ROOT_DIR"/Resources/Art/*.heic "$ROOT_DIR"/Resources/Art/opt-benchmark-*.png "$ROOT_DIR"/Resources/Art/scope-cleanup-*.png; do
+    if [ ! -f "$artwork" ] || ! cmp -s "$artwork" "$app_path/Contents/Resources/Art/$(basename "$artwork")"; then
+      echo "$app_path: missing or changed artwork Art/$(basename "$artwork")" >&2
+      return 1
+    fi
+  done
+  for artwork in "$ROOT_DIR"/Resources/Art/opt-*.png; do
+    if [ ! -f "$artwork" ] || ! cmp -s "$artwork" "$app_path/Contents/Resources/Art/$(basename "$artwork")"; then
+      echo "$app_path: missing or changed option artwork Art/$(basename "$artwork")" >&2
       return 1
     fi
   done
@@ -420,6 +475,29 @@ verify_app_metadata() {
     "$helper_plist" \
     BundleProgram \
     "Contents/Resources/$FAN_HELPER_NAME"
+  local file_helper_path="$app_path/Contents/Resources/$FILE_HELPER_NAME"
+  local file_helper_plist="$app_path/Contents/Library/LaunchDaemons/$FILE_HELPER_PLIST"
+  if [ ! -x "$file_helper_path" ] || [ ! -f "$file_helper_plist" ] \
+    || [ ! -x "$app_path/Contents/Resources/$UPDATE_ASKPASS_NAME" ]; then
+    echo "$app_path: missing file-operation helper, its launch daemon plist, or update askpass" >&2
+    return 1
+  fi
+  assert_plist_value "$file_helper_plist" Label "$FILE_HELPER_LABEL"
+  assert_plist_value "$file_helper_plist" BundleProgram "Contents/Resources/$FILE_HELPER_NAME"
+  grep -Fxq "Identifier=$FILE_HELPER_LABEL" <<<"$(codesign -dvvv "$file_helper_path" 2>&1)" \
+    || { echo "$file_helper_path: wrong code-signing identifier" >&2; return 1; }
+  [ -n "$(plist_value "$plist" NSAppBundlesUsageDescription)" ] \
+    || { echo "$app_path: missing NSAppBundlesUsageDescription" >&2; return 1; }
+  assert_plist_value "$app_path/Contents/Resources/BuildInfo.plist" version "$APP_VERSION"
+  assert_plist_value "$app_path/Contents/Resources/BuildInfo.plist" build "$APP_BUILD"
+  if [ -e "$app_path/Contents/PlugIns" ]; then
+    echo "$app_path: production bundle must not embed extensions (D88 keeps Finder uninstall Beta-only)" >&2
+    return 1
+  fi
+  if codesign -d --entitlements - --xml "$app_path" 2>/dev/null | grep -Fq "photos-library"; then
+    echo "$app_path: production bundle must not carry the photo-library entitlement (D89)" >&2
+    return 1
+  fi
   if [ -e "$app_path/Contents/Resources/$FAN_HELPER_LABEL.legacy.plist" ]; then
     echo "$app_path: legacy launch daemon plist must not be bundled" >&2
     return 1
@@ -551,14 +629,28 @@ write_and_verify_checksums() {
 
 /usr/bin/ditto --norsrc "$BUILD_BINARY" "$APP_MACOS/$APP_NAME"
 /usr/bin/ditto --norsrc "$FAN_HELPER_BINARY" "$APP_FAN_HELPER"
+/usr/bin/ditto --norsrc "$FILE_HELPER_BINARY" "$APP_RESOURCES/$FILE_HELPER_NAME"
+/usr/bin/ditto --norsrc "$UPDATE_ASKPASS_BINARY" "$APP_RESOURCES/$UPDATE_ASKPASS_NAME"
+cat >"$APP_LAUNCH_DAEMONS/$FILE_HELPER_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$FILE_HELPER_LABEL</string>
+<key>BundleProgram</key><string>Contents/Resources/$FILE_HELPER_NAME</string>
+<key>MachServices</key><dict><key>$FILE_HELPER_LABEL</key><true/></dict>
+</dict></plist>
+PLIST
+plutil -lint "$APP_LAUNCH_DAEMONS/$FILE_HELPER_PLIST" >/dev/null
 /usr/bin/ditto --norsrc "$SPARKLE_FRAMEWORK" "$APP_FRAMEWORKS/Sparkle.framework"
 copy_resource_file "$SPARKLE_LICENSE" "$APP_RESOURCES/Sparkle-LICENSE.txt"
 copy_resource_file "$NOTICE_PATH" "$APP_RESOURCES/$NOTICE_NAME"
 copy_resource_file "$ROOT_DIR/Resources/CleanupRules.v2.json" "$APP_RESOURCES/CleanupRules.v2.json"
+source "$ROOT_DIR/script/benchmark_resources.sh"
+copy_benchmark_resources
 copy_resource_file \
   "$ROOT_DIR/Resources/$FAN_HELPER_PLIST" \
   "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST"
-chmod +x "$APP_MACOS/$APP_NAME" "$APP_FAN_HELPER"
+chmod +x "$APP_MACOS/$APP_NAME" "$APP_FAN_HELPER" "$APP_RESOURCES/$FILE_HELPER_NAME" "$APP_RESOURCES/$UPDATE_ASKPASS_NAME"
 
 if [ -f "$ROOT_DIR/Resources/AppIcon.icns" ]; then
   copy_resource_file "$ROOT_DIR/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
@@ -568,6 +660,18 @@ fi
 for artwork in "$ROOT_DIR"/Resources/GoldenArtwork-*.png "$ROOT_DIR"/Resources/LandingArtwork-*.png; do
   [ -f "$artwork" ] || { echo "missing artwork: $artwork" >&2; exit 1; }
   copy_resource_file "$artwork" "$APP_RESOURCES/$(basename "$artwork")"
+done
+# D58 module/state HEIC art and approved B2 benchmark option PNGs.
+mkdir -p "$APP_RESOURCES/Art"
+for artwork in "$ROOT_DIR"/Resources/Art/*.heic "$ROOT_DIR"/Resources/Art/opt-benchmark-*.png "$ROOT_DIR"/Resources/Art/scope-cleanup-*.png; do
+  [ -f "$artwork" ] || { echo "missing artwork: $artwork" >&2; exit 1; }
+  copy_resource_file "$artwork" "$APP_RESOURCES/Art/$(basename "$artwork")"
+done
+# D70 approved option thumbnails retain alpha through the PNG fallback.
+# The option inventory JSON stays source/test only (not read at runtime).
+for artwork in "$ROOT_DIR"/Resources/Art/opt-*.png; do
+  [ -f "$artwork" ] || { echo "missing option artwork: $artwork" >&2; exit 1; }
+  copy_resource_file "$artwork" "$APP_RESOURCES/Art/$(basename "$artwork")"
 done
 
 while IFS= read -r -d '' resource; do
@@ -623,9 +727,40 @@ cat >"$APP_CONTENTS/Info.plist" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSAppBundlesUsageDescription</key>
+  <string>Manage only the app you choose to uninstall so it can be moved safely to Trash.</string>
+  <key>StorageCleanerBuildConfiguration</key>
+  <string>Release</string>
 </dict>
 </plist>
 PLIST
+
+if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]; then
+  BUILD_INFO_DIRTY_XML="<true/>"
+else
+  BUILD_INFO_DIRTY_XML="<false/>"
+fi
+cat >"$APP_RESOURCES/BuildInfo.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>version</key>
+  <string>$APP_VERSION</string>
+  <key>build</key>
+  <string>$APP_BUILD</string>
+  <key>commit</key>
+  <string>$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD)</string>
+  <key>dirty</key>
+  $BUILD_INFO_DIRTY_XML
+  <key>buildDate</key>
+  <string>$(date -u '+%Y-%m-%dT%H:%M:%SZ')</string>
+  <key>configuration</key>
+  <string>Release</string>
+</dict>
+</plist>
+PLIST
+plutil -lint "$APP_CONTENTS/Info.plist" "$APP_RESOURCES/BuildInfo.plist" >/dev/null
 
 sign_fan_helper "$APP_FAN_HELPER"
 sign_app_bundle "$APP_BUNDLE"

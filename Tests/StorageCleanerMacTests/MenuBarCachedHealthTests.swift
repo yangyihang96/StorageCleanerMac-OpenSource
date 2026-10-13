@@ -19,19 +19,19 @@ final class MenuBarCachedHealthTests: XCTestCase {
             root: root
         )
         let diskSource = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarDiskPanel.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDiskView.swift",
             root: root
         )
         let networkSource = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarNetworkPanel.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekNetworkView.swift",
             root: root
         )
         let powerSource = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarPowerPanel.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift",
             root: root
         )
         let combinedSource = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarCombinedPanel.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift",
             root: root
         )
 
@@ -50,18 +50,18 @@ final class MenuBarCachedHealthTests: XCTestCase {
         XCTAssertTrue(panelRootSource.contains("computerHealthStore: computerHealthStore"))
         XCTAssertTrue(advancedSource.contains("let store: ScanStore"))
         XCTAssertTrue(advancedSource.contains("let computerHealthStore: ComputerHealthStore"))
-        XCTAssertTrue(advancedSource.contains(
-            "MenuBarObservedObjectBoundary(model: computerHealthStore)"
-        ))
+        let liveCards = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarLiveCard.swift", root: root)
+        XCTAssertTrue(liveCards.contains("computerHealthStore.snapshot?.generatedAt"))
+        XCTAssertFalse(advancedSource.contains("@ObservedObject var computerHealthStore"))
         XCTAssertTrue(advancedSource.contains("computerHealthStore.menuBarSummary"))
 
         XCTAssertTrue(diskSource.contains("healthSummary?.diskSMARTStatus"))
-        XCTAssertTrue(diskSource.contains("healthSummary?.diskStatusText"))
-        XCTAssertTrue(diskSource.contains("healthSummary?.capacitySevenDayDeltaBytes"))
-        XCTAssertTrue(diskSource.contains("healthSummary?.backupStatusText"))
-        XCTAssertTrue(networkSource.contains("healthSummary?.lastDownloadMbps"))
-        XCTAssertTrue(networkSource.contains("healthSummary?.lastUploadMbps"))
-        XCTAssertTrue(networkSource.contains("healthSummary?.lastSpeedTestAt"))
+        XCTAssertTrue(diskSource.contains("healthSummary?.diskRemainingLifePercent"))
+        XCTAssertTrue(diskSource.contains("computerHealthStore.snapshot?.disk.smartStatus"))
+        XCTAssertTrue(diskSource.contains("computerHealthStore.snapshot?.disk.remainingLifePercent"))
+        XCTAssertTrue(networkSource.contains("connection.activeInterface"))
+        XCTAssertTrue(networkSource.contains("networkDownText"))
+        XCTAssertTrue(networkSource.contains("networkUpText"))
         XCTAssertTrue(powerSource.contains("healthSummary?.batteryCapacityPercent"))
         XCTAssertTrue(powerSource.contains("healthSummary?.batteryCycleCount"))
         XCTAssertTrue(powerSource.contains("healthSummary?.batteryCondition"))
@@ -77,7 +77,13 @@ final class MenuBarCachedHealthTests: XCTestCase {
             combinedSource
         ]
             .joined(separator: "\n")
-        XCTAssertFalse(menuSources.contains("computerHealthStore.refresh("))
+        // The live power page already performs a gated read on opening. No
+        // health read belongs in a renderer or a fingerprint.
+        XCTAssertFalse(liveCards.contains("computerHealthStore.refresh("))
+        let powerPage = try r2SourceDeclaration("var geekPowerPage:", in: powerSource)
+        XCTAssertTrue(powerPage.contains("guard !MiniWindowDemoData.isEnabled else { return }"))
+        XCTAssertTrue(powerPage.contains("guard BatteryChargeLimitAccess.allowsLiveAccess else { return }"))
+        XCTAssertTrue(powerPage.contains(".task {"))
         XCTAssertFalse(menuSources.contains("NetworkSpeedTestStore("))
         XCTAssertFalse(menuSources.contains("startScanRespectingAccessGuide()"))
     }

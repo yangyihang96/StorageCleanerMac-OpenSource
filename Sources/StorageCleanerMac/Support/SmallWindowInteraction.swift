@@ -57,6 +57,10 @@ struct SmallWindowAnchorSnapshot: Equatable, Sendable {
     let preferredPlacementEdge: MenuBarCascadeDirection
     let contentKind: String
     let lastUpdatedLayoutGeneration: UInt
+    /// For a level-one card: the card's top offset inside the overview's
+    /// layout (`GeekOverviewAnchorSpace`), which does not depend on where the
+    /// window is or on which frame the view last drew.
+    var layoutOffset: CGFloat? = nil
 }
 
 @MainActor
@@ -71,10 +75,16 @@ final class SmallWindowAnchorRegistry {
         screenRect: NSRect,
         parentPanelRole: SmallWindowPanelRole,
         preferredPlacementEdge: MenuBarCascadeDirection,
-        contentKind: String
+        contentKind: String,
+        layoutOffset: CGFloat? = nil
     ) -> Bool {
         guard screenRect.isUsableWindowAnchor else { return false }
-        if let current = snapshots[id], current.screenRect.isApproximatelyEqual(to: screenRect) {
+        // A native screen-rect report carries no layout information; it keeps
+        // the offset the card's layout registered for the same anchor.
+        let layoutOffset = layoutOffset.flatMap { $0.isFinite ? max(0, $0) : nil }
+            ?? snapshots[id]?.layoutOffset
+        if let current = snapshots[id], current.screenRect.isApproximatelyEqual(to: screenRect),
+           current.layoutOffset == layoutOffset {
             return false
         }
         layoutGeneration &+= 1
@@ -84,7 +94,8 @@ final class SmallWindowAnchorRegistry {
             parentPanelRole: parentPanelRole,
             preferredPlacementEdge: preferredPlacementEdge,
             contentKind: contentKind,
-            lastUpdatedLayoutGeneration: layoutGeneration
+            lastUpdatedLayoutGeneration: layoutGeneration,
+            layoutOffset: layoutOffset
         )
         didChange?(id)
         return true
@@ -126,17 +137,75 @@ final class SmallWindowAnchorNSView: NSView {
     private var lastReportedRect: NSRect?
     private weak var lastReportedWindow: NSWindow?
     private var isSnapshotReportScheduled = false
+    private let geometryObservers = SmallWindowAnchorGeometryObservers()
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        removeGeometryObservers()
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        installGeometryObservers()
+        reportSnapshotIfNeeded()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        // The ancestor chain changed; observe the new one.
+        installGeometryObservers()
         reportSnapshotIfNeeded()
     }
 
     override func layout() {
         super.layout()
         reportSnapshotIfNeeded()
+    }
+
+    // The screen rect changes without a layout pass of this view when only
+    // its origin moves (SwiftUI offsets and reflows), when an ancestor moves
+    // or when the window moves or resizes. Each of these reports again; the
+    // registry drops unchanged rects.
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        reportSnapshotIfNeeded()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        reportSnapshotIfNeeded()
+    }
+
+    func stopObservingGeometry() {
+        removeGeometryObservers()
+    }
+
+    private func installGeometryObservers() {
+        removeGeometryObservers()
+        guard let window else { return }
+        let center = NotificationCenter.default
+        func observe(_ name: Notification.Name, of object: AnyObject) -> NSObjectProtocol {
+            center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.reportSnapshotIfNeeded()
+                }
+            }
+        }
+        geometryObservers.tokens = [
+            observe(NSWindow.didMoveNotification, of: window),
+            observe(NSWindow.didResizeNotification, of: window),
+        ]
+        var ancestor = superview
+        while let view = ancestor {
+            geometryObservers.tokens.append(observe(NSView.frameDidChangeNotification, of: view))
+            ancestor = view.superview
+        }
+    }
+
+    private func removeGeometryObservers() {
+        geometryObservers.removeAll()
     }
 
     override func updateTrackingAreas() {
@@ -198,6 +267,22 @@ final class SmallWindowAnchorNSView: NSView {
     }
 }
 
+/// NotificationCenter keeps block observers until they are removed. An anchor
+/// view can be released inside its window (the window's hierarchy goes away
+/// without a move), so its observers are removed with this holder as well.
+private final class SmallWindowAnchorGeometryObservers {
+    var tokens: [NSObjectProtocol] = []
+
+    func removeAll() {
+        for token in tokens { NotificationCenter.default.removeObserver(token) }
+        tokens.removeAll()
+    }
+
+    deinit {
+        removeAll()
+    }
+}
+
 struct SmallWindowAnchorReader: NSViewRepresentable {
     let handle: SmallWindowAnchorHandle
     var onHoverChanged: ((Bool) -> Void)? = nil
@@ -225,6 +310,7 @@ struct SmallWindowAnchorReader: NSViewRepresentable {
         view.onHoverChanged?(false)
         view.onHoverChanged = nil
         view.onSnapshotChanged = nil
+        view.stopObservingGeometry()
     }
 }
 

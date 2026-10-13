@@ -171,6 +171,63 @@ final class DuplicateFileScannerTests: XCTestCase {
         XCTAssertFalse(candidate.files.contains(where: { $0.path == different.path }))
     }
 
+    func testSimilarImageRuleFindsSubtleColourEditAcrossOldBucketBoundary() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let original = root.appendingPathComponent("original.png")
+        let edited = root.appendingPathComponent("slightly-edited.jpg")
+        try write(
+            imageFixture(
+                primary: NSColor(deviceRed: 0.10, green: 0.30, blue: 0.90, alpha: 1),
+                secondary: .white
+            ),
+            as: .png,
+            to: original
+        )
+        try write(
+            imageFixture(
+                primary: NSColor(deviceRed: 0.14, green: 0.32, blue: 0.88, alpha: 1),
+                secondary: .white
+            ),
+            as: .jpeg,
+            to: edited
+        )
+
+        var scanConfiguration = configuration(root: root)
+        scanConfiguration.candidateRules = [.similarImage]
+        let report = DuplicateFileScanner.scanReport(configuration: scanConfiguration)
+
+        XCTAssertTrue(report.exactGroups.isEmpty)
+        XCTAssertEqual(report.candidates.count, 1)
+        XCTAssertEqual(Set(report.candidates[0].files.map(\.path)), [original.path, edited.path])
+    }
+
+    func testSimilarImageRouteRetainsCandidatesWhenResultCapIsSmall() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = try imageFixture(
+            primary: NSColor(deviceRed: 0.10, green: 0.30, blue: 0.90, alpha: 1),
+            secondary: .white
+        )
+        try write(image, as: .png, to: root.appendingPathComponent("photo.png"))
+        try write(image, as: .jpeg, to: root.appendingPathComponent("photo.jpg"))
+        let first = root.appendingPathComponent("first", isDirectory: true)
+        let second = root.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+        try Data("AAA".utf8).write(to: first.appendingPathComponent("report.txt"))
+        try Data("BBB".utf8).write(to: second.appendingPathComponent("report.txt"))
+
+        var scanConfiguration = configuration(root: root)
+        scanConfiguration.candidateRules = [.similarImage, .sameName]
+        scanConfiguration.maxResults = 2
+        let report = DuplicateFileScanner.scanReport(configuration: scanConfiguration)
+
+        XCTAssertEqual(report.candidates.map(\.rule), [.similarImage])
+        XCTAssertEqual(report.outcome, .partial)
+    }
+
     func testHardLinksDoNotCountAsSeparateDuplicates() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -287,9 +344,9 @@ final class DuplicateFileScannerTests: XCTestCase {
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
 
-        let suiteName = "duplicate-symlink-root-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let store = DuplicateFilesStore(defaults: defaults)
 
         store.addCustomRoot(link.path)
@@ -555,32 +612,30 @@ final class DuplicateFileScannerTests: XCTestCase {
             excludedPaths: []
         )
 
+        // N17 (BOARD, live test 2026-10-07): added locations come first with
+        // their own quota; a default folder the user added is one of them.
         XCTAssertEqual(configuration.roots, [
+            "~/Custom",
             "~/Downloads",
+            "/Volumes/Media",
             "~/Desktop",
             "~/Documents",
             "~/Movies",
             "~/Music",
-            "~/Pictures",
-            "~/Custom",
-            "/Volumes/Media"
+            "~/Pictures"
         ])
+        XCTAssertEqual(configuration.selectedRootsPass?.rootCount, 3)
     }
 
     func testScopeLabelsAndProductionBoundsMatchActualCoverage() {
-        let defaults = UserDefaults.standard
-        let originalLanguage = defaults.string(forKey: L10n.languageDefaultsKey)
-        defer {
-            if let originalLanguage {
-                defaults.set(originalLanguage, forKey: L10n.languageDefaultsKey)
-            } else {
-                defaults.removeObject(forKey: L10n.languageDefaultsKey)
-            }
-        }
+        let defaults = TestVolatilePreferences()
+        defer { defaults.restore() }
 
         defaults.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(DuplicateFileScanScope.userFiles.title, "用户文件")
         XCTAssertEqual(DuplicateFileScanScope.wholeComputer.title, "用户数据区")
+        XCTAssertEqual(DuplicateFileScanScope.selectedLocations.title, "仅所选位置")
+        XCTAssertTrue(DuplicateFileScanScope.selectedLocations.coverageDescription.contains("默认位置不在本次范围"))
         XCTAssertFalse(DuplicateFileScanScope.wholeComputer.coverageDescription.contains("20 MiB"))
         XCTAssertTrue(DuplicateFileScanScope.wholeComputer.coverageDescription.contains("隐藏文件"))
         XCTAssertTrue(DuplicateFileScanScope.wholeComputer.coverageDescription.contains("本地可浏览数据卷"))
@@ -593,7 +648,12 @@ final class DuplicateFileScannerTests: XCTestCase {
         XCTAssertTrue(DuplicateFileScanScope.wholeComputer.coverageDescription.contains("hidden files"))
         XCTAssertTrue(DuplicateFileScanScope.wholeComputer.coverageDescription.contains("local browsable data volumes"))
         XCTAssertTrue(DuplicateFileScanScope.wholeComputer.coverageDescription.contains("network volumes"))
-        XCTAssertEqual(DuplicateFileScanScope.allCases.map(\.rawValue), ["userFiles", "wholeComputer"])
+        XCTAssertEqual(DuplicateFileScanScope.selectedLocations.title, "Selected Only")
+        // N17 adds the "selected only" scope.
+        XCTAssertEqual(
+            DuplicateFileScanScope.allCases.map(\.rawValue),
+            ["userFiles", "wholeComputer", "selectedLocations"]
+        )
 
         let userFiles = DuplicateFileScanner.Configuration.userFiles(excludedPaths: [])
         XCTAssertEqual(userFiles.minimumBytes, 0)
@@ -649,7 +709,9 @@ final class DuplicateFileScannerTests: XCTestCase {
             mountedVolumes: []
         )
 
-        XCTAssertEqual(configuration.roots, ["/Users", "/Volumes/Custom", "/Volumes/Media"])
+        // N17: explicitly added volumes lead, ahead of the user data root.
+        XCTAssertEqual(configuration.roots, ["/Volumes/Custom", "/Volumes/Media", "/Users"])
+        XCTAssertEqual(configuration.selectedRootsPass?.rootCount, 2)
         for protectedRoot in [
             "/Applications",
             "/System",
@@ -690,7 +752,14 @@ final class DuplicateFileScannerTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(configuration.roots, ["/Users", "/Volumes/Work", "/Volumes/Media"])
+        // Automatic roots still merge (Work/Child into Work). N17: the folder
+        // the user added inside Work is walked first and skipped by the walk
+        // of Work, instead of being merged into it and possibly never reached.
+        XCTAssertEqual(
+            configuration.roots,
+            ["/Volumes/Work/Documents", "/Volumes/Media", "/Users", "/Volumes/Work"]
+        )
+        XCTAssertEqual(configuration.selectedRootsPass?.rootCount, 2)
     }
 
     func testWholeComputerProtectsTopLevelSystemSubpathsInsideAutomaticAndExplicitVolumes() {
@@ -1069,14 +1138,122 @@ final class DuplicateFileScannerTests: XCTestCase {
 
     @MainActor
     func testWorkspacePersistsWholeComputerScope() throws {
-        let suiteName = "DuplicateFilesStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
         let first = DuplicateFilesStore(defaults: defaults)
         first.scanScope = .wholeComputer
 
         XCTAssertEqual(DuplicateFilesStore(defaults: defaults).scanScope, .wholeComputer)
+    }
+
+    // A cloud-only placeholder must never be read: reading it downloads the
+    // file inside read(), which Cancel cannot interrupt (seen live: a stuck
+    // "Stopping scan" for minutes on a dataless iCloud file).
+    func testCloudPlaceholdersAreSkippedWithoutReadingAndMarkTheScanPartial() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let payload = Data("same payload".utf8)
+        for name in ["local-a.bin", "local-b.bin", "cloud-only.bin"] {
+            try payload.write(to: root.appendingPathComponent(name))
+        }
+        var askedPaths: [String] = []
+        let report = DuplicateFileScanner.scanReport(
+            configuration: configuration(root: root),
+            resumeIndexData: nil,
+            isCloudPlaceholder: { path in
+                askedPaths.append(path)
+                return path.hasSuffix("/cloud-only.bin")
+            }
+        )
+
+        XCTAssertEqual(report.exactGroups.count, 1)
+        XCTAssertEqual(Set(report.exactGroups[0].files.map(\.name)), ["local-a.bin", "local-b.bin"])
+        XCTAssertTrue(report.coverage.roots[0].skippedPaths.contains {
+            $0.reason == .cloudPlaceholder && $0.path.hasSuffix("/cloud-only.bin")
+        })
+        XCTAssertEqual(report.outcome, .partial, "Uncompared cloud files make the result partial")
+        XCTAssertGreaterThanOrEqual(askedPaths.count, 3)
+        XCTAssertEqual(report.coverage.roots[0].cloudOnlyFiles, 1)
+        XCTAssertEqual(report.coverage.roots[0].cloudOnlyBytes, Int64(payload.count))
+        XCTAssertNotNil(report.coverage.cloudOnlySummary, "An empty result must not read as fully compared")
+    }
+
+    func testScanRefusesDownloadsWhileRunningAndRestoresTheThreadPolicy() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("x".utf8).write(to: root.appendingPathComponent("a.bin"))
+        let type = IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES
+        let original = getiopolicy_np(type, IOPOL_SCOPE_THREAD)
+        defer { _ = setiopolicy_np(type, IOPOL_SCOPE_THREAD, original) }
+        // Start from an explicit ON so a restore to "default" would be caught.
+        XCTAssertEqual(setiopolicy_np(type, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_ON), 0)
+        var policyDuringScan: Int32 = -1
+        _ = DuplicateFileScanner.scanReport(
+            configuration: configuration(root: root),
+            resumeIndexData: nil,
+            isCloudPlaceholder: { _ in
+                policyDuringScan = getiopolicy_np(type, IOPOL_SCOPE_THREAD)
+                return false
+            }
+        )
+        XCTAssertEqual(policyDuringScan, IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+        XCTAssertEqual(getiopolicy_np(type, IOPOL_SCOPE_THREAD), IOPOL_MATERIALIZE_DATALESS_FILES_ON)
+        XCTAssertFalse(DuplicateFileScanner.isCloudPlaceholder(root.appendingPathComponent("a.bin").path))
+    }
+
+    func testCloudOnlyFilesAreCountedButKeepOnlyAFewExamplePaths() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for index in 0..<25 {
+            try Data("file \(index)".utf8).write(to: root.appendingPathComponent("cloud-\(index).bin"))
+        }
+        let report = DuplicateFileScanner.scanReport(
+            configuration: configuration(root: root),
+            resumeIndexData: nil,
+            isCloudPlaceholder: { _ in true }
+        )
+        let coverage = report.coverage.roots[0]
+        XCTAssertEqual(coverage.cloudOnlyFiles, 25)
+        XCTAssertEqual(coverage.skippedPaths.filter { $0.reason == .cloudPlaceholder }.count,
+                       DuplicateFileScanner.cloudOnlyExampleLimit)
+    }
+
+    func testResumedCandidatesThatBecameCloudOnlyAreCountedNotDropped() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let payload = Data("same payload".utf8)
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            try payload.write(to: root.appendingPathComponent(name))
+        }
+        var limited = configuration(root: root)
+        limited.maxFilesScanned = 2
+        let savedIndex = LockedResumeIndex()
+        let first = DuplicateFileScanner.scanReport(
+            configuration: limited,
+            resumeIndexData: nil,
+            resumeIndex: { savedIndex.set($0) },
+            isCloudPlaceholder: { _ in false }
+        )
+        XCTAssertTrue(first.coverage.reachedFileLimit)
+        let index = try XCTUnwrap(savedIndex.get())
+
+        // Evicted to the cloud between runs: every earlier candidate is now a placeholder.
+        let resumed = DuplicateFileScanner.scanReport(
+            configuration: limited,
+            resumeIndexData: index,
+            isCloudPlaceholder: { path in !path.hasSuffix("/c.bin") }
+        )
+        XCTAssertEqual(resumed.coverage.roots[0].cloudOnlyFiles, 2)
+        XCTAssertTrue(resumed.exactGroups.isEmpty)
+    }
+
+    private final class LockedResumeIndex: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Data?
+        func set(_ data: Data?) { lock.lock(); value = data ?? value; lock.unlock() }
+        func get() -> Data? { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     private func configuration(

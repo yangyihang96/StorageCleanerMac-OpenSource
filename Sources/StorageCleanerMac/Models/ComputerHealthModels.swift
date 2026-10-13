@@ -525,6 +525,12 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
     let backup: TimeMachineSnapshot
     let stability: StabilitySummary
     let batteryEvidence: BatteryHealthEvidence
+    let security: SystemProtectionSnapshot?
+    let recentChanges: [ComputerHealthChangeEvent]
+    let changeLogReadFailed: Bool
+    /// The previous change log could not be recognized; it was kept aside as
+    /// `.corrupt-<time>` and a new baseline started with this check.
+    let changeLogWasReset: Bool
 
     var battery: BatteryHealthSnapshot? { batteryEvidence.snapshot }
 
@@ -536,6 +542,10 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
         case stability
         case battery
         case batteryEvidence
+        case security
+        case recentChanges
+        case changeLogReadFailed
+        case changeLogWasReset
     }
 
     init(
@@ -544,7 +554,11 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
         capacity: CapacityTrendSnapshot,
         backup: TimeMachineSnapshot,
         stability: StabilitySummary,
-        battery: BatteryHealthSnapshot?
+        battery: BatteryHealthSnapshot?,
+        security: SystemProtectionSnapshot? = nil,
+        recentChanges: [ComputerHealthChangeEvent] = [],
+        changeLogReadFailed: Bool = false,
+        changeLogWasReset: Bool = false
     ) {
         self.init(
             generatedAt: generatedAt,
@@ -553,7 +567,11 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
             backup: backup,
             stability: stability,
             batteryEvidence: battery.map(BatteryHealthEvidence.present)
-                ?? .failed(reason: .unavailable, checkedAt: generatedAt)
+                ?? .failed(reason: .unavailable, checkedAt: generatedAt),
+            security: security,
+            recentChanges: recentChanges,
+            changeLogReadFailed: changeLogReadFailed,
+            changeLogWasReset: changeLogWasReset
         )
     }
 
@@ -563,7 +581,11 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
         capacity: CapacityTrendSnapshot,
         backup: TimeMachineSnapshot,
         stability: StabilitySummary,
-        batteryEvidence: BatteryHealthEvidence
+        batteryEvidence: BatteryHealthEvidence,
+        security: SystemProtectionSnapshot? = nil,
+        recentChanges: [ComputerHealthChangeEvent] = [],
+        changeLogReadFailed: Bool = false,
+        changeLogWasReset: Bool = false
     ) {
         self.generatedAt = generatedAt
         self.disk = disk
@@ -571,6 +593,10 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
         self.backup = backup
         self.stability = stability
         self.batteryEvidence = batteryEvidence
+        self.security = security
+        self.recentChanges = recentChanges
+        self.changeLogReadFailed = changeLogReadFailed
+        self.changeLogWasReset = changeLogWasReset
     }
 
     init(from decoder: Decoder) throws {
@@ -594,7 +620,11 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
             capacity: try container.decode(CapacityTrendSnapshot.self, forKey: .capacity),
             backup: try container.decode(TimeMachineSnapshot.self, forKey: .backup),
             stability: try container.decode(StabilitySummary.self, forKey: .stability),
-            batteryEvidence: evidence
+            batteryEvidence: evidence,
+            security: try container.decodeIfPresent(SystemProtectionSnapshot.self, forKey: .security),
+            recentChanges: try container.decodeIfPresent([ComputerHealthChangeEvent].self, forKey: .recentChanges) ?? [],
+            changeLogReadFailed: try container.decodeIfPresent(Bool.self, forKey: .changeLogReadFailed) ?? false,
+            changeLogWasReset: try container.decodeIfPresent(Bool.self, forKey: .changeLogWasReset) ?? false
         )
     }
 
@@ -605,6 +635,10 @@ struct ComputerHealthSnapshot: Codable, Equatable, Sendable {
         try container.encode(capacity, forKey: .capacity)
         try container.encode(backup, forKey: .backup)
         try container.encode(stability, forKey: .stability)
+        try container.encodeIfPresent(security, forKey: .security)
+        if !recentChanges.isEmpty { try container.encode(recentChanges, forKey: .recentChanges) }
+        if changeLogReadFailed { try container.encode(true, forKey: .changeLogReadFailed) }
+        if changeLogWasReset { try container.encode(true, forKey: .changeLogWasReset) }
 
         switch batteryEvidence {
         case let .present(snapshot):

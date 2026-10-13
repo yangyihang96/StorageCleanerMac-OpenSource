@@ -7,7 +7,6 @@ final class ComputerHealthDashboardTests: XCTestCase {
         let root = projectRoot
         let viewSource = try source("Sources/StorageCleanerMac/Views/ComputerHealthView.swift", root: root)
         let requiredComponents = [
-            "HealthScoreHero",
             "HealthActionList",
             "HealthFactorGrid",
         ]
@@ -25,15 +24,23 @@ final class ComputerHealthDashboardTests: XCTestCase {
         XCTAssertTrue(viewSource.contains("thermalReadinessCard"))
         XCTAssertTrue(viewSource.contains("snapshot.stability.spinCount"))
         XCTAssertTrue(viewSource.contains("无响应采样"))
-        XCTAssertTrue(viewSource.contains("#if DEBUG"))
-        XCTAssertTrue(viewSource.contains("ComputerHealthDebugFixture"))
-        XCTAssertTrue(viewSource.contains("case longLocalizedText"))
-        XCTAssertTrue(viewSource.contains(".frame(width: 980, height: 680)"))
-        XCTAssertTrue(viewSource.contains("debugEnvironmentSection"))
-        XCTAssertTrue(viewSource.contains("debugEvidenceSection"))
-        XCTAssertTrue(viewSource.contains(
+        // D64 removes the unreferenced debug dashboard; live layout and evidence remain covered.
+        XCTAssertFalse(viewSource.contains("struct ComputerHealthDashboardDebugView"))
+        XCTAssertFalse(viewSource.contains("ComputerHealthDebugFixture"))
+        XCTAssertFalse(viewSource.contains("case longLocalizedText"))
+        XCTAssertFalse(viewSource.contains(".frame(width: 980, height: 680)"))
+        XCTAssertFalse(viewSource.contains("debugEnvironmentSection"))
+        XCTAssertFalse(viewSource.contains("debugEvidenceSection"))
+        XCTAssertFalse(viewSource.contains(
             "fixture == .longLocalizedText ? .unverifiable : .idle"
         ))
+        // D67 replaces responsive cards with a bounded status-row list.
+        XCTAssertTrue(viewSource.contains("FeatureLightfieldResults("))
+        // Environment rows are status rows with the shared row-end disclosure.
+        XCTAssertTrue(viewSource.contains("FeatureLightfieldStatusDisclosure("))
+        XCTAssertFalse(viewSource.contains("} label: {\n                FeatureLightfieldStatusRow("),
+            "Status rows must not use a leading-arrow DisclosureGroup")
+        XCTAssertTrue(viewSource.contains("HealthDashboardText.scoreEvidenceTitle"))
         XCTAssertTrue(viewSource.contains("TimelineView(.periodic"))
         XCTAssertTrue(viewSource.contains("now: timeline.date"))
         XCTAssertTrue(viewSource.contains("if !hasDashboardBatteryAction"))
@@ -77,7 +84,7 @@ final class ComputerHealthDashboardTests: XCTestCase {
             root: projectRoot
         )
 
-        XCTAssertTrue(healthWorkspace.contains("AppPageHeader("))
+        XCTAssertTrue(healthWorkspace.contains("FeatureLightfieldPage("))
         XCTAssertTrue(healthWorkspace.contains("ReviewFilter.healthHub.title"))
         XCTAssertFalse(healthWorkspace.contains("\"检查磁盘、电池与系统状态\""))
         XCTAssertFalse(healthWorkspace.contains("MacBenchmarkDashboardView"))
@@ -86,7 +93,12 @@ final class ComputerHealthDashboardTests: XCTestCase {
         XCTAssertTrue(performanceWorkspace.contains("性能测试"))
         XCTAssertTrue(performanceWorkspace.contains("BenchmarkV7DashboardView"))
         XCTAssertTrue(performanceWorkspace.contains("await benchmarkStore.loadHistory()"))
-        XCTAssertTrue(performanceWorkspace.contains("benchmarkStore.startOfficialBenchmark"))
+        // D72: the official entry now uses v11 with independent pressure/accelerator selections.
+        XCTAssertTrue(performanceWorkspace.contains("benchmarkStore.startV11Benchmark(mode: selection.mode, accelerators: selection.units)"))
+        XCTAssertFalse(performanceWorkspace.contains("benchmarkStore.startOfficialBenchmark"))
+        XCTAssertTrue(performanceWorkspace.contains("PerformanceBenchmarkV11RunningPage("))
+        XCTAssertTrue(performanceWorkspace.contains("PerformanceBenchmarkV11ResultPage("))
+        XCTAssertFalse(healthWorkspace.contains("startV11Benchmark"))
         XCTAssertFalse(performanceWorkspace.contains("MacBenchmarkDashboardView"))
         XCTAssertFalse(performanceWorkspace.contains("Picker("))
         XCTAssertFalse(performanceWorkspace.contains("\"Mac 跑分\""))
@@ -105,12 +117,19 @@ final class ComputerHealthDashboardTests: XCTestCase {
 
         XCTAssertTrue(viewSource.contains("if healthStore.evaluation == nil {"))
         XCTAssertTrue(viewSource.contains("healthEmptyState"))
-        XCTAssertTrue(viewSource.contains("if healthStore.evaluation != nil"))
-        XCTAssertTrue(viewSource.contains("HeroScanPage("))
+        XCTAssertTrue(viewSource.contains("lightfieldResults"))
+        XCTAssertTrue(viewSource.contains("FeatureLightfieldPage("))
         XCTAssertTrue(viewSource.contains("只读取系统状态，不会修改设置"))
         XCTAssertTrue(viewSource.contains("snapshot: healthStore.snapshot"))
         XCTAssertTrue(viewSource.contains("保护与当前状态（不计分）"))
-        XCTAssertTrue(viewSource.contains("备份、FileVault、当前电量、温度与网络独立呈现"))
+        // D64 deletes the explanatory subtitle, while the non-scored live cards still render.
+        XCTAssertFalse(viewSource.contains("备份、FileVault、当前电量、温度与网络独立呈现"))
+        XCTAssertFalse(viewSource.contains("Backup, FileVault, charge, thermal state, and network stay separate"))
+        XCTAssertTrue(viewSource.contains("private var environmentSection:"))
+        XCTAssertTrue(viewSource.contains("protectionReadinessCard"))
+        XCTAssertTrue(viewSource.contains("currentPowerCard"))
+        XCTAssertTrue(viewSource.contains("thermalReadinessCard"))
+        XCTAssertTrue(viewSource.contains("networkEnvironmentCard"))
         XCTAssertFalse(viewSource.contains("HealthFactorGrid(evaluation: nil)"))
     }
 

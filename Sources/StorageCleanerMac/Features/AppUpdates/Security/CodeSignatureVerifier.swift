@@ -4,6 +4,9 @@ import Security
 struct CodeSignatureVerificationResult: Hashable, Sendable {
     let isValid: Bool
     let codeSigningIdentifier: String?
+    /// Only reported for signatures that chain to Apple (Developer ID, App
+    /// Store, Apple Development or Apple's own). A self-signed certificate can
+    /// put any Team ID in its subject, so its value is never trusted.
     let teamIdentifier: String?
     let designatedRequirement: String?
     let certificateCommonNames: [String]
@@ -62,7 +65,10 @@ struct CodeSignatureVerifier: Sendable {
         }
 
         let identifier = information[kSecCodeInfoIdentifier as String] as? String
-        let teamIdentifier = information[kSecCodeInfoTeamIdentifier as String] as? String
+        let teamIdentifier = Self.trustedTeamIdentifier(
+            reported: information[kSecCodeInfoTeamIdentifier as String] as? String,
+            isAppleAnchored: Self.isAppleAnchored(staticCode)
+        )
         let requirement = Self.requirementString(from: information[kSecCodeInfoDesignatedRequirement as String])
         let certificates = (information[kSecCodeInfoCertificates as String] as? [SecCertificate] ?? [])
             .compactMap(Self.commonName)
@@ -75,6 +81,20 @@ struct CodeSignatureVerifier: Sendable {
             certificateCommonNames: certificates,
             status: validationStatus
         )
+    }
+
+    /// Team comparisons in the update and ownership checks rely on this value.
+    static func trustedTeamIdentifier(reported: String?, isAppleAnchored: Bool) -> String? {
+        isAppleAnchored ? reported : nil
+    }
+
+    static func isAppleAnchored(_ staticCode: SecStaticCode) -> Bool {
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString("anchor apple generic" as CFString, [], &requirement) == errSecSuccess,
+              let requirement else { return false }
+        return SecStaticCodeCheckValidity(
+            staticCode, SecCSFlags(rawValue: kSecCSStrictValidate), requirement
+        ) == errSecSuccess
     }
 
     private static func requirementString(from rawValue: Any?) -> String? {

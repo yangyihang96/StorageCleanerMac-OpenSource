@@ -4,9 +4,8 @@ import XCTest
 
 final class MSeriesResourceReceiptTests: XCTestCase {
     func testCancelledInitializationClosesReceiptWithoutLeavingFixture() throws {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-            "Library/Caches/StorageCleanerResourceFixture-" + UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerResourceFixture")
+        defer { TestFileSystem.remove(root) }
         let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
         let cancellation = MSeriesCancellation(); cancellation.cancel()
         XCTAssertThrowsError(try MSeriesStorageKernel(root: root, sessionID: UUID(),
@@ -18,9 +17,8 @@ final class MSeriesResourceReceiptTests: XCTestCase {
     }
 
     func testUnexpectedResourcePreventsRecursiveCleanupAndKeepsPendingReceipt() throws {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-            "Library/Caches/StorageCleanerResourceFixture-" + UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerResourceFixture")
+        defer { TestFileSystem.remove(root) }
         let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
         let session = UUID()
         var disk: MSeriesStorageKernel? = try MSeriesStorageKernel(root: root, sessionID: session,

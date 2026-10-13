@@ -55,13 +55,23 @@ extension CleanupRecoveryService {
         userHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         trashURL: URL = CleanupService.userTrashURL(),
         quarantineRootURL: URL = CleanupQuarantineLocation.defaultURL,
+        onlyOriginalPaths: Set<String>? = nil,
         checkpoint: (@Sendable (CleanReport) throws -> Void)? = nil
     ) async -> (report: CleanReport, recovery: CleanupRecoveryReport) {
+        // A caller that confirmed specific files restores only those receipts.
+        func selected(_ receipts: [CleanupMoveReceipt]) -> [CleanupMoveReceipt] {
+            guard let onlyOriginalPaths else { return receipts }
+            return receipts.filter { onlyOriginalPaths.contains(PathSafety.lexicalPath($0.originalPath)) }
+        }
         var report = requestedReport
         let attemptID = UUID()
         var results: [CleanupRecoveryItem] = []
-        let persist: @Sendable (CleanReport) throws -> Void = checkpoint ?? {
-            try journal.checkpoint($0, expectedIdentities: [:])
+        var sequence: UInt64?
+        func persist(_ value: CleanReport) throws {
+            if let checkpoint { try checkpoint(value) }
+            else {
+                sequence = try journal.checkpointVersioned(value, expectedIdentities: [:], expectedSequence: sequence)
+            }
         }
         func snapshot(failure: String? = nil) -> CleanupRecoveryReport {
             CleanupRecoveryReport(completedAt: Date(), items: results,
@@ -79,11 +89,13 @@ extension CleanupRecoveryService {
             try await coordinator.requireValid(lease, owner: .restore)
             let path = journal.directory.appendingPathComponent(report.planID.rawValue.uuidString + ".json")
             if FileManager.default.fileExists(atPath: path.path) {
-                let latest = try journal.read(path).report
+                let loaded = try journal.readWithEvents(path)
+                let latest = loaded.entry.report
+                sequence = loaded.sequence
                 guard latest.id == report.id else { throw CleanupReportJournal.Failure.invalidEntry }
                 report = latest // stale UI cannot overwrite already restored evidence
             }
-            let receipts = report.restorableReceipts
+            let receipts = selected(report.restorableReceipts)
             results = receipts.map { CleanupRecoveryItem(id: UUID(), originalPath: $0.originalPath, outcome: .notProcessed) }
             report = replacingAttempt(snapshot(), in: report)
             try persist(report)
@@ -96,9 +108,9 @@ extension CleanupRecoveryService {
                 try persist(report)
                 let item = await restoreOne(receipt, userHomeURL: userHomeURL, trashURL: trashURL,
                     quarantineRootURL: quarantineRootURL,
-                    allowedApplicationPaths: report.rulesVersion == "uninstall.application.v1"
-                        ? Set(receipts.map(\.originalPath)) : [],
-                    beforeMove: { try await coordinator.requireValid(lease, owner: .restore) })
+                    allowedApplicationPaths: report.authorizedApplicationRestorePaths,
+                    beforeMove: { try await coordinator.requireValid(lease, owner: .restore) },
+                    onUncertainMove: { _ = try? await coordinator.beginCleanupQuarantine(lease) })
                 results[index] = CleanupRecoveryItem(id: results[index].id,
                     originalPath: item.originalPath, outcome: item.outcome)
                 report = replacingAttempt(snapshot(), in: report)
@@ -111,7 +123,7 @@ extension CleanupRecoveryService {
             // Do not claim rollback: a prior move may already be complete. Its
             // durable unknown intent is reconciled by identity after relaunch.
             if results.isEmpty {
-                results = requestedReport.restorableReceipts.map {
+                results = selected(requestedReport.restorableReceipts).map {
                     CleanupRecoveryItem(id: UUID(), originalPath: $0.originalPath, outcome: .notProcessed)
                 }
             }
@@ -122,12 +134,34 @@ extension CleanupRecoveryService {
     }
 }
 
+extension CleanupRecoveryService {
+    /// Restores several receipts in order under one restore lease, for
+    /// example an uninstall review's original receipt and its retry receipts.
+    func restore(reports: [CleanReport], coordinator: HeavyWorkCoordinator, lease: HeavyWorkCoordinator.Lease,
+                 journal: CleanupReportJournal = .live,
+                 userHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+                 trashURL: URL = CleanupService.userTrashURL()) async -> [(report: CleanReport, recovery: CleanupRecoveryReport)] {
+        var results: [(report: CleanReport, recovery: CleanupRecoveryReport)] = []
+        for report in reports where !report.restorableReceipts.isEmpty {
+            if Task.isCancelled { break }
+            results.append(await restore(report: report, coordinator: coordinator, lease: lease,
+                                         journal: journal, userHomeURL: userHomeURL, trashURL: trashURL))
+        }
+        return results
+    }
+}
+
 extension CleanupReportJournal {
     /// Only call while holding the restore lease, with no active restore worker.
     /// Reconciliation changes evidence, never file contents or locations.
     func reconcileInterruptedRecoveries() throws {
+        try reconcileInterruptedRecoveries(reports: loadAvailable().reports)
+    }
+
+    func reconcileInterruptedRecoveries(reports: [CleanReport]) throws {
         let reader = FoundationReadOnlyFileSystem()
-        for var report in try loadAvailable().reports {
+        var firstFailure: Error?
+        for var report in reports {
             guard var attempts = report.recoveryAttempts else { continue }
             var changed = false
             for index in attempts.indices {
@@ -158,8 +192,11 @@ extension CleanupReportJournal {
             }
             if changed {
                 report.recoveryAttempts = attempts
-                try checkpoint(report, expectedIdentities: [:])
+                // One unwritable receipt must not hold back the others.
+                do { try checkpoint(report, expectedIdentities: [:]) }
+                catch { firstFailure = firstFailure ?? error }
             }
         }
+        if let firstFailure { throw firstFailure }
     }
 }

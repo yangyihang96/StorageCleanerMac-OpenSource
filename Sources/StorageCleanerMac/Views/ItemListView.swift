@@ -107,9 +107,7 @@ struct ItemListView: View {
                 ItemListStatusMetric(
                     id: "cleanable",
                     title: L10n.text("可安全清理", "Safe to Clean"),
-                    value: "\(metrics.cleanableCount)",
-                    systemImage: "checkmark",
-                    tint: AppDesignTokens.Palette.success
+                    value: "\(metrics.cleanableCount)"
                 )
             )
         }
@@ -118,9 +116,7 @@ struct ItemListView: View {
                 ItemListStatusMetric(
                     id: "review",
                     title: L10n.text("需确认", "Needs Review"),
-                    value: "\(metrics.reviewCount)",
-                    systemImage: "questionmark",
-                    tint: AppDesignTokens.Palette.warning
+                    value: "\(metrics.reviewCount)"
                 )
             )
         }
@@ -129,9 +125,7 @@ struct ItemListView: View {
                 ItemListStatusMetric(
                     id: "careful",
                     title: L10n.text("谨慎处理", "Handle Carefully"),
-                    value: "\(metrics.carefulCount)",
-                    systemImage: "exclamationmark.triangle.fill",
-                    tint: AppDesignTokens.Palette.destructive
+                    value: "\(metrics.carefulCount)"
                 )
             )
         }
@@ -323,12 +317,6 @@ struct ItemListView: View {
     private var listHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: filter.systemImage)
-                    .symbolRenderingMode(.hierarchical)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(filter.accentColor)
-                    .frame(width: 32)
-                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(
@@ -351,10 +339,7 @@ struct ItemListView: View {
                     Button {
                         store.requestTrashAllGreen()
                     } label: {
-                        Label(
-                            L10n.text("选择清理项目", "Choose Cleanup Items"),
-                            systemImage: "checkmark.square"
-                        )
+                        Text(L10n.text("选择清理项目", "Choose Cleanup Items"))
                     }
                     .appButtonChrome(.primary)
                     .controlSize(.regular)
@@ -437,21 +422,20 @@ struct ItemListView: View {
     private var greenCleanupRecordStrip: some View {
         let summary = store.cleanupHistorySummary
         let movedCount = rawItems.filter { $0.status == .movedToTrash }.count
+        let recordDetail = cleanupRecordDetail(summary: summary, movedCount: movedCount)
 
         return HStack(alignment: .center, spacing: 9) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                .foregroundStyle(filter.accentColor)
-                .frame(width: 22, height: 22)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(L10n.text("清理记录", "Cleanup History"))
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(cleanupRecordDetail(summary: summary, movedCount: movedCount))
-                    .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if !recordDetail.trimmed.isEmpty {
+                    Text(recordDetail)
+                        .font(AppDesignTokens.Typography.compactLabel)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer(minLength: 4)
@@ -461,10 +445,7 @@ struct ItemListView: View {
                     Button {
                         store.copyCleanupHistoryEntry(latest)
                     } label: {
-                        Label(
-                            L10n.text("复制最近记录", "Copy Latest Record"),
-                            systemImage: "doc.on.doc"
-                        )
+                        Text(L10n.text("复制最近记录", "Copy Latest Record"))
                     }
                 }
 
@@ -472,20 +453,14 @@ struct ItemListView: View {
                     Button {
                         store.requestRestoreLatestCleanup()
                     } label: {
-                        Label(
-                            L10n.text("撤销最近清理", "Undo Latest Cleanup"),
-                            systemImage: "arrow.uturn.backward"
-                        )
+                        Text(L10n.text("撤销最近清理", "Undo Latest Cleanup"))
                     }
                 }
 
                 Button {
                     store.openTrashFolder()
                 } label: {
-                    Label(
-                        L10n.text("查看废纸篓", "Review Trash"),
-                        systemImage: "trash"
-                    )
+                    Text(L10n.text("查看废纸篓", "Review Trash"))
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -513,10 +488,7 @@ struct ItemListView: View {
                 "\(movedCount) item(s) moved to Trash and recoverable until emptied."
             )
         }
-        return L10n.text(
-            "清理后会在这里保留可复核记录。",
-            "Cleanup records will remain available here."
-        )
+        return ""
     }
 
     private var filterAndSortControls: some View {
@@ -524,12 +496,12 @@ struct ItemListView: View {
             Menu {
                 Picker(L10n.text("范围", "Scope"), selection: $scopeFilter) {
                     ForEach(availableScopes) { scope in
-                        Label(scope.title, systemImage: scope.systemImage)
+                        Text(scope.title)
                             .tag(scope)
                     }
                 }
             } label: {
-                Label(scopeFilter.title, systemImage: scopeFilter.systemImage)
+                Text(scopeFilter.title)
             }
             .appButtonChrome(.secondary)
             .help(L10n.text("筛选显示范围", "Filter Scope"))
@@ -537,13 +509,12 @@ struct ItemListView: View {
             Menu {
                 Picker(L10n.text("排序", "Sort"), selection: $sortMode) {
                     ForEach(ItemSortMode.allCases) { mode in
-                        Label(mode.title, systemImage: mode.systemImage)
+                        Text(mode.title)
                             .tag(mode)
                     }
                 }
             } label: {
-                Label(sortMode.title, systemImage: sortMode.systemImage)
-                    .labelStyle(.titleAndIcon)
+                Text(sortMode.title)
             }
             .appButtonChrome(.secondary)
             .fixedSize()
@@ -656,7 +627,7 @@ private struct ItemRow: View {
                         .font(AppDesignTokens.Typography.cardTitle)
                         .fixedSize(horizontal: false, vertical: true)
                     if item.status == .movedToTrash {
-                        Label(L10n.text("已移除", "Removed"), systemImage: "checkmark")
+                        Text(L10n.text("已移除", "Removed"))
                             .font(AppDesignTokens.Typography.compactLabel)
                             .foregroundStyle(.secondary)
                     }
@@ -696,8 +667,6 @@ private struct ItemListStatusMetric: Identifiable {
     let id: String
     let title: String
     let value: String
-    let systemImage: String
-    let tint: Color
 }
 
 private struct ItemListMetricPill: View {
@@ -705,10 +674,6 @@ private struct ItemListMetricPill: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: metric.systemImage)
-                .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                .foregroundStyle(metric.tint)
-                .accessibilityHidden(true)
             Text(metric.value)
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .monospacedDigit()
@@ -731,11 +696,6 @@ private struct EmptyItemsView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            Image(systemName: filter.systemImage)
-                .symbolRenderingMode(.hierarchical)
-                .font(.largeTitle.weight(.semibold))
-                .foregroundStyle(filter.accentColor)
-                .accessibilityHidden(true)
             Text(message)
                 .font(AppDesignTokens.Typography.inlineTitle)
                 .multilineTextAlignment(.center)

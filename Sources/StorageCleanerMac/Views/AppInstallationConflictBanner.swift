@@ -18,8 +18,8 @@ struct AppInstallationConflictBanner: View {
 
                 Text(
                     L10n.text(
-                        "请先核对版本；确认新版后只保留一个副本，并从该副本重新固定 Dock 图标。",
-                        "Compare the versions first; keep only the newer copy, then pin that copy to the Dock again."
+                        "核对版本后只保留一个副本",
+                        "Check versions before keeping one copy"
                     )
                 )
                 .font(AppTypography.body)
@@ -43,7 +43,6 @@ struct AppInstallationConflictBanner: View {
 
             AppButton(
                 title: L10n.text("在访达中显示", "Show in Finder"),
-                systemImage: "folder",
                 kind: .secondary,
                 action: revealCopies
             )

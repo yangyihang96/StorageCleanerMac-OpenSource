@@ -16,27 +16,31 @@ final class AppIconCache: Sendable {
     // NSImage is handed across the worker boundary as an immutable display value.
     struct LoadedImage: @unchecked Sendable {
         let image: NSImage?
+        var unavailableReason: String? = nil
     }
 
     private actor State {
-        private static let loadingQueue = DispatchQueue(
+        // Each cache owns its queue: an unrelated bundle-icon decoder must
+        // not prevent the bounded similar-image loader from starting.
+        private let loadingQueue = DispatchQueue(
             label: "com.local.StorageCleanerMac.app-icon-loader",
             qos: .utility
         )
 
         private final class Entry {
-            let image: NSImage?
+            let loaded: LoadedImage
 
-            init(image: NSImage?) {
-                self.image = image
+            init(loaded: LoadedImage) {
+                self.loaded = loaded
             }
         }
 
         private let cache: NSCache<NSString, Entry>
-        private let loader: @Sendable (String) -> NSImage?
+        private let loader: @Sendable (String, @escaping @Sendable () -> Bool) -> LoadedImage
         private struct Request {
             var subscribers: [UUID: CheckedContinuation<LoadedImage, Never>]
             var invalidated = false
+            var cancellation = FileContentReadPool.Control()
         }
         private var requests: [String: Request] = [:]
         private var pending: [String] = []
@@ -44,7 +48,7 @@ final class AppIconCache: Sendable {
         private var cacheGeneration = 0
         private let maximumPending: Int
 
-        init(capacity: Int, maximumPending: Int, loader: @escaping @Sendable (String) -> NSImage?) {
+        init(capacity: Int, maximumPending: Int, loader: @escaping @Sendable (String, @escaping @Sendable () -> Bool) -> LoadedImage) {
             let cache = NSCache<NSString, Entry>()
             cache.countLimit = capacity
             cache.totalCostLimit = capacity * AppIconCache.cachedBitmapCost
@@ -59,7 +63,7 @@ final class AppIconCache: Sendable {
                 await withCheckedContinuation { continuation in
                     guard !Task.isCancelled else { continuation.resume(returning: LoadedImage(image: nil)); return }
                     if let cached = cache.object(forKey: path as NSString) {
-                        continuation.resume(returning: LoadedImage(image: cached.image))
+                        continuation.resume(returning: cached.loaded)
                         return
                     }
                     if var request = requests[path] {
@@ -88,6 +92,10 @@ final class AppIconCache: Sendable {
         private func cancel(path: String, subscriber: UUID) {
             guard var request = requests[path], let waiter = request.subscribers.removeValue(forKey: subscriber) else { return }
             waiter.resume(returning: LoadedImage(image: nil))
+            if request.subscribers.isEmpty {
+                request.cancellation.cancel()
+                request.invalidated = true
+            }
             requests[path] = request
             if request.subscribers.isEmpty, activePath != path {
                 requests[path] = nil
@@ -101,8 +109,10 @@ final class AppIconCache: Sendable {
             activePath = path
             let loader = self.loader
             let generation = cacheGeneration
+            let cancellation = FileContentReadPool.Control()
+            requests[path]?.cancellation = cancellation
             Task {
-                let loaded = await Self.load(path: path, using: loader)
+                let loaded = await Self.load(path: path, using: loader, cancellation: cancellation, queue: loadingQueue)
                 finish(path, loaded: loaded, generation: generation)
             }
         }
@@ -114,8 +124,9 @@ final class AppIconCache: Sendable {
                 requests[path] = request
                 pending.insert(path, at: 0)
             } else {
-                if requests[path]?.subscribers.isEmpty == false, generation == cacheGeneration {
-                    cache.setObject(Entry(image: loaded.image), forKey: path as NSString,
+                if requests[path]?.subscribers.isEmpty == false, generation == cacheGeneration,
+                   loaded.unavailableReason == nil {
+                    cache.setObject(Entry(loaded: loaded), forKey: path as NSString,
                                     cost: AppIconCache.memoryCost(of: loaded.image))
                 }
                 complete(path, with: loaded)
@@ -145,14 +156,18 @@ final class AppIconCache: Sendable {
 
         private static func load(
             path: String,
-            using loader: @escaping @Sendable (String) -> NSImage?
+            using loader: @escaping @Sendable (String, @escaping @Sendable () -> Bool) -> LoadedImage,
+            cancellation: FileContentReadPool.Control,
+            queue: DispatchQueue
         ) async -> LoadedImage {
             await withCheckedContinuation { continuation in
-                loadingQueue.async {
-                    let image = autoreleasepool {
-                        AppIconCache.preparedForCaching(loader(path))
+                queue.async {
+                    let loaded = autoreleasepool {
+                        let result = loader(path, { cancellation.isCancelled })
+                        return LoadedImage(image: AppIconCache.preparedForCaching(result.image),
+                                           unavailableReason: result.unavailableReason)
                     }
-                    continuation.resume(returning: LoadedImage(image: image))
+                    continuation.resume(returning: loaded)
                 }
             }
         }
@@ -168,7 +183,18 @@ final class AppIconCache: Sendable {
     ) {
         let capacity = max(1, capacity)
         self.capacity = capacity
-        state = State(capacity: capacity, maximumPending: max(1, maximumPending), loader: loader)
+        state = State(capacity: capacity, maximumPending: max(1, maximumPending)) { path, _ in
+            LoadedImage(image: loader(path))
+        }
+    }
+
+    init(
+        capacity: Int, maximumPending: Int = 64,
+        resultLoader: @escaping @Sendable (String, @escaping @Sendable () -> Bool) -> LoadedImage
+    ) {
+        let capacity = max(1, capacity)
+        self.capacity = capacity
+        state = State(capacity: capacity, maximumPending: max(1, maximumPending), loader: resultLoader)
     }
 
     func loadedIcon(for path: String) async -> LoadedImage {

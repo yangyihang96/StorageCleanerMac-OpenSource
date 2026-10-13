@@ -15,19 +15,19 @@ final class CleanupHistoryServiceTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        suiteName = "CleanupHistoryServiceTests-\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)
+        suiteName = TestPreferenceDomain.makeSuite()
+        defaults = TestPreferenceDomain.open(suiteName: suiteName)
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
+        TestPreferenceDomain.cleanup(suiteName: suiteName)
         defaults = nil
         suiteName = nil
         super.tearDown()
     }
 
     func testRecordMovedItemsStoresSummary() throws {
-        let item = makeItem(title: "Example Cache", path: "~/Library/Caches/example", sizeBytes: 2048)
+        let item = makeItem(title: "Example Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 2048)
 
         CleanupHistoryService.recordMovedItems([item], date: Date(timeIntervalSince1970: 100), defaults: defaults)
 
@@ -35,12 +35,12 @@ final class CleanupHistoryServiceTests: XCTestCase {
         XCTAssertEqual(summary.totalCount, 1)
         XCTAssertEqual(summary.totalBytes, 2048)
         XCTAssertEqual(summary.latest?.title, "Example Cache")
-        XCTAssertEqual(summary.latest?.paths, ["~/Library/Caches/example"])
+        XCTAssertEqual(summary.latest?.paths, ["/Users/fixture/Library/Caches/example"])
         XCTAssertEqual(summary.latest?.moveRecords, [])
     }
 
     func testRecordMovedItemsStoresMatchingMoveRecords() throws {
-        let item = makeItem(title: "Example Cache", path: "~/Library/Caches/example", sizeBytes: 2048)
+        let item = makeItem(title: "Example Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 2048)
         let record = TrashMoveRecord(
             originalPath: PathSafety.lexicalPath(item.path),
             resultingItemURL: CleanupService.userTrashURL().appendingPathComponent("example"),
@@ -59,9 +59,9 @@ final class CleanupHistoryServiceTests: XCTestCase {
     }
 
     func testRecordMovedItemsRejectsUnrelatedMoveRecords() throws {
-        let item = makeItem(title: "Example Cache", path: "~/Library/Caches/example", sizeBytes: 2048)
+        let item = makeItem(title: "Example Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 2048)
         let unrelatedRecord = TrashMoveRecord(
-            originalPath: PathSafety.lexicalPath("~/Library/Caches/other"),
+            originalPath: PathSafety.lexicalPath("/Users/fixture/Library/Caches/other"),
             resultingItemURL: CleanupService.userTrashURL().appendingPathComponent("other"),
             itemIdentity: testTrashIdentity
         )
@@ -92,7 +92,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
             title: "Legacy cleanup",
             itemCount: 1,
             totalBytes: 2048,
-            paths: ["~/Library/Caches/legacy"]
+            paths: ["/Users/fixture/Library/Caches/legacy"]
         )
         defaults.set(
             try JSONEncoder().encode([legacyEntry]),
@@ -108,7 +108,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
     func testCleanupHistoryRoundTripsMoveRecords() throws {
         let record = TrashMoveRecord(
             id: UUID(),
-            originalPath: PathSafety.lexicalPath("~/Library/Caches/example"),
+            originalPath: PathSafety.lexicalPath("/Users/fixture/Library/Caches/example"),
             resultingItemURL: CleanupService.userTrashURL().appendingPathComponent("example"),
             itemIdentity: testTrashIdentity,
             movedAt: Date(timeIntervalSince1970: 90)
@@ -119,7 +119,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
             title: "Example Cache",
             itemCount: 1,
             totalBytes: 2048,
-            paths: ["~/Library/Caches/example"],
+            paths: ["/Users/fixture/Library/Caches/example"],
             moveRecords: [record]
         )
 
@@ -130,7 +130,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
     }
 
     func testLatestRestorableSkipsNewerLegacyRecord() throws {
-        let restorableItem = makeItem(title: "Restorable", path: "~/Library/Caches/restorable", sizeBytes: 100)
+        let restorableItem = makeItem(title: "Restorable", path: "/Users/fixture/Library/Caches/restorable", sizeBytes: 100)
         let record = TrashMoveRecord(
             originalPath: PathSafety.lexicalPath(restorableItem.path),
             resultingItemURL: CleanupService.userTrashURL().appendingPathComponent("restorable"),
@@ -143,7 +143,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
             defaults: defaults
         )
         CleanupHistoryService.recordMovedItems(
-            [makeItem(title: "Legacy", path: "~/Library/Caches/legacy", sizeBytes: 100)],
+            [makeItem(title: "Legacy", path: "/Users/fixture/Library/Caches/legacy", sizeBytes: 100)],
             date: Date(timeIntervalSince1970: 200),
             defaults: defaults
         )
@@ -155,7 +155,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
     }
 
     func testRemoveMoveRecordsConsumesOnlyCompletedRestoreRecords() throws {
-        let item = makeItem(title: "Batch", path: "~/Library/Caches/batch", sizeBytes: 100)
+        let item = makeItem(title: "Batch", path: "/Users/fixture/Library/Caches/batch", sizeBytes: 100)
         let first = TrashMoveRecord(
             originalPath: PathSafety.lexicalPath(item.path),
             resultingItemURL: CleanupService.userTrashURL().appendingPathComponent("batch-a"),
@@ -192,7 +192,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
 
         let legacy = LegacyMoveRecord(
             id: UUID(),
-            originalPath: PathSafety.lexicalPath("~/Library/Caches/legacy"),
+            originalPath: PathSafety.lexicalPath("/Users/fixture/Library/Caches/legacy"),
             resultingItemURL: CleanupService.userTrashURL().appendingPathComponent("legacy"),
             movedAt: Date(timeIntervalSince1970: 90)
         )
@@ -214,8 +214,8 @@ final class CleanupHistoryServiceTests: XCTestCase {
     }
 
     func testScanResultMarksMovedItemAvailableOnlyAfterEveryPathIsRestored() throws {
-        let firstPath = "~/Library/Caches/example-a"
-        let secondPath = "~/Library/Caches/example-b"
+        let firstPath = "/Users/fixture/Library/Caches/example-a"
+        let secondPath = "/Users/fixture/Library/Caches/example-b"
         let item = StorageItem(
             id: "multi-path",
             title: "Multi Path",
@@ -248,8 +248,8 @@ final class CleanupHistoryServiceTests: XCTestCase {
 
     func testRecordMultipleItemsCreatesBatchEntry() {
         let items = [
-            makeItem(title: "One", path: "~/Library/Caches/one", sizeBytes: 1024),
-            makeItem(title: "Two", path: "~/Library/Caches/two", sizeBytes: 2048)
+            makeItem(title: "One", path: "/Users/fixture/Library/Caches/one", sizeBytes: 1024),
+            makeItem(title: "Two", path: "/Users/fixture/Library/Caches/two", sizeBytes: 2048)
         ]
 
         CleanupHistoryService.recordMovedItems(items, defaults: defaults)
@@ -267,10 +267,10 @@ final class CleanupHistoryServiceTests: XCTestCase {
             itemCount: 4,
             totalBytes: 4096,
             paths: [
-                "~/Library/Caches/one",
-                "~/Library/Caches/two",
-                "~/Library/Caches/three",
-                "~/Library/Caches/four"
+                "/Users/fixture/Library/Caches/one",
+                "/Users/fixture/Library/Caches/two",
+                "/Users/fixture/Library/Caches/three",
+                "/Users/fixture/Library/Caches/four"
             ]
         )
 
@@ -279,14 +279,14 @@ final class CleanupHistoryServiceTests: XCTestCase {
         XCTAssertTrue(markdown.contains("Green cache cleanup"))
         XCTAssertTrue(markdown.contains("4 KiB"))
         XCTAssertTrue(markdown.contains("废纸篓") || markdown.contains("Trash"))
-        XCTAssertTrue(markdown.contains("~/Library/Caches/one"))
-        XCTAssertTrue(markdown.contains("~/Library/Caches/two"))
-        XCTAssertTrue(markdown.contains("~/Library/Caches/three"))
-        XCTAssertTrue(markdown.contains("~/Library/Caches/four"))
+        XCTAssertTrue(markdown.contains("/Users/fixture/Library/Caches/one"))
+        XCTAssertTrue(markdown.contains("/Users/fixture/Library/Caches/two"))
+        XCTAssertTrue(markdown.contains("/Users/fixture/Library/Caches/three"))
+        XCTAssertTrue(markdown.contains("/Users/fixture/Library/Caches/four"))
     }
 
     func testClearRemovesHistory() {
-        CleanupHistoryService.recordMovedItems([makeItem(title: "Example", path: "~/Library/Caches/example", sizeBytes: 1)], defaults: defaults)
+        CleanupHistoryService.recordMovedItems([makeItem(title: "Example", path: "/Users/fixture/Library/Caches/example", sizeBytes: 1)], defaults: defaults)
 
         CleanupHistoryService.clear(defaults: defaults)
 
@@ -305,7 +305,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
             usedBytes: 700,
             freeBytes: 300,
             items: [
-                makeItem(title: "Cache", path: "~/Library/Caches/example", sizeBytes: 100, tier: .green),
+                makeItem(title: "Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 100, tier: .green),
                 makeItem(title: "Downloads", path: "~/Downloads/archive.zip", sizeBytes: 200, tier: .yellow),
                 makeItem(title: "App", path: "/Applications/App.app", sizeBytes: 300, tier: .red)
             ],
@@ -426,7 +426,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
             usedBytes: 650,
             freeBytes: 350,
             items: [
-                makeItem(title: "Fresh Cache", path: "~/Library/Caches/fresh", sizeBytes: 30, tier: .green),
+                makeItem(title: "Fresh Cache", path: "/Users/fixture/Library/Caches/fresh", sizeBytes: 30, tier: .green),
                 makeItem(title: "Small Review", path: "~/Downloads/small.zip", sizeBytes: 20, tier: .yellow)
             ]
         )
@@ -586,7 +586,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
 
     func testHealthyStorageWithSmallCacheAndLargeReviewItemsCanReachPerfectScore() {
         let items = [
-            makeItem(title: "Small Cache", path: "~/Library/Caches/example", sizeBytes: 2 * gib, tier: .green),
+            makeItem(title: "Small Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 2 * gib, tier: .green),
             makeItem(title: "Large Download", path: "~/Downloads/archive.zip", sizeBytes: 180 * gib, tier: .yellow),
             makeItem(title: "Large App", path: "/Applications/Studio.app", sizeBytes: 120 * gib, tier: .red)
         ]
@@ -672,7 +672,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
                 items: [
                     makeItem(
                         title: "Cache",
-                        path: "~/Library/Caches/example",
+                        path: "/Users/fixture/Library/Caches/example",
                         sizeBytes: actionableBytes,
                         tier: .green
                     )
@@ -715,8 +715,8 @@ final class CleanupHistoryServiceTests: XCTestCase {
             usedBytes: 820 * gib,
             freeBytes: 180 * gib,
             items: [
-                makeItem(title: "Moveable Cache", path: "~/Library/Caches/moveable", sizeBytes: 12 * gib, tier: .green),
-                makeItem(title: "Already Cleaned", path: "~/Library/Caches/old", sizeBytes: 7 * gib, tier: .green, status: .movedToTrash),
+                makeItem(title: "Moveable Cache", path: "/Users/fixture/Library/Caches/moveable", sizeBytes: 12 * gib, tier: .green),
+                makeItem(title: "Already Cleaned", path: "/Users/fixture/Library/Caches/old", sizeBytes: 7 * gib, tier: .green, status: .movedToTrash),
                 makeItem(title: "Review File", path: "~/Downloads/review.zip", sizeBytes: 120 * gib, tier: .yellow)
             ]
         )
@@ -738,8 +738,8 @@ final class CleanupHistoryServiceTests: XCTestCase {
             usedBytes: 820,
             freeBytes: 180,
             items: [
-                makeItem(title: "Remaining Cache", path: "~/Library/Caches/remaining", sizeBytes: 100, tier: .green),
-                makeItem(title: "Moved Cache", path: "~/Library/Caches/moved", sizeBytes: 70, tier: .green, status: .movedToTrash),
+                makeItem(title: "Remaining Cache", path: "/Users/fixture/Library/Caches/remaining", sizeBytes: 100, tier: .green),
+                makeItem(title: "Moved Cache", path: "/Users/fixture/Library/Caches/moved", sizeBytes: 70, tier: .green, status: .movedToTrash),
                 makeItem(title: "Review File", path: "~/Downloads/review.zip", sizeBytes: 120, tier: .yellow)
             ]
         )
@@ -755,8 +755,8 @@ final class CleanupHistoryServiceTests: XCTestCase {
             usedBytes: 820,
             freeBytes: 180,
             items: [
-                makeItem(title: "Remaining Cache", path: "~/Library/Caches/remaining", sizeBytes: 100, tier: .green),
-                makeItem(title: "Moved Cache", path: "~/Library/Caches/moved", sizeBytes: 70, tier: .green, status: .movedToTrash)
+                makeItem(title: "Remaining Cache", path: "/Users/fixture/Library/Caches/remaining", sizeBytes: 100, tier: .green),
+                makeItem(title: "Moved Cache", path: "/Users/fixture/Library/Caches/moved", sizeBytes: 70, tier: .green, status: .movedToTrash)
             ]
         )
 
@@ -773,7 +773,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
             usedBytes: 820,
             freeBytes: 180,
             items: [
-                makeItem(title: "Remaining Cache", path: "~/Library/Caches/remaining", sizeBytes: 100, tier: .green)
+                makeItem(title: "Remaining Cache", path: "/Users/fixture/Library/Caches/remaining", sizeBytes: 100, tier: .green)
             ]
         )
 
@@ -803,7 +803,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
 
     func testSmartScoreBreakdownExplainsScoreWithSameFormula() {
         let items = [
-            makeItem(title: "Cache", path: "~/Library/Caches/example", sizeBytes: 12 * gib, tier: .green)
+            makeItem(title: "Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 12 * gib, tier: .green)
         ]
         + (0..<19).map { index in
             makeItem(title: "Review \(index)", path: "~/Downloads/review-\(index)", sizeBytes: 2 * gib, tier: .yellow)
@@ -889,7 +889,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
                 date: Date(timeIntervalSince1970: 100),
                 usedBytes: 700 * gib,
                 freeBytes: 300 * gib,
-                items: [makeItem(title: "Cache", path: "~/Library/Caches/example", sizeBytes: 8 * gib)]
+                items: [makeItem(title: "Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 8 * gib)]
             ),
             makeScanResult(
                 date: Date(timeIntervalSince1970: 100),
@@ -1058,7 +1058,7 @@ final class CleanupHistoryServiceTests: XCTestCase {
         deniedPaths: [String] = []
     ) -> ScanResult {
         let scanItems = items ?? [
-            makeItem(title: "Cache", path: "~/Library/Caches/example", sizeBytes: 100)
+            makeItem(title: "Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 100)
         ]
 
         return ScanResult(

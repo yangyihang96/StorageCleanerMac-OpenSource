@@ -50,12 +50,16 @@ struct BatterySample: Equatable, Sendable {
 }
 
 enum BatteryPresentationState: Equatable, Sendable {
-    case charging(timeToFullMinutes: Int?)
+    /// `isEstimating`: macOS reports that it is still calculating the time
+    /// (IOPowerSources' -1). Without minutes and without an estimate in
+    /// progress the system simply offers no time.
+    case charging(timeToFullMinutes: Int?, isEstimating: Bool = false)
+    /// Charging past the reported 100 % ("Is Finishing Charge").
+    case finishingCharge
     case charged
     case connectedNotCharging
     case optimizedChargingPaused
-    case discharging(timeToEmptyMinutes: Int?)
-    case calculating
+    case discharging(timeToEmptyMinutes: Int?, isEstimating: Bool = false)
     case unknown
     case unavailable
 }
@@ -68,6 +72,13 @@ struct BatteryPowerSnapshot: Equatable, Sendable {
     let timeToFullChargeMinutes: Int?
     let isFullyCharged: Bool?
     let isOptimizedChargingEngaged: Bool?
+    /// IOPowerSources' "Is Finishing Charge": the pack keeps charging after
+    /// it reports 100 %.
+    let isFinishingCharge: Bool?
+    /// The system reported -1 ("Still Calculating the Time") for the time
+    /// key. Zero or a missing key is not an estimate in progress.
+    let isCalculatingTimeToEmpty: Bool
+    let isCalculatingTimeToFullCharge: Bool
 
     init(
         chargePercent: Int?,
@@ -76,7 +87,10 @@ struct BatteryPowerSnapshot: Equatable, Sendable {
         timeToEmptyMinutes: Int?,
         timeToFullChargeMinutes: Int?,
         isFullyCharged: Bool? = nil,
-        isOptimizedChargingEngaged: Bool? = nil
+        isOptimizedChargingEngaged: Bool? = nil,
+        isFinishingCharge: Bool? = nil,
+        isCalculatingTimeToEmpty: Bool = false,
+        isCalculatingTimeToFullCharge: Bool = false
     ) {
         self.chargePercent = chargePercent
         self.isCharging = isCharging
@@ -85,6 +99,9 @@ struct BatteryPowerSnapshot: Equatable, Sendable {
         self.timeToFullChargeMinutes = timeToFullChargeMinutes
         self.isFullyCharged = isFullyCharged
         self.isOptimizedChargingEngaged = isOptimizedChargingEngaged
+        self.isFinishingCharge = isFinishingCharge
+        self.isCalculatingTimeToEmpty = isCalculatingTimeToEmpty
+        self.isCalculatingTimeToFullCharge = isCalculatingTimeToFullCharge
     }
 
     var isConnectedToAC: Bool? {
@@ -140,7 +157,7 @@ struct BatteryPowerSnapshot: Equatable, Sendable {
         switch powerSource {
         case .acPower:
             if isCharging == true {
-                return .charging(timeToFullMinutes: timeToFullChargeMinutes)
+                return chargingPresentationState
             }
             if isCharging == false {
                 return isOptimizedChargingEngaged == true
@@ -150,17 +167,31 @@ struct BatteryPowerSnapshot: Equatable, Sendable {
             return .unknown
         case .batteryPower:
             if isCharging == false {
-                return .discharging(timeToEmptyMinutes: timeToEmptyMinutes)
+                // The time to empty is only valid here: on battery, not charging.
+                return .discharging(
+                    timeToEmptyMinutes: timeToEmptyMinutes,
+                    isEstimating: timeToEmptyMinutes == nil && isCalculatingTimeToEmpty
+                )
             }
             if isCharging == true {
-                return .charging(timeToFullMinutes: timeToFullChargeMinutes)
+                return chargingPresentationState
             }
-            return .calculating
+            // An unknown charging flag is not an estimate in progress.
+            return .unknown
         case .unknown:
-            return isCharging == true
-                ? .charging(timeToFullMinutes: timeToFullChargeMinutes)
-                : .unknown
+            return isCharging == true ? chargingPresentationState : .unknown
         }
+    }
+
+    /// The time to full charge is only valid while charging.
+    private var chargingPresentationState: BatteryPresentationState {
+        if let timeToFullChargeMinutes {
+            return .charging(timeToFullMinutes: timeToFullChargeMinutes)
+        }
+        if isFinishingCharge == true {
+            return .finishingCharge
+        }
+        return .charging(timeToFullMinutes: nil, isEstimating: isCalculatingTimeToFullCharge)
     }
 }
 
@@ -333,8 +364,16 @@ enum BatteryPowerService {
             isFullyCharged: boolean(description["Is Charged"]),
             isOptimizedChargingEngaged: boolean(
                 description["Optimized Battery Charging Engaged"]
-            )
+            ),
+            isFinishingCharge: boolean(description[kIOPSIsFinishingChargeKey]),
+            isCalculatingTimeToEmpty: isStillCalculating(description[kIOPSTimeToEmptyKey]),
+            isCalculatingTimeToFullCharge: isStillCalculating(description[kIOPSTimeToFullChargeKey])
         )
+    }
+
+    /// IOPSKeys.h: "A value of -1 indicates 'Still Calculating the Time'".
+    private static func isStillCalculating(_ value: Any?) -> Bool {
+        integer(value) == -1
     }
 
     private static func integer(_ value: Any?) -> Int? {
@@ -352,8 +391,10 @@ enum BatteryPowerService {
     }
 
     private static func minutes(_ value: Any?) -> Int? {
-        // IOPowerSources uses -1 and, on some transitions, 0 for an unknown
-        // estimate. Neither value is a user-visible "0 minutes" estimate.
+        // IOPowerSources uses -1 while it is still calculating and, on some
+        // transitions and when the pack is full, 0. Neither value is a
+        // user-visible "0 minutes" estimate; only -1 is an estimate in
+        // progress (`isStillCalculating`).
         guard let value = integer(value), value > 0 else { return nil }
         return value
     }

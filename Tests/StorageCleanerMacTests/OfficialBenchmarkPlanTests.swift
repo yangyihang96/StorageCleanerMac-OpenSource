@@ -20,6 +20,119 @@ final class OfficialBenchmarkPlanTests: XCTestCase {
         )
     }
 
+    /// U1 029: the dial and the load chart share the monitor's height; the
+    /// dial is capped at 240 pt and gives way to the chart's minimum height.
+    func testMonitorDialAndChartShareTheGivenHeight() {
+        // The default window's monitor content (about 516 x 413 pt).
+        let wide = BenchmarkMonitorLayout(width: 516, height: 413)
+        XCTAssertEqual(wide.diameter, BenchmarkMonitorLayout.maximumDiameter)
+        XCTAssertEqual(wide.chartHeight, BenchmarkMonitorLayout.maximumChartHeight)
+        XCTAssertEqual(wide.gaugeSize, BenchmarkMonitorLayout.maximumGaugeSize)
+        // 900 x 640: height-bound; the chart keeps a useful height.
+        let compact = BenchmarkMonitorLayout(width: 288, height: 299)
+        XCTAssertEqual(compact.chartHeight,
+                       (299 - BenchmarkMonitorLayout.fixedChromeHeight) * BenchmarkMonitorLayout.chartShare,
+                       accuracy: 0.01)
+        XCTAssertGreaterThan(compact.chartHeight, BenchmarkMonitorLayout.minimumChartHeight)
+        XCTAssertEqual(compact.diameter, 299 - BenchmarkMonitorLayout.fixedChromeHeight - compact.chartHeight,
+                       accuracy: 0.01)
+        XCTAssertGreaterThan(compact.diameter, 140)
+        // A narrow column: width-bound, the dial leaves room for the gauges.
+        let narrow = BenchmarkMonitorLayout(width: 204, height: 414)
+        XCTAssertEqual(narrow.diameter,
+                       204 - BenchmarkMonitorLayout.dialGaugeSpacing - BenchmarkMonitorLayout.maximumGaugeSize)
+        XCTAssertGreaterThan(wide.diameter, compact.diameter)
+        XCTAssertGreaterThan(wide.chartHeight, compact.chartHeight)
+    }
+
+    func testMonitorKeepsTheDialAndTheChartSeparateThroughContinuousSizes() {
+        for width: CGFloat in stride(from: 200, through: 600, by: 10) {
+            for height: CGFloat in stride(from: 234, through: 480, by: 6) {
+                let metrics = BenchmarkMonitorLayout(width: width, height: height)
+                let tag = "\(width)x\(height)"
+                XCTAssertGreaterThan(metrics.diameter, 0, tag)
+                XCTAssertLessThanOrEqual(metrics.diameter, BenchmarkMonitorLayout.maximumDiameter, tag)
+                XCTAssertLessThanOrEqual(
+                    metrics.diameter + BenchmarkMonitorLayout.dialGaugeSpacing + BenchmarkMonitorLayout.maximumGaugeSize,
+                    width + 0.001, "Dial and gauges fit side by side: \(tag)"
+                )
+                XCTAssertLessThanOrEqual(
+                    BenchmarkMonitorLayout.fixedChromeHeight + metrics.diameter + metrics.chartHeight,
+                    height + 0.001, "Dial, chart and labels fit the given height: \(tag)"
+                )
+                XCTAssertGreaterThanOrEqual(metrics.chartHeight, BenchmarkMonitorLayout.minimumChartHeight, tag)
+                XCTAssertLessThanOrEqual(2 * metrics.gaugeSize + BenchmarkMonitorLayout.gaugeSpacing,
+                                         metrics.diameter + 0.001, "Gauges fit beside the dial: \(tag)")
+            }
+        }
+    }
+
+    func testInvalidMonitorDimensionsCannotProduceNonFiniteViewFrames() {
+        let cases: [(CGFloat, CGFloat)] = [
+            (-1, 390), (CGFloat.infinity, 390), (520, CGFloat.nan), (CGFloat.nan, CGFloat.nan), (520, -5),
+        ]
+        for (width, height) in cases {
+            let metrics = BenchmarkMonitorLayout(width: width, height: height)
+            XCTAssertEqual(metrics.diameter, 0)
+            XCTAssertEqual(metrics.chartHeight, 0)
+            XCTAssertEqual(metrics.gaugeSize, 0)
+        }
+        XCTAssertEqual(BenchmarkMonitorLayout.landingHeight(scrollViewportHeight: .nan),
+                       BenchmarkMonitorLayout.landingMinimumHeight)
+        XCTAssertEqual(BenchmarkMonitorLayout.landingHeight(scrollViewportHeight: -.infinity),
+                       BenchmarkMonitorLayout.landingMinimumHeight)
+    }
+
+    /// The landing monitor gets the height that is visible below the page
+    /// picker and above the status bar, within fixed limits.
+    func testLandingMonitorHeightFollowsTheVisibleScrollArea() {
+        let chrome = AppDesignTokens.Layout.pagePadding + BenchmarkMonitorLayout.pagePickerAllowance
+            + AppDesignTokens.Layout.pageSpacing + AppDesignTokens.Spacing.small
+        XCTAssertEqual(BenchmarkMonitorLayout.landingHeight(scrollViewportHeight: 420), 420 - chrome)
+        XCTAssertEqual(BenchmarkMonitorLayout.landingHeight(scrollViewportHeight: 900),
+                       BenchmarkMonitorLayout.landingMaximumHeight)
+        XCTAssertEqual(BenchmarkMonitorLayout.landingHeight(scrollViewportHeight: 200),
+                       BenchmarkMonitorLayout.landingMinimumHeight)
+    }
+
+    /// Review P2-3/P2-4: one first-screen arrangement for idle and running,
+    /// and a compact temperature reading only where the monitor is not on the
+    /// first screen (stacked below the card, or a page too short for it).
+    func testFirstScreenArrangementAndCompactTemperatureReading() {
+        let pagePadding = AppDesignTokens.Layout.pagePadding
+        let sideBySide = BenchmarkLandingLayout.sideBySideMinimumContentWidth + 2 * pagePadding
+        let tall: CGFloat = 600
+        let wide = BenchmarkLandingLayout(scrollViewportSize: CGSize(width: sideBySide, height: tall))
+        XCTAssertTrue(wide.placesMonitorBeside)
+        XCTAssertFalse(wide.showsCompactTemperature)
+        XCTAssertEqual(wide.monitorHeight, BenchmarkMonitorLayout.landingHeight(scrollViewportHeight: tall))
+
+        let narrow = BenchmarkLandingLayout(scrollViewportSize: CGSize(width: sideBySide - 1, height: tall))
+        XCTAssertFalse(narrow.placesMonitorBeside)
+        XCTAssertTrue(narrow.showsCompactTemperature)
+
+        let chrome = pagePadding + BenchmarkMonitorLayout.pagePickerAllowance
+            + AppDesignTokens.Layout.pageSpacing + AppDesignTokens.Spacing.small
+        let fits = BenchmarkLandingLayout(scrollViewportSize: CGSize(
+            width: 1_000, height: chrome + BenchmarkMonitorLayout.landingMinimumHeight))
+        XCTAssertTrue(fits.placesMonitorBeside)
+        XCTAssertFalse(fits.showsCompactTemperature)
+        let short = BenchmarkLandingLayout(scrollViewportSize: CGSize(
+            width: 1_000, height: chrome + BenchmarkMonitorLayout.landingMinimumHeight - 1))
+        XCTAssertTrue(short.placesMonitorBeside)
+        XCTAssertTrue(short.showsCompactTemperature)
+
+        // Before the first measurement, and for invalid sizes, nothing is
+        // repeated and no non-finite height reaches a view frame.
+        let invalid: [CGSize] = [.zero, CGSize(width: CGFloat.nan, height: 600),
+                                 CGSize(width: 1_000, height: CGFloat.infinity), CGSize(width: -5, height: -5)]
+        for size in invalid {
+            let layout = BenchmarkLandingLayout(scrollViewportSize: size)
+            XCTAssertFalse(layout.showsCompactTemperature, "\(size)")
+            XCTAssertTrue(layout.monitorHeight.isFinite, "\(size)")
+        }
+    }
+
     func testPerformanceWorkspaceExposesOnlyTheOfficialFlow() throws {
         let projectRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -51,7 +164,13 @@ final class OfficialBenchmarkPlanTests: XCTestCase {
         )
 
         XCTAssertTrue(source.contains("BenchmarkV7DashboardView("))
-        XCTAssertTrue(source.contains("benchmarkStore.startOfficialBenchmark"))
+        // D72 replaces the v10 entry. The old dashboard remains a history-only fallback.
+        XCTAssertTrue(source.contains("benchmarkStore.startV11Benchmark(mode: selection.mode, accelerators: selection.units)"))
+        XCTAssertFalse(source.contains("benchmarkStore.startOfficialBenchmark"))
+        XCTAssertTrue(source.contains("PerformanceBenchmarkLandingView("))
+        XCTAssertTrue(source.contains("PerformanceBenchmarkV11RunningPage("))
+        XCTAssertTrue(source.contains("else if let result = displayedResult, result.mSeriesV11 != nil"))
+        XCTAssertTrue(source.contains("PerformanceBenchmarkV11ResultPage("))
         XCTAssertTrue(source.contains("leaderboardStore: leaderboardStore"))
         XCTAssertTrue(source.contains("localBestResult:"))
         XCTAssertTrue(source.contains("onDeleteHistoryRecord:"))
@@ -61,6 +180,9 @@ final class OfficialBenchmarkPlanTests: XCTestCase {
 
         XCTAssertTrue(dashboard.contains("开始性能测试"))
         XCTAssertTrue(dashboard.contains("最新结果"))
+        // Review 2026-10-12: a legacy record without mSeries shows its own scores, not the newest comparable result.
+        XCTAssertTrue(dashboard.contains("resultCard(result, title: L10n.text(\"所选结果\""))
+        XCTAssertFalse(dashboard.contains("} else {\n                        latestResultCard\n"))
         XCTAssertTrue(dashboard.contains("本机最佳"))
         XCTAssertTrue(dashboard.contains("历史记录"))
         XCTAssertTrue(dashboard.contains("case leaderboard"))
@@ -77,7 +199,15 @@ final class OfficialBenchmarkPlanTests: XCTestCase {
         XCTAssertFalse(dashboard.contains("FileToolLandingArtwork("))
         XCTAssertTrue(dashboard.contains(".buttonStyle(.borderedProminent)"))
         XCTAssertFalse(dashboard.contains(".shadow(color: accent.opacity(canStart"))
-        XCTAssertTrue(dashboard.contains("本机实际测试记录，与 FIXTURE 固定监控数据无关"))
+        // D64 removes the history disclaimer; real history input, comparison eligibility and errors remain.
+        XCTAssertFalse(dashboard.contains("本机实际测试记录，与 FIXTURE 固定监控数据无关"))
+        XCTAssertFalse(dashboard.contains("Actual local benchmark records, independent of FIXTURE monitor samples"))
+        XCTAssertTrue(dashboard.contains("let history: [BenchmarkV7Result]"))
+        XCTAssertTrue(dashboard.contains("history.sorted { historyTimestamp($0) > historyTimestamp($1) }"))
+        XCTAssertTrue(dashboard.contains("historyCard(entry.element)"))
+        XCTAssertTrue(dashboard.contains(".filter(\\.isCurrentComparableOfficialResult)"))
+        XCTAssertTrue(dashboard.contains("switch Self.historyBadgeStatus(for: result)"))
+        XCTAssertTrue(dashboard.contains("if let message = historyStatusMessage"))
         XCTAssertTrue(dashboard.contains("原始指标与技术详情"))
         XCTAssertTrue(presentation.contains("相对强项"))
         XCTAssertTrue(presentation.contains("相对短板"))

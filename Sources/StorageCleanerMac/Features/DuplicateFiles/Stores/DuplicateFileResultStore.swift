@@ -226,6 +226,10 @@ struct DuplicateFileResultStore: Sendable {
                 trashPaths: trashPaths,
                 openPath: openPath,
                 isDirectory: isDirectory,
+                // The existing snapshot is revalidated before load. Reuse its
+                // timestamp, including older caches, without another stat pass.
+                modifiedAt: fileSnapshot.map { Date(timeIntervalSince1970: Double($0.modificationSeconds)
+                    + Double($0.modificationNanoseconds) / 1_000_000_000) },
                 duplicateGroupID: duplicateGroupID,
                 duplicateMatchKind: duplicateMatchKind,
                 duplicateRelationship: duplicateRelationship,

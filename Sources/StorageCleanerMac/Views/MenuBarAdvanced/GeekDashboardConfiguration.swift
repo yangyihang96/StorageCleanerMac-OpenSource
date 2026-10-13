@@ -198,6 +198,21 @@ enum GeekChartRangeMetric: String, CaseIterable, Sendable {
 struct GeekChartRangeSelection: @unchecked Sendable {
     var range: GeekChartRange
     var select: (GeekChartRange) -> Void
+    var rangeForMetric: ((GeekChartRangeMetric) -> GeekChartRange)? = nil
+    var selectForMetric: ((GeekChartRange, GeekChartRangeMetric) -> Void)? = nil
+
+    func resolvedRange(for metric: GeekChartRangeMetric?) -> GeekChartRange {
+        guard let metric, let rangeForMetric else { return range }
+        return rangeForMetric(metric)
+    }
+
+    func apply(_ newRange: GeekChartRange, to metric: GeekChartRangeMetric?) {
+        if let metric, let selectForMetric {
+            selectForMetric(newRange, metric)
+        } else {
+            select(newRange)
+        }
+    }
 }
 
 private struct GeekChartRangeSelectionKey: EnvironmentKey {

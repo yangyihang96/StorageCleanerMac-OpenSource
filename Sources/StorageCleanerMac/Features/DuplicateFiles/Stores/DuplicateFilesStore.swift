@@ -68,6 +68,9 @@ final class DuplicateFilesStore: ObservableObject {
     private let activityStore: HeavyWorkActivityStore
     private let scanOperation: ScanOperation
     private let resultStore: DuplicateFileResultStore?
+    /// Where an interrupted scan's place is kept. Like the result store, a
+    /// store with its own defaults (tests) gets none unless one is passed.
+    private let resumeIndexStore: DuplicateFileResumeIndexStore?
 
     @Published private(set) var items: [StorageItem] = []
     @Published private(set) var phase: FeatureScanPhase = .idle
@@ -103,11 +106,20 @@ final class DuplicateFilesStore: ObservableObject {
         }
     }
     @Published var scanScope: DuplicateFileScanScope {
-        didSet { defaults.set(scanScope.rawValue, forKey: Key.scanScope) }
+        didSet {
+            // N17: "Selected only" needs an added location; with none the
+            // choice is refused rather than silently scanning default folders.
+            guard canSelectScanScope(scanScope) else {
+                scanScope = oldValue
+                return
+            }
+            defaults.set(scanScope.rawValue, forKey: Key.scanScope)
+        }
     }
     @Published private(set) var selectedItemIDs = Set<String>()
     @Published private(set) var selectionMessage: String?
 
+    private let userHomeURL: URL
     private var scanTask: Task<Void, Never>?
     private var resultRestoreTask: Task<Void, Never>?
     private var scanGeneration: UUID?
@@ -119,15 +131,21 @@ final class DuplicateFilesStore: ObservableObject {
         coordinator: HeavyWorkCoordinator? = nil,
         activityStore: HeavyWorkActivityStore? = nil,
         scanOperation: ScanOperation? = nil,
-        resultStore: DuplicateFileResultStore? = nil
+        resultStore: DuplicateFileResultStore? = nil,
+        resumeIndexStore: DuplicateFileResumeIndexStore? = nil,
+        userHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser
     ) {
         let resolvedCoordinator = coordinator ?? HeavyWorkCoordinator()
         self.defaults = defaults
+        self.userHomeURL = userHomeURL
         self.coordinator = resolvedCoordinator
         self.activityStore = activityStore ?? HeavyWorkActivityStore(coordinator: resolvedCoordinator)
         self.scanOperation = scanOperation ?? Self.defaultScanOperation
         self.resultStore = resultStore ?? (defaults === UserDefaults.standard
             ? DuplicateFileResultStore()
+            : nil)
+        self.resumeIndexStore = resumeIndexStore ?? (defaults === UserDefaults.standard
+            ? DuplicateFileResumeIndexStore()
             : nil)
         searchText = defaults.string(forKey: Key.searchText) ?? ""
         resultFilter = DuplicateResultFilter(
@@ -202,8 +220,41 @@ final class DuplicateFilesStore: ObservableObject {
         lastScanConfiguration?.scope
     }
 
+    /// A scan is running or still winding down.
+    var isBusy: Bool {
+        isScanning || scanTask != nil
+    }
+
     var canScan: Bool {
-        !isScanning && scanTask == nil
+        !isBusy && scanUnavailableReason == nil
+    }
+
+    /// Why the current scope cannot be scanned yet, if it cannot.
+    var scanUnavailableReason: String? {
+        scopeUnavailableReason(scanScope)
+    }
+
+    func canSelectScanScope(_ scope: DuplicateFileScanScope) -> Bool {
+        scopeUnavailableReason(scope) == nil
+    }
+
+    func scopeUnavailableReason(_ scope: DuplicateFileScanScope) -> String? {
+        guard scope == .selectedLocations, configuredAdditionalRoots.isEmpty else { return nil }
+        return L10n.text(
+            "“仅所选位置”需要先添加文件夹或外接卷。",
+            "“Selected Only” needs a folder or external volume added first."
+        )
+    }
+
+    /// Added locations the last completed scan walked first, in a pass with
+    /// their own quota, for labelling its coverage rows. "Selected only" is a
+    /// single pass, so it has none (review P2-5).
+    var lastScanSelectedRootPaths: Set<String> {
+        guard let lastScanConfiguration,
+              lastScanConfiguration.selectedRootsPass != nil else { return [] }
+        return Set(lastScanConfiguration.roots
+            .prefix(lastScanConfiguration.selectedRootCount)
+            .map(PathSafety.lexicalPath))
     }
 
     func startScan() {
@@ -216,8 +267,8 @@ final class DuplicateFilesStore: ObservableObject {
             candidateRules: candidateRules
         )
         let control = DuplicateFileScanControl()
-        let resumeStore = DuplicateFileResumeIndexStore()
-        let resumeIndexData = resumeStore.load()
+        let resumeStore = resumeIndexStore
+        let resumeIndexData = resumeStore?.load()
         let generation = UUID()
         scanGeneration = generation
         scanControl = control
@@ -253,6 +304,7 @@ final class DuplicateFilesStore: ObservableObject {
                         resumeIndexData,
                         control,
                         { data in
+                            guard let resumeStore else { return }
                             if let data {
                                 try? resumeStore.save(data)
                             } else {
@@ -383,6 +435,7 @@ final class DuplicateFilesStore: ObservableObject {
                     requiresClose: L10n.text("无", "None"),
                     trashPaths: [],
                     openPath: entry.path,
+                    modifiedAt: entry.modifiedAt,
                     duplicateGroupID: "candidate|\(group.id)",
                     duplicateMatchKind: group.rule.rawValue,
                     status: .available
@@ -419,6 +472,12 @@ final class DuplicateFilesStore: ObservableObject {
             )
         case .wholeComputer:
             .wholeComputer(
+                customRoots: customRootPaths,
+                externalVolumeRoots: externalRootPaths,
+                candidateRules: candidateRules
+            )
+        case .selectedLocations:
+            .selectedLocations(
                 customRoots: customRootPaths,
                 externalVolumeRoots: externalRootPaths,
                 candidateRules: candidateRules
@@ -493,7 +552,7 @@ final class DuplicateFilesStore: ObservableObject {
             )
             return
         }
-        let homePath = PathSafety.lexicalPath(FileManager.default.homeDirectoryForCurrentUser.path)
+        let homePath = PathSafety.lexicalPath(userHomeURL.path)
         guard PathSafety.isContained(item.path, in: homePath, resolvingSymlinks: false) else {
             selectionMessage = L10n.text(
                 "外接卷结果当前仅供审阅，不能在应用内移动。",

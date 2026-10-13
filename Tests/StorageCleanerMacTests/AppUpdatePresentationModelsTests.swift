@@ -224,7 +224,7 @@ final class AppUpdatePresentationModelsTests: XCTestCase {
         )
         XCTAssertEqual(
             summary.batchEligibleApps.map(\.id),
-            ["automatic", "requires-quit"]
+            ["automatic", "requires-quit", "requires-authorization"]
         )
         XCTAssertEqual(summary.automaticCount, 1)
         XCTAssertEqual(summary.requiresQuitCount, 1)
@@ -238,9 +238,9 @@ final class AppUpdatePresentationModelsTests: XCTestCase {
         )
         XCTAssertEqual(
             Set(catalog.entries.filter(\.canJoinAutomaticUpdateBatch).map(\.id)),
-            Set(["automatic", "requires-quit"])
+            Set(["automatic", "requires-quit", "requires-authorization"])
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             catalog.entries.first { $0.id == "requires-authorization" }?
                 .canJoinAutomaticUpdateBatch ?? true
         )
@@ -409,7 +409,7 @@ final class AppUpdatePresentationModelsTests: XCTestCase {
         }
     }
 
-    func testFrozenUpdatePlanPreservesEveryBucketAndSkipsUnsupportedExecution() {
+    func testFrozenUpdatePlanExecutesAuthorizationAndKeepsAppStoreHandoffSeparate() {
         let automatic = AppUpdateTestFixtures.strictHomebrewApplication(id: "automatic")
         let waitingForQuit = AppUpdateTestFixtures.strictHomebrewApplication(
             id: "waiting-for-quit",
@@ -438,7 +438,7 @@ final class AppUpdatePresentationModelsTests: XCTestCase {
         XCTAssertEqual(plan.plan.requiresQuitApplicationIDs, ["waiting-for-quit"])
         XCTAssertEqual(
             plan.automaticApplications.map(\.id),
-            ["automatic", "waiting-for-quit"]
+            ["automatic", "waiting-for-quit", "authorization"]
         )
         XCTAssertEqual(plan.plan.requiresAuthorizationApplicationIDs, ["authorization"])
         XCTAssertEqual(plan.plan.appStoreApplicationIDs, ["app-store"])
@@ -451,11 +451,12 @@ final class AppUpdatePresentationModelsTests: XCTestCase {
         )
         XCTAssertEqual(plan.executionPlan.automaticApplicationIDs, ["automatic"])
         XCTAssertEqual(plan.executionPlan.requiresQuitApplicationIDs, ["waiting-for-quit"])
-        XCTAssertTrue(plan.executionPlan.requiresAuthorizationApplicationIDs.isEmpty)
-        XCTAssertEqual(plan.executionPlan.skippedApplicationIDs, ["authorization", "app-store"])
+        XCTAssertEqual(plan.executionPlan.requiresAuthorizationApplicationIDs, ["authorization"])
+        XCTAssertTrue(plan.executionPlan.skippedApplicationIDs.isEmpty)
+        XCTAssertEqual(plan.executionPlan.appStoreApplicationIDs, ["app-store"])
     }
 
-    func testOneClickPlanStartsVerifiedRunningApplicationWaitingForQuit() async throws {
+    func testOneClickPlanIncludesRunningAndAuthorizationAndDefersHomebrewTeamCheck() async throws {
         let running = AppUpdateTestFixtures.strictHomebrewApplication(
             id: "running",
             token: "running",
@@ -507,15 +508,15 @@ final class AppUpdatePresentationModelsTests: XCTestCase {
                 interactive, appStore, manual,
             ]
         )
-        XCTAssertEqual(oneClick.automaticApps.map(\.id), ["running"])
+        XCTAssertEqual(oneClick.automaticApps.map(\.id), ["running", "unverified", "authorization"])
 
         let sessionID = UUID()
         let frozen = FrozenUpdatePlan(
             applications: oneClick.automaticApps,
             sessionID: sessionID
         )
-        XCTAssertEqual(frozen.plan.requiresQuitApplicationIDs, ["running"])
-        XCTAssertEqual(frozen.automaticApplications.map(\.id), ["running"])
+        XCTAssertEqual(frozen.plan.requiresQuitApplicationIDs, ["running", "unverified"])
+        XCTAssertEqual(frozen.automaticApplications.map(\.id), ["running", "unverified", "authorization"])
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("StorageCleanerMacTests-\(UUID().uuidString)", isDirectory: true)
@@ -532,8 +533,8 @@ final class AppUpdatePresentationModelsTests: XCTestCase {
             applications: frozen.automaticApplications
         )
 
-        XCTAssertEqual(snapshot.tasks.map(\.applicationID), ["running"])
-        XCTAssertEqual(snapshot.tasks.map(\.state), [.waitingForQuit])
+        XCTAssertEqual(snapshot.tasks.map(\.applicationID), ["running", "unverified", "authorization"])
+        XCTAssertEqual(snapshot.tasks.map(\.state), [.waitingForQuit, .waitingForQuit, .waitingForAuthorization])
     }
 
     func testReportsDistinguishSuccessPartialFailureAndCancellation() {

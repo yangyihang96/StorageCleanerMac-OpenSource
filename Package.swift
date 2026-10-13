@@ -8,7 +8,10 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
+        .executable(name: "StorageCleanerUpdateAskpass", targets: ["StorageCleanerUpdateAskpass"]),
+        .executable(name: "StorageCleanerFileOperationHelper", targets: ["StorageCleanerFileOperationHelper"]),
         .executable(name: "StorageCleanerMac", targets: ["StorageCleanerMac"]),
+        .executable(name: "StorageCleanerFinderExtension", targets: ["StorageCleanerFinderExtension"]),
         .executable(
             name: "StorageCleanerFanControlHelper",
             targets: ["StorageCleanerFanControlHelper"]
@@ -22,6 +25,15 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4")
     ],
     targets: [
+        .executableTarget(name: "StorageCleanerUpdateAskpass", dependencies: ["FileOperationShared"], path: "Sources/UpdateAskpass"),
+        .target(name: "FileOperationShared"),
+        .target(name: "UninstallHandoffShared"),
+        // D88: Finder Sync extension executable; script/build_and_run.sh wraps
+        // it in Contents/PlugIns/StorageCleanerFinderExtension.appex.
+        .executableTarget(name: "StorageCleanerFinderExtension", dependencies: ["UninstallHandoffShared"],
+                          path: "Sources/FinderUninstallExtension",
+                          linkerSettings: [.linkedFramework("FinderSync"), .linkedFramework("AppKit")]),
+        .executableTarget(name: "StorageCleanerFileOperationHelper", dependencies: ["FileOperationShared"], path: "Sources/FileOperationHelper", linkerSettings: [.linkedFramework("Security"), .linkedFramework("AppKit")]),
         .target(name: "MSeriesKernels", path: "Sources/MSeriesKernels",
                 publicHeadersPath: "include", linkerSettings: [.linkedLibrary("compression")]),
         .target(
@@ -35,6 +47,8 @@ let package = Package(
             name: "StorageCleanerMac",
             dependencies: [
                 "FanControlShared",
+                "FileOperationShared",
+                "UninstallHandoffShared",
                 "CSQLite",
                 "MSeriesKernels",
                 .product(name: "Sparkle", package: "Sparkle")
@@ -67,7 +81,7 @@ let package = Package(
         ),
         .testTarget(
             name: "StorageCleanerMacTests",
-            dependencies: ["StorageCleanerMac", "FanControlShared", "CSQLite"],
+            dependencies: ["StorageCleanerMac", "FanControlShared", "FileOperationShared", "UninstallHandoffShared", "CSQLite"],
             exclude: ["Fixtures"],
             swiftSettings: [
                 .define(

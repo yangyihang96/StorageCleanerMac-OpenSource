@@ -51,13 +51,16 @@ struct ScanReadinessItem: Identifiable, Equatable, Sendable {
 struct ScanReadinessSummary: Equatable, Sendable {
     let items: [ScanReadinessItem]
     let fullDiskAccessState: FullDiskAccessState
+    let hasReadabilityEvidence: Bool
 
     init(
         items: [ScanReadinessItem],
-        fullDiskAccessState: FullDiskAccessState = .unknown
+        fullDiskAccessState: FullDiskAccessState = .unknown,
+        hasReadabilityEvidence: Bool = true
     ) {
         self.items = items
         self.fullDiskAccessState = fullDiskAccessState
+        self.hasReadabilityEvidence = hasReadabilityEvidence
     }
 
     var checkedItems: [ScanReadinessItem] {
@@ -65,7 +68,7 @@ struct ScanReadinessSummary: Equatable, Sendable {
     }
 
     var readableCount: Int {
-        checkedItems.filter { $0.status == .readable }.count
+        hasReadabilityEvidence ? checkedItems.filter { $0.status == .readable }.count : 0
     }
 
     var blockedItems: [ScanReadinessItem] {
@@ -96,12 +99,10 @@ struct ScanReadinessSummary: Equatable, Sendable {
         isFullDiskAccessVerified ? 0 : blockedCount
     }
 
-    var estimatedCoveragePercent: Int {
-        guard !checkedItems.isEmpty else { return 100 }
-        if isFullDiskAccessVerified {
-            return max(90, 100 - blockedCount * 3)
-        }
-        return max(55, 100 - blockedCount * 10 - highImpactBlockedCount * 5)
+    /// This describes only explicitly checked locations, never the whole disk.
+    var checkedLocationsReadablePercent: Int? {
+        guard hasReadabilityEvidence, !checkedItems.isEmpty else { return nil }
+        return Int((Double(readableCount) / Double(checkedItems.count) * 100).rounded())
     }
 }
 
@@ -176,7 +177,7 @@ enum ScanReadinessService {
                 status: isDenied ? .needsPermission : .readable
             )
         }
-        return ScanReadinessSummary(items: items, fullDiskAccessState: fullDiskAccessState)
+        return ScanReadinessSummary(items: items, fullDiskAccessState: fullDiskAccessState, hasReadabilityEvidence: false)
     }
 
     static func displayText(
@@ -208,6 +209,12 @@ enum ScanReadinessService {
                 actionTitle: L10n.text("检查当前", "Check Current"),
                 actionSystemImage: "arrow.clockwise"
             )
+        }
+
+        if !summary.hasReadabilityEvidence || summary.checkedItems.isEmpty {
+            return ScanReadinessDisplayText(title: L10n.text("当前权限待检查", "Current Access Needs Checking"),
+                detail: L10n.text("上次没有拒绝记录不代表所有位置可读。", "No previous denial record does not prove all locations are readable."),
+                actionTitle: L10n.text("检查当前", "Check Current"), actionSystemImage: "arrow.clockwise")
         }
 
         if summary.isFullDiskAccessVerified {

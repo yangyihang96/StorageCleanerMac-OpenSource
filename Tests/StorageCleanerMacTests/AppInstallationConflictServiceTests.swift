@@ -234,12 +234,12 @@ final class AppInstallationConflictServiceTests: XCTestCase {
     private func withIsolatedDefaults(
         _ body: (UserDefaults, String) async -> Void
     ) async {
-        let suiteName = "AppInstallationConflictServiceTests.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suiteName) else {
+        let suiteName = TestPreferenceDomain.makeSuite()
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
+        guard let defaults = TestPreferenceDomain.open(suiteName: suiteName) else {
             XCTFail("Could not create isolated UserDefaults")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suiteName) }
         await body(defaults, "dismissedFingerprint")
     }
 }

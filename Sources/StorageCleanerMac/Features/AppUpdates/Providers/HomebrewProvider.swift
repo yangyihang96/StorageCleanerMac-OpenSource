@@ -1,6 +1,14 @@
 import Foundation
 
 enum HomebrewAutomaticUpdateSafety {
+    /// Homebrew's outdated result also admits tuple/latest casks. The installed
+    /// package and, where present, every application identity are read back.
+    static func batchTargetVersion(metadata: HomebrewPackageMetadata, installedVersion: ApplicationVersion) -> ApplicationVersion? {
+        guard metadata.hasOutdatedEvidence, let version = metadata.currentVersion?.trimmed.nonEmpty else { return nil }
+        return strictlyNewerCurrentVersion(metadata: metadata, installedVersion: installedVersion)
+            ?? ApplicationVersion(marketing: version)
+    }
+
     /// Returns a concrete Homebrew target only when the cask/formula reports a
     /// real, strictly newer version. Symbolic targets such as `:latest`, empty
     /// values, and versions containing punctuation outside the normal version
@@ -117,9 +125,7 @@ enum HomebrewAutomaticUpdateSafety {
     }
 
     private static func isSymbolicLatest(_ value: String) -> Bool {
-        let normalized = value.trimmed
-        return normalized.caseInsensitiveCompare("latest") == .orderedSame
-            || normalized.caseInsensitiveCompare(":latest") == .orderedSame
+        HomebrewSymbolicVersion.isLatest(value)
     }
 
     private static func containsSymbolicLatest(_ value: String) -> Bool {
@@ -202,7 +208,7 @@ enum HomebrewUpdateRecipeBuilder {
             guard application.caskToken == nil || application.caskToken == metadata.token else {
                 return nil
             }
-            return ["upgrade", "--cask", metadata.token]
+            return ["upgrade", "--cask"] + (metadata.effectiveOutdatedProvenance == .greedy ? ["--greedy"] : []) + [metadata.token]
         case .formula:
             return ["upgrade", metadata.token]
         }
@@ -220,34 +226,24 @@ enum HomebrewUpdateRecipeBuilder {
     ) -> ApplicationUpdateExecutionRecipe? {
         guard let arguments = arguments(for: application),
               let metadata = application.homebrewMetadata,
-              metadata.hasPlainOutdatedEvidence,
+              metadata.hasOutdatedEvidence,
               HomebrewPackageTokenPolicy.isValid(metadata.token),
               !metadata.isPinned,
               !metadata.isDisabled,
               !metadata.isDeprecated,
-              !metadata.requiresManualInstaller,
               !application.isReadOnly,
-              let targetVersion = HomebrewAutomaticUpdateSafety.strictlyNewerCurrentVersion(
+              let targetVersion = HomebrewAutomaticUpdateSafety.batchTargetVersion(
                   metadata: metadata,
                   installedVersion: application.installedVersion
               ),
               application.availableVersion == targetVersion else {
             return nil
         }
-        if metadata.kind == .cask,
-           (!application.identity.isCompleteForAutomaticUpdates
-            || !HomebrewAutomaticUpdateSafety.hasExactCaskArtifactPath(
-                application: application,
-                metadata: metadata
-            )
-            || !HomebrewAutomaticUpdateSafety.hasVerifiedCaskSigningIdentity(application)) {
-            return nil
-        }
         var verificationSteps: [ApplicationUpdateVerificationStep] = [
             .trustedExecutable,
             .installedVersion,
         ]
-        if metadata.kind == .cask {
+        if metadata.kind == .cask && !metadata.appBundlePaths.isEmpty {
             verificationSteps.append(contentsOf: [
                 .codeSignature,
                 .bundleIdentifier,
@@ -321,6 +317,10 @@ enum HomebrewUpdateRecipeBuilder {
            HomebrewPackageTokenPolicy.isValid(arguments[1]) {
             return (.formula, arguments[1])
         }
+        if arguments.count == 4, arguments[0] == "upgrade", arguments[1] == "--cask",
+           arguments[2] == "--greedy", HomebrewPackageTokenPolicy.isValid(arguments[3]) {
+            return (.cask, arguments[3])
+        }
         if arguments.count == 3,
            arguments[0] == "upgrade",
            arguments[1] == "--cask",
@@ -336,6 +336,9 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
 
     private let activeUpdatesLock = NSLock()
     private var activeUpdates = [String: HomebrewCommandCancellation]()
+    private var preparedApplications = [String: InstalledApplication]()
+    private let applicationRechecker: any InstalledApplicationRechecking
+    private let installedFormulaVersionProvider: @Sendable (String) async throws -> ApplicationVersion?
     private let homebrewExecutableProvider: @Sendable () -> URL?
     private let environmentProvider: @Sendable () -> [String: String]
     private let commandCapture: @Sendable (
@@ -346,6 +349,10 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
     ) throws -> String
 
     init(
+        applicationRechecker: any InstalledApplicationRechecking = VerifiedInstalledApplicationRechecker(),
+        installedFormulaVersionProvider: @escaping @Sendable (String) async throws -> ApplicationVersion? = { token in
+            try await HomebrewInventoryScanner().installedFormulaVersion(token: token)
+        },
         homebrewExecutableProvider: @escaping @Sendable () -> URL? = {
             HomebrewInventoryScanner().locateHomebrewExecutable()
         },
@@ -368,6 +375,8 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
             )
         }
     ) {
+        self.applicationRechecker = applicationRechecker
+        self.installedFormulaVersionProvider = installedFormulaVersionProvider
         self.homebrewExecutableProvider = homebrewExecutableProvider
         self.environmentProvider = environmentProvider
         self.commandCapture = commandCapture
@@ -408,7 +417,7 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
             )
         }
 
-        guard let targetVersion = HomebrewAutomaticUpdateSafety.strictlyNewerCurrentVersion(
+        guard let targetVersion = HomebrewAutomaticUpdateSafety.batchTargetVersion(
             metadata: metadata,
             installedVersion: application.installedVersion
         ) else {
@@ -441,7 +450,7 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
 
     func prepareUpdate(_ application: InstalledApplication) async throws -> PreparedApplicationUpdate {
         guard let metadata = application.homebrewMetadata,
-              metadata.hasPlainOutdatedEvidence,
+              metadata.hasOutdatedEvidence,
               application.canAutomaticallyUpdate,
               isAutomaticallyEligible(application),
               let executableURL = homebrewExecutableProvider(),
@@ -456,7 +465,7 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
         guard !application.isRunning else {
             throw ApplicationScanningError.providerUnsupported("homebrew-waiting-for-quit")
         }
-        return PreparedApplicationUpdate(
+        let prepared = PreparedApplicationUpdate(
             applicationID: application.id,
             providerIdentifier: identifier,
             originalIdentity: application.identity,
@@ -465,6 +474,8 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
             providerPayload: [:],
             executionRecipe: recipe
         )
+        activeUpdatesLock.withLock { preparedApplications[application.id] = application }
+        return prepared
     }
 
     func install(
@@ -474,12 +485,25 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
         guard preparedUpdate.providerIdentifier == identifier,
               let recipe = preparedUpdate.executionRecipe,
               HomebrewUpdateRecipeBuilder.isValid(recipe, for: preparedUpdate),
+              let application = activeUpdatesLock.withLock({ preparedApplications[preparedUpdate.applicationID] }),
+              application.identity == preparedUpdate.originalIdentity,
+              application.installedVersion == preparedUpdate.originalVersion,
+              application.availableVersion == preparedUpdate.targetVersion,
               let currentlyTrustedExecutable = homebrewExecutableProvider(),
               ApplicationPathNormalizer.comparisonKey(for: currentlyTrustedExecutable)
                 == ApplicationPathNormalizer.comparisonKey(for: recipe.executableURL)
         else {
             throw ApplicationScanningError.providerUnsupported(identifier.rawValue)
         }
+        defer {
+            _ = activeUpdatesLock.withLock { preparedApplications.removeValue(forKey: preparedUpdate.applicationID) }
+        }
+
+        // A display scan (even a signed one) is not authority to execute.
+        // Re-open this actual target after preparation and immediately before
+        // launching brew, including the formula branch's current CLI inventory.
+        _ = try await verifyActualTarget(application, prepared: preparedUpdate, afterInstall: false)
+        try Task.checkCancellation()
 
         let cancellation = HomebrewCommandCancellation()
         activeUpdatesLock.withLock {
@@ -514,6 +538,7 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
         }
 
         try Task.checkCancellation()
+        _ = try await verifyActualTarget(application, prepared: preparedUpdate, afterInstall: true)
         progress(
             ApplicationUpdateProgressEvent(
                 applicationID: preparedUpdate.applicationID,
@@ -537,33 +562,77 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
             activeUpdates[application.id]
         }
         cancellation?.cancel()
+        _ = activeUpdatesLock.withLock { preparedApplications.removeValue(forKey: application.id) }
+    }
+
+    private func verifyActualTarget(
+        _ application: InstalledApplication,
+        prepared: PreparedApplicationUpdate,
+        afterInstall: Bool
+    ) async throws -> ApplicationVersion {
+        guard let metadata = application.homebrewMetadata else {
+            throw ProviderBackedUpdateExecutorError.applicationNoLongerEligible
+        }
+        let version: ApplicationVersion
+        if metadata.kind == .formula {
+            guard let current = try await installedFormulaVersionProvider(metadata.token) else {
+                throw ProviderBackedUpdateExecutorError.applicationMissing
+            }
+            version = current
+        } else {
+            guard let snapshot = try await applicationRechecker.snapshot(at: application.bundleURL) else {
+                throw ProviderBackedUpdateExecutorError.applicationMissing
+            }
+            let current = snapshot.application
+            guard snapshot.signature.isValid,
+                  current.sourceEvidence.contains("valid-code-signature"),
+                  current.bundleURL.standardizedFileURL == application.bundleURL.standardizedFileURL,
+                  current.identity == prepared.originalIdentity,
+                  snapshot.signature.teamIdentifier == prepared.originalIdentity.signingTeamIdentifier,
+                  snapshot.signature.codeSigningIdentifier == prepared.originalIdentity.codeSigningIdentifier else {
+                throw ProviderBackedUpdateExecutorError.applicationIdentityChanged
+            }
+            guard !current.isRunning else {
+                throw ApplicationScanningError.providerUnsupported("homebrew-waiting-for-quit")
+            }
+            guard !current.isReadOnly else {
+                throw ProviderBackedUpdateExecutorError.applicationNoLongerEligible
+            }
+            version = current.installedVersion
+        }
+        if afterInstall {
+            guard version != prepared.originalVersion else {
+                throw ProviderBackedUpdateExecutorError.versionDidNotChange
+            }
+            guard let target = prepared.targetVersion, version >= target else {
+                throw ProviderBackedUpdateExecutorError.applicationVersionChanged
+            }
+        } else if version != prepared.originalVersion {
+            throw ProviderBackedUpdateExecutorError.applicationVersionChanged
+        }
+        return version
     }
 
     private func isAutomaticallyEligible(_ application: InstalledApplication) -> Bool {
         guard let metadata = application.homebrewMetadata,
               homebrewExecutableProvider() != nil,
               HomebrewPackageTokenPolicy.isValid(metadata.token),
-              metadata.hasPlainOutdatedEvidence,
+              metadata.hasOutdatedEvidence,
               metadata.currentVersion?.trimmed.nonEmpty != nil,
               !metadata.isPinned,
               !metadata.isDisabled,
               !metadata.isDeprecated,
-              !metadata.requiresManualInstaller,
               !application.isReadOnly
         else {
             return false
         }
-        guard HomebrewAutomaticUpdateSafety.strictlyNewerCurrentVersion(
+        guard HomebrewAutomaticUpdateSafety.batchTargetVersion(
             metadata: metadata,
             installedVersion: application.installedVersion
         ) != nil else {
             return false
         }
-        if metadata.kind == .formula { return true }
-        return HomebrewAutomaticUpdateSafety.hasExactCaskArtifactPath(
-            application: application,
-            metadata: metadata
-        ) && HomebrewAutomaticUpdateSafety.hasVerifiedCaskSigningIdentity(application)
+        return true
     }
 
     private func ineligibilityReason(_ application: InstalledApplication) -> String? {
@@ -574,24 +643,11 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
                 "A trusted Homebrew installation was not found; the command remains available as an advanced fallback."
             )
         }
-        if !metadata.hasPlainOutdatedEvidence {
-            switch metadata.effectiveOutdatedProvenance {
-            case .greedy:
-                return L10n.text(
-                    "该项目仅由 Homebrew greedy 查询发现，需要人工确认。",
-                    "This item was found only by Homebrew's greedy query and requires manual confirmation."
-                )
-            case .plain:
-                break
-            case .unknown:
-                return L10n.text(
-                    "无法确认该更新来自普通 Homebrew outdated 清单。",
-                    "The update could not be confirmed by the normal Homebrew outdated inventory."
-                )
-            }
+        if !metadata.hasOutdatedEvidence {
+            return L10n.text("没有经过核实的 Homebrew 过期清单。", "No verified Homebrew outdated inventory.")
         }
         if metadata.isPinned {
-            return L10n.text("Homebrew 项目已 pinned。", "The Homebrew item is pinned.")
+            return L10n.text("Homebrew 项目已固定版本，已排除自动更新。", "The Homebrew item is pinned.")
         }
         if metadata.isDisabled {
             return L10n.text("Homebrew 项目已禁用。", "The Homebrew item is disabled.")
@@ -599,28 +655,8 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
         if metadata.isDeprecated {
             return L10n.text("Homebrew 项目已弃用。", "The Homebrew item is deprecated.")
         }
-        if metadata.requiresManualInstaller {
-            return L10n.text("此 Cask 需要人工完成安装器。", "This cask requires a manual installer.")
-        }
         if application.isReadOnly {
             return L10n.text("应用位于只读卷。", "The application is on a read-only volume.")
-        }
-        if metadata.kind == .cask,
-           !HomebrewAutomaticUpdateSafety.hasExactCaskArtifactPath(
-               application: application,
-               metadata: metadata
-           ) {
-            return L10n.text("仅通过唯一名称匹配，需要人工确认。", "Only a unique-name match was found; confirmation is required.")
-        }
-        if metadata.kind == .cask,
-           !HomebrewAutomaticUpdateSafety.hasVerifiedCaskSigningIdentity(application) {
-            return L10n.text(
-                "无法建立原应用的签名开发者身份。",
-                "The installed application's signing developer identity could not be established."
-            )
-        }
-        if metadata.currentVersion?.trimmed.nonEmpty == nil {
-            return L10n.text("无法确认 Homebrew 目标版本。", "The Homebrew target version could not be confirmed.")
         }
         return nil
     }

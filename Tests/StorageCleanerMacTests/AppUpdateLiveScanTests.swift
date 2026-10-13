@@ -16,7 +16,7 @@ final class AppUpdateLiveScanTests: XCTestCase {
             registry: registry,
             remoteRefresher: RemoteOfficialSourceRegistryRefresher(configuration: nil)
         )
-        let scanner = ApplicationInventoryScanner(sourceResolver: resolver)
+        let scanner = ApplicationInventoryScanner(metadataCache: nil, sourceResolver: resolver)
         let scannedApplications = try await scanner.scan(
             configuration: ApplicationScanConfiguration(
                 includeSpotlightResults: true,

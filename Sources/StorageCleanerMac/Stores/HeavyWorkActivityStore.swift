@@ -12,17 +12,47 @@ final class HeavyWorkActivityStore: ObservableObject {
     @Published private(set) var navigationDestination: HeavyWorkNavigationDestination?
 
     private let coordinator: HeavyWorkCoordinator
+    private var observationTask: Task<Void, Never>?
+    private var ownerRevision: UInt64 = 0
 
     init(coordinator: HeavyWorkCoordinator) {
         self.coordinator = coordinator
+        observationTask = Task { [weak self, coordinator] in
+            let states = await coordinator.ownerStates()
+            for await state in states {
+                guard !Task.isCancelled else { return }
+                self?.apply(state: state, acceptsEqualRevision: false)
+            }
+        }
+    }
+
+    deinit {
+        observationTask?.cancel()
     }
 
     func refresh() async {
-        apply(owner: await coordinator.activeOwner)
+        apply(state: await coordinator.ownerState, acceptsEqualRevision: true)
     }
 
     func reportConflict(activeOwner: HeavyWorkCoordinator.Owner) {
         apply(owner: activeOwner)
+        // The busy error may reach the main actor after that lease released.
+        // Reconcile once with the authoritative actor, even if its completion
+        // event was already consumed before the conflict was reported.
+        Task { [weak self, coordinator] in
+            let state = await coordinator.ownerState
+            self?.apply(state: state, acceptsEqualRevision: true)
+        }
+    }
+
+    private func apply(state: HeavyWorkCoordinator.OwnerState, acceptsEqualRevision: Bool) {
+        // A page refresh can return after a newer lease event has been applied.
+        // The initial idle revision is already represented by this store, so
+        // it must not overwrite a conflict reported while registration awaits.
+        guard state.revision > ownerRevision ||
+            (acceptsEqualRevision && state.revision == ownerRevision) else { return }
+        ownerRevision = state.revision
+        apply(owner: state.owner)
     }
 
     private func apply(owner: HeavyWorkCoordinator.Owner?) {
@@ -41,7 +71,7 @@ final class HeavyWorkActivityStore: ObservableObject {
         conflictMessage = Self.conflictMessage(activeOwner: owner)
     }
 
-    static func conflictMessage(
+    nonisolated static func conflictMessage(
         activeOwner: HeavyWorkCoordinator.Owner
     ) -> String {
         L10n.text(
@@ -70,10 +100,12 @@ final class HeavyWorkActivityStore: ObservableObject {
             .networkTest
         case .benchmark:
             .review(.performance)
+        case .cloudLocalCopy:
+            .review(.largeFiles)
         }
     }
 
-    private static func title(
+    nonisolated private static func title(
         for owner: HeavyWorkCoordinator.Owner
     ) -> String {
         switch owner {
@@ -97,6 +129,8 @@ final class HeavyWorkActivityStore: ObservableObject {
             L10n.text("网络测速", "network test")
         case .benchmark:
             L10n.text("Mac 性能测试", "Mac benchmark")
+        case .cloudLocalCopy:
+            L10n.text("释放本地副本", "local copy release")
         }
     }
 }

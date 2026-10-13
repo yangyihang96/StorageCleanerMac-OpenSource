@@ -4,11 +4,15 @@ import Foundation
 /// standalone application. A cancelled worker is awaited until it has drained.
 enum MSeriesCoreRunner {
     static func run(sessionID: UUID, root: URL, resourceJournal: CleanupReportJournal?,
+                    includeLegacyExtensions: Bool = true,
+                    cancellation suppliedCancellation: MSeriesCancellation? = nil,
+                    dispatchDeadlineNanoseconds: UInt64? = nil,
                     progress: @escaping @Sendable (UUID, String, Int) async -> Void) async -> MSeriesResult {
-        let cancellation = MSeriesCancellation()
+        let cancellation = suppliedCancellation ?? MSeriesCancellation()
         let worker = Task.detached(priority: .userInitiated) {
             await execute(sessionID: sessionID, root: root, cancellation: cancellation,
-                          resourceJournal: resourceJournal, progress: progress)
+                          resourceJournal: resourceJournal, includeLegacyExtensions: includeLegacyExtensions,
+                          dispatchDeadlineNanoseconds: dispatchDeadlineNanoseconds, progress: progress)
         }
         return await withTaskCancellationHandler {
             await worker.value
@@ -17,6 +21,7 @@ enum MSeriesCoreRunner {
 
     private static func execute(sessionID: UUID, root: URL, cancellation: MSeriesCancellation,
                                 resourceJournal: CleanupReportJournal?,
+                                includeLegacyExtensions: Bool, dispatchDeadlineNanoseconds: UInt64?,
                                 progress: @escaping @Sendable (UUID, String, Int) async -> Void) async -> MSeriesResult {
         let startedAt = Date()
         let hardware = MSeriesHardware.capture()
@@ -28,6 +33,10 @@ enum MSeriesCoreRunner {
         var writtenBytes: UInt64 = 0
         let writeBudget = MSeriesWriteBudget()
         for (index, id) in MSeriesProtocol.coreIDs.enumerated() {
+            if let deadline = dispatchDeadlineNanoseconds, MSeriesV11Clock.nanoseconds >= deadline {
+                failure = "core-timeout"; break
+            }
+            let itemStartedAt = MSeriesV11Clock.nanoseconds
             await progress(sessionID, id, index)
             environment.append(.capture())
             do {
@@ -77,12 +86,16 @@ enum MSeriesCoreRunner {
                 metrics.append(unavailable(id, status: .failed, reason: String(describing: error)))
             }
             environment.append(.capture())
+            if dispatchDeadlineNanoseconds != nil,
+               MSeriesV11Windows.seconds(itemStartedAt, MSeriesV11Clock.nanoseconds) > 30 {
+                failure = "core-item-timeout"; break
+            }
         }
         writtenBytes = writeBudget.writtenBytes
         disk = nil // Cleanup completes while the coordinator still owns its lease.
         environment.append(.capture())
         let cpuExtensions: MSeriesCPUExtensions.Result
-        if !cancelled && failure == nil && hardware.nativeARM64 && hardware.translated != true {
+        if includeLegacyExtensions && !cancelled && failure == nil && hardware.nativeARM64 && hardware.translated != true {
             cpuExtensions = await MSeriesCPUExtensions.run(hardware: hardware, cancellation: cancellation) { id in
                 await progress(sessionID, id, MSeriesProtocol.coreIDs.count)
             }

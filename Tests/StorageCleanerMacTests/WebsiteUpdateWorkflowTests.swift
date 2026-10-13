@@ -4,6 +4,116 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class WebsiteUpdateWorkflowTests: XCTestCase {
+    func testOneClickGuidanceOnlyIncludesConfirmedWebsiteSources() {
+        let confirmed = websiteApplication(id: "confirmed")
+        var unconfirmed = websiteApplication(id: "unconfirmed")
+        unconfirmed.officialSource = nil
+
+        let plan = AppUpdateService.oneClickPlan(for: [confirmed, unconfirmed])
+
+        XCTAssertEqual(plan.guidedWebsiteApps.map(\.id), [confirmed.id])
+        XCTAssertFalse(plan.hasAutomaticUpdates)
+    }
+
+    func testSelectedBatchIncludesTrustedGuidanceWithoutTreatingItAsAutomatic() {
+        let app = websiteApplication(id: "guided")
+        XCTAssertTrue(app.canJoinSelectedUpdateBatch)
+        XCTAssertFalse(app.canJoinAutomaticUpdateBatch)
+        var unknown = app
+        unknown.officialSource = nil
+        XCTAssertFalse(unknown.canJoinSelectedUpdateBatch)
+    }
+
+    func testAddingGuidedSelectionsPreservesPendingQueueAndDeduplicates() async throws {
+        let storage = InMemoryWebsiteUpdateQueueStore()
+        let queue = WebsiteUpdateQueue(store: storage)
+        let first = websiteApplication(id: "first")
+        let second = websiteApplication(id: "second")
+        let original = try await queue.start(applications: [first])
+        let appended = try await queue.start(applications: [first, second], preservingPending: true)
+        XCTAssertEqual(appended.sessionID, original.sessionID)
+        XCTAssertEqual(appended.items.map(\.applicationID), [first.id, second.id])
+        XCTAssertEqual(appended.items.first?.id, original.items.first?.id)
+        XCTAssertEqual(appended.items.map(\.state), [.queued, .queued])
+        let restored = try await WebsiteUpdateQueue(store: storage).restore(applications: [first, second])
+        XCTAssertEqual(restored?.items.map(\.applicationID), [first.id, second.id])
+    }
+
+    func testFailedQueueAppendKeepsPriorDurableAndVisibleSelections() async throws {
+        let storage = RejectSecondQueueSave()
+        let queue = WebsiteUpdateQueue(store: storage)
+        let first = websiteApplication(id: "first")
+        let prior = try await queue.start(applications: [first])
+        do {
+            _ = try await queue.start(applications: [websiteApplication(id: "second")], preservingPending: true)
+            XCTFail("Expected a durable save failure")
+        } catch { }
+        let visible = await queue.currentSnapshot()
+        let durable = await storage.load()
+        XCTAssertEqual(visible, prior)
+        XCTAssertEqual(durable, prior)
+    }
+
+    private actor RejectSecondQueueSave: WebsiteUpdateQueuePersisting {
+        var value: WebsiteUpdateQueueSnapshot?
+        func load() -> WebsiteUpdateQueueSnapshot? { value }
+        func save(_ snapshot: WebsiteUpdateQueueSnapshot) throws {
+            guard value == nil else { throw CocoaError(.fileWriteOutOfSpace) }
+            value = snapshot
+        }
+        func remove() { value = nil }
+    }
+
+    func testExternalUpdaterOnlyCompletesAfterSignedTargetVersionIsInstalled() async throws {
+        let original = websiteApplication(id: "external-proof")
+        let unchanged = ExternalUpdateVersionVerifier(rechecker: FixedApplicationRechecker(
+            snapshot: recheckSnapshot(
+                for: original, observedVersion: "1.0", observedBuild: "100"
+            )
+        ))
+        let unchangedResult = try await unchanged.verify(original)
+        XCTAssertEqual(
+            unchangedResult,
+            .unchanged(ApplicationVersion(marketing: "1.0", build: "100"))
+        )
+
+        let updated = ExternalUpdateVersionVerifier(rechecker: FixedApplicationRechecker(
+            snapshot: recheckSnapshot(
+                for: original, observedVersion: "2.0", observedBuild: "200"
+            )
+        ))
+        let updatedResult = try await updated.verify(original)
+        XCTAssertEqual(
+            updatedResult,
+            .updated(ApplicationVersion(marketing: "2.0", build: "200"))
+        )
+    }
+
+    func testExternalUpdaterRejectsChangedSignatureAndPartialVersion() async throws {
+        let original = websiteApplication(id: "external-safety")
+        let changedSignature = ExternalUpdateVersionVerifier(rechecker: FixedApplicationRechecker(
+            snapshot: recheckSnapshot(
+                for: original,
+                observedVersion: "2.0",
+                observedBuild: "200",
+                teamIdentifier: "OTHERTEAM"
+            )
+        ))
+        let changedSignatureResult = try await changedSignature.verify(original)
+        XCTAssertEqual(changedSignatureResult, .identityChanged)
+
+        let partialVersion = ExternalUpdateVersionVerifier(rechecker: FixedApplicationRechecker(
+            snapshot: recheckSnapshot(
+                for: original, observedVersion: "1.5", observedBuild: "150"
+            )
+        ))
+        let partialVersionResult = try await partialVersion.verify(original)
+        XCTAssertEqual(
+            partialVersionResult,
+            .targetNotReached(ApplicationVersion(marketing: "1.5", build: "150"))
+        )
+    }
+
     func testQueuePersistsAndRestoresWaitingItem() async throws {
         let temporaryRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("website-update-queue-tests-\(UUID().uuidString)", isDirectory: true)
@@ -124,6 +234,22 @@ final class WebsiteUpdateWorkflowTests: XCTestCase {
         XCTAssertEqual(current?.versionCheckState, .updateAvailable)
     }
 
+    func testDeferredAppRequestedAgainReturnsToTheQueue() async throws {
+        let first = websiteApplication(id: "first")
+        let second = websiteApplication(id: "second")
+        let queue = WebsiteUpdateQueue(store: InMemoryWebsiteUpdateQueueStore())
+        let created = try await queue.start(applications: [first, second])
+        let firstItem = try XCTUnwrap(created.items.first { $0.applicationID == first.id })
+        try await queue.deferCurrent(itemID: firstItem.id, sessionID: firstItem.sessionID)
+
+        // The second app is still pending, so the session is preserved.
+        let resumed = try await queue.start(applications: [first], preservingPending: true)
+
+        XCTAssertEqual(resumed.sessionID, created.sessionID)
+        XCTAssertEqual(resumed.items.filter { $0.applicationID == first.id }.map(\.state), [.queued])
+        XCTAssertEqual(resumed.items.filter { $0.applicationID == second.id }.count, 1)
+    }
+
     func testWorkflowRejectsVersionIncreaseWhenObservedSignatureIsInvalid() async throws {
         let application = websiteApplication(id: "invalid-signature", version: "1.0", availableVersion: "2.0")
         let invalidSnapshot = recheckSnapshot(
@@ -180,6 +306,37 @@ final class WebsiteUpdateWorkflowTests: XCTestCase {
         let current = try XCTUnwrap(currentValue)
         XCTAssertEqual(current.state, .waitingForUser)
         XCTAssertNil(current.observedVersion)
+    }
+
+    func testWorkflowRejectsVersionIncreaseWhenNoTeamIdentifierIsExpected() async throws {
+        // Neither side has a trusted (Apple-anchored) Team ID: a look-alike with
+        // the same bundle and code identifiers must not pass as the update.
+        let application = websiteApplication(
+            id: "no-trusted-team",
+            version: "1.0",
+            availableVersion: "2.0",
+            signingTeamIdentifier: nil
+        )
+        let snapshot = recheckSnapshot(for: application, observedVersion: "2.0", observedBuild: "200")
+        XCTAssertNil(snapshot.signature.teamIdentifier)
+        let workflow = WebsiteUpdateWorkflow(
+            queue: WebsiteUpdateQueue(store: InMemoryWebsiteUpdateQueueStore()),
+            opener: RecordingWebsiteOpener(result: true),
+            applicationRechecker: FixedApplicationRechecker(snapshot: snapshot)
+        )
+
+        try await workflow.start(applications: [application])
+        try await workflow.openCurrentWebsite()
+
+        do {
+            _ = try await workflow.recheckCurrentVersion()
+            XCTFail("Two missing Team IDs must not count as the same developer")
+        } catch {
+            XCTAssertEqual(error as? WebsiteUpdateWorkflowError, .applicationIdentityChanged)
+        }
+        let currentValue = await workflow.currentItem()
+        let current = try XCTUnwrap(currentValue)
+        XCTAssertEqual(current.state, .waitingForUser)
     }
 
     func testQueueRestoreFailsClosedWhenOfficialSourceWasRevoked() async throws {
@@ -461,12 +618,14 @@ final class WebsiteUpdateWorkflowTests: XCTestCase {
     private func websiteApplication(
         id: String,
         version: String = "1.0",
-        availableVersion: String? = "2.0"
+        availableVersion: String? = "2.0",
+        signingTeamIdentifier: String? = "TEAM123"
     ) -> InstalledApplication {
         var application = AppUpdateTestFixtures.application(
             id: id,
             version: version,
             availableVersion: availableVersion,
+            signingTeamIdentifier: signingTeamIdentifier,
             provider: .officialWebsite,
             status: .websiteUpdateRequired
         )

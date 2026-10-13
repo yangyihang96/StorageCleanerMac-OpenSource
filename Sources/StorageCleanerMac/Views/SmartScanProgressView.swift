@@ -84,6 +84,7 @@ struct SmartScanProgressDashboard: View {
     @Environment(\.moduleTheme) private var theme
     @Environment(\.windowLayoutMetrics) private var layout
     let progress: DiskScanProgress
+    var module: ReviewFilter = .overview
     var isFinalizing = false
     var isCancelling = false
 
@@ -111,7 +112,14 @@ struct SmartScanProgressDashboard: View {
             ],
             currentItem: locationText
         ) {
-            ScanProgressStageList(progress: progress, isFinalizing: isFinalizing)
+            if module == .green {
+                ForEach(progress.groups) { group in
+                    Text(group.title + " · " + FeatureLightfieldScanState.text(group.state))
+                        .font(.system(size: 15))
+                }
+            } else {
+                ScanProgressStageList(progress: progress, isFinalizing: isFinalizing)
+            }
         }
     }
 
@@ -127,6 +135,7 @@ struct SmartScanProgressDashboard: View {
 struct SmartScanScanningPage: View {
     @Environment(\.moduleTheme) private var theme
     @Environment(\.windowLayoutMetrics) private var layout
+    @Environment(\.smartScanFlowNamespace) private var flowNamespace
 
     let progress: DiskScanProgress
     var module: ReviewFilter = .overview
@@ -136,38 +145,29 @@ struct SmartScanScanningPage: View {
     var onCancel: (() -> Void)?
 
     var body: some View {
-        SmartScanPageShell(fitsVisibleHeight: true) {
-            AppPageHeader(
-                title: module.sidebarTitle,
-                subtitle: module.pageSubtitle,
-                systemImage: module.systemImage,
-                isHero: true
-            ) {
-                if layout.density == .regular {
-                    MetadataPill(text: L10n.text("只读扫描", "Read-only"),
-                        systemImage: "checkmark.shield.fill", tint: AppDesignTokens.Palette.success)
-                }
+        FeatureRunningTemplate(
+            module: module,
+            title: isCancelling ? L10n.text("正在停止扫描", "Stopping Scan")
+                : isFinalizing ? L10n.text("正在汇总", "Preparing Results")
+                : L10n.text("正在扫描", "Scanning"),
+            state: isCancelling ? .stopping : .running,
+            fraction: progress.progressKind == .determinate ? Double(progress.fractionCompleted) : nil,
+            metrics: [
+                .init(title: L10n.text("已发现", "Items Found"), value: String(progress.discoveredItemCount)),
+                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.string(progress.discoveredBytes)),
+                .init(title: L10n.text("已完成分类", "Categories Complete"),
+                      value: "\(progress.completedGroupCount) / \(progress.totalGroupCount)")
+            ],
+            currentItem: progress.currentPath ?? progress.currentGroupTitle,
+            canCancel: canCancel && !isCancelling,
+            onCancel: onCancel
+        ) {
+            if module != .green {
+                ScanProgressStageList(progress: progress, isFinalizing: isFinalizing)
             }
-        } content: {
-            RuntimeActivityColumns(module: module) {
-                SmartScanProgressDashboard(progress: progress, isFinalizing: isFinalizing, isCancelling: isCancelling)
-            }
-        } footer: {
-            RuntimeActivityFooter {
-                if canCancel || isCancelling, let onCancel {
-                    AppButton(
-                        title: isCancelling
-                            ? L10n.text("正在停止", "Stopping")
-                            : L10n.text("取消扫描", "Cancel Scan"),
-                        systemImage: "xmark.circle",
-                        isLoading: isCancelling,
-                        isDisabled: !canCancel,
-                        action: onCancel
-                    )
-                }
-            }
-        }
+        } actions: { EmptyView() }
     }
+
 }
 
 private struct SmartScanMetric: View {
@@ -406,6 +406,7 @@ private struct ModuleScanProgressRing: View {
 
 
 private struct ScanProgressGroupRow: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let group: DiskScanProgress.GroupSummary
 
     var body: some View {
@@ -447,9 +448,12 @@ private struct ScanProgressGroupRow: View {
                 .controlSize(.small)
                 .tint(statusTint)
         } else {
+            // D53 §3.2.3: a finished category's check bounces once.
             Image(systemName: stateSystemImage)
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(statusTint)
+                .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
+                .symbolEffect(.bounce, value: !reduceMotion && (group.state == .clean || group.state == .found))
         }
     }
 
@@ -976,6 +980,36 @@ struct DebugScanPresentationView: View {
     private var isSmartScan: Bool { module == .overview }
 
     var body: some View {
+        if isSmartScan && scenario.presentationKind == .scanning {
+            // D53 V0: the scanning demo renders the real Smart Scan page with
+            // fixture progress, so screenshots and recordings show production
+            // layout and motion (no files are read or changed).
+            SmartScanScanningPage(
+                progress: progress,
+                module: module,
+                isFinalizing: false,
+                canCancel: true,
+                isCancelling: false,
+                onCancel: {}
+            )
+            .task(id: scenario) { await animateDeterminateProgress() }
+        } else {
+            debugPage
+        }
+    }
+
+    private func animateDeterminateProgress() async {
+        guard scenario == .determinate,
+              DebugScanPresentationScenario.launchPercentOverride == nil else { return }
+        animatedProgressPercent = 0
+        for value in stride(from: 5, through: 100, by: 5) {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            animatedProgressPercent = value
+        }
+    }
+
+    private var debugPage: some View {
         ScrollView {
             VStack(spacing: AppDesignTokens.Spacing.large) {
                 AppPageHeader(
@@ -1027,7 +1061,7 @@ struct DebugScanPresentationView: View {
             DebugScanTerminalPanel(scenario: scenario)
         case .scanning:
             if isSmartScan {
-                SmartScanProgressDashboard(progress: progress)
+                SmartScanProgressDashboard(progress: progress, module: module)
             } else {
                 ModuleScanProgressHero(progress: progress)
             }

@@ -39,6 +39,27 @@ struct SystemBenchmarkV7HardwareProfileProvider: BenchmarkV7HardwareProfileProvi
 }
 
 enum BenchmarkV7HardwareProfileCollector {
+    struct AppleGPU: Equatable, Sendable { let name: String; let cores: Int }
+
+    /// v11 needs the selected Apple GPU, not the largest external GPU count.
+    static func parseAppleGPU(_ data: Data) -> AppleGPU? {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        let candidates = dictionaries(in: root["SPDisplaysDataType"]).compactMap { row -> AppleGPU? in
+            guard let name = profileString(row["sppci_model"]) ?? profileString(row["_name"]),
+                  name.lowercased().hasPrefix("apple "),
+                  row["spdisplays_external_gpu"] as? String != "spdisplays_yes",
+                  let cores = positiveInt(row["sppci_cores"]) else { return nil }
+            return AppleGPU(name: name, cores: cores)
+        }
+        return candidates.count == 1 ? candidates.first : nil
+    }
+
+    static func captureAppleGPU() -> AppleGPU? {
+        guard let result = try? Shell.run(systemProfilerExecutable,
+            ["-json", "-detailLevel", "mini", "-timeout", "5", "SPDisplaysDataType"],
+            timeout: 5, outputByteLimit: 1_048_576), result.terminationStatus == 0 else { return nil }
+        return parseAppleGPU(Data(result.standardOutput.utf8))
+    }
     static let systemProfilerExecutable = "/usr/sbin/system_profiler"
     static let systemProfilerArguments = [
         "-json",
@@ -137,6 +158,8 @@ enum BenchmarkV7HardwareProfileCollector {
     private static func positiveInt(_ value: Any?) -> Int? {
         let number: Int?
         if let value = value as? NSNumber {
+            let raw = value.doubleValue
+            guard raw.isFinite, raw > 0, raw.rounded() == raw, raw < Double(Int.max) else { return nil }
             number = value.intValue
         } else if let value = value as? String {
             number = Int(value.trimmingCharacters(in: .whitespacesAndNewlines))

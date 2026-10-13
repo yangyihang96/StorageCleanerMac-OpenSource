@@ -8,11 +8,6 @@ struct PanelScene: View {
     @StateObject private var panelCoordinator: GeekPanelCoordinator
     private let controlPaletteCoordinator: ControlPaletteCoordinator?
     @AppStorage(L10n.languageDefaultsKey) private var languageRawValue = AppLanguage.system.rawValue
-    @AppStorage(L10n.appearanceDefaultsKey) private var appearanceRawValue = AppAppearance.system.rawValue
-    @AppStorage(PanelAppearancePreferences.miniWindowAppearanceKey) private var miniWindowAppearanceRawValue = ""
-    @AppStorage(PanelAppearancePreferences.colorThemeKey) private var panelColorTheme = PanelColorTheme.graphite.rawValue
-    @AppStorage(PanelAppearancePreferences.backgroundColorKey) private var panelBackgroundColor = ""
-    @AppStorage(PanelAppearancePreferences.chartColorKey) private var panelChartColor = ""
 
     init(
         store: ScanStore,
@@ -50,9 +45,7 @@ struct PanelScene: View {
         .id(languageRawValue)
         .environment(\.locale, L10n.locale)
         .environment(\.controlPaletteCoordinator, controlPaletteCoordinator)
-        .environment(\.panelBackgroundTint, resolvedPanelBackgroundTint)
-        .environment(\.panelChartAccentColor, resolvedPanelChartAccentColor)
-        .preferredColorScheme(preferredColorScheme)
+        .modifier(PanelAppearanceEnvironment(forcedVisualMode: captureVisualMode))
         .onAppear {
             // Normalize preferences written by pre-1.9.2 releases without
             // reintroducing a second panel presentation at runtime.
@@ -66,56 +59,17 @@ struct PanelScene: View {
         }
     }
 
-    private var preferredColorScheme: ColorScheme? {
+    private var captureVisualMode: MiniWindowVisualMode? {
 #if DEBUG || STORAGE_CLEANER_BETA
         if MiniWindowDemoData.isEnabled {
             switch MiniWindowDemoData.forcedColorScheme {
-            case "light": return .light
-            case "dark": return .dark
+            case "light": return .graphite
+            case "dark": return .black
             default: break
             }
         }
 #endif
-        if let appearance = MiniWindowAppearance(rawValue: miniWindowAppearanceRawValue) {
-            return appearance.preferredColorScheme
-        }
-
-        // The first release with this dedicated setting preserves existing
-        // app/panel preferences until the user explicitly chooses an option.
-        switch AppAppearance(rawValue: appearanceRawValue) ?? .system {
-        case .system:
-            return resolvedPanelTheme == .graphite ? ColorScheme.dark : nil
-        case .light:
-            return ColorScheme.light
-        case .dark:
-            return ColorScheme.dark
-        }
-    }
-
-    private var resolvedPanelTheme: PanelColorTheme {
-        PanelColorTheme.resolved(
-            storedTheme: panelColorTheme,
-            backgroundHex: panelBackgroundColor,
-            chartHex: panelChartColor
-        )
-    }
-
-    private var resolvedPanelBackgroundTint: Color? {
-        return PanelAppearancePreferences.color(
-            from: PanelColorTheme.resolvedBackgroundHex(
-                storedTheme: panelColorTheme,
-                customHex: panelBackgroundColor,
-                chartHex: panelChartColor
-            ) ?? ""
-        )?.opacity(MiniWindowStyleTokens.panelBackgroundTintOpacity)
-    }
-
-    private var resolvedPanelChartAccentColor: Color? {
-        PanelColorTheme.chartColor(
-            storedTheme: panelColorTheme,
-            backgroundHex: panelBackgroundColor,
-            customHex: panelChartColor
-        )
+        return nil
     }
 
     static var shouldPresentGeekEditorOnLaunch: Bool {

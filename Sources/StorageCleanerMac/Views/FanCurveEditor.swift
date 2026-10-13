@@ -112,12 +112,6 @@ struct FanCurveEditor: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.text("风扇曲线", "Fan Curve"))
                         .font(AdvancedPanelTypography.sectionTitle)
-                    Text(L10n.text(
-                        "根据温度自动调节风扇转速",
-                        "Automatically adjust fan speed from temperature"
-                    ))
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -256,7 +250,7 @@ struct FanCurveEditor: View {
             Button {
                 _ = session.addPoint(undoManager: undoManager)
             } label: {
-                Label(L10n.text("增加控制点", "Add Point"), systemImage: "plus")
+                Text(L10n.text("增加控制点", "Add Point"))
             }
             .disabled(points.count >= FanCurveProfile.maximumPointCount)
             .accessibilityLabel(L10n.text("增加风扇曲线控制点", "Add fan-curve point"))
@@ -265,7 +259,7 @@ struct FanCurveEditor: View {
                 guard let selectedPointID = session.selectedPointID else { return }
                 session.removePoint(id: selectedPointID, undoManager: undoManager)
             } label: {
-                Label(L10n.text("删除控制点", "Delete Point"), systemImage: "minus")
+                Text(L10n.text("删除控制点", "Delete Point"))
             }
             .disabled(
                 points.count <= FanCurveProfile.minimumPointCount

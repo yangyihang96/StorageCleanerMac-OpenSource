@@ -153,6 +153,11 @@ enum CleanupService {
         case loginItems
         case fullDiskAccess
         case filesAndFolders
+        case appManagement
+        case privacySecurity
+        case gatekeeper
+        case fileVault
+        case firewall
     }
 
     static func userTrashURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
@@ -191,7 +196,8 @@ enum CleanupService {
     static func moveToTrash(
         _ item: StorageItem,
         allowedPaths: Set<String>,
-        excludedPaths: [String] = ScanExclusionService.excludedPaths()
+        excludedPaths: [String] = ScanExclusionService.excludedPaths(),
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws -> [TrashMoveRecord] {
         // Reject ineligible requests before even registering an operation.
         guard item.canMoveToTrash else { throw CleanupServiceError.notAllowed(item.path) }
@@ -202,10 +208,10 @@ enum CleanupService {
                   !ScanExclusionService.intersectsExcludedTree(path, excludedPaths: excludedPaths) else {
                 throw CleanupServiceError.notAllowed(raw)
             }
-            guard PathSafety.isLexicallyInsideHome(path) else { throw CleanupServiceError.outsideAllowedRoots(raw) }
+            guard PathSafety.isLexicallyInsideHome(path, homeDirectory: homeDirectory) else { throw CleanupServiceError.outsideAllowedRoots(raw) }
             guard !PathSafety.containsSymbolicLinkComponent(in: path) else { throw CleanupServiceError.notAllowed(raw) }
         }
-        let report = moveToTrashRecorded(item, allowedPaths: allowedPaths, excludedPaths: excludedPaths) { originalURL in
+        let report = moveToTrashRecorded(item, allowedPaths: allowedPaths, excludedPaths: excludedPaths, homeDirectory: homeDirectory) { originalURL in
             var resultingURL: NSURL?
             try FileManager.default.trashItem(
                 at: originalURL,
@@ -220,6 +226,7 @@ enum CleanupService {
 
     static func moveToTrashRecorded(
         _ item: StorageItem, allowedPaths: Set<String>, excludedPaths: [String],
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         trashItemOperation: (URL) throws -> URL,
         persist: (CleanReport, [String: FileIdentity]) throws -> Void = {
             try CleanupReportJournal.live.checkpoint($0, expectedIdentities: $1)
@@ -239,7 +246,7 @@ enum CleanupService {
             guard item.canMoveToTrash, path == PathSafety.lexicalPath(path), allowed.contains(path),
                   !paths.contains(where: { $0.split(separator: "/").contains("..") }),
                   !ScanExclusionService.intersectsExcludedTree(path, excludedPaths: excludedPaths),
-                  PathSafety.isLexicallyInsideHome(path), PathSafety.isInsideHome(path),
+                  PathSafety.isLexicallyInsideHome(path, homeDirectory: homeDirectory), PathSafety.isInsideHome(path, homeDirectory: homeDirectory),
                   !PathSafety.containsSymbolicLinkComponent(in: path) else {
                 throw CleanupServiceError.notAllowed(path)
             }
@@ -251,6 +258,7 @@ enum CleanupService {
         _ item: StorageItem,
         allowedPaths: Set<String>,
         excludedPaths: [String],
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         trashItemOperation: (URL) throws -> URL?
     ) throws -> [TrashMoveRecord] {
         guard item.canMoveToTrash else {
@@ -267,7 +275,7 @@ enum CleanupService {
                 throw CleanupServiceError.notAllowed(rawPath)
             }
 
-            guard PathSafety.isLexicallyInsideHome(path) else {
+            guard PathSafety.isLexicallyInsideHome(path, homeDirectory: homeDirectory) else {
                 throw CleanupServiceError.outsideAllowedRoots(rawPath)
             }
 
@@ -279,7 +287,7 @@ enum CleanupService {
                 throw CleanupServiceError.notAllowed(rawPath)
             }
 
-            guard PathSafety.isInsideHome(path) else {
+            guard PathSafety.isInsideHome(path, homeDirectory: homeDirectory) else {
                 throw CleanupServiceError.outsideAllowedRoots(rawPath)
             }
 
@@ -538,6 +546,20 @@ enum CleanupService {
         systemSettingsURLs(for: destination).first
     }
 
+    static func openAppManagementSettings() -> Bool {
+        openSystemSettings(.appManagement)
+    }
+
+    @discardableResult
+    static func openSecuritySettings(for check: SystemProtectionCheck) -> Bool {
+        switch check {
+        case .fileVault: openSystemSettings(.fileVault)
+        case .firewall: openSystemSettings(.firewall)
+        case .gatekeeper: openSystemSettings(.gatekeeper)
+        case .systemIntegrityProtection, .xProtectInstallation: openSystemSettings(.privacySecurity)
+        }
+    }
+
     static func systemSettingsURLs(for destination: SystemSettingsDestination) -> [URL] {
         let rawValues: [String]
         switch destination {
@@ -560,6 +582,31 @@ enum CleanupService {
             rawValues = [
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_FilesAndFolders"
+            ]
+        case .appManagement:
+            rawValues = [
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles"
+            ]
+        case .privacySecurity:
+            rawValues = [
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension",
+                "x-apple.systempreferences:com.apple.preference.security?General"
+            ]
+        case .gatekeeper:
+            rawValues = [
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Security",
+                "x-apple.systempreferences:com.apple.preference.security?General"
+            ]
+        case .fileVault:
+            rawValues = [
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?FileVault",
+                "x-apple.systempreferences:com.apple.preference.security?FDE"
+            ]
+        case .firewall:
+            rawValues = [
+                "x-apple.systempreferences:com.apple.Network-Settings.extension?Firewall",
+                "x-apple.systempreferences:com.apple.preference.security?Firewall"
             ]
         }
         return rawValues.compactMap(URL.init(string:))

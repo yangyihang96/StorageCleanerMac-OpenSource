@@ -73,7 +73,7 @@ struct HealthTrendChart: View {
             history: history
         )
         VStack(alignment: .leading, spacing: 12) {
-            Label(L10n.text("健康趋势", "Health Trend"), systemImage: "chart.xyaxis.line")
+            Text(L10n.text("健康趋势", "Health Trend"))
                 .font(AppDesignTokens.Typography.sectionTitle)
 
             if trendPoints.count >= 2 {
@@ -82,8 +82,6 @@ struct HealthTrendChart: View {
                 legend(points: trendPoints)
             } else {
                 HStack(spacing: 10) {
-                    Image(systemName: "calendar.badge.clock")
-                        .foregroundStyle(.secondary)
                     Text(L10n.text(
                         "完成两次检查后显示趋势",
                         "Complete two checks to show a trend"

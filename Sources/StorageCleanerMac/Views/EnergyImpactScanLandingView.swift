@@ -4,37 +4,26 @@ struct EnergyImpactScanLandingView: View {
     @ObservedObject var store: ScanStore
 
     var body: some View {
+        Group {
         if store.isEnergyImpactPageScanActive {
-            FeatureRuntimePage(
-                module: .energy,
-                title: L10n.text("正在测量应用能耗", "Measuring App Energy Impact"),
-                trustText: L10n.text("只读测量 · 不会更改电源模式或结束应用", "Read-only measurement · Power modes and apps stay unchanged")
-            ) {
-                EnergyImpactScanPipelineView(phase: visiblePhase, showsStageDetails: true)
-            } actions: { EmptyView() }
+            EnergyImpactRunningPage(phase: visiblePhase,
+                powerMetrics: AnyView(HelperPowerMetricsView(monitor: store.helperPowerMetricsMonitor, lightfield: true)))
         } else {
-        FeatureLandingPageShell(
-            title: L10n.text("能耗", "Energy"),
-            subtitle: ReviewFilter.energy.pageSubtitle,
-            headerSystemImage: AppSymbols.Navigation.energy,
-            configurationTitle: L10n.text("测量流程", "Measurement Stages"),
-            actionTitle: store.isEnergyImpactPageScanActive
-                ? L10n.text("正在测量", "Measuring")
-                : L10n.text("开始测量", "Start Measurement"),
-            actionDetail: "",
-            actionSystemImage: "bolt.fill",
-            status: scanStatus,
-            isLoading: store.isEnergyImpactPageScanActive,
-            isActionDisabled: !store.canRefreshEnergyImpact,
-            trustText: L10n.text(
-                "只读测量，不会更改电源模式或结束应用",
-                "Read-only measurement; power modes and apps are not changed"
-            ),
-            action: { store.scanEnergyImpact() }
-        ) {
-            EnergyImpactScanPipelineView(phase: visiblePhase, showsStageDetails: true)
+        FeatureLightfieldPage(module: .energy, phase: .landing,
+            title: L10n.text("能耗", "Energy"), status: scanStatus.title,
+            safety: L10n.text("只读测量，不会更改电源模式或结束应用", "Read-only measurement; power modes and apps are not changed"),
+            actionTitle: L10n.text("开始测量", "Start Measurement"),
+            actionEnabled: store.canRefreshEnergyImpact, action: { store.scanEnergyImpact() }) {
+            FeatureLightfieldOptions {
+                VStack(alignment: .leading, spacing: 16) {
+                    EnergyImpactScanPipelineView(phase: visiblePhase, showsStageDetails: true)
+                    HelperPowerMetricsView(monitor: store.helperPowerMetricsMonitor, lightfield: true)
+                }
+            }
         }
         }
+        }
+        .featureFlowTransition(value: store.isEnergyImpactPageScanActive)
     }
 
     private var visiblePhase: EnergyImpactScanPhase? {
@@ -73,13 +62,17 @@ struct EnergyImpactScanProgressPanel: View {
 struct EnergyImpactScanPipelineView: View {
     @Environment(\.moduleTheme) private var theme
     @Environment(\.windowLayoutMetrics) private var layout
+    @Environment(\.featureCardPresentation) private var cardPresentation
+    @AppSurfaces private var surfaces
     let phase: EnergyImpactScanPhase?
 
     var showsStageDetails = false
 
     var body: some View {
         VStack(spacing: AppDesignTokens.Spacing.tight) {
-            if showsStageDetails {
+            if showsStageDetails && cardPresentation == .running {
+                runningStages
+            } else if showsStageDetails {
                 detailedStages
             } else if layout.density == .compact {
                 compactStages
@@ -103,21 +96,11 @@ struct EnergyImpactScanPipelineView: View {
             }
                 .frame(maxWidth: 560)
                 .frame(height: 4)
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel(L10n.text("能耗扫描进度", "Energy scan progress"))
                 .accessibilityValue("\(Int(progressFraction * 100))%")
 
-            if !showsStageDetails {
-            Text(
-                phase?.detail
-                    ?? L10n.text(
-                        "按真实数据流完成进程识别、采样、校准与汇总",
-                        "Processes, sampling, calibration, and results follow the real data flow"
-                    )
-            )
-            .font(AppDesignTokens.Typography.compactLabel)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            }
+
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -126,6 +109,28 @@ struct EnergyImpactScanPipelineView: View {
             phase?.detail
                 ?? L10n.text("能耗扫描共六个步骤", "Energy scan has six steps")
         )
+    }
+
+    /// Completed work is summarized; current and next steps stay at the top
+    /// of the small running card. All six steps remain in help/VoiceOver.
+    private var runningStages: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let phase {
+                let completed = EnergyImpactScanPhase.allCases.filter { $0.rawValue < phase.rawValue }.count
+                Text(L10n.text("已完成 \(completed)/6 步", "Completed \(completed)/6 steps"))
+                    .font(AppDesignTokens.TypeScale.caption).foregroundStyle(surfaces.textSecondary)
+                ForEach(EnergyImpactScanPhase.allCases.filter {
+                    $0.rawValue == phase.rawValue || $0.rawValue == phase.rawValue + 1
+                }) { step in
+                    FeatureFormRow(title: step.shortTitle) {
+                        EmptyView()
+                    }
+                }
+            } else {
+                detailedStages
+            }
+        }
+        .help(EnergyImpactScanPhase.allCases.map { $0.shortTitle + ": " + $0.overview }.joined(separator: "\n"))
     }
 
     private var detailedStages: some View {
@@ -140,24 +145,26 @@ struct EnergyImpactScanPipelineView: View {
                     }
                     .font(.system(size: 13, weight: .medium))
                     .frame(width: 23, height: 23)
-                    .background((isComplete ? AppDesignTokens.Palette.success : isCurrent ? theme.accent : Color.secondary).opacity(0.15), in: Circle())
-                    .foregroundStyle(isComplete ? AppDesignTokens.Palette.success : isCurrent ? theme.accent : Color.secondary)
+                    .background((isComplete ? AppDesignTokens.Palette.success : theme.accent).opacity(isCurrent ? 0.20 : 0.10), in: Circle())
+                    .overlay(Circle().strokeBorder((isComplete ? AppDesignTokens.Palette.success : theme.accent).opacity(0.24), lineWidth: 0.75))
+                    .foregroundStyle(isComplete ? AppDesignTokens.Palette.success : theme.accent)
                     .accessibilityHidden(true)
                     Text(step.shortTitle)
                         .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                        .frame(width: 48, alignment: .leading)
-                    Text(step.overview)
-                        .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .frame(minWidth: 48, alignment: .leading)
+                        .fixedSize(horizontal: true, vertical: false)
                     Spacer(minLength: 0)
                     if phase == step {
                         Image(systemName: "circle.inset.filled")
                             .accessibilityLabel(L10n.text("当前步骤", "Current step"))
                     }
                 }
+                .frame(minHeight: layout.isCompactLanding ? 23 : 32)
                 .help(step.overview)
                 .foregroundStyle(phase == step ? theme.accent : Color.primary)
+#if DEBUG
+                .layoutProbe("energy.stage.\(step.rawValue)")
+#endif
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -244,7 +251,7 @@ struct EnergyImpactScanPipelineView: View {
     }
 }
 
-private extension EnergyImpactScanPhase {
+extension EnergyImpactScanPhase {
     var overview: String {
         switch self {
         case .readingProcesses:

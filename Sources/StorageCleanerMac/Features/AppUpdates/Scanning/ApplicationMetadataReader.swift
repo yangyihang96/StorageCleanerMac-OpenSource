@@ -29,21 +29,30 @@ struct SecurityFrameworkApplicationCodeSignatureInspector: ApplicationCodeSignat
                 &signingInformation
             )
             let dictionary = signingInformation as? [String: Any]
-            let teamIdentifier = dictionary?[kSecCodeInfoTeamIdentifier as String] as? String
+            let isValid = validationStatus == errSecSuccess && informationStatus == errSecSuccess
+            // Update source matching, automatic installs and post-update
+            // rechecks compare this Team ID. A self-signed or ad-hoc signature
+            // can declare any value, so only a valid, Apple-anchored one counts.
+            let teamIdentifier = isValid
+                ? CodeSignatureVerifier.trustedTeamIdentifier(
+                    reported: dictionary?[kSecCodeInfoTeamIdentifier as String] as? String,
+                    isAppleAnchored: CodeSignatureVerifier.isAppleAnchored(staticCode)
+                )
+                : nil
             let codeIdentifier = dictionary?[kSecCodeInfoIdentifier as String] as? String
             let entitlements = dictionary?[kSecCodeInfoEntitlementsDict as String] as? [String: Any]
             let hasAppSandboxEntitlement = (entitlements?["com.apple.security.app-sandbox"] as? Bool) == true
             return ApplicationCodeSignatureMetadata(
                 signingTeamIdentifier: teamIdentifier?.trimmed.nonEmpty,
                 codeSigningIdentifier: codeIdentifier?.trimmed.nonEmpty,
-                isValid: validationStatus == errSecSuccess && informationStatus == errSecSuccess,
+                isValid: isValid,
                 hasAppSandboxEntitlement: hasAppSandboxEntitlement
             )
         }.value
     }
 }
 
-struct ApplicationMetadataReader: Sendable {
+struct ApplicationMetadataReader: ApplicationMetadataReading {
     private let signatureInspector: any ApplicationCodeSignatureInspecting
 
     init(
@@ -278,7 +287,7 @@ struct ApplicationMetadataReader: Sendable {
         return .unknown
     }
 
-    private static func sourceDisplayName(
+    static func sourceDisplayName(
         for source: ApplicationInstallationSource
     ) -> String {
         switch source {

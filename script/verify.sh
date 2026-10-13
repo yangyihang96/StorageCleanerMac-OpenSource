@@ -13,19 +13,13 @@ cd "$ROOT_DIR"
 "$ROOT_DIR/script/bootstrap.sh"
 
 swift build --scratch-path "$VERIFY_ROOT/debug" --jobs "$JOBS"
-# Validate the standard-workload timing against the optimized shipping code.
-# The unoptimized Debug kernel can exceed its wall-clock budget under local
-# load. Keep the full workload and the stricter Release limit; run this exact
-# test here instead of measuring it again in the Debug suite below.
-BENCHMARK_TIMING_TEST="MacBenchmarkKernelTests.testStandardQuickKernelsCompleteWithinDeclaredLimits"
-swift test -c release --scratch-path "$VERIFY_ROOT/release" --jobs "$JOBS" \
-  --filter "$BENCHMARK_TIMING_TEST"
+# Both configurations run the complete suite; timing budgets remain unchanged.
+swift test -c release --scratch-path "$VERIFY_ROOT/release" --jobs "$JOBS" -Xswiftc -enable-testing
 swift build \
   --scratch-path "$VERIFY_ROOT/concurrency" \
   --jobs "$JOBS" \
   -Xswiftc -strict-concurrency=complete
-swift test --scratch-path "$VERIFY_ROOT/debug" --jobs "$JOBS" \
-  --skip "$BENCHMARK_TIMING_TEST"
+swift test --scratch-path "$VERIFY_ROOT/debug" --jobs "$JOBS"
 
 if grep -R -n -E '(^|[^[:alnum:]_])Process[[:space:]]*\(|\.terminate\(|\.forceTerminate\(' Sources/StorageCleanerMac/Views; then
   echo "SwiftUI Views must not launch processes or terminate applications." >&2
@@ -37,10 +31,12 @@ if grep -R -n -E '/usr/(sbin|bin)/purge|Shell\.(run|capture)\(.*purge' \
   echo "The memory feature must not execute purge." >&2
   exit 11
 fi
-if grep -R -n -E '^[[:space:]]*import[[:space:]].*Private|dlopen\(.*PrivateFrameworks|-[[:space:]]*framework[[:space:]].*Private' \
-    Sources Package.swift; then
-  echo "Private framework usage is not allowed." >&2
-  exit 12
+# Private API is allowed only where listed with a reason; formatting cannot hide a call.
+python3 "$ROOT_DIR/script/check_private_api.py"
+# Cloud-sync conflict copies ("Name 2.swift") must never sit next to sources.
+if find Sources Tests -type f -name '* [0-9]*' | grep -E ' [0-9]+\.[^/]+$'; then
+  echo "Conflict copies found in Sources/Tests; move them out of the source tree." >&2
+  exit 14
 fi
 
 "$ROOT_DIR/script/verify_menu_bar_performance.sh"

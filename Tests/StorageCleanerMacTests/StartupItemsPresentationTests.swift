@@ -578,11 +578,12 @@ final class StartupItemsPresentationTests: XCTestCase {
         )
         XCTAssertEqual(attention.visibleItems.map(\.id), ["unknown-settings"])
         XCTAssertFalse(attention.allowsStartupMutationActions)
+        // D64 keeps the System Settings ownership/open-only boundary in one bilingual notice.
         XCTAssertEqual(
             unknownSettings.managementExplanation,
             L10n.text(
-                "由 macOS 系统设置管理，本应用只会打开对应设置页。",
-                "Managed by macOS System Settings; this app only opens the relevant settings page."
+                "由系统设置管理 · 本应用只打开设置页",
+                "Managed in System Settings · This app opens Settings only"
             )
         )
     }
@@ -1205,6 +1206,37 @@ final class StartupItemsPresentationTests: XCTestCase {
             actionCapability: candidate.actionCapability,
             warnings: []
         )
+    }
+
+    func testStatusPillKeepsStateSymbolsWhoseTextOnlyShowsTheProcess() {
+        func item(_ edit: (inout StartupItemsDomain.Candidate) -> Void) -> StartupItemsDomain.Item {
+            var candidate = component(id: "pill", kind: .userLaunchAgent, scope: .currentUser, name: "Pill")
+            edit(&candidate)
+            return StartupItemsDomain.Item(
+                id: candidate.id, kind: candidate.kind, scope: candidate.scope, name: candidate.name,
+                components: [candidate], state: candidate.state, attribution: candidate.attribution,
+                actionCapability: candidate.actionCapability, warnings: []
+            )
+        }
+        // Same priority as the short status symbol: administrator, configuration,
+        // settings-only and read-only outrank the process state.
+        XCTAssertEqual(item { $0.state.management = .requiresAdministrator }.metadataPillStatus, .locked)
+        let readOnly = item { $0.state.process = .failed(exitCode: 1) }
+        XCTAssertTrue(readOnly.isReadOnly)
+        XCTAssertEqual(readOnly.metadataPillStatus, .readOnly)
+        let plain = item { $0.state.process = .running(pid: 42) }
+        let expected: MetadataPillStatus = plain.requiresAdministrator ? .locked
+            : plain.hasConfigurationIssue ? .warning
+            : plain.isSystemSettingsOnly ? .systemSettingsOnly
+            : plain.isReadOnly ? .readOnly : .none
+        XCTAssertEqual(plain.metadataPillStatus, expected)
+        XCTAssertNotEqual(item { $0.state.management = .requiresAdministrator }.metadataPillStatus,
+                          readOnly.metadataPillStatus, "Administrator and read-only rows must not look the same")
+        let source = try? String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/StorageCleanerMac/Features/StartupItems/Views/StartupItemsDashboardView.swift"), encoding: .utf8)
+        XCTAssertTrue(source?.contains("status: item.metadataPillStatus") == true,
+                      "The dashboard pill must pass the state; MetadataPill hides symbols by default")
     }
 
     private func component(

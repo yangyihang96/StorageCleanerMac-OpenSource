@@ -70,4 +70,58 @@ extension View {
         }
     }
 }
+
+/// Debug-only readback of inputs used by the actual cleanup card bodies.
+/// No model/session is retained and no text is synthesized by the test host.
+struct GeekCleanupRenderedField: Equatable, Sendable {
+    enum Kind: String, Equatable, Sendable { case heading, notice, metric, item }
+    let id: String
+    let kind: Kind
+    let label: String
+    var value: String? = nil
+    var detail: String? = nil
+}
+
+enum GeekCleanupProbeID {
+    static let heading = "mini-cleanup.heading"
+    static let notice = "mini-cleanup.notice"
+    static let viewport = "mini-cleanup.viewport"
+    static let listViewport = "mini-cleanup.list-viewport"
+    static let footer = "mini-cleanup.footer"
+    static let hint = "mini-cleanup.scroll-hint"
+    static func action(_ index: Int) -> String { "mini-cleanup.action.\(index)" }
+    static func metric(_ id: String) -> String { "mini-cleanup.metric." + id }
+    static func item(_ id: ScanCandidateID) -> String { "mini-cleanup.item." + id.rawValue.uuidString }
+}
+
+struct GeekCleanupRenderedPreferenceKey: PreferenceKey {
+    static let defaultValue: [String: GeekCleanupRenderedField] = [:]
+    static func reduce(value: inout [String: GeekCleanupRenderedField],
+                       nextValue: () -> [String: GeekCleanupRenderedField]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+extension View {
+    func cleanupRenderedProbe(_ fields: [GeekCleanupRenderedField]) -> some View {
+        preference(key: GeekCleanupRenderedPreferenceKey.self,
+                   value: Dictionary(uniqueKeysWithValues: fields.map { ($0.id, $0) }))
+    }
+
+    /// Row and viewport frames use the same named, top-left SwiftUI space,
+    /// independent of the hosting NSView's flipped/screen coordinates.
+    func cleanupRowLayoutProbe(_ id: String) -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: LayoutFramePreferenceKey.self,
+                    value: [id: proxy.frame(in: .named(GeekCleanupProbeID.viewport))])
+            }
+        }
+    }
+
+    func cleanupViewportProbe() -> some View {
+        cleanupRowLayoutProbe(GeekCleanupProbeID.viewport)
+            .coordinateSpace(name: GeekCleanupProbeID.viewport)
+    }
+}
 #endif

@@ -7,9 +7,9 @@ import FanControlShared
 final class FanControlPlannerTests: XCTestCase {
     @MainActor
     func testUnchangedHelperStatusDoesNotInvalidatePanelObservers() {
-        let suiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let coordinator = FanControlCoordinator(
             defaults: defaults,
             helperStatusOverride: .notRegistered,
@@ -92,9 +92,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testOutOfRangeCurveTemperatureRequestsAutomaticRestore() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
             defaults: defaults,
@@ -130,9 +130,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testInvalidSecondaryCurveSensorRequestsAutomaticRestore() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
             defaults: defaults,
@@ -589,9 +589,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testManualSelectionUsesCurrentRPMAndDebouncesSliderWrites() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 850))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -637,9 +637,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testRapidModeSelectionIsSerialAndLatestAutomaticWins() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let sender = ControlledFanModeSender()
         let coordinator = FanControlCoordinator(
             defaults: defaults,
@@ -686,9 +686,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testCriticalThermalSnapshotBlocksManualControlBeforeAnyWrite() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 875))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -716,9 +716,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testSelectedModeRequiresMatchingHelperReadbackBeforeItIsObserved() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 900))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -749,9 +749,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testVerifiedObservationRenewsBeforeTheWatchdogLeaseExpires() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 925))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -797,9 +797,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testFreshHelperReadbackOutranksLaggingTelemetryTarget() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 950))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -841,9 +841,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testHardwareRangeChangeFailsClosedAndRequestsAutomaticRestore() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 957))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -890,9 +890,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testRestoreKeepsAutomaticUnconfirmedAndCancelsTheVerifiedManualLease() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 965))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -931,9 +931,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testUnreadableHardwareInvalidatesObservedMode() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 975))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -967,9 +967,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testDisconnectResetClearsObservationWithoutWritingHardware() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 990))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -996,9 +996,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testLaggingPhysicalRPMDoesNotCancelVerifiedTargetLease() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 1_000))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -1029,9 +1029,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testReachedFeedbackKeepsControlActiveAndAllowsTheNextWrite() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let clock = FanControlTestClock(Date(timeIntervalSince1970: 2_000))
         let recorder = FanControlRequestRecorder()
         let coordinator = makeCoordinator(
@@ -1065,9 +1065,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testTerminationRetriesAutomaticRestoreAfterHelperRejectsTheFirstRequest() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let recorder = FanControlRequestRecorder()
         recorder.restoreFailuresRemaining = 1
         let coordinator = makeCoordinator(
@@ -1092,18 +1092,27 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testUnexpectedHelperInvalidationFailsClosedAndRequestsAutomaticRestore() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let recorder = FanControlRequestRecorder()
+        let clock = FanControlTestClock(Date(timeIntervalSince1970: 3_500))
         let coordinator = makeCoordinator(
             defaults: defaults,
-            clock: FanControlTestClock(Date(timeIntervalSince1970: 3_500)),
+            clock: clock,
             recorder: recorder
         )
         coordinator.selectedMode = .manual
 
         coordinator.handleUnexpectedHelperInvalidation()
+
+        XCTAssertEqual(coordinator.selectedMode, .systemAutomatic)
+        XCTAssertFalse(recorder.requests.contains { $0.operation == .restoreAutomatic })
+        clock.now = clock.now.addingTimeInterval(0.99)
+        await coordinator.connectHelper()
+        XCTAssertTrue(recorder.requests.isEmpty, "Invalidation must honor the first backoff")
+        clock.now = clock.now.addingTimeInterval(0.01)
+        await coordinator.connectHelper()
 
         for _ in 0..<100 where !recorder.requests.contains(where: {
             $0.operation == .restoreAutomatic
@@ -1123,9 +1132,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testMismatchedApplyReplyFailsClosedAndRequestsAutomaticRestore() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let recorder = FanControlRequestRecorder()
         recorder.applyReplyTargets = [:]
         let coordinator = makeCoordinator(
@@ -1159,10 +1168,11 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testApplyTimeoutFailsClosedAndLateReplyCannotOverrideRestore() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let state = FanControlTimeoutTestState()
+        let clock = FanControlTestClock(Date(timeIntervalSince1970: 4_500))
         defer { state.releasePendingApply() }
         let coordinator = FanControlCoordinator(
             defaults: defaults,
@@ -1185,8 +1195,14 @@ final class FanControlPlannerTests: XCTestCase {
                         : [:]
                 )
             },
+            reconnectClock: { clock.now.timeIntervalSince1970 },
+            reconnectJitter: { 0.5 },
+            automaticallyReconnect: false,
             helperRequestTimeout: 0.01,
-            fanWriteRequestTimeout: 0.01
+            fanWriteRequestTimeout: 0.01,
+            legacyArtifactsPresentProvider: { false },
+            legacyArtifactsCurrentProvider: { false },
+            serviceStatusProvider: { .enabled }
         )
         coordinator.selectedMode = .manual
 
@@ -1197,8 +1213,14 @@ final class FanControlPlannerTests: XCTestCase {
         await waitForCondition {
             coordinator.selectedMode == .systemAutomatic
                 && !coordinator.isApplying
-                && state.requests.contains { $0.operation == .restoreAutomatic }
         }
+        XCTAssertFalse(state.requests.contains { $0.operation == .restoreAutomatic })
+        clock.now = clock.now.addingTimeInterval(0.99)
+        await coordinator.connectHelper()
+        XCTAssertFalse(state.requests.contains { $0.operation == .restoreAutomatic })
+        clock.now = clock.now.addingTimeInterval(0.01)
+        await coordinator.connectHelper()
+        await waitForCondition { state.requests.contains { $0.operation == .restoreAutomatic } }
 
         XCTAssertEqual(coordinator.selectedMode, .systemAutomatic)
         XCTAssertFalse(coordinator.isApplying)
@@ -1221,9 +1243,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testSlowFanUnlockUsesFanWriteTimeoutInsteadOfGenericXPCTimeout() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let state = FanControlTimeoutTestState()
         let coordinator = FanControlCoordinator(
             defaults: defaults,
@@ -1335,13 +1357,14 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testLegacyMigrationFailureStaysClosedAndDoesNotRegister() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let state = LegacyMigrationTestState()
         let coordinator = FanControlCoordinator(
             defaults: defaults,
             helperStatusOverride: .needsMigration,
+            requestSender: TestOperationFactory(for: self).fanRequestSender(),
             legacyArtifactsPresentProvider: { state.artifactsPresent },
             legacyArtifactsCurrentProvider: { state.artifactsCurrent },
             legacyArtifactsSafeForRemovalProvider: { true },
@@ -1368,13 +1391,14 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testSelectingModeWithMigrationRequirementKeepsMigrationMessage() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let state = LegacyMigrationTestState()
         let coordinator = FanControlCoordinator(
             defaults: defaults,
             helperStatusOverride: .needsMigration,
+            requestSender: TestOperationFactory(for: self).fanRequestSender(),
             legacyArtifactsPresentProvider: { state.artifactsPresent },
             legacyArtifactsCurrentProvider: { state.artifactsCurrent }
         )
@@ -1391,9 +1415,9 @@ final class FanControlPlannerTests: XCTestCase {
 
     @MainActor
     func testLegacyMigrationUninstallsReadsBackRegistersAndPings() async {
-        let defaultsSuiteName = "FanControlPlannerTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let defaultsSuiteName = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: defaultsSuiteName)!
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsSuiteName) }
         let state = LegacyMigrationTestState()
         let coordinator = FanControlCoordinator(
             defaults: defaults,
@@ -1452,6 +1476,9 @@ final class FanControlPlannerTests: XCTestCase {
             isHelperReachable: true,
             now: { clock.now },
             requestSender: { request in recorder.reply(to: request) },
+            reconnectClock: { clock.now.timeIntervalSince1970 },
+            reconnectJitter: { 0.5 },
+            automaticallyReconnect: false,
             legacyArtifactsPresentProvider: { false },
             legacyArtifactsCurrentProvider: { false },
             serviceStatusProvider: { .enabled }
@@ -1548,7 +1575,8 @@ private final class FanControlRequestRecorder {
             replyTargets = activeTargets
         case .ping, .readPowerConfiguration, .restoreAutomatic,
              .applyPowerMode, .validateFanCurve, .activateFanCurve,
-             .updateFanCurve, .getFanCurveRuntimeState, .deactivateFanCurve:
+             .updateFanCurve, .getFanCurveRuntimeState, .deactivateFanCurve,
+             .readMacMiniMode, .setMacMiniMode, .samplePowerMetrics:
             replyTargets = [:]
         }
         let curveRuntimeState: FanCurveRuntimeState? = switch request.operation {

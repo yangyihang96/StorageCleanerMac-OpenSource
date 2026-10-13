@@ -59,8 +59,6 @@ enum PanelSection: String, CaseIterable, Identifiable, Codable, Sendable {
     static let defaultsKey = "menuBar.panelSection"
     static let legacyMonitorDefaultsKey = "menuBar.monitorSection"
     static let legacySimpleDefaultsKey = "menuBar.simpleSection"
-    static let simpleChoices: [PanelSection] = [.overview, .cleanup]
-
     var id: Self { self }
 
     var title: String {
@@ -73,14 +71,6 @@ enum PanelSection: String, CaseIterable, Identifiable, Codable, Sendable {
         case .sensors: L10n.text("传感器", "Sensors")
         case .power: L10n.text("电源与能耗", "Power & Energy")
         case .cleanup: L10n.text("清理", "Cleanup")
-        }
-    }
-
-    var simpleTitle: String {
-        switch self {
-        case .overview: L10n.text("系统", "System")
-        case .cleanup: L10n.text("清理", "Cleanup")
-        default: title
         }
     }
 
@@ -131,7 +121,7 @@ enum GeekPanelPresentationMetrics {
     static let tertiarySize = CGSize(width: MiniWindowStyleTokens.historyWidth, height: 480)
     static let tertiaryMaximumSize = CGSize(width: MiniWindowStyleTokens.historyWidth, height: 520)
     static let tertiaryMinimumDimension: CGFloat = 1
-    static let sensorsDetailHeight = overviewSize.height
+    static let sensorsDetailHeight: CGFloat = 390
 
     static func normalizedOverviewSize(_ preferredSize: CGSize?) -> CGSize {
         guard let preferredSize,
@@ -185,14 +175,15 @@ enum GeekPanelPresentationMetrics {
     static func detailSize(for section: PanelSection) -> CGSize {
         switch section {
         case .overview: .zero
-        case .processor: CGSize(width: detailWidth, height: 561)
+        case .processor: CGSize(width: detailWidth, height: 708)
         case .memory: CGSize(width: detailWidth, height: 465)
         case .disk: CGSize(width: detailWidth, height: 400)
         case .network: CGSize(width: detailWidth, height: 483)
-        // The sensor page keeps every real reading visible, using a compact
-        // two-column temperature grid to avoid scrolling in the fixed panel.
+        // Temperature and fan monitoring stay in the sensor column; battery
+        // electrical data and clock frequencies live in their own modules.
         case .sensors: CGSize(width: detailWidth, height: sensorsDetailHeight)
-        case .power: CGSize(width: powerDetailWidth, height: 365)
+        case .power: CGSize(width: powerDetailWidth, height: GeekPowerLayout.secondaryContentHeight
+            + GeekPanelLayout.detailSpacing + 33 + 2 * GeekPanelLayout.contentPadding)
         case .cleanup: CGSize(width: detailWidth, height: 420)
         }
     }
@@ -201,14 +192,14 @@ enum GeekPanelPresentationMetrics {
         guard density == .complex else { return detailSize(for: section) }
         return switch section {
         case .overview: .zero
-        case .processor: CGSize(width: detailWidth, height: 368)
+        case .processor: CGSize(width: detailWidth, height: 515)
         case .memory: CGSize(width: detailWidth, height: 334)
         case .disk: CGSize(width: detailWidth, height: 281)
         // Detailed keeps the shared interface/address/details stack while
         // omitting the public-address card and the extended session rows.
         case .network: CGSize(width: detailWidth, height: 367)
-        case .sensors: CGSize(width: detailWidth, height: 414)
-        case .power: CGSize(width: powerDetailWidth, height: 257)
+        case .sensors: CGSize(width: detailWidth, height: 370)
+        case .power: CGSize(width: powerDetailWidth, height: 392)
         // Initial size only; the complete action grid is measured after layout.
         case .cleanup: CGSize(width: detailWidth, height: 360)
         }
@@ -487,19 +478,14 @@ enum MenuBarRefreshInterval: String, CaseIterable, Identifiable, Codable, Sendab
         panelVisible: Bool,
         statusDisplayMode: MenuBarStatusDisplayMode,
         customFanControlActive: Bool,
-        lowPowerMode: Bool
+        lowPowerMode: Bool,
+        statusVisible: Bool = true
     ) -> UInt64 {
-        // The status icon chooses a metric, not the history's sampling rate.
-        // Keep cheap CPU/network reads continuous across opening and closing.
-        // Background low-power gaps remain genuine gaps in the chart.
-        let resolvedInterval: TimeInterval
-        if customFanControlActive {
-            resolvedInterval = min(seconds, SystemMonitorSamplingInterval.interactive)
-        } else if lowPowerMode && !panelVisible {
-            resolvedInterval = 30
-        } else {
-            resolvedInterval = seconds
-        }
+        // D74: status-item visibility does not disable background prestorage.
+        let cadence = MenuBarSamplingCadence.resolve(visible: panelVisible,
+            lowPower: lowPowerMode, suspended: false, selectedInterval: seconds)
+        let resolvedInterval = customFanControlActive && !lowPowerMode
+            ? min(cadence.cheap, SystemMonitorSamplingInterval.interactive) : cadence.cheap
         return UInt64(resolvedInterval * 1_000_000_000)
     }
 
@@ -570,6 +556,15 @@ enum SystemTemperatureZone: String, CaseIterable, Codable, Hashable, Sendable {
     case thunderboltLeft
     case thunderboltRight
     case wifi
+    /// The built-in charge regulator (`TCHP`, Asahi "Charge Regulator
+    /// Temperature"; D57 "充电电路"). Not the external adapter.
+    case chargingCircuit
+
+    /// Zones added after the saved history format was set: history writes
+    /// them under a separate key, because earlier versions decode the
+    /// original list strictly and would lose the whole file to one unknown
+    /// zone (`MenuBarTelemetryPoint` coding).
+    static let addedAfterOriginalHistoryFormat: Set<SystemTemperatureZone> = [.chargingCircuit]
 }
 
 struct SystemTemperatureReading: Codable, Equatable, Sendable, Identifiable {
@@ -577,6 +572,29 @@ struct SystemTemperatureReading: Codable, Equatable, Sendable, Identifiable {
     let celsius: Double
 
     var id: SystemTemperatureZone { zone }
+}
+
+/// An individually identified reading for the sensor detail page. Aggregate
+/// zones above remain the only long-term temperature history channels.
+struct SystemTemperatureDetailReading: Equatable, Sendable, Identifiable {
+    let id: String
+    let name: String
+    let zone: SystemTemperatureZone?
+    let celsius: Double
+    var channel: MenuBarTemperatureChannel? = nil
+
+    static let powerManagementID = "pmu.max"
+
+    /// D57: the power-management IC's hottest die reading, listed with the
+    /// hardware probes (it used to be shown as the "CPU" row).
+    static func powerManagement(celsius: Double) -> SystemTemperatureDetailReading {
+        SystemTemperatureDetailReading(
+            id: powerManagementID,
+            name: L10n.text("电源管理芯片", "Power Management IC"),
+            zone: nil,
+            celsius: celsius
+        )
+    }
 }
 
 enum SystemFanIdentity: Codable, Equatable, Sendable {
@@ -686,15 +704,101 @@ struct SystemMonitorSnapshot: Equatable, Sendable {
     let cpuCoreUsagePercent: [Double]?
     let loadAverage: SystemLoadAverage?
     let systemUptimeSeconds: TimeInterval
+    /// Measured wall-clock boot time. Nil when kern.boottime is unavailable.
+    let systemBootAt: Date?
     let thermalState: SystemThermalState
     let fanSpeedsRPM: [Int]?
     /// A successful SMC FNum read; zero is confirmed fanless, nil is unknown.
     let fanCount: Int?
     let fanReadings: [SystemFanReading]?
     let temperatureReadings: [SystemTemperatureReading]?
+    let temperatureDetails: [SystemTemperatureDetailReading]?
     let gpuMemoryUsedBytes: Int64?
+    /// Original sensor/GPU read times, independent of cheap publication ticks.
+    let sensorSampledAt: Date?
+    let gpuSampledAt: Date?
+    /// When the SMC/HID readings shown were measured (falls back to the
+    /// publication time for standalone snapshots without a source time).
+    var sensorReadingDate: Date { sensorSampledAt ?? generatedAt }
+    var gpuReadingDate: Date { gpuSampledAt ?? generatedAt }
+
+    /// D74 presentation only. A cheap tick must not erase the previous actual
+    /// hardware read while its next worker is in flight. Never use this merged
+    /// value to append history: each retained domain keeps its source date.
+    func retainingStoredHardwareReadings(from stored: Self) -> Self {
+        func usable(_ date: Date?) -> Bool {
+            date.map { $0.timeIntervalSinceReferenceDate.isFinite && $0 <= generatedAt } ?? false
+        }
+        let keepSensors = sensorSampledAt == nil && usable(stored.sensorSampledAt)
+        let keepGPU = gpuSampledAt == nil && usable(stored.gpuSampledAt)
+        guard keepSensors || keepGPU else { return self }
+        let retainedKinds = Set<MenuBarMetricKind>(keepSensors ? [.chipTemperature, .fanSpeed] : [])
+            .union(keepGPU ? [.gpuUsage] : [])
+        return Self(
+            generatedAt: generatedAt,
+            metrics: metrics.filter { !retainedKinds.contains($0.kind) }
+                + stored.metrics.filter { retainedKinds.contains($0.kind) },
+            networkThroughput: networkThroughput,
+            cpuUsageBreakdown: cpuUsageBreakdown, cpuCoreUsagePercent: cpuCoreUsagePercent,
+            loadAverage: loadAverage, systemUptimeSeconds: systemUptimeSeconds,
+            systemBootAt: systemBootAt, thermalState: thermalState,
+            fanSpeedsRPM: keepSensors ? stored.fanSpeedsRPM : fanSpeedsRPM,
+            fanCount: keepSensors ? stored.fanCount : fanCount,
+            fanReadings: keepSensors ? stored.fanReadings : fanReadings,
+            temperatureReadings: keepSensors ? stored.temperatureReadings : temperatureReadings,
+            temperatureDetails: keepSensors ? stored.temperatureDetails : temperatureDetails,
+            gpuMemoryUsedBytes: keepGPU ? stored.gpuMemoryUsedBytes : gpuMemoryUsedBytes,
+            sensorAvailability: keepSensors ? stored.sensorAvailability : sensorAvailability,
+            fanAvailability: keepSensors ? stored.fanAvailability : fanAvailability,
+            inferredTemperatureZones: keepSensors ? stored.inferredTemperatureZones : inferredTemperatureZones,
+            ambientLight: keepSensors ? stored.ambientLight : ambientLight,
+            sensorSampledAt: keepSensors ? stored.sensorSampledAt : sensorSampledAt,
+            gpuSampledAt: keepGPU ? stored.gpuSampledAt : gpuSampledAt
+        )
+    }
+
+    /// Reopening may receive a recent cheap tick containing older hardware
+    /// readings. Remove those independently; keep the cheap readings' date.
+    func removingExpiredHardwareReadings(now: Date, maximumAge: TimeInterval) -> Self {
+        let sensorsExpired = sensorSampledAt.map {
+            let age = now.timeIntervalSince($0)
+            return !age.isFinite || age < 0 || age > maximumAge
+        } ?? false
+        let gpuExpired = gpuSampledAt.map {
+            let age = now.timeIntervalSince($0)
+            return !age.isFinite || age < 0 || age > maximumAge
+        } ?? false
+        guard sensorsExpired || gpuExpired else { return self }
+        return Self(
+            generatedAt: generatedAt,
+            metrics: metrics.filter {
+                !(sensorsExpired && [.chipTemperature, .fanSpeed].contains($0.kind))
+                    && !(gpuExpired && $0.kind == .gpuUsage)
+            },
+            networkThroughput: networkThroughput,
+            cpuUsageBreakdown: cpuUsageBreakdown, cpuCoreUsagePercent: cpuCoreUsagePercent,
+            loadAverage: loadAverage, systemUptimeSeconds: systemUptimeSeconds,
+            systemBootAt: systemBootAt, thermalState: thermalState,
+            fanSpeedsRPM: sensorsExpired ? nil : fanSpeedsRPM,
+            fanCount: sensorsExpired ? nil : fanCount,
+            fanReadings: sensorsExpired ? nil : fanReadings,
+            temperatureReadings: sensorsExpired ? nil : temperatureReadings,
+            temperatureDetails: sensorsExpired ? nil : temperatureDetails,
+            gpuMemoryUsedBytes: gpuExpired ? nil : gpuMemoryUsedBytes,
+            sensorAvailability: sensorsExpired ? .sampling : sensorAvailability,
+            fanAvailability: sensorsExpired ? .sampling : fanAvailability,
+            inferredTemperatureZones: sensorsExpired ? [] : inferredTemperatureZones,
+            ambientLight: sensorsExpired ? nil : ambientLight,
+            sensorSampledAt: sensorsExpired ? nil : sensorSampledAt,
+            gpuSampledAt: gpuExpired ? nil : gpuSampledAt
+        )
+    }
     let sensorAvailability: SystemSensorAvailability
     let fanAvailability: SystemSensorAvailability
+    /// Zones whose meaning is inferred from SMC key names (D57).
+    let inferredTemperatureZones: Set<SystemTemperatureZone>
+    /// Ambient light in lux (`CurrentLux`); nil when not sampled.
+    let ambientLight: HardwareReading<Double>?
 
     init(
         generatedAt: Date,
@@ -704,16 +808,26 @@ struct SystemMonitorSnapshot: Equatable, Sendable {
         cpuCoreUsagePercent: [Double]? = nil,
         loadAverage: SystemLoadAverage? = nil,
         systemUptimeSeconds: TimeInterval = 0,
+        systemBootAt: Date? = nil,
         thermalState: SystemThermalState = .unknown,
         fanSpeedsRPM: [Int]? = nil,
         fanCount: Int? = nil,
         fanReadings: [SystemFanReading]? = nil,
         temperatureReadings: [SystemTemperatureReading]? = nil,
+        temperatureDetails: [SystemTemperatureDetailReading]? = nil,
         gpuMemoryUsedBytes: Int64? = nil,
         sensorAvailability: SystemSensorAvailability? = nil,
-        fanAvailability: SystemSensorAvailability? = nil
+        fanAvailability: SystemSensorAvailability? = nil,
+        inferredTemperatureZones: Set<SystemTemperatureZone> = [],
+        ambientLight: HardwareReading<Double>? = nil,
+        sensorSampledAt: Date? = nil,
+        gpuSampledAt: Date? = nil
     ) {
         self.generatedAt = generatedAt
+        self.sensorSampledAt = sensorSampledAt
+        self.gpuSampledAt = gpuSampledAt
+        self.inferredTemperatureZones = inferredTemperatureZones
+        self.ambientLight = ambientLight
         self.metrics = metrics
         self.networkThroughput = networkThroughput
         self.cpuUsageBreakdown = cpuUsageBreakdown
@@ -727,6 +841,9 @@ struct SystemMonitorSnapshot: Equatable, Sendable {
         }
         self.loadAverage = loadAverage
         self.systemUptimeSeconds = max(0, systemUptimeSeconds)
+        self.systemBootAt = systemBootAt.flatMap {
+            $0.timeIntervalSinceReferenceDate.isFinite && $0 <= generatedAt ? $0 : nil
+        }
         self.thermalState = thermalState
         self.fanCount = fanCount.flatMap { (0...16).contains($0) ? $0 : nil }
         if let fanSpeedsRPM,
@@ -755,10 +872,23 @@ struct SystemMonitorSnapshot: Equatable, Sendable {
            !temperatureReadings.isEmpty,
            temperatureReadings.count <= SystemTemperatureZone.allCases.count,
            Set(temperatureReadings.map(\.zone)).count == temperatureReadings.count,
-           temperatureReadings.allSatisfy({ $0.celsius.isFinite && (5...130).contains($0.celsius) }) {
+           temperatureReadings.allSatisfy({ $0.celsius.isFinite && (0...130).contains($0.celsius) }) {
             self.temperatureReadings = temperatureReadings
         } else {
             self.temperatureReadings = nil
+        }
+        if let temperatureDetails,
+           !temperatureDetails.isEmpty,
+           temperatureDetails.count <= 32,
+           Set(temperatureDetails.map(\.id)).count == temperatureDetails.count,
+           temperatureDetails.allSatisfy({
+               !$0.id.isEmpty && $0.id.count <= 80
+                   && !$0.name.isEmpty && $0.name.count <= 80
+                   && $0.celsius.isFinite && (0...130).contains($0.celsius)
+           }) {
+            self.temperatureDetails = temperatureDetails
+        } else {
+            self.temperatureDetails = nil
         }
         if let gpuMemoryUsedBytes, gpuMemoryUsedBytes >= 0 {
             self.gpuMemoryUsedBytes = gpuMemoryUsedBytes
@@ -773,6 +903,7 @@ struct SystemMonitorSnapshot: Equatable, Sendable {
                 || self.fanSpeedsRPM != nil
                 || self.fanReadings != nil
                 || self.temperatureReadings != nil
+                || self.temperatureDetails != nil
                 ? .available
                 : .unavailable
         )

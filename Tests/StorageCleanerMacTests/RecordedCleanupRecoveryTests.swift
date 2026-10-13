@@ -9,26 +9,30 @@ final class RecordedCleanupRecoveryTests: XCTestCase {
         let journal: CleanupReportJournal
         let report: CleanReport
         init() throws {
-            root = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Caches/StorageCleanerRecoveryFixture-" + UUID().uuidString)
+            root = TestFileSystem.uniqueOperationRoot("StorageCleanerRecoveryFixture")
             trash = root.appendingPathComponent("trash")
             journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
-            try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
-            let reader = FoundationReadOnlyFileSystem()
-            let fixtureRoot = root
-            let items = try ["A", "B"].map { name -> RecordedTrashOperation.Item in
-                let url = fixtureRoot.appendingPathComponent(name)
-                try Data(name.utf8).write(to: url)
-                return RecordedTrashOperation.Item(path: url.path, bytes: 1, identity: try reader.snapshot(at: url).identity)
+            do {
+                try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+                let reader = FoundationReadOnlyFileSystem()
+                let fixtureRoot = root
+                let items = try ["A", "B"].map { name -> RecordedTrashOperation.Item in
+                    let url = fixtureRoot.appendingPathComponent(name)
+                    try Data(name.utf8).write(to: url)
+                    return RecordedTrashOperation.Item(path: url.path, bytes: 1, identity: try reader.snapshot(at: url).identity)
+                }
+                let target = trash, writer = journal
+                report = RecordedTrashOperation.run(items: items, ruleID: "fixture.v1", validate: { _ in }, move: { source in
+                    let destination = target.appendingPathComponent(source.lastPathComponent)
+                    try FileManager.default.moveItem(at: source, to: destination)
+                    return destination
+                }, persist: { try writer.checkpoint($0, expectedIdentities: $1) })
+            } catch {
+                TestFileSystem.remove(root)
+                throw error
             }
-            let target = trash, writer = journal
-            report = RecordedTrashOperation.run(items: items, ruleID: "fixture.v1", validate: { _ in }, move: { source in
-                let destination = target.appendingPathComponent(source.lastPathComponent)
-                try FileManager.default.moveItem(at: source, to: destination)
-                return destination
-            }, persist: { try writer.checkpoint($0, expectedIdentities: $1) })
         }
-        func remove() { try? FileManager.default.removeItem(at: root) }
+        func remove() { TestFileSystem.remove(root) }
     }
 
     func testRestorePersistsPartialSuccessAndConflictWithoutErasingOriginalReceipts() async throws {

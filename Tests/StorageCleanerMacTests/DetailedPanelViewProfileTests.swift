@@ -13,7 +13,7 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         XCTAssertEqual(PanelDensity.geek.geekContentProfile, .full)
     }
 
-    func testDetailedOverviewKeepsCoreSignalsAndIgnoresGeekCustomization() {
+    func testDetailedOverviewHonorsTheSameCustomizationAsGeek() {
         var configuration = GeekDashboardConfiguration.defaultValue
         configuration.setModule(.processorGraphics, isVisible: false)
         configuration.setModule(.network, isVisible: false)
@@ -24,10 +24,8 @@ final class DetailedPanelViewProfileTests: XCTestCase {
                 configuredModules: configuration.modules
             ),
             [
-                .processorGraphics,
                 .coreMetrics,
                 .disk,
-                .network,
                 .sensors,
                 .power,
             ]
@@ -98,12 +96,19 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         let networkSection = try XCTUnwrap(source.range(of: "geekNetworkDiskSection"))
         XCTAssertLessThan(localList.lowerBound, networkSection.lowerBound)
         XCTAssertTrue(source.contains("L10n.text(\"网络硬盘\", \"Network Drives\")"))
-        XCTAssertTrue(source.contains("networkStorageVolumes.map"))
-        XCTAssertTrue(source.contains("capacity.userUsedPercent"))
+        XCTAssertTrue(source.contains("GeekDiskVolumePresentation.hasReadableCapacity($0.capacity)"))
+        XCTAssertTrue(source.contains("guard Self.hasReadableCapacity(capacity) else { return nil }"))
+        XCTAssertTrue(source.contains("return capacity?.userUsedPercent"))
         XCTAssertTrue(source.contains("ByteFormat.storageString(capacity.userAvailableBytes)"))
     }
 
-    func testDiskCascadeKeepsCapacityProgressOnlyInTheOverview() throws {
+    /// Decision D14 (2026-10-04): the level-one bar shows the used share like
+    /// the level-two ring. This test was
+    /// `testDiskCascadeKeepsOverviewFreeRatioAndRealVolumeCapacity` and locked
+    /// the earlier decision, the available share
+    /// (`max(0, 1 - storageSnapshot.userUsedRatio)`). The rendered bar width is
+    /// measured in `MiniWindowDiskLevelOneBarTests`.
+    func testDiskCascadeShowsTheUsedShareOnEveryLevelAndRealVolumeCapacity() throws {
         let overview = try sourceText(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
         )
@@ -111,9 +116,13 @@ final class DetailedPanelViewProfileTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDiskView.swift"
         )
 
-        XCTAssertTrue(overview.contains("max(0, 1 - storageSnapshot.userUsedRatio)"))
+        XCTAssertTrue(overview.contains(".frame(width: proxy.size.width * storageSnapshot.userUsedRatio)"))
+        XCTAssertFalse(overview.contains("1 - storageSnapshot.userUsedRatio"))
         XCTAssertFalse(detail.contains("GeekDiskUsageRing"))
-        XCTAssertTrue(detail.contains("capacity.userUsedPercent"))
+        XCTAssertTrue(detail.contains("GeekDiskVolumeCapacityRing(volume: volume"))
+        XCTAssertTrue(detail.contains("return capacity?.userUsedPercent"))
+        XCTAssertTrue(detail.contains("return capacity?.userUsedRatio"))
+        XCTAssertTrue(detail.contains("progress: volume.usageProgress"))
     }
 
     func testMiniWindowCardsShareBordersAndNarrowHeadersDoNotOverlap() throws {
@@ -197,7 +206,7 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         // The CPU time picker is a sibling overlay; the removed overview toolbar stays absent.
         XCTAssertFalse(overview.contains("overviewToolbar"))
         XCTAssertTrue(overview.contains(".contextMenu { overviewContextMenu }"))
-        XCTAssertTrue(overview.contains("attachmentAnchor: .rect(.bounds), arrowEdge: .leading"))
+        XCTAssertFalse(overview.contains("GeekDashboardEditor(state:"))
         XCTAssertFalse(root.contains(".background(.bar)"))
         XCTAssertFalse(root.contains("forcesGeekOverviewToolbar"))
     }
@@ -238,16 +247,17 @@ final class DetailedPanelViewProfileTests: XCTestCase {
             sectionHandlerTail.range(of: ".onChange(of: hasActiveTertiary)")
         )
         let sectionHandler = sectionHandlerTail[..<nextHandler.lowerBound]
-        let setSection = try XCTUnwrap(sectionHandler.range(of: "setGeekPanelSection"))
-        let setDetailSize = try XCTUnwrap(sectionHandler.range(of: "setGeekPanelDetailSize"))
-        XCTAssertLessThan(setSection.lowerBound, setDetailSize.lowerBound)
+        XCTAssertTrue(sectionHandler.contains("setGeekPanelSection("))
+        XCTAssertTrue(sectionHandler.contains("preferredDetailSize: selectedSection == .overview ? nil : activeDetailPreferredSize"))
+        XCTAssertFalse(sectionHandler.contains("setGeekPanelDetailSize("),
+                       "A hover route must not commit a second layout before content measurement")
         XCTAssertTrue(advanced.contains(".onChange(of: presentation)"))
         XCTAssertTrue(advanced.contains("private func resetAttachedPanelNavigation()"))
         XCTAssertTrue(advanced.contains("private func reconcileAttachedPanelAfterDensityChange()"))
         XCTAssertTrue(advanced.contains("activeTertiaryDetail = nil"))
         XCTAssertTrue(advanced.contains("panelCoordinator.reset()"))
-        XCTAssertTrue(advanced.contains("selectedRailSection = .overview"))
-        XCTAssertTrue(advanced.contains("setGeekPanelSection(selectedSection)"))
+        XCTAssertFalse(advanced.contains("selectedRailSection"))
+        XCTAssertTrue(advanced.contains("setGeekPanelSection(\n            selectedSection,"))
     }
 
     private func sourceText(_ relativePath: String) throws -> String {
@@ -256,9 +266,13 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         let packageRoot = testsDirectory
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        return try String(
-            contentsOf: packageRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        let value = try String(contentsOf: packageRoot.appendingPathComponent(relativePath), encoding: .utf8)
+        if relativePath.hasSuffix("/MenuBarGeekPanel.swift") {
+            let presentationURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPresentation.swift")
+            return value + "\n" + (try String(contentsOf: presentationURL, encoding: .utf8))
+        }
+        return value
     }
 }

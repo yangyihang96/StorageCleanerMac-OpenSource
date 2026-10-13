@@ -48,6 +48,13 @@ final class FanControlCoordinator: ObservableObject {
     static let helperLabel = StorageCleanerBuildIdentity.helperLabel
     static let helperPlistName = "\(helperLabel).plist"
     private(set) var isDataOnlyFixture = false
+    private var startupRecoveryFailureLatched = false
+    @Published private(set) var macMiniModeStatus: MacMiniModeStatus?
+    @Published private(set) var macMiniModeMessage: String?
+    @Published private(set) var isChangingMacMiniMode = false
+    @Published private(set) var macMiniHelperNeedsUpdate = false
+    private var isReadingMacMiniMode = false
+    private var macMiniIntentGeneration: UInt64 = 0
     private var fixtureHelperState: HelperState?
 
 #if DEBUG || STORAGE_CLEANER_BETA
@@ -104,6 +111,7 @@ final class FanControlCoordinator: ObservableObject {
     @Published private(set) var bundledHelperSigningIsTrusted: Bool?
     @Published private(set) var isHelperReachable = false
     @Published private(set) var isRefreshingConnection = false
+    @Published private(set) var helperConnectionNeedsAttention = false
     @Published private(set) var isApplying = false
     @Published private(set) var isSwitchingMode = false
     @Published private(set) var lastMessage: String?
@@ -225,7 +233,13 @@ final class FanControlCoordinator: ObservableObject {
     private let legacyUninstaller: () async throws -> Void
     private let serviceStatusProvider: (() -> SMAppService.Status)?
     private let serviceRegistrar: (() throws -> Void)?
+    private let approvalSettingsOpener: () -> Void
+    private let serviceUnregistrar: (() async throws -> Void)?
     private let now: @MainActor () -> Date
+    private let reconnectClock: @MainActor () -> TimeInterval
+    private let reconnectJitter: @MainActor () -> Double
+    private let automaticallyReconnect: Bool
+    private let reconnectSleeper: @MainActor (TimeInterval) async throws -> Void
     private let requestSender:
         (@MainActor (FanControlHelperRequest) async throws -> FanControlHelperReply)?
     private let helperRequestTimeout: TimeInterval
@@ -259,6 +273,14 @@ final class FanControlCoordinator: ObservableObject {
     }()
     private var connection: NSXPCConnection?
     private var connectionGeneration: UInt64 = 0
+    private var reconnectRequiresAutomaticRestore = false
+    private var reconnectBackoff = HelperReconnectBackoff()
+    private var manualReconnectCooldown = HelperManualReconnectCooldown()
+    private var manualReconnectCountdownTask: Task<Void, Never>?
+    @Published private var manualReconnectClockTick: TimeInterval = 0
+    private var reconnectInFlight = false
+    private var automaticReconnectTask: Task<Void, Never>?
+    private var reconnectScheduleGeneration: UInt64 = 0
     private var didOpenApprovalSettingsAutomatically = false
     @Published private(set) var isPreparingHelper = false
     private var lifecycleObservers: [NSObjectProtocol] = []
@@ -303,6 +325,12 @@ final class FanControlCoordinator: ObservableObject {
         now: @escaping @MainActor () -> Date = { Date() },
         requestSender:
             (@MainActor (FanControlHelperRequest) async throws -> FanControlHelperReply)? = nil,
+        reconnectClock: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        reconnectJitter: @escaping @MainActor () -> Double = { Double.random(in: 0...1) },
+        automaticallyReconnect: Bool = true,
+        reconnectSleeper: @escaping @MainActor (TimeInterval) async throws -> Void = {
+            try await Task.sleep(for: .seconds($0))
+        },
         helperRequestTimeout: TimeInterval = FanControlSafetyPolicy.helperRequestTimeout,
         fanWriteRequestTimeout: TimeInterval = FanControlSafetyPolicy.fanWriteRequestTimeout,
         curveStore: FanCurveStore? = nil,
@@ -319,7 +347,9 @@ final class FanControlCoordinator: ObservableObject {
             throw LegacyFanControlHelperInstallerError.installedArtifactsMismatch
         },
         serviceStatusProvider: (() -> SMAppService.Status)? = nil,
-        serviceRegistrar: (() throws -> Void)? = nil
+        serviceRegistrar: (() throws -> Void)? = nil,
+        serviceUnregistrar: (() async throws -> Void)? = nil,
+        approvalSettingsOpener: @escaping () -> Void = { SMAppService.openSystemSettingsLoginItems() }
     ) {
         self.defaults = defaults
         self.legacyArtifactsPresentProvider = legacyArtifactsPresentProvider
@@ -328,7 +358,13 @@ final class FanControlCoordinator: ObservableObject {
         self.legacyUninstaller = legacyUninstaller
         self.serviceStatusProvider = serviceStatusProvider
         self.serviceRegistrar = serviceRegistrar
+        self.serviceUnregistrar = serviceUnregistrar
+        self.approvalSettingsOpener = approvalSettingsOpener
         self.now = now
+        self.reconnectClock = reconnectClock
+        self.reconnectJitter = reconnectJitter
+        self.automaticallyReconnect = automaticallyReconnect
+        self.reconnectSleeper = reconnectSleeper
         self.requestSender = requestSender
         self.helperRequestTimeout = helperRequestTimeout
         self.fanWriteRequestTimeout = fanWriteRequestTimeout
@@ -363,12 +399,25 @@ final class FanControlCoordinator: ObservableObject {
         // Every new app session requests automatic control, but the observed
         // hardware mode stays unknown until a fresh verified SMC readback.
         selectedMode = .systemAutomatic
+        if helperStatusOverride == nil {
+            helperStatus = currentHelperStatus()
+        }
         if requestSender == nil {
             installLifecycleObservers()
+            scheduleAutomaticReconnect(initial: true)
         }
     }
 
-    func refreshStatus() {
+    /// Compatibility for availability/UI readers: cached state only. Explicit
+    /// connection/registration actions own service queries and publication.
+    func refreshStatus() {}
+
+    func refreshConnection() async {
+        guard !isDataOnlyFixture else { return }
+        expireObservedModeIfNeeded()
+    }
+
+    private func refreshRegistrationStatus() {
         guard !isDataOnlyFixture else { return }
         let resolvedStatus = currentHelperStatus()
         if helperStatus != resolvedStatus {
@@ -388,16 +437,31 @@ final class FanControlCoordinator: ObservableObject {
         }
     }
 
-    func refreshConnection() async {
+    /// A failed process cannot be restarted by ping. Hide the retry action;
+    /// removal followed by fresh authorization is the explicit recovery path.
+    var offersHelperReconnect: Bool { !startupRecoveryFailureLatched }
+    var offersHelperConnectionAction: Bool {
+        offersHelperReconnect || [.notRegistered, .requiresApproval, .unavailable].contains(helperState)
+    }
+
+    func connectHelper() async {
         guard !isDataOnlyFixture else { return }
-        guard !isRefreshingConnection else { return }
+        guard !startupRecoveryFailureLatched else {
+            lastMessage = Self.startupRecoveryFailureMessage
+            return
+        }
+        guard !isRefreshingConnection, !isPreparingHelper, !reconnectInFlight,
+              reconnectBackoff.permitsAttempt(at: reconnectClock()) else { return }
         isRefreshingConnection = true
-        defer { isRefreshingConnection = false }
+        defer {
+            isRefreshingConnection = false
+            scheduleAutomaticReconnect()
+        }
         _ = await resolveBundledHelperSigningTrust()
-        refreshStatus()
+        refreshRegistrationStatus()
         guard helperStatus == .enabled else { return }
         do {
-            let reply = try await send(.ping)
+            let reply = try await waitForHelper()
             if isHelperReachable != reply.success {
                 isHelperReachable = reply.success
             }
@@ -415,10 +479,73 @@ final class FanControlCoordinator: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
-            failClosed(L10n.text(
-                "高级控制连接暂不可用，当前硬件模式尚未确认。",
-                "The advanced-control connection is unavailable; the current hardware mode is unconfirmed."
-            ))
+            recordHelperConnectionFailure(error)
+        }
+    }
+
+    var helperReconnectWaitSeconds: Int {
+        manualReconnectCooldown.remainingSeconds(at: reconnectClock())
+    }
+
+    var helperReconnectTitle: String {
+        let seconds = helperReconnectWaitSeconds
+        return seconds > 0
+            ? L10n.text("等待 \(seconds) 秒", "Wait \(seconds)s")
+            : L10n.text("重新连接", "Reconnect")
+    }
+
+    /// A deliberate action resets automatic backoff once, but cannot bypass
+    /// either an in-flight attempt or the independent ten-second manual gate.
+    func reconnectHelper() async {
+        guard !isDataOnlyFixture, offersHelperReconnect,
+              !isRefreshingConnection, !isPreparingHelper, !reconnectInFlight,
+              manualReconnectCooldown.admit(at: reconnectClock()) else { return }
+        manualReconnectClockTick = reconnectClock()
+        startManualReconnectCountdown()
+        cancelAutomaticReconnect()
+        reconnectBackoff.reset()
+        await connectHelper()
+    }
+
+    private func startManualReconnectCountdown() {
+        // Fake senders use their injected clock; production publishes only the
+        // countdown. This worker never queries availability or sends XPC.
+        guard requestSender == nil else { return }
+        manualReconnectCountdownTask?.cancel()
+        manualReconnectCountdownTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self else { return }
+                self.manualReconnectClockTick = self.reconnectClock()
+                if self.helperReconnectWaitSeconds == 0 {
+                    self.manualReconnectCountdownTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func cancelAutomaticReconnect() {
+        reconnectScheduleGeneration &+= 1
+        automaticReconnectTask?.cancel()
+        automaticReconnectTask = nil
+    }
+
+    private func scheduleAutomaticReconnect(initial: Bool = false) {
+        guard automaticallyReconnect, !isDataOnlyFixture, !startupRecoveryFailureLatched,
+              helperStatus == .enabled, !isHelperReachable,
+              !reconnectInFlight, !isRefreshingConnection, !isPreparingHelper,
+              automaticReconnectTask == nil,
+              initial || reconnectBackoff.nextAttemptAt != nil else { return }
+        let delay = reconnectBackoff.remainingDelay(at: reconnectClock())
+        let generation = reconnectScheduleGeneration
+        let sleeper = reconnectSleeper
+        automaticReconnectTask = Task { @MainActor [weak self] in
+            do { try await sleeper(delay) } catch { return }
+            guard !Task.isCancelled, let self,
+                  generation == self.reconnectScheduleGeneration else { return }
+            self.automaticReconnectTask = nil
+            await self.connectHelper()
         }
     }
 
@@ -435,6 +562,119 @@ final class FanControlCoordinator: ObservableObject {
             opensApprovalSettings: true,
             automatic: false
         )
+    }
+
+    /// Demand-only, read-only. Does not call prepareHelper or approval settings.
+    func samplePowerMetrics() async -> PowermetricsResult {
+        guard !isDataOnlyFixture else { return .failure(.unavailable) }
+        guard helperStatus == .enabled, isHelperReachable, !isChangingMacMiniMode, !isPreparingHelper,
+              !startupRecoveryFailureLatched else { return .failure(.unavailable) }
+        do {
+            let reply = try await send(.samplePowerMetrics)
+            return reply.powerSampleResult ?? .failure(.unavailable)
+        } catch let error as FanControlHelperProtocolError {
+            if case .unsupportedProtocolVersion(let version) = error, [2, 3].contains(version) {
+                macMiniHelperNeedsUpdate = true
+            }
+            return .failure(.unavailable)
+        } catch { return .failure(.unavailable) }
+    }
+
+    /// Visible power controls call this; it never installs or changes hardware.
+    func refreshMacMiniMode() async {
+        guard !isDataOnlyFixture, !isReadingMacMiniMode, !isChangingMacMiniMode else { return }
+        guard isHelperReachable || startupRecoveryFailureLatched else { return }
+        isReadingMacMiniMode = true
+        let generation = macMiniIntentGeneration
+        defer { isReadingMacMiniMode = false }
+        refreshRegistrationStatus()
+        guard helperStatus == .enabled else {
+            macMiniModeStatus = nil
+            macMiniModeMessage = nil
+            return
+        }
+        do {
+            let reply = try await send(.readMacMiniMode)
+            guard generation == macMiniIntentGeneration else { return }
+            macMiniModeStatus = reply.macMiniModeStatus
+            macMiniModeMessage = reply.success ? nil : MacMiniModePresentation.failureMessage(reply.errorCode)
+            macMiniHelperNeedsUpdate = false
+        } catch {
+            guard generation == macMiniIntentGeneration else { return }
+            macMiniModeStatus = nil
+            recordMacMiniError(error)
+        }
+    }
+
+    func setMacMiniMode(_ mode: MacMiniMode) async {
+        guard !isDataOnlyFixture, !isChangingMacMiniMode else { return }
+        isChangingMacMiniMode = true
+        macMiniIntentGeneration &+= 1
+        defer { isChangingMacMiniMode = false }
+        macMiniModeMessage = nil
+        if !(startupRecoveryFailureLatched && mode == .off) {
+            if helperStatus == .enabled {
+                do { _ = try await send(.ping) }
+                catch { recordMacMiniError(error); return }
+            }
+            // Only enabling/normal use needs a ready fan helper. Fault-mode OFF
+            // is recovery, not a request to restart normal hardware control.
+            guard await prepareHelperForControl() else {
+                macMiniModeMessage = lastMessage ?? macMiniUnavailableMessage
+                return
+            }
+        }
+        do {
+            let reply = try await send(.setMacMiniMode(mode))
+            macMiniModeStatus = reply.macMiniModeStatus
+            macMiniModeMessage = reply.success ? nil : MacMiniModePresentation.failureMessage(reply.errorCode)
+            macMiniHelperNeedsUpdate = false
+        } catch {
+            macMiniModeStatus = nil
+            recordMacMiniError(error)
+        }
+    }
+
+    func updateMacMiniModeHelper() async {
+        guard !isDataOnlyFixture, macMiniHelperNeedsUpdate, !isChangingMacMiniMode else { return }
+        await unregisterHelper()
+        guard helperStatus == .notRegistered else {
+            macMiniModeMessage = lastMessage
+            return
+        }
+        await registerHelper()
+        await refreshMacMiniMode()
+    }
+
+    private var macMiniUnavailableMessage: String {
+        switch helperStatus {
+        case .notRegistered:
+            L10n.text("开启时需要授权系统助手。", "Enabling requires system-helper authorization.")
+        case .requiresApproval:
+            L10n.text("请在系统设置的“登录项与扩展”中允许系统助手。", "Allow the helper in System Settings → Login Items & Extensions.")
+        case .needsMigration:
+            L10n.text("请先迁移旧版系统助手。", "Migrate the legacy helper first.")
+        case .enabled, .unavailable:
+            L10n.text("系统助手不可用，请重新连接或重新授权。", "The helper is unavailable; reconnect or authorize it again.")
+        }
+    }
+
+    private func recordMacMiniError(_ error: any Error) {
+        if let protocolError = error as? FanControlHelperProtocolError,
+           case .unsupportedProtocolVersion(let version) = protocolError,
+           [2, 3].contains(version) {
+            macMiniHelperNeedsUpdate = true
+            macMiniModeMessage = L10n.text(
+                "系统助手版本过旧，请更新并重新授权。",
+                "The system helper is outdated; update it and authorize it again."
+            )
+        } else {
+            macMiniHelperNeedsUpdate = false
+            macMiniModeMessage = L10n.text(
+                "无法确认系统睡眠状态，请重新连接系统助手。",
+                "System sleep state could not be confirmed; reconnect the system helper."
+            )
+        }
     }
 
     /// Explicitly removes a mismatched fixed-path helper before registering
@@ -465,7 +705,10 @@ final class FanControlCoordinator: ObservableObject {
         guard !isDataOnlyFixture else { return false }
         guard !isPreparingHelper else { return false }
         isPreparingHelper = true
-        defer { isPreparingHelper = false }
+        defer {
+            isPreparingHelper = false
+            scheduleAutomaticReconnect()
+        }
 
         lastMessage = nil
         do {
@@ -476,7 +719,7 @@ final class FanControlCoordinator: ObservableObject {
                       legacyArtifactsSafeForRemovalProvider() else {
                     // Never overwrite a root-owned helper whose bytes or fixed
                     // launchd contract do not match this app.
-                    refreshStatus()
+                    refreshRegistrationStatus()
                     lastMessage = LegacyFanControlHelperInstallerError
                         .installedArtifactsMismatch.localizedDescription
                     return false
@@ -490,7 +733,7 @@ final class FanControlCoordinator: ObservableObject {
                 connection = nil
                 try await legacyUninstaller()
                 guard !legacyArtifactsPresentProvider() else {
-                    refreshStatus()
+                    refreshRegistrationStatus()
                     lastMessage = L10n.text(
                         "旧版系统控制辅助程序未完全移除，系统控制仍保持关闭。",
                         "The legacy system-control helper was not fully removed; system control remains disabled."
@@ -513,7 +756,7 @@ final class FanControlCoordinator: ObservableObject {
                 || currentServiceStatus() == .notFound {
                 try await registerService()
             }
-            refreshStatus()
+            refreshRegistrationStatus()
             if helperStatus == .requiresApproval {
                 lastMessage = L10n.text(
                     "请在“系统设置 → 通用 → 登录项与扩展”中允许系统控制辅助程序。只需批准一次。",
@@ -523,7 +766,7 @@ final class FanControlCoordinator: ObservableObject {
                     if automatic {
                         didOpenApprovalSettingsAutomatically = true
                     }
-                    SMAppService.openSystemSettingsLoginItems()
+                    approvalSettingsOpener()
                 }
                 return false
             } else if helperStatus == .enabled {
@@ -536,14 +779,17 @@ final class FanControlCoordinator: ObservableObject {
             } else if helperStatus == .unavailable {
                 lastMessage = unavailableHelperDiagnostic
             }
+        } catch is CancellationError {
+            return false
         } catch {
             if allowLegacyMigration {
                 resetControlState()
                 connection?.invalidate()
                 connection = nil
             }
-            refreshStatus()
-            lastMessage = error.localizedDescription
+            refreshRegistrationStatus()
+            if helperStatus == .enabled { recordHelperConnectionFailure(error) }
+            else { lastMessage = error.localizedDescription }
         }
         return false
     }
@@ -573,12 +819,47 @@ final class FanControlCoordinator: ObservableObject {
 
     func unregisterHelper() async {
         guard !isDataOnlyFixture else { return }
+        guard !isChangingMacMiniMode else { return }
+        isChangingMacMiniMode = true
+        macMiniIntentGeneration &+= 1
+        defer { isChangingMacMiniMode = false }
         lastMessage = nil
-        refreshStatus()
+        refreshRegistrationStatus()
         if helperStatus == .enabled {
             do {
-                let reply = try await send(.restoreAutomatic)
-                guard reply.success else {
+                let reply: FanControlHelperReply?
+                do {
+                    // Stop the persistent policy BEFORE unregistering launchd.
+                    let sleepReply = try await send(.setMacMiniMode(.off), allowsLegacyRemovalFallback: true)
+                    macMiniModeStatus = sleepReply.macMiniModeStatus
+                    guard sleepReply.success,
+                          sleepReply.macMiniModeStatus?.mode == .off,
+                          sleepReply.macMiniModeStatus?.ownsSleepDisabled == false else {
+                        lastMessage = MacMiniModePresentation.failureMessage(sleepReply.errorCode)
+                        return
+                    }
+                    // Startup failure already attempted fan recovery. Never
+                    // issue another fan write; sleep OFF is the removal gate.
+                    if startupRecoveryFailureLatched { reply = nil }
+                    else { reply = try await send(.restoreAutomatic) }
+                } catch FanControlHelperProtocolError.unsupportedProtocolVersion(2) {
+                    // The old v2 helper has no persistent lid policy. Its only
+                    // compatible operation is returning fans to system control.
+                    reply = try await send(.restoreAutomaticForVersion2)
+                } catch FanControlHelperProtocolError.unsupportedProtocolVersion(3) {
+                    // v3 owns a persistent sleep policy: verified OFF precedes
+                    // retiring its fans/daemon. Compatibility cannot enable it.
+                    let sleepReply = try await send(.disableMacMiniModeForVersion3)
+                    macMiniModeStatus = sleepReply.macMiniModeStatus
+                    guard sleepReply.success, sleepReply.macMiniModeStatus?.mode == .off,
+                          sleepReply.macMiniModeStatus?.ownsSleepDisabled == false else {
+                        lastMessage = MacMiniModePresentation.failureMessage(sleepReply.errorCode)
+                        return
+                    }
+                    if startupRecoveryFailureLatched { reply = nil }
+                    else { reply = try await send(.restoreAutomaticForVersion3) }
+                }
+                if let reply, !reply.success, reply.errorCode != .fanCrashRecoveryFailed {
                     failClosed(reply.message)
                     return
                 }
@@ -586,38 +867,54 @@ final class FanControlCoordinator: ObservableObject {
                 failClosed(error.localizedDescription)
                 return
             }
+        } else if macMiniModeStatus?.mode == .whenOnAC
+                    || macMiniModeStatus?.ownsSleepDisabled == true {
+            lastMessage = L10n.text(
+                "请先允许系统助手运行并关闭 Mac mini 模式，再移除助手。",
+                "Allow the helper to run and turn Mac mini mode off before removing it."
+            )
+            return
         }
         connection?.invalidate()
         connection = nil
         clearObservedMode()
         isHelperReachable = false
+        let removedAfterStartupFault = startupRecoveryFailureLatched
         do {
             if legacyArtifactsPresentProvider() {
                 guard legacyArtifactsSafeForRemovalProvider() else {
-                    refreshStatus()
+                    refreshRegistrationStatus()
                     lastMessage = LegacyFanControlHelperInstallerError
                         .installedArtifactsMismatch.localizedDescription
                     return
                 }
                 try await legacyUninstaller()
             } else if currentServiceStatus() != .notFound {
-                try await service.unregister()
+                if let serviceUnregistrar {
+                    try await serviceUnregistrar()
+                } else {
+                    try await service.unregister()
+                }
             }
             selectedMode = .systemAutomatic
-            refreshStatus()
-            lastMessage = L10n.text(
-                "自定义风扇控制已停止，辅助程序已移除。",
-                "Custom fan control was stopped and the helper was removed."
-            )
+            macMiniModeStatus = nil
+            macMiniHelperNeedsUpdate = false
+            refreshRegistrationStatus()
+            startupRecoveryFailureLatched = false
+            lastMessage = removedAfterStartupFault
+                ? L10n.text("本助手的睡眠恢复责任已解除，辅助程序已移除；风扇自动控制仍未确认。重新授权前请检查风扇状态。",
+                            "This helper's sleep restoration is complete and it was removed; automatic fan control is unconfirmed. Check the fan state before authorizing it again.")
+                : L10n.text("自定义硬件控制已停止，辅助程序已移除。",
+                            "Custom hardware control was stopped and the helper was removed.")
         } catch {
-            refreshStatus()
+            refreshRegistrationStatus()
             lastMessage = error.localizedDescription
         }
     }
 
     func openApprovalSettings() {
         guard !isDataOnlyFixture else { return }
-        SMAppService.openSystemSettingsLoginItems()
+        approvalSettingsOpener()
     }
 
     func curvePoints(forFanID fanID: Int?) -> [FanCurvePoint] {
@@ -696,7 +993,7 @@ final class FanControlCoordinator: ObservableObject {
                 signpostState
             )
         }
-        refreshStatus()
+        refreshRegistrationStatus()
         if helperStatus != .enabled {
             _ = await prepareHelperForControl()
         }
@@ -801,6 +1098,10 @@ final class FanControlCoordinator: ObservableObject {
     private func performSelectMode(_ request: FanControlIntentRequest) async {
         guard case .selectMode(let mode) = request.intent,
               isCurrentControlIntent(request) else { return }
+        guard !startupRecoveryFailureLatched else {
+            lastMessage = Self.startupRecoveryFailureMessage
+            return
+        }
         let signpostID = PerformanceTelemetry.signposter.makeSignpostID()
         let signpostState = PerformanceTelemetry.signposter.beginInterval(
             "FanModeSwitch",
@@ -889,7 +1190,7 @@ final class FanControlCoordinator: ObservableObject {
             }
         }
 
-        refreshStatus()
+        refreshRegistrationStatus()
         if helperStatus != .enabled {
             _ = await prepareHelperForControl()
             guard isCurrentControlIntent(request) else { return }
@@ -967,6 +1268,10 @@ final class FanControlCoordinator: ObservableObject {
     ) async {
         guard case .applyCurveDraft = request.intent,
               isCurrentControlIntent(request) else { return }
+        guard !startupRecoveryFailureLatched else {
+            lastMessage = Self.startupRecoveryFailureMessage
+            return
+        }
         lastMessage = nil
         guard let snapshot = latestSnapshot,
               now().timeIntervalSince(snapshot.generatedAt)
@@ -1005,7 +1310,7 @@ final class FanControlCoordinator: ObservableObject {
             return
         }
 
-        refreshStatus()
+        refreshRegistrationStatus()
         if helperStatus != .enabled {
             _ = await prepareHelperForControl()
             guard isCurrentControlIntent(request) else { return }
@@ -1025,7 +1330,7 @@ final class FanControlCoordinator: ObservableObject {
             let validation = try await send(.validateFanCurve(profile))
             guard isCurrentControlIntent(request) else { return }
             guard validation.success else {
-                lastMessage = Self.curveMessage(for: Self.curveError(from: validation))
+                lastMessage = Self.curveMessage(for: validation)
                 return
             }
 
@@ -1042,7 +1347,7 @@ final class FanControlCoordinator: ObservableObject {
                   let runtime = reply.curveRuntimeState,
                   runtime.activeProfileID == profile.id,
                   runtime.status == .active || runtime.status == .applying else {
-                failClosed(Self.curveMessage(for: Self.curveError(from: reply)))
+                failClosed(Self.curveMessage(for: reply))
                 return
             }
 
@@ -1400,7 +1705,7 @@ final class FanControlCoordinator: ObservableObject {
                       let runtime = reply.curveRuntimeState,
                       runtime.status == .active || runtime.status == .applying,
                       runtime.activeProfileID == curveStore.appliedProfile?.id else {
-                    failClosed(Self.curveMessage(for: Self.curveError(from: reply)))
+                    failClosed(Self.curveMessage(for: reply))
                     return
                 }
                 let verifiedAt = now()
@@ -1464,6 +1769,11 @@ final class FanControlCoordinator: ObservableObject {
     }
 
     func disconnectForTermination() {
+        cancelAutomaticReconnect()
+        manualReconnectCountdownTask?.cancel()
+        manualReconnectCountdownTask = nil
+        restoreRecoveryTask?.cancel()
+        restoreRecoveryTask = nil
         resetControlState()
         connection?.invalidate()
         connection = nil
@@ -1472,9 +1782,11 @@ final class FanControlCoordinator: ObservableObject {
     private func failClosed(_ message: String) {
         Self.logger.error("Hardware control failed closed: \(message, privacy: .public)")
         resetControlState()
-        lastMessage = message
-        connection?.invalidate()
+        lastMessage = startupRecoveryFailureLatched ? Self.startupRecoveryFailureMessage : message
+        let oldConnection = connection
         connection = nil
+        connectionGeneration &+= 1
+        oldConnection?.invalidate()
         beginRestoreRecovery()
     }
 
@@ -1592,88 +1904,108 @@ final class FanControlCoordinator: ObservableObject {
     }
 
     private func beginRestoreRecovery() {
-        let failureReason = lastMessage
-        func feedback(_ status: String) -> String {
-            [failureReason, status].compactMap { $0 }.joined(separator: "\n")
-        }
-        guard helperStatus == .enabled else {
-            lastMessage = feedback(L10n.text(
-                "恢复系统自动控制尚未确认。",
-                "Restoration of automatic system control remains unconfirmed."
-            ))
+        guard !startupRecoveryFailureLatched else {
+            lastMessage = Self.startupRecoveryFailureMessage
             return
         }
-        let pendingMessage = feedback(L10n.text(
+        reconnectRequiresAutomaticRestore = true
+        guard helperStatus == .enabled else { return }
+        guard reconnectBackoff.permitsAttempt(at: reconnectClock()), !reconnectInFlight else {
+            scheduleAutomaticReconnect()
+            return
+        }
+        // Never cancel/recreate the first attempt from an interruption callback.
+        guard restoreRecoveryTask == nil else { return }
+        let failureReason = lastMessage
+        let pendingMessage = [failureReason, L10n.text(
             "正在请求恢复系统自动控制，结果尚未确认。",
             "Requesting restoration of automatic system control; the result is unconfirmed."
-        ))
+        )].compactMap { $0 }.joined(separator: "\n")
         lastMessage = pendingMessage
         let recoveryGeneration = controlIntentGeneration
-        restoreRecoveryTask?.cancel()
         restoreRecoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                restoreRecoveryTask = nil
+                scheduleAutomaticReconnect()
+            }
+            // Preserve bounded recovery for an authenticated RPC refusal.
+            // Transport failures stop this worker; only the shared scheduler
+            // may attempt the next connection after its backoff deadline.
             for attempt in 0..<3 {
+                guard !Task.isCancelled, !startupRecoveryFailureLatched else { return }
                 if attempt > 0 {
-                    try? await Task.sleep(for: .milliseconds(250))
+                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
                 }
                 do {
                     let reply = try await send(.restoreAutomatic)
                     if reply.success {
+                        reconnectRequiresAutomaticRestore = false
                         isHelperReachable = true
-                        if controlIntentGeneration == recoveryGeneration,
-                           lastMessage == pendingMessage {
-                            lastMessage = feedback(L10n.text(
+                        if controlIntentGeneration == recoveryGeneration, lastMessage == pendingMessage {
+                            lastMessage = [failureReason, L10n.text(
                                 "Helper 已确认恢复请求完成；当前硬件模式仍待确认。",
                                 "Helper confirmed completion of the restore request; the current hardware mode remains unconfirmed."
-                            ))
+                            )].compactMap { $0 }.joined(separator: "\n")
                         }
-                        restoreRecoveryTask = nil
                         return
                     }
                 } catch {
-                    connection?.invalidate()
-                    connection = nil
+                    // Keep restoration due for the next trusted connection.
+                    return
                 }
             }
-            if controlIntentGeneration == recoveryGeneration,
-               lastMessage == pendingMessage {
-                lastMessage = feedback(L10n.text(
-                    "恢复请求未获确认，请检查 Helper 连接与风扇状态。",
-                    "The restore request was not confirmed. Check the Helper connection and fan state."
-                ))
+            if controlIntentGeneration == recoveryGeneration, lastMessage == pendingMessage {
+                lastMessage = [failureReason, L10n.text(
+                    "恢复请求未获确认，请检查辅助程序连接与风扇状态。",
+                    "The restore request was not confirmed. Check the helper connection and fan state."
+                )].compactMap { $0 }.joined(separator: "\n")
             }
-            restoreRecoveryTask = nil
         }
     }
 
-    /// An XPC invalidation can mean the privileged helper exited without first
-    /// delivering an interruption callback. If custom control had been
-    /// requested or verified, rebuild the connection and explicitly request
-    /// automatic control; merely clearing the UI state could leave AppleSMC in
-    /// manual mode until another process changes it.
+    /// Both XPC callbacks and request completions enter this same failure gate.
+    /// Retiring the exact connection first makes duplicate/stale callbacks inert.
     func handleUnexpectedHelperInvalidation() {
-        let requiresAutomaticRestore = selectedMode != .systemAutomatic
-            || observedMode != nil
-            || !lastAppliedTargets.isEmpty
+        guard connection != nil || isHelperReachable || reconnectInFlight
+                || selectedMode != .systemAutomatic || observedMode != nil else { return }
+        recordTransportFailure(FanControlConnectionError.connectionChanged,
+                               generation: connectionGeneration)
+    }
 
-        isHelperReachable = false
-        clearObservedMode()
-        guard requiresAutomaticRestore else { return }
-
-        failClosed(L10n.text(
-            "风扇辅助程序已意外退出，正在重新连接并恢复系统自动控制。",
-            "The fan helper exited unexpectedly; reconnecting to restore automatic system control."
-        ))
+    private func recordTransportFailure(_ error: any Error, generation: UInt64) {
+        guard generation == connectionGeneration else { return }
+        let oldConnection = connection
+        connection = nil
+        connectionGeneration &+= 1
+        oldConnection?.invalidate()
+        reconnectRequiresAutomaticRestore = reconnectRequiresAutomaticRestore
+            || selectedMode != .systemAutomatic || observedMode != nil
+            || !lastAppliedTargets.isEmpty || curveLeaseID != nil
+        reconnectBackoff.recordFailure(at: reconnectClock(), jitter: reconnectJitter())
+        resetControlState()
+        recordHelperConnectionFailure(error)
+        scheduleAutomaticReconnect()
     }
 
     private func installLifecycleObservers() {
+        // Returning from approval settings is a lifecycle event, not an
+        // availability read. Re-query registration and use the same retry gate.
+        lifecycleObservers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.connectHelper()
+            }
+        })
         let center = NSWorkspace.shared.notificationCenter
         let names: [Notification.Name] = [
             NSWorkspace.willSleepNotification,
             NSWorkspace.sessionDidResignActiveNotification,
             NSWorkspace.willPowerOffNotification,
         ]
-        lifecycleObservers = names.map { name in
+        lifecycleObservers += names.map { name in
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, self.selectedMode != .systemAutomatic else { return }
@@ -1694,14 +2026,74 @@ final class FanControlCoordinator: ObservableObject {
                 Task { @MainActor in
                     guard let self else { return }
                     self.latestSnapshot = nil
-                    await self.refreshConnection()
+                    await self.connectHelper()
                 }
             }
         )
     }
 
-    private func send(_ request: FanControlHelperRequest) async throws -> FanControlHelperReply {
+    private func send(_ request: FanControlHelperRequest,
+                      allowsLegacyRemovalFallback: Bool = false) async throws -> FanControlHelperReply {
         guard !isDataOnlyFixture else { throw CancellationError() }
+        try Task.checkCancellation()
+        if startupRecoveryFailureLatched, request.operation != .ping, !request.isMacMiniSleepRecoveryRequest {
+            return try FanControlHelperReply(operation: request.operation, success: false,
+                message: Self.startupRecoveryFailureMessage, appliedTargetRPMByFan: [:],
+                errorCode: .fanCrashRecoveryFailed).validated(for: request)
+        }
+        if requestSender == nil, !(await resolveBundledHelperSigningTrust()) {
+            throw FanControlConnectionError.untrustedBundledHelper
+        }
+        let isConnectionAttempt = !isHelperReachable || (requestSender == nil && connection == nil)
+        if isConnectionAttempt {
+            guard !reconnectInFlight else { throw FanControlConnectionError.reconnectInProgress }
+            guard reconnectBackoff.permitsAttempt(at: reconnectClock()) else {
+                throw FanControlConnectionError.reconnectDeferred
+            }
+            reconnectInFlight = true
+            if requestSender != nil { connectionGeneration &+= 1 }
+        }
+        defer {
+            if isConnectionAttempt { reconnectInFlight = false }
+            scheduleAutomaticReconnect()
+        }
+        // Signing preflight completes before admission. Connection creation in
+        // transport cannot yield between this gate and assigning the connection.
+        var generation = connectionGeneration
+        do {
+            let reply = try await performSend(request, generation: &generation)
+            guard generation == connectionGeneration else {
+                throw FanControlConnectionError.connectionChanged
+            }
+            if reply.success, !startupRecoveryFailureLatched {
+                reconnectBackoff.reset()
+                cancelAutomaticReconnect()
+                isHelperReachable = true
+            }
+            return reply
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if case FanControlConnectionError.untrustedBundledHelper = error {
+                // Local signing failures never induce repeated XPC attempts.
+                throw error
+            }
+            // A decoded v2/v3 response is an authenticated protocol mismatch,
+            // not a transport refusal. Preserve the existing removal-only
+            // fallback on this exact connection; all other mismatches back off.
+            if allowsLegacyRemovalFallback,
+               request.operation == .setMacMiniMode, request.macMiniMode == .off,
+               case FanControlHelperProtocolError.unsupportedProtocolVersion(let version) = error,
+               [2, 3].contains(version) {
+                throw error
+            }
+            recordTransportFailure(error, generation: generation)
+            throw error
+        }
+    }
+
+    private func performSend(_ request: FanControlHelperRequest,
+                             generation: inout UInt64) async throws -> FanControlHelperReply {
         let response: FanControlHelperReply
         var requestConnectionGeneration: UInt64?
         PerformanceTelemetry.signposter.emitEvent("XPCRequest")
@@ -1718,11 +2110,12 @@ final class FanControlCoordinator: ObservableObject {
                 }
             }
         } else {
-            guard await resolveBundledHelperSigningTrust() else {
+            guard bundledHelperSigningIsTrusted == true else {
                 throw FanControlConnectionError.untrustedBundledHelper
             }
-            let requestData = try JSONEncoder().encode(request)
+            let requestData = try request.encodedForTransport()
             let connection = helperConnection()
+            generation = connectionGeneration
             requestConnectionGeneration = connectionGeneration
             response = try await withCheckedThrowingContinuation { continuation in
                 let completion = FanControlReplyCompletion(continuation)
@@ -1736,10 +2129,7 @@ final class FanControlCoordinator: ObservableObject {
                 }
                 helper.execute(requestData) { @Sendable replyData in
                     do {
-                        completion.resume(returning: try JSONDecoder().decode(
-                            FanControlHelperReply.self,
-                            from: replyData
-                        ))
+                        completion.resume(returning: try FanControlHelperReply.decodeFromTransport(replyData))
                     } catch {
                         completion.resume(throwing: error)
                     }
@@ -1748,10 +2138,33 @@ final class FanControlCoordinator: ObservableObject {
         }
         if let requestConnectionGeneration,
            requestConnectionGeneration != connectionGeneration {
-            throw CancellationError()
+            throw FanControlConnectionError.connectionChanged
         }
         PerformanceTelemetry.signposter.emitEvent("XPCReply")
-        return try response.validated(for: request)
+        let validated = try response.validated(for: request)
+        if validated.errorCode == .fanCrashRecoveryFailed {
+            latchStartupRecoveryFailure()
+            return validated.replacingMessage(Self.startupRecoveryFailureMessage)
+        }
+        if request.operation == .ping, validated.success { startupRecoveryFailureLatched = false }
+        return validated
+    }
+
+    private func latchStartupRecoveryFailure() {
+        startupRecoveryFailureLatched = true
+        cancelAutomaticReconnect()
+        helperConnectionNeedsAttention = false
+        reconnectRequiresAutomaticRestore = false
+        restoreRecoveryTask?.cancel()
+        restoreRecoveryTask = nil
+        resetControlState()
+        lastMessage = Self.startupRecoveryFailureMessage
+        connection?.invalidate()
+        connection = nil
+    }
+
+    private static var startupRecoveryFailureMessage: String {
+        L10n.text(FanControlStartupSafety.failureMessageChinese, FanControlStartupSafety.failureMessageEnglish)
     }
 
     private func armTimeout(
@@ -1764,8 +2177,10 @@ final class FanControlCoordinator: ObservableObject {
         case .renewFanControlLease, .restoreAutomatic, .validateFanCurve,
              .getFanCurveRuntimeState, .deactivateFanCurve:
             completion.armTimeout(after: helperRequestTimeout)
-        case .readPowerConfiguration, .applyPowerMode:
+        case .readPowerConfiguration, .applyPowerMode, .readMacMiniMode, .setMacMiniMode:
             completion.armTimeout(after: FanControlSafetyPolicy.powerModeRequestTimeout)
+        case .samplePowerMetrics:
+            completion.armTimeout(after: PowermetricsExecutionPolicy.timeoutSeconds + 1)
         case .ping:
             completion.armTimeout(after: helperRequestTimeout)
         }
@@ -1783,18 +2198,15 @@ final class FanControlCoordinator: ObservableObject {
         )
         newConnection.invalidationHandler = { [weak self, weak newConnection] in
             Task { @MainActor in
-                guard self?.connection === newConnection else { return }
-                self?.connection = nil
-                self?.connectionGeneration &+= 1
-                self?.handleUnexpectedHelperInvalidation()
+                guard let self, let newConnection, self.connection === newConnection else { return }
+                self.handleUnexpectedHelperInvalidation()
             }
         }
-        newConnection.interruptionHandler = { [weak self] in
+        newConnection.interruptionHandler = { [weak self, weak newConnection] in
             Task { @MainActor in
-                self?.failClosed(L10n.text(
-                    "高级控制连接已中断，当前硬件模式尚未确认。",
-                    "The advanced-control connection was interrupted; the current hardware mode is unconfirmed."
-                ))
+                guard let self, let newConnection, self.connection === newConnection else { return }
+                self.recordTransportFailure(FanControlConnectionError.connectionChanged,
+                                            generation: self.connectionGeneration)
             }
         }
         connectionGeneration &+= 1
@@ -1803,26 +2215,49 @@ final class FanControlCoordinator: ObservableObject {
         return newConnection
     }
 
-    private func waitForHelper(
-        attempts: Int = 12
-    ) async throws -> FanControlHelperReply {
-        var lastError: Error = FanControlConnectionError.invalidRemoteObject
-        for attempt in 0..<attempts {
-            do {
-                let reply = try await send(.ping)
-                if reply.success {
-                    return reply
-                }
-                lastError = FanControlConnectionError.helperRejected(reply.message)
-            } catch {
-                lastError = error
+    private func waitForHelper() async throws -> FanControlHelperReply {
+        // Exactly one ping. Automatic retry is owned by the monotonic scheduler.
+        let reply = try await send(.ping)
+        if reply.success {
+            helperConnectionNeedsAttention = false
+            if !reconnectRequiresAutomaticRestore {
+                lastMessage = L10n.text("辅助程序已重新连接；当前硬件模式仍待确认。", "The helper reconnected; the hardware mode still needs verification.")
             }
-            connection?.invalidate()
-            connection = nil
-            guard attempt < attempts - 1 else { break }
-            try await Task.sleep(for: .milliseconds(250))
+            if reconnectRequiresAutomaticRestore { beginRestoreRecovery() }
         }
-        throw lastError
+        return reply
+    }
+
+    private static func connectionRetryMessage(for error: any Error) -> String {
+        if let error = error as? FanControlHelperProtocolError {
+            switch error {
+            case .unsupportedProtocolVersion, .missingProtocolVersion:
+                return L10n.text("辅助程序需要更新，正在重新连接…", "The helper needs an update; reconnecting…")
+            default: break
+            }
+        }
+        return L10n.text("辅助程序连接中断，正在重新连接…", "The helper connection was interrupted; reconnecting…")
+    }
+
+    private func recordHelperConnectionFailure(_ error: any Error) {
+        if startupRecoveryFailureLatched {
+            lastMessage = Self.startupRecoveryFailureMessage
+            return
+        }
+        if !helperConnectionNeedsAttention { helperConnectionNeedsAttention = true }
+        let message = [error.localizedDescription, L10n.text(
+            "辅助程序连接未获确认，可能需要更新或重新批准。请点击“重新连接”；仍失败时，在“系统设置 → 通用 → 登录项与扩展”中重新批准本应用的后台项目。旧助手若不支持自动更新，需要按系统批准流程重新启用。当前硬件模式尚未确认。",
+            "The helper connection is unconfirmed and may need an update or approval. Choose Reconnect. If it still fails, approve this app's background item again in System Settings → General → Login Items & Extensions. A helper without automatic update support needs to be enabled again through system approval. The current hardware mode is unconfirmed."
+        )].joined(separator: "\n")
+        isHelperReachable = false
+        clearObservedMode()
+        let prefix = Self.connectionRetryMessage(for: error)
+        let restoreMessage = reconnectRequiresAutomaticRestore ? L10n.text(
+            "恢复系统自动控制尚未确认；受信任连接恢复后将再次请求。",
+            "Restoration of automatic system control remains unconfirmed; it will be requested after a trusted connection returns."
+        ) : nil
+        let feedback = [prefix, message, restoreMessage].compactMap { $0 }.joined(separator: "\n")
+        if lastMessage != feedback { lastMessage = feedback }
     }
 
     private func currentServiceStatus() -> SMAppService.Status {
@@ -2032,6 +2467,12 @@ final class FanControlCoordinator: ObservableObject {
         return FanCurveError(rawValue: rawValue) ?? .curveActivationFailed
     }
 
+    private static func curveMessage(for reply: FanControlHelperReply) -> String {
+        reply.errorCode == .fanCrashRecoveryFailed
+            ? startupRecoveryFailureMessage
+            : curveMessage(for: curveError(from: reply))
+    }
+
     private static func curveMessage(for error: FanCurveError) -> String {
         switch error {
         case .invalidCurvePointCount:
@@ -2076,6 +2517,9 @@ final class FanControlCoordinator: ObservableObject {
 
 private enum FanControlConnectionError: LocalizedError {
     case invalidRemoteObject
+    case connectionChanged
+    case reconnectDeferred
+    case reconnectInProgress
     case helperRejected(String)
     case timedOut
     case untrustedBundledHelper
@@ -2087,6 +2531,10 @@ private enum FanControlConnectionError: LocalizedError {
                 "无法连接受信任的风扇控制辅助程序。",
                 "Could not connect to the trusted fan-control helper."
             )
+        case .connectionChanged:
+            L10n.text("辅助程序连接已中断或意外退出，正在重新核对。", "The helper connection was interrupted or exited unexpectedly and needs verification again.")
+        case .reconnectDeferred, .reconnectInProgress:
+            L10n.text("辅助程序正在等待重新连接，请稍后重试。", "The helper is waiting to reconnect; try again later.")
         case .helperRejected(let message):
             message
         case .timedOut:

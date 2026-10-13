@@ -94,27 +94,21 @@ struct CleanupOperationOverlay: View {
         HStack(spacing: AppDesignTokens.Spacing.medium) {
             completionMetric(
                 title: L10n.text("已移动", "Moved"),
-                value: L10n.items(snapshot.movedCount),
-                systemImage: "checkmark.circle.fill"
+                value: L10n.items(snapshot.movedCount)
             )
             completionMetric(
                 title: L10n.text("处理容量", "Processed"),
-                value: ByteFormat.string(snapshot.movedBytes),
-                systemImage: "externaldrive.fill"
+                value: ByteFormat.string(snapshot.movedBytes)
             )
             completionMetric(
                 title: L10n.text("耗时", "Duration"),
-                value: L10n.scanSeconds(snapshot.duration ?? 0),
-                systemImage: "clock.fill"
+                value: L10n.scanSeconds(snapshot.duration ?? 0)
             )
         }
     }
 
-    private func completionMetric(title: String, value: String, systemImage: String) -> some View {
+    private func completionMetric(title: String, value: String) -> some View {
         VStack(spacing: AppDesignTokens.Spacing.compact) {
-            Image(systemName: systemImage)
-                .foregroundStyle(tint)
-                .accessibilityHidden(true)
             Text(value)
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .monospacedDigit()
@@ -138,7 +132,7 @@ struct CleanupOperationOverlay: View {
                     store.dismissCleanupOperationSummary()
                     store.requestRestoreLatestCleanup()
                 } label: {
-                    Label(L10n.text("撤销", "Undo"), systemImage: "arrow.uturn.backward")
+                    Text(L10n.text("撤销", "Undo"))
                 }
                 .appButtonChrome(.secondary)
                 .controlSize(.large)
@@ -148,7 +142,7 @@ struct CleanupOperationOverlay: View {
                 store.dismissCleanupOperationSummary()
                 store.openTrashFolder()
             } label: {
-                Label(L10n.text("查看废纸篓", "Review Trash"), systemImage: "trash")
+                Text(L10n.text("查看废纸篓", "Review Trash"))
             }
             .appButtonChrome(.secondary)
             .controlSize(.large)

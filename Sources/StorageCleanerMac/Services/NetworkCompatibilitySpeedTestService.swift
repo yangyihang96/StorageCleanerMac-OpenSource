@@ -219,6 +219,10 @@ struct NetworkCompatibilitySpeedTestCleanupPendingError: Error, Sendable {
     let context: NetworkCompatibilityCleanupContext
 }
 
+typealias CompatibilityShutdownTimeoutScheduler = @Sendable (
+    TimeInterval, @escaping @Sendable () -> Void
+) -> Void
+
 fileprivate final class NetworkCompatibilitySessionLifetime: @unchecked Sendable {
     private let session: URLSession
     private let delegate: CompatibilitySessionDelegate
@@ -267,6 +271,7 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
     private let sentByteCount: @Sendable (URLSessionTask) -> Int64
     private let shutdownGraceSeconds: TimeInterval
     private let sessionInvalidator: @Sendable (URLSession) -> Void
+    private let shutdownTimeoutScheduler: CompatibilityShutdownTimeoutScheduler
     // Custom URLProtocol stubs do not emit didSendBodyData. Tests may inject
     // that observed event explicitly; production always leaves this nil.
     private let uploadProgressObservationForTesting: (@Sendable (URLSessionTask) -> Bool)?
@@ -287,6 +292,9 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
         },
         shutdownGraceSeconds: TimeInterval = 1,
         sessionInvalidator: (@Sendable (URLSession) -> Void)? = nil,
+        shutdownTimeoutScheduler: @escaping CompatibilityShutdownTimeoutScheduler = { seconds, expire in
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds, execute: expire)
+        },
         uploadProgressObservationForTesting: (@Sendable (URLSessionTask) -> Bool)? = nil
     ) {
         self.meter = meter
@@ -302,6 +310,7 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
             ? min(Self.maximumShutdownGraceSeconds, max(0, shutdownGraceSeconds))
             : 1
         self.sessionInvalidator = sessionInvalidator ?? { $0.finishTasksAndInvalidate() }
+        self.shutdownTimeoutScheduler = shutdownTimeoutScheduler
         self.uploadProgressObservationForTesting = uploadProgressObservationForTesting
     }
 
@@ -416,7 +425,8 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
         // be used as evidence that it is safe to release the heavy-work lease.
         sessionInvalidator(session)
         guard await delegate.waitUntilSessionInvalidated(
-            timeoutSeconds: shutdownGraceSeconds
+            timeoutSeconds: shutdownGraceSeconds,
+            scheduleTimeout: shutdownTimeoutScheduler
         ) else {
             throw NetworkCompatibilitySpeedTestCleanupPendingError(
                 context: NetworkCompatibilityCleanupContext(lifetime: lifetime)
@@ -1051,7 +1061,10 @@ private final class CompatibilitySessionDelegate:
         }
     }
 
-    func waitUntilSessionInvalidated(timeoutSeconds: TimeInterval) async -> Bool {
+    func waitUntilSessionInvalidated(
+        timeoutSeconds: TimeInterval,
+        scheduleTimeout: CompatibilityShutdownTimeoutScheduler
+    ) async -> Bool {
         // Cancellation must not release the session early. The deadline is the
         // only fast-exit path; a later callback is handed to cleanup quarantine.
         await withCheckedContinuation { continuation in
@@ -1069,9 +1082,9 @@ private final class CompatibilitySessionDelegate:
                 return
             }
 
-            DispatchQueue.global(qos: .utility).asyncAfter(
-                deadline: .now() + timeoutSeconds
-            ) { [self] in
+            // Production still uses the clamped deadline. Tests can order the
+            // deadline and real invalidation callback without wall-clock races.
+            scheduleTimeout(timeoutSeconds) { [self] in
                 expireInvalidationWaiter(waiterID)
             }
         }

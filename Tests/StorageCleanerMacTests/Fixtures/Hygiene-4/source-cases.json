@@ -1,0 +1,912 @@
+[
+  {
+    "case": "r4-H1-chs-convenience-no-controller",
+    "source": "let store = ComputerHealthStore()",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H2-chs-probe-no-controller",
+    "source": "let store = ComputerHealthStore(probe: Probe())",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H3-chs-nil-controller",
+    "source": "let store = ComputerHealthStore(probe: Probe(), batteryPowerModeController: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H4-chs-optional-existential-controller",
+    "source": "let maybe: (any BatteryPowerModeControlling)? = nil; let store = ComputerHealthStore(probe: Probe(), batteryPowerModeController: maybe)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H5-chs-runtime-shared-controller",
+    "source": "let store = ComputerHealthStore(probe: Probe(), batteryPowerModeController: BatteryHealthRuntime.shared)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H6-chs-contextual-init",
+    "source": "let host = Host(computerHealthStore: .init(probe: Probe()))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H7-chs-safe",
+    "source": "let store = ComputerHealthStore(probe: Probe(), batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-H8-chs-ternary-nil",
+    "source": "let store = ComputerHealthStore(probe: Probe(), batteryPowerModeController: flag ? controller : nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H9-chs-iuo-member",
+    "source": "class T { var controller: (any BatteryPowerModeControlling)!; func make() { _ = ComputerHealthStore(probe: Probe(), batteryPowerModeController: controller) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H10-runtime-shared-direct",
+    "source": "func testChange() async { _ = await BatteryHealthRuntime.shared.changePowerMode(source: .batteryPower, mode: .lowPower) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H11-panel-root",
+    "source": "func testRender(store: ScanStore) { _ = MenuBarStatusPanelRoot(store: store, computerHealthStore: health) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H12-contextual-fan-shared",
+    "source": "func testWrite() { let fan: FanControlCoordinator = .shared; fan.selectedMode = .manual }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H13-contextual-fan-shared-param-default",
+    "source": "func helper(fan: FanControlCoordinator = .shared) { fan.selectedMode = .manual }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H14-contextual-fan-shared-assignment",
+    "source": "func testWrite() { var fan = FanControlCoordinator(defaults: d, requestSender: { _ in throw CancellationError() }); fan = .shared; fan.selectedMode = .manual }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H15-dashboard-shared-via-alias-type",
+    "source": "typealias Store = GeekDashboardConfigurationStore; func testApply() throws { try Store.shared.applyLive(.defaultValue) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-S1-trailing-closure-after-for-label-shadow",
+    "source": "let prefs = UserDefaults.standard; makeThing(for: self) { prefs in prefs.set(1, forKey: \"k\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-S2-trailing-closure-after-for-label-capture",
+    "source": "let prefs = UserDefaults.standard; makeThing(for: self) { prefs.set(1, forKey: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-S3-if-body-for-first-with-closure-in-condition",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if items.contains(where: { $0 > 1 }) { for item in items { _ = item }; url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-S4-if-body-for-first",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { for item in items { _ = item }; url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-S5-if-body-retain-first",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { retain; url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-S6-closure-assignment-boundary",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); run { url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-isolated-dotdot-traversal",
+    "source": "func testWrite() throws { let home = try TestFileSystem.makeOperationHome(for: self); try Data().write(to: home.appendingPathComponent(\"../../Desktop/x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P2-isolated-virtual-users-component",
+    "source": "func testWrite() throws { let root = try TestFileSystem.makeHome(for: self); let label = \"/Users/fixture/Documents/a.txt\"; try Data().write(to: root.appendingPathComponent(URL(fileURLWithPath: label).lastPathComponent)) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P3-real-home-lastPathComponent-of-object",
+    "source": "func testWrite() throws { let real = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop\"); try Data().write(to: URL(fileURLWithPath: real.path).lastPathComponent) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P4-getenv-home",
+    "source": "func testWrite() throws { let home = String(cString: getenv(\"HOME\")); try Data().write(toFile: home + \"/Desktop/x\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P5-contextual-url-homeDirectory",
+    "source": "func testWrite() throws { let base: URL = .homeDirectory; try Data().write(to: base.appending(path: \"Desktop/x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P6-ternary-try-optional-colon",
+    "source": "func testWrite() throws { let root = try TestFileSystem.makeHome(for: self); let data = try? Data(contentsOf: root); try (data ?? Data()).write(to: root.appendingPathComponent(\"x\")) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P7-ternary-real-home-branch",
+    "source": "func testWrite() throws { let root = try TestFileSystem.makeHome(for: self); let target = flag ? root : FileManager.default.homeDirectoryForCurrentUser; try Data().write(to: target) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P8-append-unknown-component-to-real",
+    "source": "func testWrite() throws { let target = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(name); try Data().write(to: target) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P9-isolated-append-real-home-component",
+    "source": "func testWrite() throws { let root = try TestFileSystem.makeHome(for: self); try Data().write(to: root.appendingPathComponent(FileManager.default.homeDirectoryForCurrentUser.path)) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-C1-multi-clause-second-binding",
+    "source": "func testSnapshot() throws { let view = View(currentItem: \"/Users/example/demo\"); if let scale = Optional(2), let path = ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"] { let rendered = view; let directory = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-C2-multi-clause-real-home",
+    "source": "func testWrite() throws { if let scale = Optional(2), let path = FileManager.default.homeDirectoryForCurrentUser.path as String? { try Data().write(toFile: path) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-L1-reassign-before-closure-use",
+    "source": "func testWrite() { var prefs = TestPreferenceDomain.make(for: self); prefs = UserDefaults.standard; run { prefs.set(1, forKey: \"k\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-L2-reassign-before-closure-use-real-home",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); url = FileManager.default.homeDirectoryForCurrentUser; try run { try Data().write(to: url) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-L3-xctassertthrows-trailing-closure-shadow",
+    "source": "let error = UserDefaults.standard; XCTAssertThrowsError(try builder.plan(for: candidate)) { error in error.set(1, forKey: \"k\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-B1-extension-member-standard",
+    "source": "class Fixture { var prefs: UserDefaults = isolated }\nextension Fixture { func setUp() { prefs = UserDefaults.standard }; func write() { prefs.set(1, forKey: \"k\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B2-other-instance-member",
+    "source": "func testWrite() { let holder = Holder(); holder.prefs = UserDefaults.standard; holder.prefs.set(1, forKey: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B3-static-member-home",
+    "source": "enum Paths { static let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop\") }\nfunc testWrite() throws { try Data().write(to: Paths.root) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B4-superclass-member",
+    "source": "class Base { var prefs: UserDefaults! }\nfinal class T: Base { func setUp() { prefs = UserDefaults.standard }; func test() { prefs.set(1, forKey: \"k\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-constant-alias-dotdot",
+    "source": "let home = try TestFileSystem.makeOperationHome(for: self); let piece = \"../../Desktop/x\"; try Data().write(to: home.appendingPathComponent(piece))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-appending-path-dotdot",
+    "source": "let home = try TestFileSystem.makeOperationHome(for: self); try Data().write(to: home.appending(path: \"../../Desktop/x\"))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-chained-dotdot",
+    "source": "let home = try TestFileSystem.makeOperationHome(for: self); try Data().write(to: home.appendingPathComponent(\"../..\").appendingPathComponent(\"Desktop/x\"))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-leaf-dotdot",
+    "source": "let home = try TestFileSystem.makeOperationHome(for: self); try Data().write(to: home.appendingPathComponent(URL(fileURLWithPath: \"..\").lastPathComponent))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-dotdot-not-segment",
+    "source": "let home = try TestFileSystem.makeHome(for: self); try Data().write(to: home.appendingPathComponent(\"version..txt\"))",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P1-dot-segment",
+    "source": "let home = try TestFileSystem.makeHome(for: self); try Data().write(to: home.appendingPathComponent(\"./a\"))",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P1-ordinary-path",
+    "source": "let home = try TestFileSystem.makeHome(for: self); try Data().write(to: home.appending(path: \"folder/a\"))",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P4-getenv-readonly",
+    "source": "let home = String(cString: getenv(\"HOME\")); _ = home",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P4-getenv-nonhome",
+    "source": "let label = String(cString: getenv(\"FIXTURE_LABEL\")); _ = label",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P5-contextual-reassignment",
+    "source": "func testWrite() throws { var url: URL = try TestFileSystem.makeHome(for: self); url = .homeDirectory; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P5-url-typealias",
+    "source": "typealias FixtureURL = URL; let home: FixtureURL = .homeDirectory; try Data().write(to: home)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P5-contextual-readonly",
+    "source": "let home: URL = .homeDirectory; _ = home.path",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-H13-alias-default",
+    "source": "typealias Controller = FanControlCoordinator; func helper(fan: Controller = .shared) { _ = fan }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H14-typed-assignment",
+    "source": "func helper() { var fan: FanControlCoordinator = isolated; fan = .shared; _ = fan }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H15-alias-chain",
+    "source": "typealias Store = GeekDashboardConfigurationStore; typealias Alias = Store; let config = Alias.shared",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H15-alias-constructor",
+    "source": "typealias Health = ComputerHealthStore; let store = Health(batteryPowerModeController: controller)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-H15-alias-safe-constructor",
+    "source": "typealias Health = ComputerHealthStore; let store = Health(probe: probe, batteryPowerModeController: controller)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-singleton-fixture-allowed",
+    "source": "struct MockController { static let shared = MockController() }; let mock = MockController.shared",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-parameter-fixture-default-allowed",
+    "source": "struct MockController { static let shared = MockController() }; class Fixture { func helper(mock: MockController = .shared) { _ = mock } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-B1-extension-static-entry",
+    "source": "class Fixture {}; extension Fixture { static let root = FileManager.default.homeDirectoryForCurrentUser }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B2-other-instance-alias-home",
+    "source": "let home = FileManager.default.homeDirectoryForCurrentUser; holder.target = home",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B3-static-standard",
+    "source": "enum Preferences { static let defaults = UserDefaults.standard }; func testRead() { _ = Preferences.defaults }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B3-qualified-shared",
+    "source": "enum Access { static let controller = FanControlCoordinator.shared }; let controller = Access.controller",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B4-super-member-home",
+    "source": "class Base { var root: URL! }; class Fixture: Base { func setUp() { root = FileManager.default.homeDirectoryForCurrentUser }; func testWrite() throws { try Data().write(to: root) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-B2-isolated-assignment",
+    "source": "let home = try TestFileSystem.makeHome(for: self); holder.target = home; try Data().write(to: home)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-B3-isolated-static",
+    "source": "enum Paths { static let root = TestFileSystem.uniqueRoot() }; _ = Paths.root",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-closure-late-write",
+    "source": "func testWrite() { var prefs = isolated; let callback = { prefs.set(1, forKey: \"key\") }; prefs = UserDefaults.standard; callback() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-closure-parameter-shadow",
+    "source": "let prefs = UserDefaults.standard; run(for: self) { prefs in prefs.set(1, forKey: \"key\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-closure-local-shadow",
+    "source": "func testWrite() { var prefs = isolated; run { let prefs = UserDefaults.standard; _ = prefs.string(forKey: \"key\") }; prefs.set(1, forKey: \"key\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-closure-isolated-reassignment",
+    "source": "func testWrite() { var prefs = isolated; run { prefs = anotherIsolated }; prefs.set(1, forKey: \"key\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-health-convenience-injected-controller",
+    "source": "let store = ComputerHealthStore(batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-health-convenience-contextual",
+    "source": "let store: ComputerHealthStore = .init(batteryPowerModeController: controller)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-health-default-probe",
+    "source": "let store = ComputerHealthStore(probe: DefaultComputerHealthProbe(), batteryPowerModeController: controller)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-health-fixture-probe",
+    "source": "let store = ComputerHealthStore(probe: TestUnavailableComputerHealthProbe(), batteryPowerModeController: controller)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-P1-dotdot-path-property",
+    "source": "let root = try TestFileSystem.makeOperationHome(for: self); try Data().write(toFile: root.appendingPathComponent(\"../../Desktop/x\").path)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-dotdot-conditional-component",
+    "source": "let root = try TestFileSystem.makeOperationHome(for: self); let component = flag ? \"../../Desktop/x\" : \"safe\"; try Data().write(to: root.appendingPathComponent(component))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-P1-safe-path-property",
+    "source": "let root = try TestFileSystem.makeHome(for: self); try Data().write(toFile: root.appendingPathComponent(\"safe\").path)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-discard-appkit-read",
+    "source": "class Host { func initApp() { _ = NSApplication.shared } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-discard-workspace-read",
+    "source": "class Fixture { func read() { let applications = NSWorkspace.shared.runningApplications; _ = RunningApplicationIdentityCache.identities(of: applications) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-discard-sampler-result",
+    "source": "class Fixture { func read() { let sampler = MenuBarStallSampler.shared; _ = sampler.iterationEnded() } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-discard-policy-result",
+    "source": "class Fixture { func run() { var policy = FanCurveControlPolicy.standard; var engine = FanCurveControlEngine(policy: policy); _ = try engine.evaluate(rawTemperature: 55, profile: fixture, at: date) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-discard-virtual-path-policy",
+    "source": "class Fixture { func read() { let home = \"/Users/fixture\"; let policy = FileAnalysisTrashPolicy(rootPath: home, targetKind: .homeDirectory, homePath: home); _ = policy.block(path: home, name: \"a\", kind: \"file\", isDirectory: false, isEstimated: false) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-discard-update-result",
+    "source": "class Fixture { func read() { let item = AppUpdateItem(path: \"/Users/test/Applications/App.app\"); let coordinator = MockCoordinator(items: [item]); _ = try await coordinator.start() } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-readonly-member-value",
+    "source": "class Fixture { var original: Any; func read() { let defaults = UserDefaults.standard; original = defaults.volatileDomain(forName: UserDefaults.argumentDomain); _ = defaults.string(forKey: \"key\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-readonly-other-instance-value",
+    "source": "let defaults = UserDefaults.standard; holder.text = defaults.string(forKey: \"key\")",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-readonly-other-instance-alias-value",
+    "source": "let defaults = UserDefaults.standard; let text = defaults.string(forKey: \"key\"); holder.text = text",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-virtual-bundle-url",
+    "source": "func testDisplay() { var app = AppUpdateItem(path: \"/Applications/Fixture.app\"); app.bundleURL = URL(fileURLWithPath: \"/Users/test/Applications/Store.app\"); _ = Presentation.make(applications: [app]) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-virtual-bundle-url-alias",
+    "source": "let path = \"/Users/test/Applications/App.app\"; let url = URL(fileURLWithPath: path); app.bundleURL = url",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-virtual-scan-model",
+    "source": "class Fixture { func display() { let item = StorageItem(path: \"/Users/fixture/Library/Caches/example\"); store.result = ScanResult(items: [item], snapshot: makeSnapshot()) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-pure-model-standard",
+    "source": "let policy = FanCurveControlPolicy.standard; holder.policy = policy",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-mixed-model-enum-and-path",
+    "source": "holder.model = Model(path: \"/Users/test/Applications/App.app\", profile: .standard)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-guard-enum-pattern",
+    "source": "class Fixture { func read() { let raw = makeRawResult(profile: .standard); let catalog = Catalog(raw: raw); guard case .matched = catalog.lookup(matching: raw) else { return } } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-guard-error-pattern",
+    "source": "class Fixture { func read() { let error = FixtureError(path: \"/Users/fixture/Library/Caches/example\"); guard case FixtureError.notAllowed = error else { return } } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-qualified-parameter-default",
+    "source": "class Fixture { func request(trash: String = \"/Users/fixture/.Trash/item\", direction: Fixture.Direction = .trash) { _ = Request(trash: trash, direction: direction) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-injected-parameter-default",
+    "source": "struct MockController { static let shared = MockController() }; class Fixture { var mock = isolated; func helper(mock: MockController = .shared) { _ = mock }; func run() { helper(mock: isolated) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-probe-error-description",
+    "source": "let secret = \"/Users/secret/Private Volume SERIAL-12345\"; let probe = ScriptedHealthProbe(steps: [.unknownFailure(secret)]); let store = ComputerHealthStore(probe: probe, batteryPowerModeController: refused)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-probe-inline-error-description",
+    "source": "let store = ComputerHealthStore(probe: ScriptedHealthProbe(steps: [.unknownFailure(\"/Users/secret/Private Volume\")]), batteryPowerModeController: refused)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-health-label-controller",
+    "source": "RenderFixture(computerHealthStore: .init(batteryPowerModeController: injected))",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-initializer-closure-isolated",
+    "source": "func testWrite() { var prefs = isolated; let callback = { prefs.set(1, forKey: \"key\") }; prefs = alsoIsolated; callback() }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-initializer-closure-local-shadow",
+    "source": "func testWrite() { var prefs = isolated; let callback = { let prefs = isolated; prefs.set(1, forKey: \"key\") }; prefs = UserDefaults.standard; callback() }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-initializer-closure-parameter-shadow",
+    "source": "func testWrite() { var prefs = isolated; let callback = { prefs in prefs.set(1, forKey: \"key\") }; prefs = UserDefaults.standard; callback(isolated) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r2-initializer-closure-next-line",
+    "source": "func testWrite() { var prefs = isolated; let callback =\n { prefs.set(1, forKey: \"key\") }; prefs = UserDefaults.standard; callback() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-initializer-closure-parenthesized",
+    "source": "func testWrite() { var prefs = isolated; let callback = ({ prefs.set(1, forKey: \"key\") }); prefs = UserDefaults.standard; callback() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-initializer-closure-array",
+    "source": "func testWrite() { var prefs = isolated; let callbacks = [{ prefs.set(1, forKey: \"key\") }]; prefs = UserDefaults.standard; callbacks[0]() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-assigned-closure-late-source",
+    "source": "func testWrite() { var prefs = isolated; var callback: () -> Void; callback = { prefs.set(1, forKey: \"key\") }; prefs = UserDefaults.standard; callback() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-discard-persistent-write",
+    "source": "class Fixture { func write() { _ = UserDefaults.standard.set(1, forKey: \"key\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-discard-home-write",
+    "source": "class Fixture { func write() { _ = try FileManager.default.createDirectory(at: URL.homeDirectory.appendingPathComponent(\"fixture\"), withIntermediateDirectories: true) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-virtual-path-file-write",
+    "source": "let path = \"/Users/test/Applications/App.app\"; app.bundleURL = URL(fileURLWithPath: path); try Data().write(to: URL(fileURLWithPath: path))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-other-instance-standard-alias",
+    "source": "let defaults = UserDefaults.standard; let alias = defaults; holder.prefs = alias",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-other-instance-standard-typealias",
+    "source": "typealias Preferences = UserDefaults; holder.prefs = Preferences.standard",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-other-instance-contextual-standard",
+    "source": "let defaults: UserDefaults = .standard; holder.prefs = defaults",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-other-instance-contextual-home",
+    "source": "let home: URL = .homeDirectory; holder.target = home",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-other-instance-getenv-home",
+    "source": "let home = String(cString: getenv(\"HOME\")); holder.target = URL(fileURLWithPath: home)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-other-instance-runtime-home-constructor",
+    "source": "holder.repository = CleanupReportJournal(directory: URL.homeDirectory)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-probe-runtime-home",
+    "source": "let probe = FixtureProbe(fileURL: URL.homeDirectory); let store = ComputerHealthStore(probe: probe, batteryPowerModeController: refused)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-health-label-missing-controller",
+    "source": "RenderFixture(computerHealthStore: .init())",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-health-typed-label-value",
+    "source": "let store: ComputerHealthStore = .init(batteryPowerModeController: injected); RenderFixture(computerHealthStore: store)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r2-health-alias-typed-convenience",
+    "source": "typealias HealthStore = ComputerHealthStore; let store: HealthStore = .init(batteryPowerModeController: injected)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r3-startup-embedded-dotdot-model-allowed",
+    "source": "func testEmbeddedExecutableUsesDeepestStandardizedApplicationPath() {\n        let outerURL = URL(fileURLWithPath: \"/Applications/Outer.app\")\n        let nestedURL = outerURL.appendingPathComponent(\n            \"Contents/Library/LoginItems/Nested.app\"\n        )\n        let applications = [\n            StartupInstalledApplication(\n                bundleIdentifier: \"com.example.outer\",\n                bundleURL: outerURL,\n                executableURL: nil,\n                displayName: \"Outer\",\n                developerName: nil,\n                teamIdentifier: nil,\n                codeSigningIdentifier: nil,\n                designatedRequirement: nil\n            ),\n            StartupInstalledApplication(\n                bundleIdentifier: \"com.example.nested\",\n                bundleURL: nestedURL,\n                executableURL: nil,\n                displayName: \"Nested\",\n                developerName: nil,\n                teamIdentifier: nil,\n                codeSigningIdentifier: nil,\n                designatedRequirement: nil\n            ),\n        ]\n        var candidate = fixtureCandidate(label: \"unrelated.helper\")\n        candidate.executableURL = nestedURL\n            .appendingPathComponent(\"Contents/MacOS/../MacOS/Nested\")\n\n        let resolved = StartupAttributionResolver().resolve(\n            candidate,\n            using: InstalledApplicationIndex(applications: applications)\n        )\n\n        XCTAssertEqual(resolved.applicationURL, nestedURL)\n        XCTAssertEqual(resolved.attribution?.confidence, .verified)\n        XCTAssertEqual(resolved.attribution?.evidence.first?.kind, .embeddedInApplication)\n    }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r3-application-dotdot-alias-model-allowed",
+    "source": "let root = URL(fileURLWithPath: \"/Applications/Outer.app\"); let component = \"Contents/MacOS/../MacOS/Nested\"; let path = root.appendingPathComponent(component); let relay = path; candidate.executableURL = relay",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r3-application-dotdot-conditional-model-allowed",
+    "source": "let root = URL(fileURLWithPath: \"/Applications/Outer.app\"); let path = root.appendingPathComponent(\"Contents/MacOS/../MacOS/Nested\"); candidate.executableURL = flag ? path : isolatedURL",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r3-application-dotdot-path-model-allowed",
+    "source": "let root = URL(fileURLWithPath: \"/Applications/Outer.app\"); holder.path = root.appending(path: \"Contents/MacOS/../MacOS/Nested\").standardizedFileURL.path",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r3-runtime-home-dotdot-storage",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser; holder.root = root.appendingPathComponent(\"../other\")",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r3-owned-home-dotdot-storage",
+    "source": "let root = try TestFileSystem.makeOperationHome(for: self); holder.root = root.appendingPathComponent(\"../../Desktop/x\")",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r3-owned-home-dotdot-alias-storage",
+    "source": "let root = try TestFileSystem.makeHome(for: self); let path = root.appendingPathComponent(\"../outside\"); let relay = path; holder.root = relay",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r3-owned-home-dotdot-conditional-storage",
+    "source": "let root = try TestFileSystem.makeHome(for: self); let path = root.appendingPathComponent(\"../outside\"); holder.root = flag ? path : isolatedURL",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r3-owned-home-dotdot-chained-storage",
+    "source": "let root = try TestFileSystem.makeHome(for: self); holder.root = root.appendingPathComponent(\"../outside\").appendingPathComponent(\"safe\").standardizedFileURL",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r3-application-dotdot-write",
+    "source": "let root = URL(fileURLWithPath: \"/Applications/Outer.app\"); try Data().write(to: root.appendingPathComponent(\"Contents/MacOS/../MacOS/Nested\"))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-review-N1-static-model-users-path",
+    "source": "enum Samples { static let path = \"/Users/fixture/Documents/a.txt\" }\nfunc testModel() { XCTAssertEqual(model(path: Samples.path), 1) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-review-N2-static-nsworkspace-shared",
+    "source": "final class T: XCTestCase { static let workspace = NSWorkspace.shared; func testApps() { _ = Self.workspace.runningApplications } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-review-N17-unresolved-member-defaults-read",
+    "source": "final class T: BaseTests { func testRead() { label = UserDefaults.standard.string(forKey: \"k\") ?? \"\"; XCTAssertNotNil(label) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-review-N18-static-defaults-read",
+    "source": "final class T: XCTestCase { static let savedName = UserDefaults.standard.string(forKey: \"k\"); func testRead() { XCTAssertNil(Self.savedName) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-review-N19-static-enum-standard",
+    "source": "final class T: XCTestCase { static let policy = FanCurveControlPolicy.standard; func testPolicy() { XCTAssertNotNil(Self.policy) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-extension-model-path-allowed",
+    "source": "class Fixture {}; extension Fixture { static let path = \"/Users/fixture/Documents/a.txt\" }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-extension-policy-allowed",
+    "source": "class Fixture {}; extension Fixture { static let policy = FanCurveControlPolicy.standard }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-extension-read-result-allowed",
+    "source": "class Fixture {}; extension Fixture { static let savedName = UserDefaults.standard.string(forKey: \"k\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-unresolved-policy-allowed",
+    "source": "final class T: BaseTests { func configure() { policy = FanCurveControlPolicy.standard } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-unresolved-workspace-allowed",
+    "source": "final class T: BaseTests { func configure() { workspace = NSWorkspace.shared } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-static-defaults-alias",
+    "source": "let token = UserDefaults.standard; enum Values { static let value = token }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-static-home-alias",
+    "source": "let token = URL.homeDirectory; enum Values { static let value = token }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-extension-defaults-alias",
+    "source": "let token = UserDefaults.standard; class Fixture {}; extension Fixture { static let value = token }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-unresolved-defaults-alias",
+    "source": "let token = UserDefaults.standard; final class T: BaseTests { func configure() { value = token } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-explicit-self-member-alias",
+    "source": "class Fixture { var token = UserDefaults.standard; func configure() { holder.value = self.token } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-late-write-storage-alias",
+    "source": "func configure() { var token = isolated; let save = { holder.value = token }; token = UserDefaults.standard; save() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-static-default-location",
+    "source": "enum Values { static let token = SystemEnergyAccumulatorLocation.defaultURL }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-static-directory-api",
+    "source": "enum Values { static let token = URL.desktopDirectory }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-static-passwd-home",
+    "source": "enum Values { static let token = account.pw_dir }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-review-B1-extension-member-standard",
+    "source": "class Fixture { var prefs: UserDefaults = isolated }\nextension Fixture { func setUp() { prefs = UserDefaults.standard }; func write() { prefs.set(1, forKey: \"k\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-review-B2-other-instance-member",
+    "source": "func testWrite() { let holder = Holder(); holder.prefs = UserDefaults.standard; holder.prefs.set(1, forKey: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-review-B3-static-member-home",
+    "source": "enum Paths { static let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop\") }\nfunc testWrite() throws { try Data().write(to: Paths.root) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-review-B4-superclass-member",
+    "source": "class Base { var prefs: UserDefaults! }\nfinal class T: Base { func setUp() { prefs = UserDefaults.standard }; func test() { prefs.set(1, forKey: \"k\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r4-r4-discard-defaults-object-allowed",
+    "source": "class Fixture { func read() { _ = UserDefaults.standard } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r4-r4-parameter-defaults-read-only-allowed",
+    "source": "class Fixture { func describe(prefs: UserDefaults = UserDefaults.standard) -> String? { prefs.string(forKey: \"k\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-contextual-read-allowed",
+    "source": "func read(prefs: UserDefaults = .standard) -> Bool { prefs.bool(forKey: \"k\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-explicit-return-read-allowed",
+    "source": "func read(prefs: UserDefaults = UserDefaults.standard) -> String? { return prefs.string(forKey: \"k\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-optional-read-allowed",
+    "source": "func read(prefs: UserDefaults? = .standard) -> String? { prefs?.string(forKey: \"k\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-read-result-storage-allowed",
+    "source": "class Fixture { var text: String?; func read(prefs: UserDefaults = .standard) { self.text = prefs.string(forKey: \"k\"); holder.text = prefs.string(forKey: \"k\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-read-label-allowed",
+    "source": "func read(prefs: UserDefaults = .standard) { describe(prefs: prefs.string(forKey: \"k\")) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-dictionary-read-allowed",
+    "source": "func read(prefs: UserDefaults = .standard) -> [String: Any] { prefs.dictionaryRepresentation() }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-domain-read-allowed",
+    "source": "func read(prefs: UserDefaults = .standard) { holder.values = prefs.volatileDomain(forName: UserDefaults.argumentDomain); _ = prefs.persistentDomain(forName: \"example\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-nested-read-allowed",
+    "source": "func reader(prefs: UserDefaults = .standard) -> () -> String? { return { prefs.string(forKey: \"k\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-comment-literal-read-allowed",
+    "source": "func read(prefs: UserDefaults = .standard) -> String? { /* prefs.set(true, forKey: \"k\") */ let text = \"helper(prefs)\"; return prefs.string(forKey: text) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-all-key-readers-allowed",
+    "source": "func read(prefs: UserDefaults = .standard) { _ = prefs.object(forKey: \"k\"); _ = prefs.string(forKey: \"k\"); _ = prefs.bool(forKey: \"k\"); _ = prefs.integer(forKey: \"k\"); _ = prefs.float(forKey: \"k\"); _ = prefs.double(forKey: \"k\"); _ = prefs.data(forKey: \"k\"); _ = prefs.array(forKey: \"k\"); _ = prefs.dictionary(forKey: \"k\"); _ = prefs.stringArray(forKey: \"k\"); _ = prefs.url(forKey: \"k\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-unused-allowed",
+    "source": "func read(prefs: UserDefaults = .standard) -> Int { 1 }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-two-read-defaults-allowed",
+    "source": "func read(first: UserDefaults = .standard, second: UserDefaults = UserDefaults.standard) { _ = first.string(forKey: \"a\"); _ = second.bool(forKey: \"b\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-isolated-write-from-read-allowed",
+    "source": "func copyValue(prefs: UserDefaults = .standard) { let isolated = TestPreferenceDomain.make(for: self); isolated.set(prefs.string(forKey: \"k\"), forKey: \"copy\") }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r5-parameter-direct-write",
+    "source": "func write(prefs: UserDefaults = .standard) { prefs.set(true, forKey: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-alias-write",
+    "source": "func write(prefs: UserDefaults = .standard) { let alias = prefs; alias.set(true, forKey: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-read-then-relay",
+    "source": "func relay(prefs: UserDefaults = .standard) { _ = prefs.string(forKey: \"k\"); helper(prefs) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-return-object",
+    "source": "func pass(prefs: UserDefaults = .standard) -> UserDefaults { return prefs }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-store-object",
+    "source": "class Fixture { var storage: UserDefaults?; func remember(prefs: UserDefaults = .standard) { self.storage = prefs } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-capture-object",
+    "source": "func capture(prefs: UserDefaults = .standard) { let callback = { [prefs] in helper(prefs) }; consume(callback) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-unknown-method",
+    "source": "func change(prefs: UserDefaults = .standard) { prefs.resetFixture() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-method-reference",
+    "source": "func reader(prefs: UserDefaults = .standard) -> (String) -> String? { return prefs.string(forKey:) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-wrong-read-label",
+    "source": "func change(prefs: UserDefaults = .standard) { prefs.string(mutating: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-extra-read-argument",
+    "source": "func change(prefs: UserDefaults = .standard) { prefs.string(forKey: \"k\", reset: true) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-escape-inside-read",
+    "source": "func read(prefs: UserDefaults = .standard) -> String? { prefs.string(forKey: helper(prefs)) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-one-read-one-escape",
+    "source": "func read(first: UserDefaults = .standard, second: UserDefaults = .standard) { _ = first.string(forKey: \"k\"); helper(second) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-optional-write",
+    "source": "func write(prefs: UserDefaults? = .standard) { prefs?.set(true, forKey: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-late-closure-write",
+    "source": "func write(prefs: UserDefaults = .standard) { _ = prefs.string(forKey: \"k\"); let callback = { prefs.set(true, forKey: \"k\") }; callback() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-shadow-alias-escape",
+    "source": "func relay(prefs: UserDefaults = .standard) { if condition { let prefs = prefs; helper(prefs) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-unknown-default-expression",
+    "source": "func relay(prefs: UserDefaults = UserDefaults.standard.redirect()) { _ = prefs.string(forKey: \"k\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r5-parameter-dictionary-argument",
+    "source": "func change(prefs: UserDefaults = .standard) { prefs.dictionaryRepresentation(\"reset\") }",
+    "expect_rejection": true
+  }
+]

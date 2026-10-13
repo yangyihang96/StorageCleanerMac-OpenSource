@@ -11,7 +11,7 @@ struct MSeriesRawResultView: View {
                     .font(AppDesignTokens.Typography.sectionTitle)
                 Text(L10n.text("本协议整机性能指数：待真实参考校准", "Whole-machine performance index: awaiting reference calibration"))
                     .font(AppDesignTokens.Typography.secondary)
-                Text(L10n.text("以下 A/B/C 仅表示样本稳定程度，不是统计置信度。", "A/B/C describe sample stability, not statistical confidence."))
+                Text(L10n.text("A/B/C：样本稳定程度，非统计置信度", "A/B/C: sample stability, not statistical confidence"))
                     .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
                 ForEach(result.metrics) { metric in
                     HStack(alignment: .firstTextBaseline) {

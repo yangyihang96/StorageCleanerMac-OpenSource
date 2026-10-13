@@ -21,21 +21,27 @@ protocol SparkleReadOnlyProbing: Sendable {
     func probe(bundleURL: URL) async throws -> SparkleReadOnlyProbeOutcome
 }
 
-struct SparkleProvider: ApplicationUpdateProvider {
+final class SparkleProvider: ApplicationUpdateProvider, @unchecked Sendable {
     let identifier = ApplicationUpdateProviderIdentifier.sparkle
 
     private let probe: any SparkleReadOnlyProbing
     private let signatureInspector: any ApplicationCodeSignatureInspecting
     private let probeTimeout: Duration
+    private let automaticAdapter: (any SparkleAutomaticUpdating)?
+    private let stateLock = NSLock()
+    private var releases = [String: SparkleRelease]()
+    private var preparedApplications = [String: InstalledApplication]()
 
     init(
         probe: any SparkleReadOnlyProbing = SystemSparkleReadOnlyProbe(),
         signatureInspector: any ApplicationCodeSignatureInspecting = SecurityFrameworkApplicationCodeSignatureInspector(),
-        probeTimeout: Duration = .seconds(12)
+        probeTimeout: Duration = .seconds(12),
+        automaticAdapter: (any SparkleAutomaticUpdating)? = SparkleAutomaticUpdateAdapter()
     ) {
         self.probe = probe
         self.signatureInspector = signatureInspector
         self.probeTimeout = probeTimeout
+        self.automaticAdapter = automaticAdapter
     }
 
     func canHandle(_ application: InstalledApplication) async -> Bool {
@@ -67,13 +73,29 @@ struct SparkleProvider: ApplicationUpdateProvider {
         return ApplicationUpdateSourceInfo(
             providerIdentifier: identifier,
             evidence: evidence,
-            requiresUserInteraction: true,
-            canAutomaticallyUpdate: false
+            requiresUserInteraction: !canExecute(application, configuration: configuration),
+            canAutomaticallyUpdate: canExecute(application, configuration: configuration)
         )
     }
 
     func checkForUpdate(_ application: InstalledApplication) async throws -> ApplicationUpdateCheckResult {
         try Task.checkCancellation()
+        if let automaticAdapter, let configuration = ApplicationMetadataReader.sparkleConfiguration(at: application.bundleURL) ?? application.sparkleConfiguration,
+           canExecute(application, configuration: configuration) {
+            if let scanned = application.sparkleConfiguration, scanned != configuration { throw SparkleAutomaticUpdateError.configurationChanged }
+            var current = application
+            current.sparkleConfiguration = configuration
+            guard let release = try await automaticAdapter.check(current) else {
+                return .init(status: .upToDate, availableVersion: nil, releaseDate: nil, releaseNotes: nil, downloadSize: nil, warning: nil)
+            }
+            guard ["zip", "dmg"].contains(release.downloadURL.pathExtension.lowercased()) else {
+                return .init(status: .applicationUpdateRequired, availableVersion: release.version, releaseDate: nil, releaseNotes: nil,
+                    downloadSize: release.byteCount, warning: SparkleAutomaticUpdateError.unsupportedArchive.localizedDescription)
+            }
+            stateLock.withLock { releases[application.id] = release }
+            return .init(status: .automaticallyUpdatable, availableVersion: release.version, releaseDate: nil, releaseNotes: nil,
+                downloadSize: release.byteCount, warning: nil)
+        }
         guard let configuration = ApplicationMetadataReader.sparkleConfiguration(at: application.bundleURL),
               configuration.isEligibleForReadOnlyProbe else {
             return unknownResult(
@@ -147,13 +169,40 @@ struct SparkleProvider: ApplicationUpdateProvider {
         }
     }
 
+    private func canExecute(_ application: InstalledApplication, configuration: SparkleConfiguration?) -> Bool {
+        guard automaticAdapter != nil, let configuration, let feed = configuration.feedURL,
+              SparkleAutomaticUpdateAdapter.safeHTTPS(feed), application.identity.isCompleteForAutomaticUpdates,
+              application.sourceEvidence.contains("valid-code-signature"), !application.isReadOnly,
+              application.homebrewMetadata == nil else { return false }
+        if let key = configuration.publicEDKey { return Data(base64Encoded: key.trimmed)?.count == 32 }
+        return application.sourceEvidence.contains("signed-bundle-identity")
+    }
+
+    func prepareUpdate(_ application: InstalledApplication) async throws -> PreparedApplicationUpdate {
+        guard canExecute(application, configuration: application.sparkleConfiguration), !application.isRunning else {
+            throw ApplicationScanningError.providerUnsupported("sparkle-automatic-safety-check-unavailable")
+        }
+        guard let automaticAdapter, let release = try await automaticAdapter.check(application),
+              release.version == application.availableVersion else { throw SparkleAutomaticUpdateError.configurationChanged }
+        stateLock.withLock { releases[application.id] = release; preparedApplications[application.id] = application }
+        return .init(applicationID: application.id, providerIdentifier: .sparkle, originalIdentity: application.identity,
+            originalVersion: application.installedVersion, targetVersion: release.version, providerPayload: [:])
+    }
+    func install(_ preparedUpdate: PreparedApplicationUpdate, progress: @escaping @Sendable (ApplicationUpdateProgressEvent) -> Void) async throws -> ApplicationUpdateInstallResult {
+        guard let automaticAdapter, let app = stateLock.withLock({ preparedApplications[preparedUpdate.applicationID] }),
+              let release = stateLock.withLock({ releases[preparedUpdate.applicationID] }), app.identity == preparedUpdate.originalIdentity,
+              app.installedVersion == preparedUpdate.originalVersion, release.version == preparedUpdate.targetVersion else { throw SparkleAutomaticUpdateError.configurationChanged }
+        defer { _ = stateLock.withLock { preparedApplications.removeValue(forKey: app.id) } }
+        return try await automaticAdapter.install(app, release: release, progress: progress)
+    }
+
     private func probeWithTimeout(bundleURL: URL) async throws -> SparkleReadOnlyProbeOutcome {
         try await withThrowingTaskGroup(of: SparkleReadOnlyProbeOutcome.self) { group in
             group.addTask {
-                try await probe.probe(bundleURL: bundleURL)
+                try await self.probe.probe(bundleURL: bundleURL)
             }
             group.addTask {
-                try await Task.sleep(for: probeTimeout)
+                try await Task.sleep(for: self.probeTimeout)
                 throw SparkleReadOnlyProbeError.timeout
             }
             defer { group.cancelAll() }
@@ -238,6 +287,13 @@ struct SystemSparkleReadOnlyProbe: SparkleReadOnlyProbing {
 private struct SparkleShadowHost: Sendable {
     let rootURL: URL
     let bundleURL: URL
+    /// N23: an absolute path inside `rootURL`. Sparkle opens SUDefaultsDomain
+    /// with NSUserDefaults(suiteName:), which then keeps "<path>.plist" in the
+    /// probe's own folder. A plain domain named after the one-off host
+    /// identifier left a new empty preferences file behind on every probe,
+    /// since emptying a domain does not delete its file. Files earlier probes
+    /// left are not touched by the app (D48: the main session moves them to
+    /// the Trash).
     let defaultsDomain: String
 
     static func create(
@@ -256,6 +312,7 @@ private struct SparkleShadowHost: Sendable {
         )
         let bundleURL = rootURL.appendingPathComponent("SparkleProbe.app", isDirectory: true)
         let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
+        let defaultsDomain = rootURL.appendingPathComponent("SparkleDefaults", isDirectory: false).path
         do {
             try FileManager.default.createDirectory(
                 at: rootURL,
@@ -274,14 +331,20 @@ private struct SparkleShadowHost: Sendable {
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": sourceInfo["CFBundleShortVersionString"] ?? "0",
                 "CFBundleVersion": sourceInfo["CFBundleVersion"] ?? "0",
-                "SUDefaultsDomain": identifier,
+                "SUDefaultsDomain": defaultsDomain,
                 "SUFeedURL": feedURL.absoluteString,
                 "SUPublicEDKey": publicEDKey,
                 "SURequireSignedFeed": true,
+                // N23 review P2-3: with a grace period Sparkle records the first
+                // failed feed-signature check in this app's standard defaults
+                // under "SUInitialFailedFeedSigningValidationDate_<host id>",
+                // and the host id is new on every probe. Each probe started a
+                // new count anyway, so the grace period never applied; zero
+                // turns it off and Sparkle writes no such key.
+                "SUSignedFeedFailureExpirationInterval": 0,
             ]
             for key in [
                 "SUVerifyUpdateBeforeExtraction",
-                "SUSignedFeedFailureExpirationInterval",
                 "NSUpdateSecurityPolicy",
             ] where sourceInfo[key] != nil {
                 info[key] = sourceInfo[key]
@@ -301,17 +364,17 @@ private struct SparkleShadowHost: Sendable {
             return SparkleShadowHost(
                 rootURL: rootURL,
                 bundleURL: bundleURL,
-                defaultsDomain: identifier
+                defaultsDomain: defaultsDomain
             )
         } catch {
             try? FileManager.default.removeItem(at: rootURL)
-            UserDefaults.standard.removePersistentDomain(forName: identifier)
             throw error
         }
     }
 
     func remove() {
-        UserDefaults.standard.removePersistentDomain(forName: defaultsDomain)
+        // Write out what Sparkle still holds before the folder goes.
+        _ = CFPreferencesAppSynchronize(defaultsDomain as CFString)
         try? FileManager.default.removeItem(at: rootURL)
     }
 }

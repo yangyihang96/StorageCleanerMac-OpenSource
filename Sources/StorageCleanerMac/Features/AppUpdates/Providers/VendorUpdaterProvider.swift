@@ -1,11 +1,12 @@
 import Foundation
 
-/// Recognizes applications that ship their own trusted update machinery
-/// (Google Keystone, Squirrel.Mac). StorageCleanerMac never drives these
-/// updaters; the provider exists so such apps surface an honest, actionable
-/// "update inside the app" path instead of falling through to the
-/// source-unconfirmed bucket.
+/// Drives a verified official CLI when available; local updater markers alone
+/// keep an explicit in-app fallback with its reason.
 struct VendorUpdaterProvider: ApplicationUpdateProvider {
+    var commandAdapter = VendorCommandUpdateAdapter()
+    var readApplication: @Sendable (URL) async -> InstalledApplication? = { url in
+        await ApplicationMetadataReader().read(applicationURL: url, runningState: .init(bundleIdentifiers: [], normalizedBundlePaths: []))
+    }
     let identifier = ApplicationUpdateProviderIdentifier.vendorUpdater
 
     enum VendorUpdaterKind: String, CaseIterable, Sendable {
@@ -23,23 +24,30 @@ struct VendorUpdaterProvider: ApplicationUpdateProvider {
     }
 
     func canHandle(_ application: InstalledApplication) async -> Bool {
-        !Self.detectUpdaterKinds(at: application.bundleURL).isEmpty
+        if await commandAdapter.resolve(application) != nil { return true }
+        return !Self.detectUpdaterKinds(at: application.bundleURL).isEmpty
     }
 
     func inspect(_ application: InstalledApplication) async throws -> ApplicationUpdateSourceInfo {
         let kinds = Self.detectUpdaterKinds(at: application.bundleURL)
-        guard !kinds.isEmpty else {
+        let command = await commandAdapter.resolve(application)
+        guard !kinds.isEmpty || command != nil else {
             throw ApplicationScanningError.providerUnsupported(identifier.rawValue)
         }
         return ApplicationUpdateSourceInfo(
             providerIdentifier: identifier,
-            evidence: kinds.map(\.rawValue).sorted(),
-            requiresUserInteraction: true,
-            canAutomaticallyUpdate: false
+            evidence: kinds.map(\.rawValue).sorted() + (command == nil ? [] : ["vendor-official-cli"]),
+            requiresUserInteraction: command == nil,
+            canAutomaticallyUpdate: command != nil
         )
     }
 
     func checkForUpdate(_ application: InstalledApplication) async throws -> ApplicationUpdateCheckResult {
+        if let command = await commandAdapter.resolve(application) {
+            let version = try await commandAdapter.check(application, command: command)
+            return .init(status: .automaticallyUpdatable, availableVersion: version, releaseDate: nil, releaseNotes: nil, downloadSize: nil,
+                warning: version == nil ? L10n.text("将由厂商官方更新器检查并更新，完成后核验磁盘版本", "The official vendor updater will check and update, then verify the on-disk version") : nil)
+        }
         let kinds = Self.detectUpdaterKinds(at: application.bundleURL)
         let updaterName = kinds.first?.displayName
             ?? L10n.text("厂商更新器", "Vendor Updater")
@@ -54,6 +62,27 @@ struct VendorUpdaterProvider: ApplicationUpdateProvider {
                 "This app is maintained by its \(updaterName); the latest version cannot be confirmed read-only from outside. Open the app to check and install updates."
             )
         )
+    }
+
+    func prepareUpdate(_ application: InstalledApplication) async throws -> PreparedApplicationUpdate {
+        guard !application.isRunning, let command = await commandAdapter.resolve(application) else {
+            throw ApplicationScanningError.providerUnsupported("vendor-official-cli-unavailable")
+        }
+        return .init(applicationID: application.id, providerIdentifier: .vendorUpdater, originalIdentity: application.identity,
+            originalVersion: application.installedVersion, targetVersion: application.availableVersion,
+            providerPayload: ["bundle-path": application.path, "command-path": command.executableURL.path,
+                "product-id": command.productID, "team": application.signingTeamIdentifier ?? ""])
+    }
+
+    func install(_ update: PreparedApplicationUpdate, progress: @escaping @Sendable (ApplicationUpdateProgressEvent) -> Void) async throws -> ApplicationUpdateInstallResult {
+        guard let path = update.providerPayload["bundle-path"],
+              let app = await readApplication(URL(fileURLWithPath: path)),
+              app.identity == update.originalIdentity, app.installedVersion == update.originalVersion, !app.isRunning,
+              let command = await commandAdapter.resolve(app), command.executableURL.path == update.providerPayload["command-path"],
+              command.productID == update.providerPayload["product-id"] else { throw ProviderBackedUpdateExecutorError.applicationIdentityChanged }
+        progress(.init(applicationID: update.applicationID, state: .installing, fraction: nil, detail: L10n.text("厂商官方更新器正在更新", "The official vendor updater is updating")))
+        _ = try await commandAdapter.run(command.executableURL, command.installArguments)
+        return .init(applicationID: update.applicationID, state: .needsReconciliation, observedVersion: nil, detail: L10n.text("正在核验厂商更新后的版本", "Verifying the version after vendor update"))
     }
 
     /// Purely local, read-only detection. Only unambiguous in-bundle markers

@@ -21,6 +21,31 @@ struct SystemEnergyPowerSample: Codable, Equatable, Sendable {
     let confidence: SystemEnergySampleConfidence
     let source: String
 
+    /// `source` of a battery-side measurement from the SMC: `B0AP`, the
+    /// instantaneous V × I about every second (D57 supplement).
+    static let batterySMCSource = "smc-battery-power-b0ap"
+    /// `source` of a battery-side measurement from the SMC on a Mac without
+    /// `B0AP`: `B0AV × B0AC`, about every second (incremental review P2-2).
+    static let batterySMCVoltageCurrentSource = "smc-battery-voltage-current"
+    /// `source` of a battery-side measurement from the battery controller:
+    /// its voltage × current, about once a minute (Macs without the SMC keys).
+    static let batteryControllerSource = "battery-controller-voltage-current"
+    /// Every battery-side sample before D57; a saved session may still end
+    /// with one.
+    static let legacyBatterySource = "native-battery-voltage-current"
+
+    static func batterySource(_ electrical: NativeBatteryElectricalSnapshot) -> String {
+        switch electrical.powerBasis {
+        case .smcPowerKey?: batterySMCSource
+        case .smcVoltageTimesCurrent?: batterySMCVoltageCurrentSource
+        case .batteryController?, nil: batteryControllerSource
+        }
+    }
+    /// `source` of an estimate from the attributed processes.
+    static let attributedSource = "attributed-process-estimate"
+    /// `source` of the system load measured on external power (BOARD N16-5).
+    static let systemLoadSource = "power-telemetry-system-load"
+
     var isValid: Bool {
         monotonicSeconds.isFinite
             && monotonicSeconds >= 0
@@ -93,7 +118,6 @@ struct SystemEnergySessionSnapshot: Codable, Equatable, Sendable {
     var totalKilowattHours: Double { totalWattHours / 1_000 }
     var coveredSeconds: TimeInterval { measuredSeconds + estimatedSeconds }
     var isEstimated: Bool { estimatedSeconds > 0 || monitoringStartedAt > bootStartedAt.addingTimeInterval(5) }
-    var currentPowerWatts: Double? { lastSample?.watts }
 
     var totalKilowattHoursText: String {
         String(format: "%.3f kWh", locale: Locale(identifier: "en_US_POSIX"), totalKilowattHours)
@@ -107,8 +131,74 @@ struct SystemEnergySessionSnapshot: Codable, Equatable, Sendable {
         )
     }
 
-    var currentPowerText: String {
-        currentPowerWatts.map(EnergyImpactApp.powerText) ?? "—"
+    /// BOARD N16-5: something was recorded (a sample interval was integrated).
+    var hasRecordedEnergy: Bool { coveredSeconds > 0 }
+
+    /// The energy card's title: "since boot" only for a session monitored
+    /// from boot with measurements covering it; otherwise the energy of
+    /// the monitored time (its share is the coverage card).
+    func energyTitle(uptimeSeconds: TimeInterval) -> String {
+        let coversBoot = !isEstimated && hasRecordedEnergy
+            && coveragePercent(uptimeSeconds: uptimeSeconds) >= 99
+        return coversBoot
+            ? L10n.text("本次开机耗电", "Energy Since Boot")
+            : L10n.text("监测期间耗电", "Energy While Monitored")
+    }
+
+    /// The energy card's value; "—" while nothing was recorded (not 0 kWh).
+    var recordedEnergyText: String {
+        hasRecordedEnergy ? totalKilowattHoursText : "—"
+    }
+
+    /// The energy card's detail: the split by power source, or why nothing
+    /// was recorded yet.
+    var recordedEnergyDetail: String {
+        guard hasRecordedEnergy else {
+            return L10n.text(
+                "尚未记录：需要连续两次功率读数（外接电源时读整机负载，电池供电时读电池侧）",
+                "Nothing recorded yet: two consecutive power readings are needed (the system load on external power, the battery side on battery)"
+            )
+        }
+        return sourceBreakdownText
+    }
+
+    /// Review P2-6: the last sample is the current power only while it is at
+    /// most this old (the integration interval); a reading that stopped is
+    /// not shown as current.
+    static let currentPowerMaximumAge: TimeInterval = 90
+
+    /// The last sample if it is recent at `now` (by its wall-clock time,
+    /// which includes sleep).
+    func currentPowerSample(now: Date) -> SystemEnergyPowerSample? {
+        guard let lastSample,
+              now.timeIntervalSince(lastSample.wallClock) <= Self.currentPowerMaximumAge else { return nil }
+        return lastSample
+    }
+
+    func currentPowerText(now: Date) -> String {
+        currentPowerSample(now: now).map { EnergyImpactApp.powerText($0.watts) } ?? "—"
+    }
+
+    /// Where the current power reading comes from; with no recent reading,
+    /// that there is none (and when the last one was taken).
+    func currentPowerDetail(now: Date) -> String {
+        guard let sample = currentPowerSample(now: now) else {
+            guard let lastSample else { return L10n.text("暂无当前读数", "No current reading") }
+            let time = PanelTimestampFormat.display(lastSample.wallClock)
+            return L10n.text("暂无当前读数（上次读数 \(time)）", "No current reading (last at \(time))")
+        }
+        return switch sample.source {
+        case SystemEnergyPowerSample.systemLoadSource:
+            L10n.text("整机负载实测（外接电源）", "Measured system load (external power)")
+        case SystemEnergyPowerSample.batterySMCSource:
+            L10n.text("电池功率实测（SMC，约每秒更新）", "Measured battery power (SMC, about every second)")
+        case SystemEnergyPowerSample.batterySMCVoltageCurrentSource:
+            L10n.text("电池电压 × 电流实测（SMC，约每秒更新）", "Measured battery voltage × current (SMC, about every second)")
+        case SystemEnergyPowerSample.batteryControllerSource, SystemEnergyPowerSample.legacyBatterySource:
+            L10n.text("电池电压与电流实测", "Measured battery voltage and current")
+        default:
+            L10n.text("应用进程归属估算", "Attributed-process estimate")
+        }
     }
 
     func coveragePercent(uptimeSeconds: TimeInterval) -> Double {
@@ -258,7 +348,8 @@ enum SystemEnergyPowerSampleService {
         }
 
         if powerSource == .battery,
-           let watts = nativePower?.powerWatts.map(abs),
+           let nativePower,
+           let watts = nativePower.powerWatts.map(abs),
            watts.isFinite,
            watts > 0 {
             return SystemEnergyPowerSample(
@@ -267,7 +358,7 @@ enum SystemEnergyPowerSampleService {
                 watts: watts,
                 powerSource: .battery,
                 confidence: .measured,
-                source: "native-battery-voltage-current"
+                source: SystemEnergyPowerSample.batterySource(nativePower)
             )
         }
 
@@ -298,13 +389,16 @@ final class SystemEnergyAccumulator {
     private var pendingPersistence: (snapshot: SystemEnergySessionSnapshot, force: Bool)?
     private var powerSourceObserver: BatteryPowerSourceObserver?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private let samplingGaps: MenuBarSamplingGaps
 
     init(
         fileURL: URL? = SystemEnergyAccumulatorLocation.defaultURL,
         boot: SystemEnergyBootIdentity = .current(),
         now: Date = Date(),
+        samplingGaps: MenuBarSamplingGaps = .shared,
         sampleProvider: @escaping SampleProvider = SystemEnergyPowerSampleService.sample
     ) {
+        self.samplingGaps = samplingGaps
         self.fileURL = fileURL
         self.sampleProvider = sampleProvider
         if let fileURL,
@@ -380,27 +474,62 @@ final class SystemEnergyAccumulator {
         record(sample)
     }
 
-    func recordBattery(_ battery: BatteryPowerSnapshot?, electrical: NativeBatteryElectricalSnapshot?) {
-        guard !isStopping, !isSleeping, battery?.powerSource == .batteryPower else { return }
+    func recordBattery(
+        _ battery: BatteryPowerSnapshot?,
+        electrical: NativeBatteryElectricalSnapshot?,
+        uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
+        guard !isStopping, !isSleeping else { return }
+        if battery?.powerSource == .acPower {
+            recordSystemLoad(electrical, uptime: uptime)
+            return
+        }
+        guard battery?.powerSource == .batteryPower else { return }
         guard let electrical, let watts = electrical.powerWatts.map(abs), watts.isFinite, watts > 0 else {
             snapshot.markGap(at: Date())
             publish()
             return
         }
-        guard shouldRecordSharedSample(at: electrical.generatedAt, source: .battery) else { return }
-        record(SystemEnergyPowerSample(monotonicSeconds: ProcessInfo.processInfo.systemUptime,
+        guard shouldRecordSharedSample(at: electrical.generatedAt, source: .battery, uptime: uptime) else { return }
+        record(SystemEnergyPowerSample(monotonicSeconds: uptime,
             wallClock: electrical.generatedAt, watts: watts, powerSource: .battery,
-            confidence: .measured, source: "native-battery-voltage-current"))
+            confidence: .measured, source: SystemEnergyPowerSample.batterySource(electrical)))
     }
 
-    func recordAttributed(_ reading: EnergyImpactSnapshot, powerSource: BatteryPowerSource, continuous: Bool = false) {
+    /// BOARD N16-5: on external power the battery controller reports the
+    /// whole computer's load. It is integrated like battery samples, from
+    /// the same background battery reading (about every 30 s). Without a
+    /// reading nothing is recorded and nothing is broken off.
+    private func recordSystemLoad(_ electrical: NativeBatteryElectricalSnapshot?, uptime: TimeInterval) {
+        guard let electrical, let watts = electrical.systemLoadWatts, watts.isFinite, watts > 0,
+              shouldRecordSharedSample(at: electrical.generatedAt, source: .ac, uptime: uptime) else { return }
+        record(SystemEnergyPowerSample(monotonicSeconds: uptime,
+            wallClock: electrical.generatedAt, watts: watts, powerSource: .ac,
+            confidence: .measured, source: SystemEnergyPowerSample.systemLoadSource))
+    }
+
+    /// A measured load on external power within the integration interval:
+    /// the attributed estimates neither replace it nor break it off.
+    private func hasCurrentMeasuredSystemLoad(uptime: TimeInterval) -> Bool {
+        guard let last = snapshot.lastSample else { return false }
+        return last.source == SystemEnergyPowerSample.systemLoadSource
+            && uptime - last.monotonicSeconds <= 90
+    }
+
+    func recordAttributed(
+        _ reading: EnergyImpactSnapshot,
+        powerSource: BatteryPowerSource,
+        continuous: Bool = false,
+        uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
         guard !isStopping, !isSleeping, powerSource == .acPower,
-              reading.totalCurrentPowerWatts.isFinite, reading.totalCurrentPowerWatts > 0 else { return }
+              reading.totalCurrentPowerWatts.isFinite, reading.totalCurrentPowerWatts > 0,
+              !hasCurrentMeasuredSystemLoad(uptime: uptime) else { return }
         if !continuous { snapshot.markGap(at: reading.generatedAt) }
-        guard shouldRecordSharedSample(at: reading.generatedAt, source: .ac) else { return }
-        record(SystemEnergyPowerSample(monotonicSeconds: ProcessInfo.processInfo.systemUptime,
+        guard shouldRecordSharedSample(at: reading.generatedAt, source: .ac, uptime: uptime) else { return }
+        record(SystemEnergyPowerSample(monotonicSeconds: uptime,
             wallClock: reading.generatedAt, watts: reading.totalCurrentPowerWatts,
-            powerSource: .ac, confidence: .estimated, source: "attributed-process-estimate"))
+            powerSource: .ac, confidence: .estimated, source: SystemEnergyPowerSample.attributedSource))
     }
 
     func endAttributedObservation() {
@@ -413,12 +542,16 @@ final class SystemEnergyAccumulator {
         publish()
     }
 
-    private func shouldRecordSharedSample(at date: Date, source: SystemEnergyPowerSource) -> Bool {
+    private func shouldRecordSharedSample(
+        at date: Date,
+        source: SystemEnergyPowerSource,
+        uptime: TimeInterval
+    ) -> Bool {
         guard let last = snapshot.lastSample else { return true }
         // Sampling cadence uses the monotonic clock; a wall-clock correction
         // must not freeze the energy view until the old date is reached.
         return source != last.powerSource
-            || ProcessInfo.processInfo.systemUptime - last.monotonicSeconds >= 30
+            || uptime - last.monotonicSeconds >= 30
     }
 
     func record(_ sample: SystemEnergyPowerSample) {
@@ -476,7 +609,7 @@ final class SystemEnergyAccumulator {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
-                    MenuBarSamplingGaps.shared.begin(.sleep)
+                    self?.samplingGaps.begin(.sleep)
                     self?.markSleep()
                 }
             },
@@ -486,7 +619,7 @@ final class SystemEnergyAccumulator {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
-                    MenuBarSamplingGaps.shared.end(.sleep)
+                    self?.samplingGaps.end(.sleep)
                     self?.markWake()
                 }
             },

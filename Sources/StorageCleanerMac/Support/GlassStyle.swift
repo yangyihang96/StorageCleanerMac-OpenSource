@@ -48,15 +48,20 @@ private struct GlassPanelModifier: ViewModifier {
 
         if glassSurfaceDepth > 0 {
             preparedContent
+        } else if moduleTheme.isImmersive {
+            // D53: module pages use the v2 card surface (UI-V2-SPEC 1.1).
+            preparedContent
+                .background {
+                    SurfaceBackground(
+                        level: elevated ? .elevated : .card,
+                        cornerRadius: cornerRadius
+                    )
+                }
         } else {
             // Content cards, tables and editors stay opaque and legible. The
             // only true material carrier is the floating popover chrome below.
             decorated(
                 preparedContent
-                    .background(
-                        (tint ?? .clear).opacity(tintOpacity),
-                        in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    )
                     .background(
                         panelBackground,
                         in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -89,26 +94,22 @@ private struct GlassPanelModifier: ViewModifier {
             )
     }
 
-    private var tintOpacity: Double {
-        guard colorSchemeContrast != .increased else { return 0 }
-        return switch prominence {
-        case .quiet: 0.035
-        case .regular: 0.055
-        case .prominent: 0.075
-        }
-    }
-
     private var borderColor: Color {
-        let base = colorSchemeContrast == .increased
-            ? (moduleTheme.isImmersive ? AppAppearanceColors.ink : Color.primary)
-            : (tint ?? moduleTheme.accent)
-        return base.opacity(borderOpacity)
+        if colorScheme == .light {
+            return colorSchemeContrast == .increased
+                ? AppAppearanceColors.ink.opacity(0.65) : AppAppearanceColors.border
+        }
+        if colorSchemeContrast == .increased {
+            return (moduleTheme.isImmersive ? AppAppearanceColors.ink : Color.primary).opacity(borderOpacity)
+        }
+        // The night chrome stays neutral; a card's data color should not
+        // repaint every edge when the page or the system appearance changes.
+        return AppAppearanceColors.border
     }
 
     private var panelBackground: Color {
-        guard moduleTheme.isImmersive else {
-            return Color(nsColor: .controlBackgroundColor)
-        }
+        if colorScheme == .light { return AppAppearanceColors.panel }
+        guard moduleTheme.isImmersive else { return AppAppearanceColors.panel }
         return moduleTheme.panelFill(
             for: colorScheme,
             reduceTransparency: reduceTransparency
@@ -150,7 +151,7 @@ private struct GlassCapsuleModifier: ViewModifier {
             decorated(
                 preparedContent
                     .background(
-                        (tint ?? .clear).opacity(colorSchemeContrast == .increased ? 0 : 0.045),
+                        (tint ?? .clear).opacity(colorSchemeContrast == .increased || colorScheme == .light ? 0 : 0.045),
                         in: Capsule(style: .continuous)
                     )
                     .background(
@@ -193,9 +194,8 @@ private struct GlassCapsuleModifier: ViewModifier {
     }
 
     private var capsuleBackground: Color {
-        guard moduleTheme.isImmersive else {
-            return Color(nsColor: .controlBackgroundColor)
-        }
+        if colorScheme == .light { return AppAppearanceColors.secondarySurface }
+        guard moduleTheme.isImmersive else { return AppAppearanceColors.panel }
         return moduleTheme.panelFill(
             for: colorScheme,
             reduceTransparency: reduceTransparency
@@ -262,6 +262,7 @@ private struct AdaptivePopoverChromeModifier: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.panelBackgroundTint) private var panelBackgroundTint
+    @Environment(\.panelChromePalette) private var panelChromePalette
 
     let cornerRadii: RectangleCornerRadii
 
@@ -270,7 +271,7 @@ private struct AdaptivePopoverChromeModifier: ViewModifier {
             .background {
                 ZStack {
                     panelShape
-                        .fill(AppDesignTokens.Palette.contentBackground)
+                        .fill(panelChromePalette?.shell ?? AppDesignTokens.Palette.contentBackground)
                     if let panelBackgroundTint {
                         panelShape
                             .fill(panelBackgroundTint)
@@ -287,7 +288,10 @@ private struct AdaptivePopoverChromeModifier: ViewModifier {
     }
 
     private var borderColor: Color {
-        colorSchemeContrast == .increased
+        if let panelChromePalette {
+            return colorSchemeContrast == .increased ? panelChromePalette.text : panelChromePalette.border
+        }
+        return colorSchemeContrast == .increased
             ? AppDesignTokens.Palette.primaryText
             : AppDesignTokens.Palette.separator
     }

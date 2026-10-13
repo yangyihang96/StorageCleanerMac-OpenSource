@@ -36,17 +36,29 @@ final class MSeriesCPUMemoryKernel: @unchecked Sendable {
             repetitions: repetitions, workers: workspaces.count)
     }
 
-    private func run(repetitions: Int, cancellation: MSeriesCancellation) throws -> BenchmarkV7RawSample {
+    func v11Batch(id: String, repetitions: Int, cancellation: MSeriesCancellation) throws -> MSeriesV11Batch {
+        var bounds: (UInt64, UInt64)?
+        let sample = try run(repetitions: repetitions, cancellation: cancellation,
+            intervalClock: { MSeriesV11Clock.nanoseconds }, recordInterval: { bounds = ($0, $1) })
+        guard let bounds else { throw MSeriesKernelError.invalidTiming }
+        return .init(stageID: id, startMonotonicNs: bounds.0, endMonotonicNs: bounds.1,
+            workUnits: Double(repetitions * workspaces.count), gpuElapsedSeconds: nil,
+            checksum: sample.checksum ?? 0, clockDomain: MSeriesV11Windows.clockDomain)
+    }
+
+    private func run(repetitions: Int, cancellation: MSeriesCancellation,
+                     intervalClock: @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+                     recordInterval: ((UInt64, UInt64) -> Void)? = nil) throws -> BenchmarkV7RawSample {
         let collector = WorkerResults()
         DispatchQueue.concurrentPerform(iterations: workspaces.count) { worker in
             let pointer = self.workspaces[worker]
             var succeeded = true
-            let start = DispatchTime.now().uptimeNanoseconds
+            let start = intervalClock()
             for _ in 0..<repetitions {
                 if cancellation.isCancelled { succeeded = false; break }
                 if msc_run_unit(pointer) == 0 { succeeded = false; break }
             }
-            let end = DispatchTime.now().uptimeNanoseconds
+            let end = intervalClock()
             collector.append(start: start, end: end, valid: succeeded, checksum: 0)
         }
         if cancellation.isCancelled { throw CancellationError() }
@@ -67,6 +79,7 @@ final class MSeriesCPUMemoryKernel: @unchecked Sendable {
         else if kind >= 4 { value = work * Double(msc_unit_bytes(kind)) / elapsed / 1e9 }
         else { value = work / elapsed }
         guard value.isFinite, value > 0 else { throw MSeriesKernelError.invalidTiming }
+        recordInterval?(first, last)
         return BenchmarkV7RawSample(value: value, elapsedSeconds: elapsed, wallElapsedSeconds: nil,
             checksum: checksum)
     }

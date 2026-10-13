@@ -131,7 +131,8 @@ final class BenchmarkV7RealHardwareCaptureTests: XCTestCase {
                 sustainedService: sustainedService,
                 environmentProvider: environmentProvider
             ),
-            v7HistoryRepository: historyRepository
+            v7HistoryRepository: historyRepository,
+            v7PromotionRevocationDefaults: TestPreferenceDomain.make(for: self)
         )
 
         store.startOfficialBenchmark()

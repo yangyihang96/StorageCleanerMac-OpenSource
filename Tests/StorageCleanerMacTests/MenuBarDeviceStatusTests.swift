@@ -95,6 +95,14 @@ final class MenuBarDeviceStatusTests: XCTestCase {
         }
         XCTAssertNotEqual(base, MenuBarStatusRenderIdentity(summary: base.summary, appearance: dark))
         XCTAssertNotEqual(base, MenuBarStatusRenderIdentity(summary: "电量 79%，内存 64%", appearance: light))
+        XCTAssertNotEqual(base, MenuBarStatusRenderIdentity(summary: base.summary, appearance: light,
+                                                            statusPreset: .blue))
+        XCTAssertNotEqual(
+            MenuBarStatusRenderIdentity(summary: base.summary, appearance: light, statusPreset: .custom,
+                                        customDayHex: "#123456", customNightHex: "#ABCDEF"),
+            MenuBarStatusRenderIdentity(summary: base.summary, appearance: light, statusPreset: .custom,
+                                        customDayHex: "#234567", customNightHex: "#ABCDEF")
+        )
         XCTAssertEqual(base.appearanceName, .aqua)
     }
 
@@ -134,9 +142,9 @@ final class MenuBarDeviceStatusTests: XCTestCase {
     }
 
     func testEverySavedModeRemainsReadableAndInvalidValuesUseNewDefault() throws {
-        let name = UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let name = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: name))
+        defer { TestPreferenceDomain.cleanup(suiteName: name) }
         XCTAssertEqual(MenuBarStatusDisplayMode.stored(in: defaults), .deviceStatus)
         for mode in MenuBarStatusDisplayMode.allCases {
             mode.save(in: defaults)
@@ -158,17 +166,10 @@ final class MenuBarDeviceStatusTests: XCTestCase {
         // Export only when explicitly requested for the visual review. This
         // invokes the same drawing function as the installed status item.
         if let directory = ProcessInfo.processInfo.environment["SCM_DUO_RENDER_DIR"] {
-            let previous = UserDefaults.standard.object(forKey: L10n.languageDefaultsKey)
-            defer {
-                if let previous {
-                    UserDefaults.standard.set(previous, forKey: L10n.languageDefaultsKey)
-                } else {
-                    UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey)
-                }
-                NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: nil)
-            }
+            let languagePreferences = TestVolatilePreferences()
+            defer { languagePreferences.restore() }
             for language in [AppLanguage.zhHans, .english] {
-                UserDefaults.standard.set(language.rawValue, forKey: L10n.languageDefaultsKey)
+                languagePreferences.set(language.rawValue, forKey: L10n.languageDefaultsKey)
                 NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: nil)
                 try exportNativeContactSheets(
                     to: URL(fileURLWithPath: directory).appendingPathComponent(language.rawValue)

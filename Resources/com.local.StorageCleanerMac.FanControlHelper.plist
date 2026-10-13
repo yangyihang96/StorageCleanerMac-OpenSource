@@ -6,6 +6,13 @@
     <string>com.local.StorageCleanerMac.FanControlHelper</string>
     <key>BundleProgram</key>
     <string>Contents/Resources/StorageCleanerFanControlHelper</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>MachServices</key>
     <dict>
         <key>com.local.StorageCleanerMac.FanControlHelper</key>

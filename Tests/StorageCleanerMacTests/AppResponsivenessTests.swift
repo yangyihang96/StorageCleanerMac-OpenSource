@@ -51,7 +51,7 @@ final class AppResponsivenessTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Views/SettingsView.swift"
         )
         let benchmark = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift"
+            at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift"
         )
 
         XCTAssertTrue(settings.contains("settingsPane(for: selectedCategory)"))
@@ -61,8 +61,8 @@ final class AppResponsivenessTests: XCTestCase {
         XCTAssertTrue(settings.contains("ScanHistorySummary(entries: [])"))
 
         XCTAssertTrue(benchmark.contains("LazyVStack("))
-        XCTAssertTrue(benchmark.contains("private let leaderboardStore"))
-        XCTAssertFalse(benchmark.contains("DisclosureGroup"))
+        XCTAssertTrue(benchmark.contains("@ObservedObject var leaderboardStore: BenchmarkV7LeaderboardStore"))
+        XCTAssertTrue(benchmark.contains("switch selectedPage"))
         XCTAssertFalse(benchmark.contains("@ObservedObject private var leaderboardStore"))
     }
 
@@ -74,9 +74,6 @@ final class AppResponsivenessTests: XCTestCase {
     }
 
     private func sourceText(at relativePath: String) throws -> String {
-        try String(
-            contentsOf: projectRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        try SettingsSourceContract.source(at: projectRoot.appendingPathComponent(relativePath))
     }
 }

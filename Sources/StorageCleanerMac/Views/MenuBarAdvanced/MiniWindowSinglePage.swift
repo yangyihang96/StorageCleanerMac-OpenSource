@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// The window first grows to the page's measured size. Only a smaller display
-/// can constrain that size; in that case keep the entire page and its hit areas
-/// together instead of introducing a scroll offset or clipping the last row.
+/// Legacy geometry helper retained for decoding/tests. Production pages never
+/// shrink controls or text; constrained viewports scroll at their readable size.
 enum MiniWindowPageFit {
     static func scale(content: CGSize, available: CGSize) -> CGFloat {
         guard content.width.isFinite, content.height.isFinite,
@@ -19,12 +18,14 @@ struct MiniWindowFittedPage<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        let scale = MiniWindowPageFit.scale(content: contentSize, available: availableSize)
-        content
-            .frame(width: contentSize.width, height: contentSize.height, alignment: .topLeading)
-            .scaleEffect(scale, anchor: .topLeading)
-            .frame(width: contentSize.width * scale, height: contentSize.height * scale, alignment: .topLeading)
-            .frame(width: availableSize.width, height: availableSize.height, alignment: .top)
+        ScrollView(.vertical) {
+            content
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .scrollIndicators(.hidden)
+        .frame(width: max(1, availableSize.width), height: max(1, availableSize.height), alignment: .top)
+
     }
 }
 
@@ -41,14 +42,21 @@ struct MiniWindowMeasuredPage<Content: View>: View {
         GeometryReader { viewport in
             MiniWindowFittedPage(contentSize: naturalSize, availableSize: viewport.size) {
                 content
-                    .frame(width: initialSize.width, alignment: .topLeading)
+                    .frame(width: initialSize.width,
+                           alignment: .topLeading)
                     .fixedSize(horizontal: false, vertical: true)
                     .background {
                         GeometryReader { proxy in
                             Color.clear.onChange(of: proxy.size, initial: true) {
                                 guard proxy.size.height.isFinite, proxy.size.height > 0 else { return }
-                                measuredHeight = proxy.size.height
-                                reportSize(proxy.size)
+                                let size = proxy.size
+                                guard measuredHeight.map({ abs($0 - size.height) > 0.5 }) ?? true else { return }
+                                measuredHeight = size.height
+                                // Publish outside the current SwiftUI measurement.
+                                Task { @MainActor in
+                                    guard measuredHeight == size.height else { return }
+                                    reportSize(size)
+                                }
                             }
                         }
                     }

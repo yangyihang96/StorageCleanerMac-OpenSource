@@ -25,7 +25,6 @@ struct ScanHeavyWorkCleanupPendingError: LocalizedError, @unchecked Sendable {
 struct ScanHeavyWorkService: Sendable {
     struct Operations: Sendable {
         let scan: @Sendable (ScanMode, DiskScanProgressHandler?) async throws -> ScanResult
-        let duplicateScan: @Sendable () async throws -> [StorageItem]
         let moveToTrash: @Sendable (StorageItem, Set<String>) async throws -> [TrashMoveRecord]
         let emptyTrash: @Sendable () async throws -> TrashSummary
         let restoreFromTrash: @Sendable ([TrashMoveRecord]) async throws -> TrashRestoreSummary
@@ -40,12 +39,6 @@ struct ScanHeavyWorkService: Sendable {
                         scanMode: mode,
                         progressHandler: progressHandler
                     ).scan()
-                }.value
-            },
-            duplicateScan: @escaping @Sendable () async throws -> [StorageItem] = {
-                await Task.detached(priority: .userInitiated) {
-                    let groups = DuplicateFileScanner.scanGroups(configuration: .userFiles())
-                    return DiskScanner.itemsForDuplicateGroups(groups)
                 }.value
             },
             moveToTrash: @escaping @Sendable (StorageItem, Set<String>) async throws -> [TrashMoveRecord] = { item, allowedPaths in
@@ -77,7 +70,6 @@ struct ScanHeavyWorkService: Sendable {
             }
         ) {
             self.scan = scan
-            self.duplicateScan = duplicateScan
             self.moveToTrash = moveToTrash
             self.emptyTrash = emptyTrash
             self.restoreFromTrash = restoreFromTrash
@@ -108,13 +100,6 @@ struct ScanHeavyWorkService: Sendable {
     ) async throws -> ScanResult {
         try await coordinator.requireValid(lease, owner: .mainScan)
         return try await operations.scan(mode, progressHandler)
-    }
-
-    func scanDuplicates(
-        lease: HeavyWorkCoordinator.Lease
-    ) async throws -> [StorageItem] {
-        try await coordinator.requireValid(lease, owner: .duplicateScan)
-        return try await operations.duplicateScan()
     }
 
     func moveToTrash(

@@ -241,6 +241,21 @@ struct StorageMapContentProfile: Equatable, Sendable {
         otherBytes += other.otherBytes
     }
 
+    /// Takes out what `merge` added (D46: an item moved to the Trash).
+    /// Counters never go below zero.
+    mutating func subtract(_ other: StorageMapContentProfile) {
+        applicationBytes = max(0, applicationBytes - other.applicationBytes)
+        imageBytes = max(0, imageBytes - other.imageBytes)
+        videoBytes = max(0, videoBytes - other.videoBytes)
+        audioBytes = max(0, audioBytes - other.audioBytes)
+        documentBytes = max(0, documentBytes - other.documentBytes)
+        archiveBytes = max(0, archiveBytes - other.archiveBytes)
+        developerBytes = max(0, developerBytes - other.developerBytes)
+        dataBytes = max(0, dataBytes - other.dataBytes)
+        systemBytes = max(0, systemBytes - other.systemBytes)
+        otherBytes = max(0, otherBytes - other.otherBytes)
+    }
+
     func bytes(for category: StorageMapContentCategory) -> Int64 {
         switch category {
         case .application: applicationBytes
@@ -292,29 +307,233 @@ struct StorageMapIndexedEntry: Equatable, Sendable {
     let isDirectory: Bool
     let canDescend: Bool
     let isEstimated: Bool
+    /// D46: `DiskScanner.storageMapChangeStamp` when the analysis saw the
+    /// item; 0 when it was not recorded (links, excluded and unreadable
+    /// items). Kept last: it sits in what was padding, so the entry's stride
+    /// stays 48 bytes.
+    var changeStamp: UInt32 = 0
 }
 
 struct StorageMapAnalysisIndex: Equatable, Sendable {
     let rootPath: String
     let rootVolumeIdentifier: String?
-    let directories: [String: StorageMapDirectoryAggregate]
-    let childrenByDirectory: [String: [StorageMapIndexedEntry]]
-    let blockedDirectoryPaths: Set<String>
-    let duplicateFilePaths: Set<String>
+    /// Changed only by moving an item out (D46) and putting it back.
+    private(set) var directories: [String: StorageMapDirectoryAggregate]
+    private(set) var childrenByDirectory: [String: [StorageMapIndexedEntry]]
+    private(set) var blockedDirectoryPaths: Set<String>
+    private(set) var duplicateFilePaths: Set<String>
+
+    init(
+        rootPath: String,
+        rootVolumeIdentifier: String?,
+        directories: [String: StorageMapDirectoryAggregate],
+        childrenByDirectory: [String: [StorageMapIndexedEntry]],
+        blockedDirectoryPaths: Set<String>,
+        duplicateFilePaths: Set<String>
+    ) {
+        self.rootPath = rootPath
+        self.rootVolumeIdentifier = rootVolumeIdentifier
+        self.directories = directories
+        self.childrenByDirectory = childrenByDirectory
+        self.blockedDirectoryPaths = blockedDirectoryPaths
+        self.duplicateFilePaths = duplicateFilePaths
+    }
 }
 
 struct StorageMapAnalysisResult: Equatable, Sendable {
     let target: StorageMapScanTarget
     let volumeTotalBytes: Int64
     let volumeAvailableBytes: Int64
-    let inspectedItemCount: Int
+    private(set) var inspectedItemCount: Int
     let omittedItemCount: Int
     let scanSeconds: TimeInterval
-    let index: StorageMapAnalysisIndex
-    let rootSnapshot: StorageMapDirectorySnapshot
+    private(set) var index: StorageMapAnalysisIndex
+    /// Rebuilt from `index` by the store after the index changes.
+    var rootSnapshot: StorageMapDirectorySnapshot
+
+    init(
+        target: StorageMapScanTarget,
+        volumeTotalBytes: Int64,
+        volumeAvailableBytes: Int64,
+        inspectedItemCount: Int,
+        omittedItemCount: Int,
+        scanSeconds: TimeInterval,
+        index: StorageMapAnalysisIndex,
+        rootSnapshot: StorageMapDirectorySnapshot
+    ) {
+        self.target = target
+        self.volumeTotalBytes = volumeTotalBytes
+        self.volumeAvailableBytes = volumeAvailableBytes
+        self.inspectedItemCount = inspectedItemCount
+        self.omittedItemCount = omittedItemCount
+        self.scanSeconds = scanSeconds
+        self.index = index
+        self.rootSnapshot = rootSnapshot
+    }
 
     var usedVolumeBytes: Int64 {
         max(0, volumeTotalBytes - volumeAvailableBytes)
+    }
+
+    /// D46: an item was moved to the Trash. Takes it and everything under
+    /// it out of the index and its bytes, items and content out of every
+    /// folder above it, so the page shows the new sizes without another
+    /// analysis. Returns what was taken out, to put it back after a restore.
+    mutating func removeItem(at path: String) -> StorageMapRemovedItem? {
+        guard let removed = index.removeItem(at: path) else { return nil }
+        inspectedItemCount = max(0, inspectedItemCount - removed.itemCount)
+        return removed
+    }
+
+    /// D46: the item came back (restored from Operation History).
+    @discardableResult
+    mutating func reinsert(_ removed: StorageMapRemovedItem) -> Bool {
+        guard index.reinsert(removed) else { return false }
+        inspectedItemCount += removed.itemCount
+        return true
+    }
+}
+
+/// What `StorageMapAnalysisIndex.removeItem(at:)` took out: the item's entry,
+/// what it added to the folders above it, and, for a folder, its part of the
+/// index, so a restored item can be put back exactly.
+struct StorageMapRemovedItem: Equatable, Sendable {
+    let path: String
+    let parentPath: String
+    /// Where the entry was among its parent's children.
+    let position: Int
+    let entry: StorageMapIndexedEntry
+    /// The bytes the folders above it counted for it (0 for a hard link the
+    /// analysis counted at another path).
+    let bytes: Int64
+    /// The item and everything under it.
+    let itemCount: Int
+    let contentProfile: StorageMapContentProfile
+    let directories: [String: StorageMapDirectoryAggregate]
+    let childrenByDirectory: [String: [StorageMapIndexedEntry]]
+    let blockedDirectoryPaths: Set<String>
+    let duplicateFilePaths: Set<String>
+}
+
+extension StorageMapIndexedEntry {
+    /// D46: the walk marks a cloud placeholder estimated: a file keeps its
+    /// size (one whose size could not be read has none), a folder is not
+    /// walked into. An excluded folder looks the same; the Trash rules check
+    /// exclusions first.
+    var isCloudOnly: Bool {
+        isEstimated && (isDirectory || sizeBytes != nil)
+    }
+}
+
+extension StorageMapAnalysisIndex {
+    /// The entry the analysis recorded for `path`, if any.
+    func indexedEntry(at path: String) -> StorageMapIndexedEntry? {
+        guard path != rootPath else { return nil }
+        let parent = DiskScanner.storageMapParentPath(path)
+        let name = (path as NSString).lastPathComponent
+        return childrenByDirectory[parent]?.first { $0.name == name }
+    }
+
+    /// The child path the snapshots use for an entry of `directory`.
+    static func childPath(_ name: String, in directory: String) -> String {
+        directory == "/" ? "/" + name : directory + "/" + name
+    }
+
+    /// See `StorageMapAnalysisResult.removeItem(at:)`. Refuses the root and
+    /// anything inside a folder the map does not open (a package, an
+    /// excluded or cloud-only folder): their insides are never listed, and a
+    /// package counts its bytes under its own category.
+    mutating func removeItem(at path: String) -> StorageMapRemovedItem? {
+        guard path != rootPath, DiskScanner.storageMapPath(path, isWithinRoot: rootPath) else { return nil }
+        let parent = DiskScanner.storageMapParentPath(path)
+        let name = (path as NSString).lastPathComponent
+        guard directories[parent] != nil,
+              let position = childrenByDirectory[parent]?.firstIndex(where: { $0.name == name }) else { return nil }
+        var ancestor = parent
+        while ancestor != rootPath {
+            guard !blockedDirectoryPaths.contains(ancestor), directories[ancestor] != nil else { return nil }
+            ancestor = DiskScanner.storageMapParentPath(ancestor)
+        }
+        let entry = childrenByDirectory[parent]![position]
+
+        let bytes: Int64
+        let itemCount: Int
+        let profile: StorageMapContentProfile
+        var removedDirectories: [String: StorageMapDirectoryAggregate] = [:]
+        var removedChildren: [String: [StorageMapIndexedEntry]] = [:]
+        var removedBlocked = Set<String>()
+        var removedDuplicates = Set<String>()
+        if entry.isDirectory {
+            guard let aggregate = directories[path] else { return nil }
+            bytes = aggregate.sizeBytes
+            itemCount = aggregate.descendantItemCount + 1
+            profile = aggregate.contentProfile
+            var pending = [path]
+            while let directory = pending.popLast() {
+                if let removed = directories.removeValue(forKey: directory) { removedDirectories[directory] = removed }
+                if blockedDirectoryPaths.remove(directory) != nil { removedBlocked.insert(directory) }
+                guard let children = childrenByDirectory.removeValue(forKey: directory) else { continue }
+                removedChildren[directory] = children
+                for child in children {
+                    let childPath = Self.childPath(child.name, in: directory)
+                    if child.isDirectory {
+                        pending.append(childPath)
+                    } else if duplicateFilePaths.remove(childPath) != nil {
+                        removedDuplicates.insert(childPath)
+                    }
+                }
+            }
+        } else {
+            let isDuplicate = duplicateFilePaths.remove(path) != nil
+            if isDuplicate { removedDuplicates.insert(path) }
+            bytes = isDuplicate ? 0 : max(0, entry.sizeBytes ?? 0)
+            itemCount = 1
+            profile = StorageMapContentProfile(
+                category: StorageMapContentCategory.classify(name: entry.name, kind: entry.kind, isDirectory: false),
+                bytes: bytes
+            )
+        }
+        childrenByDirectory[parent]!.remove(at: position)
+        directories[parent]!.immediateChildCount = max(0, directories[parent]!.immediateChildCount - 1)
+        ancestor = parent
+        while true {
+            directories[ancestor]!.sizeBytes = max(0, directories[ancestor]!.sizeBytes - bytes)
+            directories[ancestor]!.descendantItemCount = max(0, directories[ancestor]!.descendantItemCount - itemCount)
+            directories[ancestor]!.contentProfile.subtract(profile)
+            if ancestor == rootPath { break }
+            ancestor = DiskScanner.storageMapParentPath(ancestor)
+        }
+        return StorageMapRemovedItem(
+            path: path, parentPath: parent, position: position, entry: entry, bytes: bytes,
+            itemCount: itemCount, contentProfile: profile, directories: removedDirectories,
+            childrenByDirectory: removedChildren, blockedDirectoryPaths: removedBlocked,
+            duplicateFilePaths: removedDuplicates
+        )
+    }
+
+    /// Puts back what `removeItem(at:)` took out, where it was, unless its
+    /// parent is gone or its name or folders are taken in the meantime.
+    mutating func reinsert(_ removed: StorageMapRemovedItem) -> Bool {
+        guard directories[removed.parentPath] != nil,
+              childrenByDirectory[removed.parentPath]?.contains(where: { $0.name == removed.entry.name }) == false,
+              removed.directories.keys.allSatisfy({ directories[$0] == nil }) else { return false }
+        // Changed in place: holding a copy of the array would copy it.
+        let siblingCount = childrenByDirectory[removed.parentPath]!.count
+        childrenByDirectory[removed.parentPath]!.insert(removed.entry, at: min(removed.position, siblingCount))
+        directories.merge(removed.directories) { current, _ in current }
+        childrenByDirectory.merge(removed.childrenByDirectory) { current, _ in current }
+        blockedDirectoryPaths.formUnion(removed.blockedDirectoryPaths)
+        duplicateFilePaths.formUnion(removed.duplicateFilePaths)
+        directories[removed.parentPath]!.immediateChildCount += 1
+        var ancestor = removed.parentPath
+        while directories[ancestor] != nil {
+            directories[ancestor]!.sizeBytes += removed.bytes
+            directories[ancestor]!.descendantItemCount += removed.itemCount
+            directories[ancestor]!.contentProfile.merge(removed.contentProfile)
+            if ancestor == rootPath { break }
+            ancestor = DiskScanner.storageMapParentPath(ancestor)
+        }
+        return true
     }
 }
 
@@ -336,6 +555,8 @@ struct StorageTreemapEntry: Identifiable, Equatable, Sendable {
     let isEstimated: Bool
     let contentCategory: StorageMapContentCategory
     let role: StorageTreemapEntryRole
+    /// D46: the analysis found the item only in the cloud (not downloaded).
+    let isCloudOnly: Bool
 
     init(
         id: String,
@@ -348,7 +569,8 @@ struct StorageTreemapEntry: Identifiable, Equatable, Sendable {
         childCount: Int? = nil,
         isEstimated: Bool = false,
         contentCategory: StorageMapContentCategory? = nil,
-        role: StorageTreemapEntryRole = .content
+        role: StorageTreemapEntryRole = .content,
+        isCloudOnly: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -365,6 +587,7 @@ struct StorageTreemapEntry: Identifiable, Equatable, Sendable {
             isDirectory: isDirectory
         )
         self.role = role
+        self.isCloudOnly = isCloudOnly
     }
 }
 
@@ -473,6 +696,13 @@ enum StorageMapEntrySort: String, CaseIterable, Hashable, Identifiable, Sendable
 }
 
 enum StorageTreemapPresentation {
+    /// Review P2-9: whether `path` is an item that moved to the Trash, or
+    /// sat inside a folder that did.
+    static func isGone(_ path: String?, after movedPaths: [String]) -> Bool {
+        guard let path, !path.isEmpty else { return false }
+        return movedPaths.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
     static func navigationLevel(
         for entry: StorageTreemapEntry,
         in navigation: [StorageMapDirectorySnapshot],

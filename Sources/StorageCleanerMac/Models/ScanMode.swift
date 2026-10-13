@@ -65,10 +65,6 @@ enum ScanMode: String, CaseIterable, Identifiable, Codable, Sendable {
         ]
     }
 
-    var largeFileMinimumBytes: Int64 {
-        200 * 1024 * 1024
-    }
-
     var largeFileResultLimit: Int {
         80
     }

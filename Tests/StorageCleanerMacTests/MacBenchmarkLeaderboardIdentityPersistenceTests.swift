@@ -10,7 +10,7 @@ final class MacBenchmarkLeaderboardIdentityPersistenceTests: XCTestCase {
     @MainActor
     func testSubmittedIdentityRoundTripsAllRemovalContractFields() throws {
         let (defaults, suiteName) = try makeDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let provider = DefaultMacBenchmarkLeaderboardIdentityProvider(
             defaults: defaults
         )
@@ -40,7 +40,7 @@ final class MacBenchmarkLeaderboardIdentityPersistenceTests: XCTestCase {
     @MainActor
     func testLegacyV1EntryMigratesToFrozenStandardV4Identity() throws {
         let (defaults, suiteName) = try makeDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let entryID = "22222222222222222222222222222222"
         defaults.set(entryID, forKey: legacyEntryIDKey)
         let provider = DefaultMacBenchmarkLeaderboardIdentityProvider(
@@ -62,7 +62,7 @@ final class MacBenchmarkLeaderboardIdentityPersistenceTests: XCTestCase {
     @MainActor
     func testRemovalUsesPersistedV4ContractAndClearsBothIdentityKeys() async throws {
         let (defaults, suiteName) = try makeDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let provider = DefaultMacBenchmarkLeaderboardIdentityProvider(
             defaults: defaults
         )
@@ -98,7 +98,7 @@ final class MacBenchmarkLeaderboardIdentityPersistenceTests: XCTestCase {
     @MainActor
     func testUnconfirmedRemovalKeepsExactIdentityForRetry() async throws {
         let (defaults, suiteName) = try makeDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let provider = DefaultMacBenchmarkLeaderboardIdentityProvider(
             defaults: defaults
         )
@@ -125,9 +125,8 @@ final class MacBenchmarkLeaderboardIdentityPersistenceTests: XCTestCase {
 
 private extension MacBenchmarkLeaderboardIdentityPersistenceTests {
     func makeDefaults() throws -> (UserDefaults, String) {
-        let suiteName = "MacBenchmarkLeaderboardIdentityPersistenceTests.\(UUID())"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.removePersistentDomain(forName: suiteName)
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
         return (defaults, suiteName)
     }
 }

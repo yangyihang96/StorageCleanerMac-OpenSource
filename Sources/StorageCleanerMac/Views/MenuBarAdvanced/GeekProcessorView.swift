@@ -5,6 +5,7 @@ extension MenuBarAdvancedStatusView {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
             liveCard(.cpu) { geekProcessorActivityHoverTarget }
             liveCard(.cpu) { geekProcessorCoreCard }
+            liveCard(.cpu) { geekProcessorFrequencyCard }
             liveCard(.energyProcesses) { geekProcessorProcessCard }
             if showsExtendedGeekDetails {
                 liveCard(.sensors) { geekProcessorGPUHoverTarget }
@@ -13,6 +14,22 @@ extension MenuBarAdvancedStatusView {
             }
         }
 
+    }
+
+    @ViewBuilder
+    private var geekProcessorFrequencyCard: some View {
+        let rows = geekFrequencyReadouts
+        if rows.isEmpty {
+            // Preserve real IOReport readings when available; otherwise use the
+            // same passive helper leaf and missing-state card as sensors/power.
+            GeekHelperPowerMetricsCards(monitor: store.helperPowerMetricsMonitor) { presentation in
+                geekHelperReadoutCard(L10n.text("频率", "FREQUENCY"), rows: presentation.frequencyRows,
+                    unavailableText: presentation.unavailableText)
+                    .help(presentation.helpText)
+            }
+        } else {
+            geekSensorReadoutCard(L10n.text("频率", "FREQUENCY"), rows: rows)
+        }
     }
 
     private var geekProcessorActivityHoverTarget: some View {
@@ -28,7 +45,8 @@ extension MenuBarAdvancedStatusView {
                 duration: cpuChartRange.duration,
                 userValue: percentText(geekCurrentCPUUserPercent),
                 systemValue: percentText(geekCurrentCPUSystemPercent),
-                samplingInterval: store.menuBarRefreshInterval.seconds
+                samplingInterval: store.menuBarRefreshInterval.seconds,
+                isUpdating: cpuDisplayedHistory.isUpdating
             )
         }
     }
@@ -36,7 +54,8 @@ extension MenuBarAdvancedStatusView {
     private var geekProcessorCoreCard: some View {
         GeekCombinedCard(
             height: GeekProcessorCoreLayout.cardHeight(
-                for: geekProcessorCoreReadings.count
+                for: geekProcessorCoreReadings.count,
+                groupCount: geekProcessorCoreGroups.count
             )
         ) {
             VStack(spacing: 3) {
@@ -57,7 +76,7 @@ extension MenuBarAdvancedStatusView {
                 }
 
                 VStack(spacing: 0) {
-                    ForEach(geekProcessorCoreGroups.prefix(2)) { group in
+                    ForEach(geekProcessorCoreGroups) { group in
                         HStack(spacing: 3) {
                             Circle()
                                 .fill(group.tint)
@@ -68,76 +87,37 @@ extension MenuBarAdvancedStatusView {
                             Text(group.averageUsagePercent.map { "\(Int($0.rounded()))%" } ?? "--")
                                 .monospacedDigit()
                         }
+                        .frame(minHeight: GeekProcessorCoreLayout.legendRowHeight)
                     }
                 }
                 .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.secondary)
             }
-            .padding(.top, 5)
+            .padding(.top, MiniWindowStyleTokens.rowSpacing)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
     private var geekProcessorProcessCard: some View {
-        GeekCombinedCard(
-            height: showsExtendedGeekDetails ? 111 : 75
-        ) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(L10n.text("进程", "PROCESSES"))
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(processorTint)
-                        .lineLimit(1)
-                        .help(L10n.text(
-                            "按需快照 · \(geekOnDemandSnapshotStatusText)",
-                            "On-demand snapshot · \(geekOnDemandSnapshotStatusText)"
-                        ))
-                        .accessibilityValue(geekOnDemandSnapshotStatusText)
-
-                    Spacer(minLength: 0)
-                    Text(geekOnDemandSnapshotStatusText)
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                if geekCPUAppsByUsage.isEmpty {
-                    Spacer(minLength: 0)
-                    Group {
-                        if store.isLoadingEnergyImpact {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Text("—")
-                                .font(AdvancedPanelTypography.body)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    Spacer(minLength: 0)
-                } else {
-                    VStack(spacing: 1) {
-                        ForEach(geekCPUAppsByUsage) { app in
-                            GeekCPUProcessRow(app: app)
-                        }
-                    }
-                }
-            }
-        }
+        GeekProcessorProcessList(
+            apps: geekCPUAppsByUsage,
+            geekOnDemandSnapshotStatusText: geekOnDemandSnapshotStatusText,
+            isLoading: store.isLoadingEnergyImpact || store.isMenuBarProcessSamplePending,
+            showsExtendedDetails: showsExtendedGeekDetails,
+            nothingMeasured: geekOnDemandSnapshotNothingMeasured
+        )
     }
 
     private var geekProcessorGPUCard: some View {
         GeekCombinedCard(height: 86) {
             VStack(spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("GPU")
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(resolvedGPUTint)
+                    GeekSectionTitle(title: "GPU")
 
                     Spacer(minLength: 0)
                 }
 
-                HStack(spacing: 5) {
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                     GeekCombinedRing(
                         title: "GPU",
                         value: metricValue(.gpuUsage),
@@ -147,11 +127,12 @@ extension MenuBarAdvancedStatusView {
                     )
 
                     GeekCombinedRing(
-                        title: L10n.text("显存", "MEM"),
+                        title: GeekGPUVocabulary.memoryRingTitle,
                         value: geekProcessorGPUMemoryPercent.map { "\(Int($0.rounded()))%" } ?? "--",
                         progress: geekProcessorGPUMemoryPercent.map { $0 / 100 },
-                        tint: memoryTint,
-                        size: 56
+                        tint: geekProcessorGPUMemoryTint,
+                        size: 56,
+                        accessibilityTitle: GeekGPUVocabulary.memory
                     )
 
                     GeekCombinedRing(
@@ -159,13 +140,34 @@ extension MenuBarAdvancedStatusView {
                         value: geekProcessorGPUTemperature.map(geekProcessorTemperatureText) ?? "--",
                         progress: geekProcessorGPUTemperature.map { min(1, max(0, $0 / 100)) },
                         tint: geekProcessorGPUTemperature.map(geekProcessorTemperatureTint) ?? .secondary,
-                        size: 56
+                        size: 56,
+                        accessibilityTitle: L10n.text("温度", "Temperature")
                     )
+
+                    geekProcessorGPUFrequencyRing
                 }
                 .frame(maxWidth: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// BOARD N16-1: the GPU's frequency ring (iStat shows usage, memory,
+    /// temperature and frequency); the arc is the share of the highest
+    /// operating point.
+    private var geekProcessorGPUFrequencyRing: some View {
+        let reading = processorTelemetry?.gpu
+        let ring = GeekGPUFrequencyPresentation.ringValue(reading)
+        return GeekCombinedRing(
+            title: L10n.text("频率", "FREQ"),
+            value: ring.value,
+            detail: ring.unit,
+            progress: GeekGPUFrequencyPresentation.ringProgress(reading),
+            tint: resolvedGPUTint,
+            size: 56,
+            accessibilityTitle: L10n.text("GPU 频率", "GPU Frequency")
+        )
+        .help(GeekGPUFrequencyPresentation.readout(reading, sampledAt: auxiliaryState.processorTelemetryRefreshedAt).note)
     }
 
     private var geekProcessorGPUHoverTarget: some View {
@@ -177,14 +179,24 @@ extension MenuBarAdvancedStatusView {
             geekProcessorGPUCard
         } detail: {
             GeekGPUHoverDetail(
-                points: geekChartHistory,
-                duration: geekChartDuration,
+                points: geekMetricHistory(.gpu),
+                duration: geekMetricRange(.gpu).duration,
                 isAvailable: metricAvailable(.gpuUsage),
                 currentValue: metricValue(.gpuUsage),
                 memoryValue: geekProcessorGPUMemoryPercent.map { "\(Int($0.rounded()))%" },
-                temperatureValue: geekProcessorGPUTemperature.map(geekProcessorTemperatureText)
+                temperatureValue: geekProcessorGPUTemperature.map(geekProcessorTemperatureText),
+                memoryTint: geekProcessorGPUMemoryTint,
+                temperatureTint: geekProcessorGPUTemperature.map(geekProcessorTemperatureTint) ?? .secondary,
+                isUpdating: geekMetricIsUpdating(.gpu),
+                sampledAt: monitorSnapshot?.gpuReadingDate
             )
         }
+    }
+
+    /// GPU memory is a share of physical memory, not the system memory
+    /// pressure level; it uses the memory data color in the ring and legend.
+    private var geekProcessorGPUMemoryTint: Color {
+        panelMetricColors.memoryApp
     }
 
     private var geekProcessorGPUTemperature: Double? {
@@ -204,23 +216,27 @@ extension MenuBarAdvancedStatusView {
         "\(Int(value.rounded()))°C"
     }
 
+    // The sensors page draws the same GPU temperature; share its color rule
+    // (the CPU page used caution yellow at 80 °C where sensors used warning).
     private func geekProcessorTemperatureTint(_ value: Double) -> Color {
-        switch value {
-        case 90...: AppDesignTokens.Palette.destructive
-        case 80...: AppDesignTokens.Palette.caution
-        default: resolvedThermalTint
-        }
+        geekTemperatureTint(value)
     }
 
     private var geekProcessorUsageCard: some View {
         GeekCombinedCard(height: 25) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(L10n.text("CPU 占用", "CPU USAGE"))
-                    .foregroundStyle(processorTint)
-                Spacer(minLength: 6)
-                Text(geekProcessorUsageSummaryText)
-                    .foregroundStyle(.primary)
-                    .monospacedDigit()
+            HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
+                GeekSectionTitle(title: L10n.text("CPU 占用", "CPU USAGE"))
+                Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
+                // The load color is on the total (the data); the title keeps
+                // the section-header color. (D43: the overview CPU card's
+                // title shows the frequency and temperature instead.)
+                HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.rowSpacing) {
+                    Text(percentText(cpuCurrentReading?.cpuTotal))
+                        .foregroundStyle(processorTint)
+                    Text(geekProcessorUsageBreakdownText)
+                        .foregroundStyle(.primary)
+                }
+                .monospacedDigit()
             }
             .font(AdvancedPanelTypography.body)
             .lineLimit(1)
@@ -237,7 +253,7 @@ extension MenuBarAdvancedStatusView {
             geekProcessorUsageCard
         } detail: {
             GeekProcessorUsageHoverDetail(
-                total: cpuChartHistory.last?.cpuTotal,
+                total: cpuCurrentReading?.cpuTotal,
                 applications: geekCurrentCPUUserPercent,
                 system: geekCurrentCPUSystemPercent,
                 points: cpuChartHistory,
@@ -247,21 +263,21 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    private var geekProcessorUsageSummaryText: String {
-        let total = percentText(cpuChartHistory.last?.cpuTotal)
+    /// Follows the total: "· 用户 22% · 系统 12%". One CPU vocabulary across
+    /// the mini window (用户 / 系统), as in the chart legend and inspector.
+    private var geekProcessorUsageBreakdownText: String {
         let applications = percentText(geekCurrentCPUUserPercent)
         let system = percentText(geekCurrentCPUSystemPercent)
         return L10n.text(
-            "\(total) · 应用 \(applications) · 系统 \(system)",
-            "\(total) · Apps \(applications) · System \(system)"
+            "· 用户 \(applications) · 系统 \(system)",
+            "· User \(applications) · System \(system)"
         )
     }
 
     private var geekProcessorUptimeCard: some View {
         GeekCombinedCard(height: 25) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(L10n.text("运行时间", "UPTIME"))
-                    .foregroundStyle(processorTint)
+                GeekSectionTitle(title: L10n.text("运行时间", "UPTIME"))
                 Spacer(minLength: 6)
                 Text(uptimeText)
                     .foregroundStyle(.primary)
@@ -288,8 +304,8 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekProcessorPoweredOnAtText: String {
-        guard let seconds = monitorSnapshot?.systemUptimeSeconds, seconds > 0 else { return "--" }
-        return PanelTimestampFormat.monthDayAndTime(Date().addingTimeInterval(-seconds))
+        guard let bootAt = monitorSnapshot?.systemBootAt else { return "—" }
+        return PanelTimestampFormat.monthDayAndTime(bootAt)
     }
 
     private var geekProcessorCoreColumns: [GridItem] {
@@ -303,45 +319,22 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekProcessorCoreGroups: [GeekProcessorCoreGroup] {
-        let sourceLevels = processorTelemetry?.performanceLevels ?? []
-        let levels = GeekProcessorCoreLevelOrdering.ordered(sourceLevels)
-        let sourceOffsets = GeekProcessorCoreLevelOrdering.sourceOffsets(sourceLevels)
-        let usageValues = monitorSnapshot?.cpuCoreUsagePercent ?? []
-        if !levels.isEmpty {
-            return levels.enumerated().map { colorOffset, level in
-                let count = max(0, level.coreCount)
-                let sourceOffset = sourceOffsets[level.index] ?? 0
-                let samples = usageValues
-                    .dropFirst(sourceOffset)
-                    .prefix(count)
-                    .filter(\.isFinite)
-                let average = samples.isEmpty
-                    ? nil
-                    : samples.reduce(0, +) / Double(samples.count)
-                let levelTitle = processorLevelTitle(level.name)
-                return GeekProcessorCoreGroup(
-                    id: "level-\(level.index)",
-                    title: L10n.text(levelTitle, "\(levelTitle) Cores"),
-                    count: count,
-                    sourceOffset: sourceOffset,
-                    averageUsagePercent: average,
-                    tint: geekProcessorCoreTint(at: colorOffset)
-                )
-            }
-        }
-
-        return [
-            GeekProcessorCoreGroup(
-                id: "logical",
-                title: L10n.text("逻辑核心", "Logical Cores"),
-                count: max(1, ProcessInfo.processInfo.processorCount),
-                sourceOffset: 0,
-                averageUsagePercent: usageValues.isEmpty
-                    ? nil
-                    : usageValues.reduce(0, +) / Double(usageValues.count),
-                tint: processorTint
+        GeekProcessorCorePresentation.groups(
+            levels: processorTelemetry?.performanceLevels ?? [],
+            usageValues: monitorSnapshot?.cpuCoreUsagePercent ?? [],
+            logicalCoreCount: ProcessInfo.processInfo.processorCount
+        ).map { group in
+            let levelTitle = group.levelName.map(processorLevelTitle)
+            return GeekProcessorCoreGroup(
+                id: group.id,
+                title: levelTitle.map { L10n.text($0, "\($0) Cores") }
+                    ?? L10n.text("逻辑核心", "Logical Cores"),
+                count: group.count,
+                sourceOffset: group.sourceOffset,
+                averageUsagePercent: group.averageUsagePercent,
+                tint: group.colorRole.map(geekProcessorCoreTint) ?? processorTint
             )
-        ]
+        }
     }
 
     private var geekProcessorCoreReadings: [GeekProcessorCoreReading] {
@@ -362,20 +355,30 @@ extension MenuBarAdvancedStatusView {
     private var geekCPUAppsByUsage: [EnergyImpactApp] {
 #if DEBUG || STORAGE_CLEANER_BETA
         if MiniWindowDemoData.isEnabled {
-            return Array(geekEnergyApps.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(showsExtendedGeekDetails ? 5 : 3))
+            return Array(MiniWindowDemoData.preparedProcesses.cpu.prefix(
+                GeekProcessorProcessList.maximumRows(extended: showsExtendedGeekDetails)))
         }
 #endif
-        return Array((store.menuBarPreparedProcesses?.cpu ?? []).prefix(showsExtendedGeekDetails ? 5 : 3))
+        return Array((store.menuBarPreparedProcesses?.cpu ?? []).prefix(
+            GeekProcessorProcessList.maximumRows(extended: showsExtendedGeekDetails)))
     }
 
-    private func geekProcessorCoreTint(at index: Int) -> Color {
-        let colors = [
-            resolvedSecondaryTint,
-            resolvedPrimaryTint,
-            AppDesignTokens.Palette.diagnostic,
-        ]
-        return colors[index % colors.count]
+    private func geekProcessorCoreTint(for role: GeekProcessorCoreColorRole) -> Color {
+        switch role {
+        case .secondary: resolvedSecondaryTint
+        case .primary: resolvedPrimaryTint
+        case .yellow: colorScheme == .light ? MonitorPalette.lightYellow : MonitorPalette.yellow
+        case .green: colorScheme == .light ? MonitorPalette.color(0x398520) : MonitorPalette.green
+        }
     }
+}
+
+/// One name for the GPU's share of memory on the CPU page ring and in the
+/// GPU history legend: 显存 / GPU Memory. The 56-pt ring abbreviates the
+/// English to MEM (like TMP beside it) and keeps the full name for VoiceOver.
+enum GeekGPUVocabulary {
+    static var memory: String { L10n.text("显存", "GPU Memory") }
+    static var memoryRingTitle: String { L10n.text("显存", "MEM") }
 }
 
 enum GeekProcessorCoreLayout {
@@ -384,17 +387,68 @@ enum GeekProcessorCoreLayout {
     static let valueFontSize: CGFloat = 8
     static let spacing: CGFloat = 3
     static let minimumCardHeight: CGFloat = 102
-    private static let nonGridHeight: CGFloat = 40
+    static let legendRowHeight: CGFloat = 14
+    private static let nonLegendHeight: CGFloat = 12
 
     static func rowCount(for coreCount: Int) -> Int {
         max(1, (max(1, coreCount) + columnCount - 1) / columnCount)
     }
 
-    static func cardHeight(for coreCount: Int) -> CGFloat {
+    static func cardHeight(for coreCount: Int, groupCount: Int = 2) -> CGFloat {
         max(
             minimumCardHeight,
-            nonGridHeight + CGFloat(rowCount(for: coreCount)) * (ringSize + spacing)
+            nonLegendHeight + CGFloat(max(1, groupCount)) * legendRowHeight
+                + CGFloat(rowCount(for: coreCount)) * (ringSize + spacing)
         )
+    }
+}
+
+enum GeekProcessorCoreColorRole: Int, CaseIterable {
+    case secondary, primary, yellow, green
+
+    static func forDisplayIndex(_ index: Int) -> Self {
+        allCases[max(0, index) % allCases.count]
+    }
+}
+
+/// Presentation-only grouping; source offsets stay native even when display order changes.
+enum GeekProcessorCorePresentation {
+    struct Group: Equatable {
+        let id: String
+        let levelName: String?
+        let count: Int
+        let sourceOffset: Int
+        let averageUsagePercent: Double?
+        let colorRole: GeekProcessorCoreColorRole?
+    }
+
+    static func groups(
+        levels: [CPUPerformanceStateService.PerformanceLevel],
+        usageValues: [Double],
+        logicalCoreCount: Int
+    ) -> [Group] {
+        func average(_ samples: some Sequence<Double>) -> Double? {
+            let finiteSamples = samples.filter(\.isFinite)
+            return finiteSamples.isEmpty ? nil
+                : finiteSamples.reduce(0, +) / Double(finiteSamples.count)
+        }
+        guard !levels.isEmpty else {
+            return [Group(
+                id: "logical", levelName: nil, count: max(1, logicalCoreCount),
+                sourceOffset: 0, averageUsagePercent: average(usageValues), colorRole: nil
+            )]
+        }
+        let sourceOffsets = GeekProcessorCoreLevelOrdering.sourceOffsets(levels)
+        return GeekProcessorCoreLevelOrdering.ordered(levels).enumerated().map { offset, level in
+            let count = max(0, level.coreCount)
+            let sourceOffset = sourceOffsets[level.index] ?? 0
+            return Group(
+                id: "level-\(level.index)", levelName: level.name, count: count,
+                sourceOffset: sourceOffset,
+                averageUsagePercent: average(usageValues.dropFirst(sourceOffset).prefix(count)),
+                colorRole: .forDisplayIndex(offset)
+            )
+        }
     }
 }
 
@@ -449,14 +503,84 @@ private struct GeekProcessorCoreReading: Identifiable {
     let tint: Color
 }
 
+/// The processor page's process card: the processes with the most CPU in
+/// the latest on-demand snapshot.
+struct GeekProcessorProcessList: View {
+    let apps: [EnergyImpactApp]
+    let geekOnDemandSnapshotStatusText: String
+    let isLoading: Bool
+    let showsExtendedDetails: Bool
+    /// Review P2-8: the first measurement did not come in time; the header's
+    /// help and the empty list say so.
+    var nothingMeasured = false
+
+    var body: some View {
+        GeekCombinedCard(
+            height: showsExtendedDetails ? 111 : 75
+        ) {
+            VStack(alignment: .leading, spacing: 3) {
+                GeekProcessListHeader(
+                    title: L10n.text("进程", "PROCESSES"),
+                    status: geekOnDemandSnapshotStatusText,
+                    help: L10n.text(
+                        "按需快照 · \(geekOnDemandSnapshotStatusText)\(GeekOnDemandSnapshotFreshness.nothingMeasuredReason(nothingMeasured))",
+                        "On-demand snapshot · \(geekOnDemandSnapshotStatusText)\(GeekOnDemandSnapshotFreshness.nothingMeasuredReason(nothingMeasured))"
+                    ),
+                    columns: [GeekProcessListColumn(id: "cpu", title: L10n.text("占用", "CPU"),
+                                                    accessibilityLabel: L10n.text("CPU 占用", "CPU usage"))]
+                )
+
+                Group {
+                    if apps.isEmpty {
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            Group {
+                                if isLoading {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Text(nothingMeasured ? GeekOnDemandSnapshotFreshness.nothingMeasuredText : "—")
+                                        .font(AdvancedPanelTypography.body)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            Spacer(minLength: 0)
+                        }
+                    } else {
+                        VStack(spacing: Self.rowSpacing) {
+                            ForEach(apps) { app in
+                                GeekCPUProcessRow(app: app)
+                            }
+                        }
+                    }
+                }
+                // Room for every row the card can list, however many the
+                // latest snapshot has: the 111 / 75 pt minimum held one row
+                // less, so the card (and the page, and the whole cascade)
+                // grew and shrank as the number of busy processes crossed it.
+                .frame(minHeight: Self.rowsHeight(extended: showsExtendedDetails), alignment: .top)
+            }
+        }
+    }
+
+    /// The most processes the card lists (`geekCPUAppsByUsage`).
+    static func maximumRows(extended: Bool) -> Int { extended ? 5 : 3 }
+
+    static func rowsHeight(extended: Bool) -> CGFloat {
+        let rows = CGFloat(maximumRows(extended: extended))
+        return rows * MiniWindowStyleTokens.dataRowHeight + (rows - 1) * Self.rowSpacing
+    }
+
+    private static let rowSpacing: CGFloat = 1
+}
+
 private struct GeekCPUProcessRow: View {
     let app: EnergyImpactApp
 
     var body: some View {
         HStack(spacing: 6) {
-            AdvancedAppIcon(path: app.iconPath, fallback: "app.fill")
-                .scaleEffect(0.62)
-                .frame(width: 14, height: 14)
+            GeekSecondaryProcessIcon(path: app.iconPath)
 
             Text(app.name)
                 .font(AdvancedPanelTypography.body)
@@ -469,7 +593,7 @@ private struct GeekCPUProcessRow: View {
                 .monospacedDigit()
                 .lineLimit(1)
         }
-        .frame(minHeight: 14)
+        .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
         .help(L10n.text("最近一次按需 CPU 测量", "Latest on-demand CPU measurement"))
         .accessibilityElement(children: .combine)
     }

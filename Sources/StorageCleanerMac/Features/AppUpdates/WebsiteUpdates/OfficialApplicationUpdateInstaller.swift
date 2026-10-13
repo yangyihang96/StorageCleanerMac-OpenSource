@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import FileOperationShared
 
 enum OfficialApplicationUpdateInstallerError: LocalizedError, Sendable {
     case unsupportedPackage
@@ -95,12 +96,63 @@ struct OfficialApplicationUpdateStage: Hashable, Sendable {
 struct OfficialApplicationUpdateInstaller: Sendable {
     private let downloadResolver = OfficialDownloadResolver()
     private let packageValidator = PackageTypeValidator()
-    private let bundleVerifier = BundleIdentityVerifier()
-    private let metadataReader = ApplicationMetadataReader()
+    private let bundleVerifier: BundleIdentityVerifier
+    private let mountAuthenticated: (@Sendable (AuthenticatedUpdateArchive, URL) async throws -> [URL])?
+    private let detachInjected: (@Sendable ([URL]) async -> Void)?
+    private let protectedReplacement: @Sendable (URL, InstalledApplication, String) async throws -> Void
+    private let writable: @Sendable (URL) -> Bool
+    private let transactionURL: URL
+    private let metadataReader: any ApplicationMetadataReading
+    private let runningStateProvider: @Sendable () async -> ApplicationRunningStateSnapshot
     private let zipExtractor = SecureZipArchiveExtractor()
+    private let afterExtraction: @Sendable (URL) async throws -> Void
+    private let replacementEvent: @Sendable (OfficialApplicationReplacement.Event) throws -> Void
+
+    init(
+        metadataReader: any ApplicationMetadataReading = ApplicationMetadataReader(),
+        bundleVerifier: BundleIdentityVerifier = BundleIdentityVerifier(),
+        mountAuthenticated: (@Sendable (AuthenticatedUpdateArchive, URL) async throws -> [URL])? = nil,
+        detachInjected: (@Sendable ([URL]) async -> Void)? = nil,
+        protectedReplacement: @escaping @Sendable (URL, InstalledApplication, String) async throws -> Void = { candidate, app, digest in
+            try await AppUpdateBatchAuthorization.shared.replace(candidate: candidate, application: app, authenticatedSHA256: digest)
+        },
+        writable: @escaping @Sendable (URL) -> Bool = { FileManager.default.isWritableFile(atPath: $0.path) },
+        transactionURL: URL = OfficialApplicationReplacementTransactionLocation.defaultURL,
+        afterExtraction: @escaping @Sendable (URL) async throws -> Void = { _ in },
+        replacementEvent: @escaping @Sendable (OfficialApplicationReplacement.Event) throws -> Void = { _ in },
+        runningStateProvider: @escaping @Sendable () async -> ApplicationRunningStateSnapshot = {
+            await MainActor.run { ApplicationRunningStateSnapshot.capture() }
+        }
+    ) {
+        self.bundleVerifier = bundleVerifier; self.mountAuthenticated = mountAuthenticated; self.detachInjected = detachInjected
+        self.protectedReplacement = protectedReplacement; self.writable = writable; self.transactionURL = transactionURL
+        self.metadataReader = metadataReader
+        self.afterExtraction = afterExtraction; self.replacementEvent = replacementEvent
+        self.runningStateProvider = runningStateProvider
+    }
 
     /// A retry starts a fresh, fully validated request; it never pretends to
     /// resume an untrusted partial archive.
+    /// Called only after Sparkle archive authentication. Extraction, bundle
+    /// validation, original readback and rollback use the same installer.
+    func installVerifiedSparkleArchive(_ archive: AuthenticatedUpdateArchive, application: InstalledApplication, release: SparkleRelease,
+        progress: @escaping @Sendable (ApplicationUpdateProgressEvent) -> Void) async throws -> ApplicationUpdateInstallResult {
+        let kind: OfficialPackageType = archive.fileExtension == "zip" ? .zipArchive : .diskImage
+        let source = OfficialUpdateSource(applicationIdentity: application.identity, providerType: .sparkle,
+            developerName: nil, homepageURL: nil, updatePageURL: nil, releaseFeedURL: application.sparkleConfiguration?.feedURL,
+            directDownloadURL: release.downloadURL, allowedHosts: [release.downloadURL.host!],
+            expectedBundleIdentifier: application.bundleIdentifier, expectedTeamIdentifier: application.signingTeamIdentifier,
+            expectedDesignatedRequirement: nil, verificationMethod: .sparkleConfiguration, trustLevel: .providerVerified,
+            lastVerifiedAt: Date(), capability: .automatic, expectedPackageExtensions: [kind.rawValue], officialGitHubRepository: nil)
+        let download = ResolvedOfficialDownload(source: source, remoteURL: release.downloadURL, packageType: kind,
+            expectedSize: release.byteCount, checksumSHA256: nil, permitsAutomaticInstallation: true)
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent("StorageCleaner-Verified-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        return try await installPackage(packageURL: root.appendingPathComponent("Update." + archive.fileExtension), workingDirectory: root,
+            context: .init(application: application, source: source, download: download), targetVersion: release.version, authenticated: archive, progress: progress)
+    }
+
     private static let maximumDownloadAttempts = 2
     private static let downloadRetryDelayNanoseconds: UInt64 = 200_000_000
 
@@ -224,9 +276,8 @@ struct OfficialApplicationUpdateInstaller: Sendable {
         else {
             return false
         }
-        return FileManager.default.isWritableFile(
-            atPath: application.bundleURL.deletingLastPathComponent().path
-        )
+        return FileManager.default.isWritableFile(atPath: application.bundleURL.deletingLastPathComponent().path)
+            || application.bundleURL.deletingLastPathComponent().path == "/Applications"
     }
 
     func install(
@@ -341,6 +392,7 @@ struct OfficialApplicationUpdateInstaller: Sendable {
             workingDirectory: staged.workingDirectory,
             context: context,
             targetVersion: targetVersion,
+            authenticated: try AuthenticatedUpdateArchive.snapshot(staged.packageURL, expectedSHA256: staged.sha256),
             progress: progress
         )
     }
@@ -373,15 +425,19 @@ struct OfficialApplicationUpdateInstaller: Sendable {
         workingDirectory: URL,
         context: OfficialApplicationUpdateContext,
         targetVersion: ApplicationVersion?,
+        authenticated: AuthenticatedUpdateArchive? = nil,
         progress: @escaping @Sendable (ApplicationUpdateProgressEvent) -> Void
     ) async throws -> ApplicationUpdateInstallResult {
 
+        let archive = try authenticated ?? AuthenticatedUpdateArchive.snapshot(packageURL, expectedSHA256: context.download.checksumSHA256)
         var mountPointsToDetach: [URL] = []
         do {
             let candidate: URL
+            let authenticatedDigest: String
             switch context.download.packageType {
             case .diskImage:
-                mountPointsToDetach = try await mountReadOnly(packageURL)
+                if let mountAuthenticated { mountPointsToDetach = try await mountAuthenticated(archive, workingDirectory) }
+                else { mountPointsToDetach = try await mountReadOnly(archive, workingDirectory: workingDirectory) }
                 candidate = try verifiedCandidate(
                     in: mountPointsToDetach,
                     application: context.application,
@@ -389,12 +445,15 @@ struct OfficialApplicationUpdateInstaller: Sendable {
                     targetVersion: targetVersion,
                     requiresSingleApplicationBundle: false
                 )
+                authenticatedDigest = try AuthenticatedApplicationDigest.compute(candidate)
+                try await afterExtraction(candidate)
             case .zipArchive:
                 let extractionRoot = workingDirectory.appendingPathComponent(
                     "Extracted",
                     isDirectory: true
                 )
-                try await zipExtractor.extract(archiveURL: packageURL, to: extractionRoot)
+                let extracted = try await zipExtractor.extract(bytes: archive.bytes, to: extractionRoot)
+                try await afterExtraction(extractionRoot)
                 candidate = try verifiedCandidate(
                     in: [extractionRoot],
                     application: context.application,
@@ -402,6 +461,7 @@ struct OfficialApplicationUpdateInstaller: Sendable {
                     targetVersion: targetVersion,
                     requiresSingleApplicationBundle: true
                 )
+                authenticatedDigest = try extracted.digest(for: candidate)
             case .application, .installerPackage:
                 throw OfficialApplicationUpdateInstallerError.unsupportedPackage
             }
@@ -412,11 +472,16 @@ struct OfficialApplicationUpdateInstaller: Sendable {
                 fraction: nil,
                 detail: L10n.text("签名验证通过，正在替换应用", "Signature verified; replacing the application")
             ))
+            let privateCandidate = try AuthenticatedApplicationCandidate.copy(from: candidate, into: workingDirectory, expectedSHA256: authenticatedDigest) { url in
+                let verified = try bundleVerifier.verifyReplacement(at: url, for: context.application, source: context.source)
+                guard targetVersion.map({ verified.candidateVersion.reaches($0) }) ?? false else { throw OfficialApplicationUpdateInstallerError.targetVersionMissing }
+            }
             try await installCandidate(
-                candidate,
+                privateCandidate.url,
                 application: context.application,
                 source: context.source,
-                targetVersion: targetVersion
+                targetVersion: targetVersion,
+                authenticatedDigest: privateCandidate.sha256
             )
         } catch {
             await detach(mountPointsToDetach)
@@ -472,34 +537,15 @@ struct OfficialApplicationUpdateInstaller: Sendable {
         _ download: ResolvedOfficialDownload,
         into directory: URL
     ) async throws -> URL {
-        let delegate = OfficialUpdateDownloadDelegate(
-            initialURL: download.remoteURL,
-            allowedHosts: download.source.allowedHosts,
-            maximumDownloadBytes: packageValidator.maximumDownloadBytes
-        )
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 30 * 60
-        let session = URLSession(
-            configuration: configuration,
-            delegate: delegate,
-            delegateQueue: nil
-        )
-        defer { session.finishTasksAndInvalidate() }
-
         var request = URLRequest(url: download.remoteURL)
         request.httpMethod = "GET"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-        let temporaryURL: URL
-        let response: URLResponse
-        do {
-            (temporaryURL, response) = try await session.download(for: request)
-        } catch {
-            if delegate.rejectedRedirect { throw OfficialApplicationUpdateInstallerError.invalidRedirect }
-            if delegate.exceededSize { throw PackageValidationError.fileTooLarge }
-            throw error
-        }
+        let downloaded = try await OfficialUpdateDownloader(
+            maximumBytes: packageValidator.maximumDownloadBytes,
+            allowedHosts: download.source.allowedHosts
+        ).download(request, stagingURL: directory.appendingPathComponent("Update.partial", isDirectory: false))
+        let temporaryURL = downloaded.fileURL
+        let response = downloaded.response
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else {
             if let http = response as? HTTPURLResponse,
@@ -510,7 +556,7 @@ struct OfficialApplicationUpdateInstaller: Sendable {
             }
             throw OfficialApplicationUpdateInstallerError.invalidResponse
         }
-        var redirectChain = delegate.redirectChain
+        var redirectChain = downloaded.redirectChain
         if let finalURL = http.url, redirectChain.last != finalURL {
             redirectChain.append(finalURL)
         }
@@ -590,12 +636,14 @@ struct OfficialApplicationUpdateInstaller: Sendable {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private func revalidateInstalledApplication(_ expected: InstalledApplication) async throws {
-        let runningState = await ApplicationRunningStateSnapshot.capture()
+    func revalidateInstalledApplication(_ expected: InstalledApplication) async throws {
+        let runningState = await runningStateProvider()
         guard let observed = await metadataReader.read(
             applicationURL: expected.bundleURL,
-            runningState: runningState
+            runningState: runningState,
+            scanDate: Date()
         ), observed.sourceEvidence.contains("valid-code-signature"),
+           observed.bundleURL.standardizedFileURL == expected.bundleURL.standardizedFileURL,
            observed.identity == expected.identity,
            observed.installedVersion == expected.installedVersion else {
             throw OfficialApplicationUpdateInstallerError.installedApplicationChanged
@@ -603,6 +651,29 @@ struct OfficialApplicationUpdateInstaller: Sendable {
         guard !observed.isRunning else {
             throw OfficialApplicationUpdateInstallerError.applicationBecameRunning
         }
+    }
+
+    private func mountReadOnly(_ archive: AuthenticatedUpdateArchive, workingDirectory: URL) async throws -> [URL] {
+        let descriptor = try archive.imageDescriptor(in: workingDirectory)
+        defer { try? descriptor.close() }
+        let cancellation = OfficialUpdateInstallerCancellation()
+        let data = try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                try AppUpdateCommandRunner(outputLimit: 1_048_576).runSync(executableURL: URL(fileURLWithPath: "/usr/bin/hdiutil"),
+                    arguments: ["attach", "/dev/fd/0", "-readonly", "-nobrowse", "-plist"],
+                    environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], timeout: 120,
+                    inputFD: descriptor.fileDescriptor, permitsPersistentSystemService: true, cancelled: { cancellation.isCancelled })
+            }.value
+        } onCancel: { cancellation.cancel() }
+        return try Self.mountPoints(data)
+    }
+    private static func mountPoints(_ data: Data) throws -> [URL] {
+        guard let dictionary = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+            let entities = dictionary["system-entities"] as? [[String: Any]] else { throw OfficialApplicationUpdateInstallerError.mountFailed }
+        let urls = entities.compactMap { ($0["mount-point"] as? String).map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath() } }
+            .filter { $0.path.hasPrefix("/Volumes/") }
+        guard !urls.isEmpty else { throw OfficialApplicationUpdateInstallerError.mountFailed }
+        return urls
     }
 
     func mountReadOnly(_ imageURL: URL) async throws -> [URL] {
@@ -646,6 +717,7 @@ struct OfficialApplicationUpdateInstaller: Sendable {
     }
 
     func detach(_ mountPoints: [URL]) async {
+        if let detachInjected { await detachInjected(mountPoints); return }
         for mountPoint in mountPoints.reversed() {
             _ = try? await Task.detached(priority: .utility) {
                 try Shell.run(
@@ -682,7 +754,7 @@ struct OfficialApplicationUpdateInstaller: Sendable {
                     for: application,
                     source: source
                 )
-                if let targetVersion, result.candidateVersion < targetVersion {
+                if let targetVersion, !result.candidateVersion.reaches(targetVersion) {
                     firstVerificationError = OfficialApplicationUpdateInstallerError
                         .candidateBelowTarget(
                             expected: targetVersion.display,
@@ -709,21 +781,30 @@ struct OfficialApplicationUpdateInstaller: Sendable {
         _ candidate: URL,
         application: InstalledApplication,
         source: OfficialUpdateSource,
-        targetVersion: ApplicationVersion?
+        targetVersion: ApplicationVersion?,
+        authenticatedDigest: String
     ) async throws {
+        guard try AuthenticatedApplicationDigest.compute(candidate) == authenticatedDigest else { throw SparkleAutomaticUpdateError.invalidSignature }
         guard let targetVersion, !targetVersion.preferred.isEmpty else {
             throw OfficialApplicationUpdateInstallerError.targetVersionMissing
         }
         let parent = application.bundleURL.deletingLastPathComponent()
-        guard FileManager.default.isWritableFile(atPath: parent.path) else {
-            throw OfficialApplicationUpdateInstallerError.destinationNotWritable
+        guard writable(parent) else {
+            try await revalidateInstalledApplication(application)
+            guard AppUpdateProtectedReplacementPolicy.accepts(application) else { throw AuthorizedMoveError.unavailable }
+            try await protectedReplacement(candidate, application, authenticatedDigest)
+            return
         }
         let staged = parent.appendingPathComponent(
             ".StorageCleanerMac-Update-\(UUID().uuidString).app",
             isDirectory: true
         )
-        defer { try? FileManager.default.removeItem(at: staged) }
+        // Once a transaction exists, it owns cleanup. A rollback failure must
+        // retain staged (which may be the sole old bundle) and its journal.
+        var handedToTransaction = false
+        defer { if !handedToTransaction { try? FileManager.default.removeItem(at: staged) } }
         try FileManager.default.copyItem(at: candidate, to: staged)
+        guard try AuthenticatedApplicationDigest.compute(staged) == authenticatedDigest else { throw SparkleAutomaticUpdateError.invalidSignature }
         _ = try bundleVerifier.verifyReplacement(
             at: staged,
             for: application,
@@ -733,12 +814,16 @@ struct OfficialApplicationUpdateInstaller: Sendable {
         // launch or change. Re-read its signature, version and running state at
         // the last safe point before the filesystem swap.
         try await revalidateInstalledApplication(application)
+        handedToTransaction = true
         try OfficialApplicationReplacement.replace(
             destination: application.bundleURL,
             staged: staged,
             expectedIdentity: application.identity,
             originalVersion: application.installedVersion,
-            targetVersion: targetVersion
+            targetVersion: targetVersion,
+            transactionURL: transactionURL,
+            authenticatedDigest: authenticatedDigest,
+            event: replacementEvent
         ) { installedURL in
             _ = try bundleVerifier.verifyReplacement(
                 at: installedURL,
@@ -750,6 +835,8 @@ struct OfficialApplicationUpdateInstaller: Sendable {
 }
 
 enum OfficialApplicationReplacementPhase: String, Codable, Sendable {
+    case rollbackFailed
+    case bundlesExchanged
     /// The record is durable, but no filesystem move has been observed yet.
     case prepared
     /// The old application was moved to `backupURL`; the staged bundle is
@@ -772,6 +859,8 @@ struct OfficialApplicationReplacementTransaction: Codable, Hashable, Sendable {
     let expectedIdentity: ApplicationIdentity
     let originalVersion: ApplicationVersion
     let targetVersion: ApplicationVersion
+    let authenticatedDigest: String?
+    var retainedOldURL: URL?
     var phase: OfficialApplicationReplacementPhase
 
     init(
@@ -783,7 +872,9 @@ struct OfficialApplicationReplacementTransaction: Codable, Hashable, Sendable {
         expectedIdentity: ApplicationIdentity,
         originalVersion: ApplicationVersion,
         targetVersion: ApplicationVersion,
-        phase: OfficialApplicationReplacementPhase
+        phase: OfficialApplicationReplacementPhase,
+        authenticatedDigest: String? = nil,
+        retainedOldURL: URL? = nil
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.id = id
@@ -794,6 +885,7 @@ struct OfficialApplicationReplacementTransaction: Codable, Hashable, Sendable {
         self.expectedIdentity = expectedIdentity
         self.originalVersion = originalVersion
         self.targetVersion = targetVersion
+        self.authenticatedDigest = authenticatedDigest; self.retainedOldURL = retainedOldURL
         self.phase = phase
     }
 }
@@ -956,6 +1048,7 @@ enum OfficialApplicationReplacementTransactionLocation {
 }
 
 enum OfficialApplicationReplacement {
+    enum Event: Sendable, Equatable { case beforeSwap, afterSwap, beforeCleanup, afterCleanup, beforeRollback }
     typealias IdentityVerifier = @Sendable (URL, ApplicationIdentity) throws -> Bool
 
     static func replace(
@@ -965,6 +1058,8 @@ enum OfficialApplicationReplacement {
         originalVersion: ApplicationVersion,
         targetVersion: ApplicationVersion,
         transactionURL: URL = OfficialApplicationReplacementTransactionLocation.defaultURL,
+        authenticatedDigest: String,
+        event: (Event) throws -> Void = { _ in },
         verify: (URL) throws -> Void
     ) throws {
         let fileManager = FileManager.default
@@ -995,40 +1090,56 @@ enum OfficialApplicationReplacement {
             expectedIdentity: expectedIdentity,
             originalVersion: originalVersion,
             targetVersion: targetVersion,
-            phase: .prepared
+            phase: .prepared,
+            authenticatedDigest: authenticatedDigest
         )
         try Self.validate(transaction)
         try store.save(transaction)
 
-        var currentPhase = transaction.phase
+        var exchanged = false
+        var oldURL = staged
         var backupRemoved = false
+        var restored = false
         do {
-            try fileManager.moveItem(at: destination, to: backup)
-            currentPhase = .destinationMovedToBackup
-            try store.save(Self.withPhase(transaction, currentPhase))
-
-            try fileManager.moveItem(at: staged, to: destination)
-            currentPhase = .stagedMovedToDestination
-            try store.save(Self.withPhase(transaction, currentPhase))
-
+            try event(.beforeSwap)
+            try AuthenticatedApplicationDigest.authenticateCopy(staged, expectedSHA256: authenticatedDigest)
+            try swap(staged, destination)
+            exchanged = true
+            try event(.afterSwap)
+            try AuthenticatedApplicationDigest.authenticateCopy(destination, expectedSHA256: authenticatedDigest)
+            try store.save(Self.withPhase(transaction, .bundlesExchanged))
+            try fileManager.moveItem(at: staged, to: backup)
+            oldURL = backup
+            try store.save(Self.withPhase(transaction, .stagedMovedToDestination))
             try verify(destination)
+            try event(.beforeCleanup)
+            try AuthenticatedApplicationDigest.authenticateCopy(destination, expectedSHA256: authenticatedDigest)
             try fileManager.removeItem(at: backup)
             backupRemoved = true
+            try event(.afterCleanup)
             try store.clear()
         } catch {
-            guard !backupRemoved else { throw error }
-            guard currentPhase != .prepared else { throw error }
-            if fileManager.fileExists(atPath: destination.path) {
-                try? fileManager.removeItem(at: destination)
-            }
-            do {
-                try fileManager.moveItem(at: backup, to: destination)
-                try store.clear()
-            } catch {
-                throw OfficialApplicationUpdateInstallerError.rollbackFailed(backup.path)
-            }
+            if exchanged && !backupRemoved {
+                do {
+                    try event(.beforeRollback)
+                    try swap(oldURL, destination)
+                    restored = true
+                    try fileManager.removeItem(at: oldURL)
+                    try store.clear()
+                } catch {
+                    var retained = Self.withPhase(transaction, .rollbackFailed)
+                    retained.retainedOldURL = restored ? destination : oldURL
+                    try? store.save(retained)
+                    throw OfficialApplicationUpdateInstallerError.rollbackFailed((restored ? destination : oldURL).path + "；staging: " + staged.path + "；journal: " + transactionURL.path)
+                }
+            } else if !exchanged { try? store.clear() }
             throw error
         }
+    }
+
+    private static func swap(_ from: URL, _ to: URL) throws {
+        let result = from.path.withCString { from in to.path.withCString { to in renamex_np(from, to, UInt32(RENAME_SWAP)) } }
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
     static func reconcilePending(
@@ -1042,6 +1153,9 @@ enum OfficialApplicationReplacement {
         let store = OfficialApplicationReplacementTransactionStore(fileURL: transactionURL)
         guard let transaction = try store.load() else { return .none }
         try validate(transaction)
+        if transaction.phase == .rollbackFailed {
+            throw OfficialApplicationUpdateInstallerError.rollbackFailed((transaction.retainedOldURL ?? transaction.stagedURL).path + "；journal: " + transactionURL.path)
+        }
         if let expectedDestinationURL,
            transaction.destinationURL.standardizedFileURL.path
                 != expectedDestinationURL.standardizedFileURL.path {
@@ -1078,6 +1192,8 @@ enum OfficialApplicationReplacement {
         }
 
         func verifyCandidate(_ url: URL) throws {
+            guard let digest = transaction.authenticatedDigest else { throw OfficialApplicationUpdateInstallerError.stagedArtifactChanged }
+            try AuthenticatedApplicationDigest.authenticateCopy(url, expectedSHA256: digest)
             guard try identityVerifier(url, expectedIdentity),
                   Self.matchesCandidateVersion(
                       at: url,
@@ -1114,6 +1230,16 @@ enum OfficialApplicationReplacement {
             return .cleanedCandidate
         }
 
+        if destinationExists, !backupExists, stagedExists,
+           Self.matchesCandidateVersion(at: transaction.destinationURL, original: transaction.originalVersion, target: transaction.targetVersion),
+           Self.matchesOriginalVersion(at: transaction.stagedURL, expected: transaction.originalVersion) {
+            try verifyCandidate(transaction.destinationURL)
+            try verifyOriginal(transaction.stagedURL)
+            try fileManager.removeItem(at: transaction.stagedURL)
+            try store.clear()
+            return .cleanedCandidate
+        }
+
         if destinationExists, !backupExists, stagedExists {
             guard transaction.phase == .prepared
                     || transaction.phase == .destinationMovedToBackup else {
@@ -1132,9 +1258,9 @@ enum OfficialApplicationReplacement {
                 try verifyOriginal(transaction.destinationURL)
                 try store.clear()
                 return .restoredOriginal
-            case .destinationMovedToBackup:
+            case .destinationMovedToBackup, .rollbackFailed:
                 throw OfficialApplicationReplacementRecoveryError.filesystemStateMismatch
-            case .stagedMovedToDestination:
+            case .bundlesExchanged, .stagedMovedToDestination:
                 try verifyCandidate(transaction.destinationURL)
                 try store.clear()
                 return .cleanedCandidate
@@ -1166,7 +1292,9 @@ enum OfficialApplicationReplacement {
             expectedIdentity: transaction.expectedIdentity,
             originalVersion: transaction.originalVersion,
             targetVersion: transaction.targetVersion,
-            phase: phase
+            phase: phase,
+            authenticatedDigest: transaction.authenticatedDigest,
+            retainedOldURL: transaction.retainedOldURL
         )
     }
 
@@ -1248,7 +1376,7 @@ enum OfficialApplicationReplacement {
               let observed = observedVersion(at: url) else {
             return false
         }
-        return observed != original && observed >= target
+        return observed != original && observed.reaches(target)
     }
 
     private static func observedVersion(at url: URL) -> ApplicationVersion? {
@@ -1273,7 +1401,11 @@ enum OfficialApplicationReplacement {
         }
         do {
             let signature = try CodeSignatureVerifier().verifyCode(at: url)
-            guard signature.teamIdentifier == expected.signingTeamIdentifier else {
+            // Two missing Team IDs are not a match: without an expected,
+            // Apple-anchored Team ID the replacement cannot be tied to the
+            // same developer.
+            guard let expectedTeam = expected.signingTeamIdentifier?.trimmed.nonEmpty,
+                  signature.teamIdentifier == expectedTeam else {
                 return false
             }
             if let expectedCodeIdentifier = expected.codeSigningIdentifier,
@@ -1287,18 +1419,93 @@ enum OfficialApplicationReplacement {
     }
 }
 
+/// Downloads through a plain delegate-driven task: unlike the async
+/// convenience API, it is guaranteed to report every write, so the size
+/// limit stops an oversized or unbounded (chunked) response while it streams
+/// instead of after the whole file reached the disk.
+struct OfficialUpdateDownloader: Sendable {
+    struct Result: Sendable {
+        let fileURL: URL
+        let response: URLResponse
+        let redirectChain: [URL]
+    }
+
+    /// Test seams; production leaves both empty.
+    struct TestHooks: Sendable {
+        /// Runs after the transfer task exists and before the download
+        /// registers for its completion, which may arrive first.
+        var beforeStart: (@Sendable () -> Void)?
+        /// Sees the running total of every write the size limit checks.
+        var didWrite: (@Sendable (_ totalBytesWritten: Int64) -> Void)?
+    }
+
+    let maximumBytes: Int64
+    let allowedHosts: Set<String>
+    var makeConfiguration: @Sendable () -> URLSessionConfiguration = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 30 * 60
+        return configuration
+    }
+    var testHooks = TestHooks()
+
+    func download(_ request: URLRequest, stagingURL: URL) async throws -> Result {
+        guard let initialURL = request.url else { throw OfficialApplicationUpdateInstallerError.invalidResponse }
+        let delegate = OfficialUpdateDownloadDelegate(
+            initialURL: initialURL,
+            allowedHosts: allowedHosts,
+            maximumDownloadBytes: maximumBytes,
+            stagingURL: stagingURL,
+            testHooks: testHooks
+        )
+        let session = URLSession(configuration: makeConfiguration(), delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        do {
+            let (fileURL, response) = try await delegate.run(session.downloadTask(with: request))
+            // A refused redirect or a crossed limit fails the download even
+            // if the transfer still managed to complete.
+            guard !delegate.rejectedRedirect, !delegate.exceededSize else { throw URLError(.cancelled) }
+            return Result(fileURL: fileURL, response: response, redirectChain: delegate.redirectChain)
+        } catch {
+            try? FileManager.default.removeItem(at: stagingURL)
+            if delegate.rejectedRedirect { throw OfficialApplicationUpdateInstallerError.invalidRedirect }
+            if delegate.exceededSize { throw PackageValidationError.fileTooLarge }
+            throw error
+        }
+    }
+}
+
 private final class OfficialUpdateDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private typealias Outcome = Swift.Result<(URL, URLResponse), Error>
+
     private let allowedHosts: Set<String>
     private let maximumDownloadBytes: Int64
+    private let stagingURL: URL
+    private let testHooks: OfficialUpdateDownloader.TestHooks
     private let validator = AllowedHostValidator()
     private let lock = NSLock()
     private var chain: [URL]
     private var didReject = false
     private var didExceedSize = false
+    private var finishedURL: URL?
+    private var finishError: Error?
+    private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+    /// A completion that arrived before `run` registered its continuation,
+    /// for example for a task cancelled before it started.
+    private var earlyOutcome: Outcome?
 
-    init(initialURL: URL, allowedHosts: Set<String>, maximumDownloadBytes: Int64) {
+    init(
+        initialURL: URL,
+        allowedHosts: Set<String>,
+        maximumDownloadBytes: Int64,
+        stagingURL: URL,
+        testHooks: OfficialUpdateDownloader.TestHooks
+    ) {
         self.allowedHosts = allowedHosts
         self.maximumDownloadBytes = maximumDownloadBytes
+        self.stagingURL = stagingURL
+        self.testHooks = testHooks
         chain = [initialURL]
     }
 
@@ -1306,27 +1513,91 @@ private final class OfficialUpdateDownloadDelegate: NSObject, URLSessionDownload
     var rejectedRedirect: Bool { lock.withLock { didReject } }
     var exceededSize: Bool { lock.withLock { didExceedSize } }
 
+    func run(_ task: URLSessionDownloadTask) async throws -> (URL, URLResponse) {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                testHooks.beforeStart?()
+                // Registration and completion meet under one lock, so the
+                // download resumes whichever of the two comes first.
+                let early = lock.withLock { () -> Outcome? in
+                    if let earlyOutcome { return earlyOutcome }
+                    self.continuation = continuation
+                    return nil
+                }
+                if let early {
+                    continuation.resume(with: early)
+                } else if Task.isCancelled {
+                    // Never start a transfer for a cancelled caller; the
+                    // cancellation still completes the task and resumes here.
+                    task.cancel()
+                } else {
+                    task.resume()
+                }
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     func urlSession(
         _: URLSession,
         downloadTask: URLSessionDownloadTask,
         didWriteData _: Int64,
         totalBytesWritten: Int64,
-        totalBytesExpectedToWrite _: Int64
+        totalBytesExpectedToWrite: Int64
     ) {
-        guard totalBytesWritten > maximumDownloadBytes else { return }
-        lock.withLock { didExceedSize = true }
-        downloadTask.cancel()
+        // A declared length over the limit stops at the first write; an
+        // undeclared (chunked) one stops as soon as it crosses the limit.
+        if totalBytesWritten > maximumDownloadBytes || totalBytesExpectedToWrite > maximumDownloadBytes {
+            lock.withLock { didExceedSize = true }
+            downloadTask.cancel()
+        }
+        testHooks.didWrite?(totalBytesWritten)
     }
 
     func urlSession(
         _: URLSession,
         downloadTask _: URLSessionDownloadTask,
-        didFinishDownloadingTo _: URL
-    ) {}
+        didFinishDownloadingTo location: URL
+    ) {
+        // The system deletes `location` when this returns; keep the bytes.
+        do {
+            try? FileManager.default.removeItem(at: stagingURL)
+            try FileManager.default.moveItem(at: location, to: stagingURL)
+            lock.withLock { finishedURL = stagingURL }
+        } catch {
+            lock.withLock { finishError = error }
+        }
+    }
+
+    func urlSession(_: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let response = task.response
+        let (continuation, outcome) = lock.withLock {
+            () -> (CheckedContinuation<(URL, URLResponse), Error>?, Outcome) in
+            let outcome: Outcome
+            if let error {
+                outcome = .failure(error)
+            } else if let finishError {
+                outcome = .failure(finishError)
+            } else if let finishedURL, let response {
+                outcome = .success((finishedURL, response))
+            } else {
+                outcome = .failure(OfficialApplicationUpdateInstallerError.invalidResponse)
+            }
+            // `run` may not have registered yet: keep the outcome for it.
+            guard let continuation = self.continuation else {
+                earlyOutcome = outcome
+                return (nil, outcome)
+            }
+            self.continuation = nil
+            return (continuation, outcome)
+        }
+        continuation?.resume(with: outcome)
+    }
 
     func urlSession(
         _: URLSession,
-        task _: URLSessionTask,
+        task: URLSessionTask,
         willPerformHTTPRedirection _: HTTPURLResponse,
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
@@ -1334,10 +1605,15 @@ private final class OfficialUpdateDownloadDelegate: NSObject, URLSessionDownload
         guard let url = request.url,
               (try? validator.validate(url, allowedHosts: allowedHosts)) != nil else {
             lock.withLock { didReject = true }
+            // Refusing only stops following: the task would still complete
+            // with the redirect's own body. Cancel it so the download fails as
+            // an invalid redirect.
+            task.cancel()
             completionHandler(nil)
             return
         }
         lock.withLock { chain.append(url) }
+
         completionHandler(request)
     }
 }

@@ -6,6 +6,7 @@ struct ApplicationInventoryScanner: Sendable {
     private let directoryScanner: DirectoryApplicationScanner
     private let spotlightScanner: SpotlightApplicationScanner
     private let metadataReader: ApplicationMetadataReader
+    private let inventoryMetadataReader: ApplicationInventoryMetadataReader?
     private let homebrewScanner: HomebrewInventoryScanner
     private let deduplicator: ApplicationDeduplicator
     private let sourceResolver: OfficialUpdateSourceResolver
@@ -15,6 +16,7 @@ struct ApplicationInventoryScanner: Sendable {
         directoryScanner: DirectoryApplicationScanner = DirectoryApplicationScanner(),
         spotlightScanner: SpotlightApplicationScanner = SpotlightApplicationScanner(),
         metadataReader: ApplicationMetadataReader = ApplicationMetadataReader(),
+        metadataCache: ApplicationInventoryMetadataCache? = ApplicationInventoryMetadataCache(),
         homebrewScanner: HomebrewInventoryScanner = HomebrewInventoryScanner(),
         deduplicator: ApplicationDeduplicator = ApplicationDeduplicator(),
         sourceResolver: OfficialUpdateSourceResolver = OfficialUpdateSourceResolver(),
@@ -23,6 +25,9 @@ struct ApplicationInventoryScanner: Sendable {
         self.directoryScanner = directoryScanner
         self.spotlightScanner = spotlightScanner
         self.metadataReader = metadataReader
+        self.inventoryMetadataReader = metadataCache.map {
+            ApplicationInventoryMetadataReader(reader: metadataReader, cache: $0)
+        }
         self.homebrewScanner = homebrewScanner
         self.deduplicator = deduplicator
         self.sourceResolver = sourceResolver
@@ -63,7 +68,7 @@ struct ApplicationInventoryScanner: Sendable {
         await onProgress(ApplicationScanProgress(stage: .scanningStandardDirectories))
         async let spotlightOutcome = scanSpotlight(configuration: configuration)
         async let homebrewOutcome = scanHomebrew(
-            checkSelfUpdatingCasks: configuration.checkSelfUpdatingHomebrewCasks
+            checkSelfUpdatingCasks: true
         )
         let directoryURLs = try await directoryScanner.scan(roots)
         let runningState = await ApplicationRunningStateSnapshot.capture()
@@ -100,12 +105,21 @@ struct ApplicationInventoryScanner: Sendable {
             onApplications: onApplications
         ))
 
+        do {
+            try await inventoryMetadataReader?.cache.flush()
+        } catch {
+            await onProgress(ApplicationScanProgress(
+                stage: .readingMetadata,
+                detail: "inventory-cache-write: \(error.localizedDescription)"
+            ))
+        }
+
         let homebrewResult = try await homebrewOutcome
         if let homebrewInventory = homebrewResult.inventory {
             applications = merge(
                 homebrewInventory,
                 into: applications,
-                includeFormulae: configuration.includeHomebrewFormulae
+                includeFormulae: true
             )
         } else if let errorDescription = homebrewResult.errorDescription {
             await onProgress(ApplicationScanProgress(
@@ -207,7 +221,7 @@ struct ApplicationInventoryScanner: Sendable {
         }
     }
 
-    private func readMetadata(
+    func readMetadata(
         urls: [URL],
         runningState: ApplicationRunningStateSnapshot,
         onProgress: @escaping @Sendable (ApplicationScanProgress) async -> Void,
@@ -217,6 +231,7 @@ struct ApplicationInventoryScanner: Sendable {
         var incrementalBatch = [InstalledApplication]()
         let urls = uniqueURLs(urls)
         let metadataReader = self.metadataReader
+        let inventoryMetadataReader = self.inventoryMetadataReader
         applications.reserveCapacity(urls.count)
         incrementalBatch.reserveCapacity(16)
         var startIndex = 0
@@ -234,10 +249,16 @@ struct ApplicationInventoryScanner: Sendable {
                     let url = urls[index]
                     group.addTask {
                         try Task.checkCancellation()
-                        let application = await metadataReader.read(
-                            applicationURL: url,
-                            runningState: runningState
-                        )
+                        let application: InstalledApplication?
+                        if let inventoryMetadataReader {
+                            application = await inventoryMetadataReader.read(
+                                applicationURL: url, runningState: runningState
+                            )
+                        } else {
+                            application = await metadataReader.read(
+                                applicationURL: url, runningState: runningState
+                            )
+                        }
                         try Task.checkCancellation()
                         return (index, application)
                     }
@@ -331,7 +352,7 @@ struct ApplicationInventoryScanner: Sendable {
             } ?? inventory.prefixURL
                 .appendingPathComponent("Caskroom", isDirectory: true)
                 .appendingPathComponent(metadata.token, isDirectory: true)
-            packageKind = .graphicalApplication
+            packageKind = metadata.appBundlePaths.isEmpty ? .commandLineTool : .graphicalApplication
             bundleIdentifier = "homebrew.cask.\(metadata.token)"
         case .formula:
             bundleURL = inventory.prefixURL

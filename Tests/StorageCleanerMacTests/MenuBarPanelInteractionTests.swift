@@ -5,7 +5,7 @@ import XCTest
 final class MenuBarPanelInteractionTests: XCTestCase {
     @MainActor
     func testMoreMenuDensitySelectorCommitsSelectionImmediately() {
-        let state = MenuBarPanelSettingsState(initialDensity: .simple)
+        let state = MenuBarPanelSettingsState(initialDensity: .simple, defaults: TestPreferenceDomain.make(for: self))
 
         state.selectDensity(.geek)
 
@@ -14,7 +14,7 @@ final class MenuBarPanelInteractionTests: XCTestCase {
 
     @MainActor
     func testGeekEditorPresentationSurvivesDensitySynchronization() {
-        let state = MenuBarPanelSettingsState(initialDensity: .simple)
+        let state = MenuBarPanelSettingsState(initialDensity: .simple, defaults: TestPreferenceDomain.make(for: self))
 
         state.presentGeekEditor()
         state.synchronizeDensity(.complex)
@@ -35,7 +35,7 @@ final class MenuBarPanelInteractionTests: XCTestCase {
             root: projectRoot
         )
         let compactSource = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift",
             root: projectRoot
         )
         let advancedSource = try source(
@@ -74,18 +74,18 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         XCTAssertFalse(rootSource.contains(".popover("))
         XCTAssertFalse(rootSource.contains("DispatchQueue.main.asyncAfter"))
         XCTAssertFalse(chromeSource.contains("PanelSettingsView("))
-        XCTAssertTrue(chromeSource.contains(".popover(isPresented: geekEditorBinding"))
-        XCTAssertEqual(chromeSource.components(separatedBy: ".popover(isPresented:").count - 1, 1)
+        XCTAssertFalse(chromeSource.contains(".popover(isPresented: geekEditorBinding"))
+        XCTAssertEqual(chromeSource.components(separatedBy: ".popover(isPresented:").count - 1, 0)
         XCTAssertTrue(chromeSource.contains("Menu {"))
         XCTAssertFalse(chromeSource.contains("if state.selectedDensity == .geek {"))
         XCTAssertTrue(chromeSource.contains("state.presentGeekEditor()"))
         XCTAssertEqual(
-            chromeSource.components(separatedBy: "Customize Geek Overview…").count - 1,
+            chromeSource.components(separatedBy: "Panel Settings…").count - 1,
             1
         )
-        XCTAssertTrue(chromeSource.contains("GeekDashboardEditor(state: state)"))
+        XCTAssertFalse(chromeSource.contains("GeekDashboardEditor(state: state)"))
         XCTAssertTrue(chromeSource.contains("启动时恢复小窗"))
-        XCTAssertFalse(chromeSource.contains("小窗设置"))
+        XCTAssertTrue(chromeSource.contains("小窗设置"))
         XCTAssertFalse(chromeSource.contains("isSettingsPresented"))
         XCTAssertFalse(controllerSource.contains("MenuBarPanelSettingsView("))
         XCTAssertFalse(controllerSource.contains("panelModeChangeState"))
@@ -234,13 +234,13 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         let folder = projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced")
         let expectedFiles = [
             "MenuBarAdvancedComponents.swift",
-            "MenuBarCombinedPanel.swift",
-            "MenuBarProcessorPanel.swift",
-            "MenuBarMemoryPanel.swift",
-            "MenuBarDiskPanel.swift",
-            "MenuBarNetworkPanel.swift",
-            "MenuBarSensorsPanel.swift",
-            "MenuBarPowerPanel.swift"
+            "MenuBarGeekPanel.swift",
+            "GeekProcessorView.swift",
+            "GeekMemoryView.swift",
+            "GeekDiskView.swift",
+            "GeekNetworkView.swift",
+            "GeekSensorsView.swift",
+            "GeekPowerView.swift"
         ]
 
         for name in expectedFiles {
@@ -261,7 +261,7 @@ final class MenuBarPanelInteractionTests: XCTestCase {
             root: projectRoot
         )
         let compactSource = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift",
             root: projectRoot
         )
         let componentsSource = try source(
@@ -284,14 +284,14 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         XCTAssertFalse(settingsSource.contains("关闭面板设置"))
         XCTAssertFalse(settingsSource.contains("xmark"))
         XCTAssertTrue(chromeSource.contains(
-            ".accessibilityLabel(L10n.text(\"正在刷新本机数据\", \"Refreshing local data\"))"
+            ".accessibilityLabel(L10n.text(\"刷新与刷新频率\", \"Refresh and Refresh Rate\"))"
         ))
-        XCTAssertTrue(compactSource.contains("PanelHeader("))
-        XCTAssertTrue(componentsSource.contains("PanelHeader("))
+        XCTAssertTrue(compactSource.contains("GeekAttachedPanelShell("))
+        XCTAssertTrue(componentsSource.contains("PanelToolbarActions("))
         XCTAssertEqual(chromeSource.components(separatedBy: "AppIconButton(").count - 1, 1)
         XCTAssertEqual(chromeSource.components(separatedBy: "kind: .toolbar").count - 1, 1)
         XCTAssertEqual(chromeSource.components(separatedBy: "Menu {").count - 1, 2)
-        XCTAssertEqual(chromeSource.components(separatedBy: ".popover(isPresented:").count - 1, 1)
+        XCTAssertEqual(chromeSource.components(separatedBy: ".popover(isPresented:").count - 1, 0)
         XCTAssertFalse(chromeSource.contains("Picker(L10n.text(\"面板模式\""))
         XCTAssertFalse(chromeSource.contains("Picker(L10n.text(\"刷新频率\""))
         XCTAssertTrue(chromeSource.contains("ForEach(MenuBarRefreshInterval.allCases)"))
@@ -301,10 +301,10 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         XCTAssertFalse(chromeSource.contains("if state.selectedDensity == .geek {"))
         XCTAssertTrue(chromeSource.contains("state.presentGeekEditor()"))
         XCTAssertEqual(
-            chromeSource.components(separatedBy: "Customize Geek Overview…").count - 1,
+            chromeSource.components(separatedBy: "Panel Settings…").count - 1,
             1
         )
-        XCTAssertTrue(chromeSource.contains("GeekDashboardEditor(state: state)"))
+        XCTAssertFalse(chromeSource.contains("GeekDashboardEditor(state: state)"))
         XCTAssertTrue(componentsSource.contains("var overviewContextMenu: some View"))
         XCTAssertTrue(componentsSource.contains("return actions.contextMenuContents"))
         XCTAssertFalse(componentsSource.contains("var overviewToolbar:"))
@@ -314,7 +314,7 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         let contextMenu = try XCTUnwrap(chromeSource.components(separatedBy: "var contextMenuContents: some View {").last?
             .components(separatedBy: "private var refreshControl:").first)
         XCTAssertTrue(contextMenu.contains("Button(action: togglePause)"))
-        XCTAssertTrue(contextMenu.contains("Label(pauseTitle, systemImage: pauseSystemImage)"))
+        XCTAssertTrue(contextMenu.contains("Text(pauseTitle)"))
         XCTAssertTrue(contextMenu.contains("refreshControl.menuContents"))
         XCTAssertTrue(contextMenu.contains("moreMenuContents"))
         XCTAssertTrue(chromeSource.contains("var menuContents: some View"))
@@ -328,7 +328,7 @@ final class MenuBarPanelInteractionTests: XCTestCase {
             chromeSource.range(of: "PanelRefreshControl(", options: .backwards)?.lowerBound
         )
         let more = try XCTUnwrap(
-            chromeSource.range(of: "Customize Geek Overview…")?.lowerBound
+            chromeSource.range(of: "Panel Settings…")?.lowerBound
         )
         XCTAssertLessThan(pause, refresh)
         XCTAssertLessThan(refresh, more)
@@ -349,7 +349,7 @@ final class MenuBarPanelInteractionTests: XCTestCase {
                 .appendingPathComponent("Sources/StorageCleanerMac/Views/AdvancedMonitorWindowView.swift")
                 .path
         ))
-        XCTAssertTrue(chromeSource.contains("L10n.text(\"实时\", \"Live\")"))
+        XCTAssertTrue(chromeSource.contains(".disabled(isRefreshing)"))
     }
 
     func testGeekPanelOpensAtOverviewAndUsesCancelableHoverDrillDown() throws {
@@ -387,9 +387,14 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         XCTAssertFalse(components.contains("GeekOverviewHoverMetrics"))
         XCTAssertTrue(components.contains("guard hovering, !isSelected else { return }"))
         XCTAssertTrue(components.contains("action(destination)"))
-        XCTAssertTrue(tertiary.contains("scheduleTertiaryPreview("))
+        let hover = try source(
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift",
+            root: projectRoot
+        )
+        XCTAssertTrue(hover.contains("scheduleTertiaryPreview("))
         XCTAssertTrue(tertiary.contains("scheduleHoverDismissal("))
-        XCTAssertTrue(tertiary.contains("activeTertiaryDetail = detail"))
+        XCTAssertTrue(hover.contains("inlineTertiaryEvent?(.present(GeekInlineTertiaryRequest("))
+        XCTAssertTrue(advanced.contains("activeInlineTertiaryRequest = request"))
         XCTAssertEqual(HoverIntentPolicy.menuBar.ordinaryCloseDelay, .milliseconds(260))
         XCTAssertTrue(advanced.contains("@State private var geekPanelDismissIntent: GeekPanelCoordinator.HoverIntent?"))
         XCTAssertTrue(advanced.contains("onHoverChange: geekAttachedPanelHoverChanged"))

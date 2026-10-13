@@ -58,14 +58,11 @@ final class MemoryDomainTests: XCTestCase {
     }
 
     func testPressureClassificationPrioritizesCriticalSignals() {
+        // D28 removed the estimate from available memory, swap and
+        // compression; the percent rule is the only one left (85 % elevated,
+        // 95 % critical), used for samples without the system level.
         XCTAssertEqual(
-            MemoryPressurePolicy.classify(
-                physicalBytes: 16_000,
-                availableBytes: 500,
-                compressedBytes: 1_000,
-                swapUsedBytes: 0,
-                pressureFreePercentage: 10
-            ),
+            MemoryPressurePolicy.classify(pressureFreePercentage: 5),
             .critical
         )
         XCTAssertEqual(

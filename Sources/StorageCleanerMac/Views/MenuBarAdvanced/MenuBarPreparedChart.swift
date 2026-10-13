@@ -17,30 +17,67 @@ extension EnvironmentValues {
 @MainActor
 final class MenuBarPreparedChartModel<Value: Sendable>: ObservableObject {
     @Published private(set) var value: Value?
+    /// `value` is the frame of another window of the same chart (kept while
+    /// the requested window's frame is built, see `request`). The history
+    /// shows "更新中…" meanwhile (`GeekHistoryPreviousFrameKey`).
+    @Published private(set) var isShowingPreviousValue = false
     private var desiredKey: MenuBarDerivedKey?
     private var deliveredKey: MenuBarDerivedKey?
-    private var pending: (MenuBarDerivedKey, Int, @Sendable () -> Value)?
+    private var deliveredShape: String?
+    private var deliveredWindow: TimeInterval?
+    private var pending: (key: MenuBarDerivedKey, shape: String?, window: TimeInterval?, cost: Int,
+                          build: @Sendable () -> Value)?
     private var worker: Task<Void, Never>?
     private var generation = 0
     let cache: MenuBarDerivedCache
 
     init(cache: MenuBarDerivedCache = .shared) { self.cache = cache }
 
-    func request(key: MenuBarDerivedKey, cost: Int, build: @escaping @Sendable () -> Value) {
+    /// `shape` names what must stay equal for the delivered value to remain
+    /// on screen while a value of another configuration is prepared: a
+    /// chart's series and plot geometry, but not its time window. Switching
+    /// only the window then keeps the previous frame until the new one is
+    /// ready. Without a shape, or when the shape changes, a value of another
+    /// configuration is cleared at once, because it would be drawn in the
+    /// wrong place.
+    func request(key: MenuBarDerivedKey, shape: String? = nil, window: TimeInterval? = nil, cost: Int,
+                 build: @escaping @Sendable () -> Value) {
         desiredKey = key
-        guard deliveredKey != key || value == nil else { pending = nil; return }
-        if let deliveredKey, deliveredKey.family != key.family { value = nil }
-        pending = (key, cost, build)
+        guard deliveredKey != key || value == nil else {
+            pending = nil
+            if isShowingPreviousValue { isShowingPreviousValue = false }
+            return
+        }
+        if let deliveredKey, deliveredKey.family != key.family,
+           shape == nil || shape != deliveredShape {
+            value = nil
+        }
+        // "Previous" means another time window (BOARD N11-1). A request that
+        // names its window is compared by window only: a new value range or
+        // sampling interval of the same window changes the key, not the
+        // window the frame on screen shows.
+        let showsAnotherWindow: Bool
+        if let window, let deliveredWindow {
+            showsAnotherWindow = window != deliveredWindow
+        } else {
+            showsAnotherWindow = deliveredKey.map { $0.family != key.family } == true
+        }
+        let showsPrevious = value != nil && showsAnotherWindow
+        if isShowingPreviousValue != showsPrevious { isShowingPreviousValue = showsPrevious }
+        pending = (key, shape, window, cost, build)
         guard worker == nil else { return }
         let capturedGeneration = generation
         worker = Task { @MainActor [weak self] in
             while let self, let request = pending {
                 pending = nil
-                let prepared = await cache.value(for: request.0, cost: request.1, build: request.2)
+                let prepared = await cache.value(for: request.key, cost: request.cost, build: request.build)
                 guard !Task.isCancelled, generation == capturedGeneration else { return }
-                if desiredKey == request.0 {
-                    deliveredKey = request.0
+                if desiredKey == request.key {
+                    deliveredKey = request.key
+                    deliveredShape = request.shape
+                    deliveredWindow = request.window
                     value = prepared
+                    if isShowingPreviousValue { isShowingPreviousValue = false }
                     pending = nil
                 }
             }
@@ -55,22 +92,62 @@ final class MenuBarPreparedChartModel<Value: Sendable>: ObservableObject {
         worker?.cancel()
         worker = nil
     }
+
+    /// Audit only: whether the drawn value was prepared for `key`.
+    func isDelivered(_ key: MenuBarDerivedKey) -> Bool { value != nil && deliveredKey == key }
 }
 
 struct MenuBarPreparedChart<Value: Sendable, Content: View>: View {
     let key: MenuBarDerivedKey
+    var shape: String? = nil
+    /// The time window the frame shows (`MenuBarPreparedChartModel.request`).
+    var window: TimeInterval? = nil
     let cost: Int
     let build: @Sendable () -> Value
+    var placeholder: AnyView? = nil
+    /// Audit only: the prepared input has samples.
+    var hasData = true
     @ViewBuilder let content: (Value) -> Content
     @StateObject private var model = MenuBarPreparedChartModel<Value>()
 
     var body: some View {
         Group {
             if let value = model.value { content(value) }
+            else if let placeholder { placeholder.accessibilityLabel(PanelChartSampling.statusText) }
             else { Color.clear.accessibilityLabel(PanelChartSampling.statusText) }
         }
-        .task(id: key) { model.request(key: key, cost: cost, build: build) }
+        .menuBarTraceProbe {
+            // A plotted frame of the requested data; summaries and stand-in
+            // frames of another window do not acknowledge.
+            if key.kind.hasSuffix("-frame") {
+                MenuBarPreparedChartProbe(
+                    revision: MenuBarPresentationProbe.revision(key.revision + key.configuration),
+                    isDelivered: model.isDelivered(key),
+                    hasData: hasData
+                )
+            }
+        }
+        .preference(key: GeekHistoryPreviousFrameKey.self, value: model.isShowingPreviousValue)
+        .task(id: key) { model.request(key: key, shape: shape, window: window, cost: cost, build: build) }
         .onDisappear { model.stop() }
+    }
+}
+
+/// `chart.<region>`: the first draw of a frame prepared for the requested
+/// data, unless the history still shows the previously selected window.
+/// `chart.empty.<region>`: a frame prepared from no samples was drawn.
+private struct MenuBarPreparedChartProbe: View {
+    @Environment(\.menuBarTraceRegion) private var region
+    @Environment(\.menuBarTraceChartIsStale) private var isStale
+    let revision: UInt64
+    let isDelivered: Bool
+    let hasData: Bool
+
+    var body: some View {
+        if isDelivered, !isStale {
+            MenuBarPresentationProbe(key: hasData ? "chart.\(region)" : "chart.empty.\(region)", revision: revision)
+                .frame(width: 1, height: 1)
+        }
     }
 }
 
@@ -91,16 +168,25 @@ struct MenuBarChartPreparation<Value: Sendable, Content: View>: View {
     let last: Date?
     let count: Int
     let configuration: String
+    /// See `MenuBarPreparedChartModel.request`: the part of the configuration
+    /// that is not the time window. Values of one shape stand in for each
+    /// other while the window changes.
+    var shape: String? = nil
+    /// The time window shown; with it, only another window marks the frame
+    /// on screen as the previous one ("更新中…").
+    var window: TimeInterval? = nil
     var clockRevision: TimeInterval = 0
     let cost: Int
     let build: @Sendable () -> Value
+    var placeholder: AnyView? = nil
     @ViewBuilder let content: (Value) -> Content
 
     var body: some View {
         if let context {
             MenuBarPreparedChart(key: context.key(kind: kind, first: first, last: last, count: count, clockRevision: clockRevision,
                                                   configuration: configuration),
-                                 cost: cost, build: build, content: content)
+                                 shape: shape, window: window,
+                                 cost: cost, build: build, placeholder: placeholder, hasData: count > 0, content: content)
         } else {
             content(build())
         }
@@ -115,9 +201,11 @@ struct GeekPreparedLineSummary: Sendable {
         var visible: [MenuBarTelemetryChannel] = []
         var stats: [MenuBarTelemetryChannel: GeekSeriesStatistics] = [:]
         for channel in channels {
-            let samples = points.map { MenuBarChartSample(date: $0.date, value: channel.value(in: $0)) }
-            if PanelChartSampling.hasRenderableTrend(samples) { visible.append(channel) }
-            stats[channel] = GeekSeriesStatistics(values: samples.compactMap(\.value))
+            let samples = MenuBarTelemetryPoint.historyPoints(points, channels: [channel]).map {
+                MenuBarChartSample(date: $0.date, value: channel.value(in: $0))
+            }
+            if PanelChartSampling.hasRenderableTrend(samples) || GeekCompressedHistoryProjection.hasTrend(points, channel: channel) { visible.append(channel) }
+            stats[channel] = GeekCompressedHistoryProjection.telemetryStatistics(points, channel: channel)
         }
         self.channels = visible
         statistics = stats
@@ -133,38 +221,64 @@ struct GeekPreparedLineFrame: Sendable {
     let hoverEstimated: [[Bool]]
     let segments: [MenuBarTelemetryChannel: [[CGPoint]]]
     let range: (start: Date, end: Date, dataStart: Date)
+    /// Per bucket, the most severe memory-pressure level among its samples;
+    /// prepared only for the memory-pressure channel.
+    let pressureLevels: [MemoryPressureLevel?]
 
     init(points: [MenuBarTelemetryPoint], channels: [MenuBarTelemetryChannel],
          plot: CGRect, duration: TimeInterval, reference: Date, samplingInterval: TimeInterval,
          scale: CGFloat, stacked: Bool, valueRange: ClosedRange<Double>) {
+        let points = MenuBarTelemetryPoint.historyPoints(points, channels: channels)
         sourcePoints = points
         let dates = points.map(\.date)
-        if stacked { range = GeekChartWindow.barRange(for: dates, duration: duration, referenceDate: reference) }
+        let bucketRange = GeekChartWindow.barRange(for: dates, duration: duration, referenceDate: reference)
+        let averagingInterval = GeekHistoryAveraging.interval(for: duration)
+        if stacked { range = bucketRange }
         else {
             let window = GeekChartWindow.range(for: dates, duration: duration, referenceDate: reference)
             range = (window.start, window.end, dates.first ?? window.start)
         }
-        let bucketRange = GeekChartWindow.barRange(for: dates, duration: duration, referenceDate: reference)
         let usesCPU = stacked && !channels.isEmpty && channels.allSatisfy { [.cpuTotal, .cpuUser, .cpuSystem].contains($0) }
-        cpu = usesCPU ? GeekCPUHistoryFrame.prepare(points: points, plotRect: plot, duration: duration,
-                                                    referenceDate: reference, samplingInterval: samplingInterval,
-                                                    displayScale: scale) : nil
-        if stacked || GeekHistoryAveraging.interval(for: duration) != nil {
-            buckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: bucketRange,
+        var preparedBuckets: [GeekChartBucketSnapshot]
+        if stacked || averagingInterval != nil {
+            preparedBuckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: bucketRange,
                 referenceDate: reference, displayScale: scale,
                 isValid: { index in channels.allSatisfy { $0.value(in: points[index])?.isFinite == true } },
-                isMissing: { index in stacked && channels.allSatisfy { $0.value(in: points[index]) == nil } },
+                isMissing: { index in
+                    if usesCPU, averagingInterval != nil {
+                        return !GeekCPUHistoryFrame.isComplete(points[index])
+                    }
+                    return stacked && channels.allSatisfy { $0.value(in: points[index]) == nil }
+                },
                 holdLatestWhileFresh: true)
         } else {
-            buckets = GeekChartWindow.barBucketSnapshots(for: dates, in: plot, range: bucketRange,
+            preparedBuckets = GeekChartWindow.barBucketSnapshots(for: dates, in: plot, range: bucketRange,
                 referenceDate: reference, displayScale: scale)
         }
-        values = buckets.map { bucket in channels.map { channel in
-            bucket.displayValue { index in
-                if stacked && !channels.allSatisfy({ $0.value(in: points[index])?.isFinite == true }) { return nil }
-                return channel.value(in: points[index])
+        let compressed = points.contains { $0.bucketStatistics != nil }
+        if compressed, let channel = channels.first {
+            let gaps = MenuBarSamplingGaps.shared.intervals(at: reference)
+            preparedBuckets = GeekCompressedHistoryProjection.buckets(preparedBuckets, dates: dates,
+                records: points.indices.map { points[$0].statistic(for: channel, previous: $0 > 0 ? points[$0 - 1] : nil, gaps: gaps) })
+        }
+        buckets = preparedBuckets
+        cpu = usesCPU ? GeekCPUHistoryFrame.prepare(points: points, plotRect: plot, duration: duration,
+                                                    referenceDate: reference, samplingInterval: samplingInterval,
+                                                    displayScale: scale,
+                                                    preparedAveragedBuckets: averagingInterval == nil ? nil : buckets) : nil
+        if let cpu, averagingInterval != nil {
+            let means = Dictionary(uniqueKeysWithValues: cpu.marks.map { ($0.bucket.x, $0.mean) })
+            values = buckets.map { bucket in
+                channels.map { channel in means[bucket.x].flatMap { channel.value(in: $0) } }
             }
-        } }
+        } else {
+            values = buckets.map { bucket in channels.map { channel in
+                bucket.displayValue { index in
+                    if stacked && !channels.allSatisfy({ $0.value(in: points[index])?.isFinite == true }) { return nil }
+                    return channel.mean(in: points[index])
+                }
+            } }
+        }
         let values = self.values
         let bucketValues = self.buckets
         let filled = channels.indices.map { channel in
@@ -181,9 +295,12 @@ struct GeekPreparedLineFrame: Sendable {
         if !stacked {
             let span = max(Double.ulpOfOne, valueRange.upperBound - valueRange.lowerBound)
             for channel in channels {
-                let filled = TimeBucketAggregator.nearestFilled(buckets.map { bucket in
-                    bucket.displayValue { channel.value(in: points[$0]) }
-                })
+                let observedValues = buckets.map { bucket in
+                    bucket.displayValue { channel.mean(in: points[$0]) }
+                }
+                let filled = compressed
+                    ? observedValues.enumerated().map { TimeBucketValue(value: $0.element, isEstimated: false, sourceIndex: $0.offset) }
+                    : TimeBucketAggregator.nearestFilled(observedValues)
                 paths[channel] = TimeBucketAggregator.observedSegments(filled.map(\.value), in: buckets,
                     sampleDates: dates, isSampleValid: { channel.value(in: points[$0])?.isFinite == true }).map { segment in
                     segment.map { sample in
@@ -195,20 +312,43 @@ struct GeekPreparedLineFrame: Sendable {
             }
         }
         segments = paths
+        pressureLevels = channels.contains(.memoryPressure)
+            ? buckets.map { bucket in
+                bucket.indices
+                    .compactMap { points.indices.contains($0) ? points[$0].memoryPressureLevel : nil }
+                    .max { $0.severity < $1.severity }
+            }
+            : []
     }
 }
 
 struct GeekPreparedDiskSummary: Sendable {
+    static let preparationKind = "disk-summary"
+    static func preparationConfiguration(duration: TimeInterval) -> String { "disk:\(duration)" }
+    /// One shape for every window: a summary of the previous window stays
+    /// until the selected window's summary is ready.
+    static let preparationShape = "disk"
+    let referenceDate: Date
     let hasData: Bool
     let read: GeekSeriesStatistics?
     let write: GeekSeriesStatistics?
-    init(points allPoints: [NativeDiskIOPoint], duration: TimeInterval = GeekChartWindow.defaultDuration) {
-        let points = MenuBarHistoryRetention.selected(allPoints, duration: duration, date: \.date, referenceDate: allPoints.last?.date ?? Date())
+    let readPeakBytesPerSecond: Int64?
+    let writePeakBytesPerSecond: Int64?
+    var readPeakText: String { readPeakBytesPerSecond.map { "\(ByteFormat.string($0))/s" } ?? "--" }
+    var writePeakText: String { writePeakBytesPerSecond.map { "\(ByteFormat.string($0))/s" } ?? "--" }
+    init(points allPoints: [NativeDiskIOPoint], duration: TimeInterval = GeekChartWindow.defaultDuration, referenceDate: Date) {
+        self.referenceDate = referenceDate
+        let points = MenuBarHistoryRetention.selected(allPoints, duration: duration, date: \.date, referenceDate: referenceDate)
         hasData = PanelChartSampling.hasRenderableTrend(points.map {
             MenuBarChartSample(date: $0.date, value: Double($0.readBytesPerSecond))
-        })
-        read = GeekSeriesStatistics(values: points.map { Double($0.readBytesPerSecond) })
-        write = GeekSeriesStatistics(values: points.map { Double($0.writeBytesPerSecond) })
+        }) || points.contains { ($0.bucketStatistics?.metrics["diskRead"]?.sampleCount ?? 0) >= 2
+            && ($0.bucketStatistics?.metrics["diskRead"]?.coveredDuration ?? 0) > 0 }
+        let gaps = MenuBarSamplingGaps.shared.intervals(at: referenceDate)
+        let records = points.indices.map { points[$0].statistics(previous: $0 > 0 ? points[$0 - 1] : nil, gaps: gaps) }
+        read = GeekSeriesStatistics(records: records.compactMap { $0.metrics["diskRead"] }, current: points.last.map { Double($0.readBytesPerSecond) })
+        write = GeekSeriesStatistics(records: records.compactMap { $0.metrics["diskWrite"] }, current: points.last.map { Double($0.writeBytesPerSecond) })
+        readPeakBytesPerSecond = read.map { Int64(clampingHistoryValue: $0.maximum) }
+        writePeakBytesPerSecond = write.map { Int64(clampingHistoryValue: $0.maximum) }
     }
 }
 
@@ -225,17 +365,26 @@ struct GeekPreparedDiskFrame: Sendable {
         let dates = points.map(\.date)
         let window = GeekChartWindow.barRange(for: dates, duration: duration, referenceDate: reference)
         range = window
-        let buckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: window,
+        var buckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: window,
             referenceDate: reference, displayScale: scale,
             intervalStart: { points[$0].intervalStart }, holdLatestWhileFresh: true)
+        let compressed = points.contains { $0.bucketStatistics != nil }
+        if compressed {
+            let gaps = MenuBarSamplingGaps.shared.intervals(at: reference)
+            buckets = GeekCompressedHistoryProjection.buckets(buckets, dates: dates,
+                records: points.indices.map { points[$0].statistics(previous: $0 > 0 ? points[$0 - 1] : nil, gaps: gaps).metrics["diskRead"] })
+        }
         self.buckets = buckets
-        let reads = buckets.map { $0.displayValue { Double(points[$0].readBytesPerSecond) } }
-        let writes = buckets.map { $0.displayValue { Double(points[$0].writeBytesPerSecond) } }
+        let reads = buckets.map { $0.displayValue { points[$0].bucketStatistics?.metrics["diskRead"]?.mean ?? Double(points[$0].readBytesPerSecond) } }
+        let writes = buckets.map { $0.displayValue { points[$0].bucketStatistics?.metrics["diskWrite"]?.mean ?? Double(points[$0].writeBytesPerSecond) } }
         self.reads = reads
         self.writes = writes
         maximum = GeekBarChartScale.throughputUpperBound(for: (reads + writes).compactMap { $0 })
         func marks(_ values: [Double?]) -> [GeekMirroredBarMark] {
-            zip(buckets, TimeBucketAggregator.nearestFilled(values)).compactMap { bucket, value in
+            let filled = compressed
+                ? values.enumerated().map { TimeBucketValue(value: $0.element, isEstimated: false, sourceIndex: $0.offset) }
+                : TimeBucketAggregator.nearestFilled(values)
+            return zip(buckets, filled).compactMap { bucket, value in
                 value.value.map { GeekMirroredBarMark(x: bucket.x, value: $0,
                     isEstimated: bucket.isEstimated || value.isEstimated) }
             }

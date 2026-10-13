@@ -119,8 +119,8 @@ final class DebugAppUpdatePresentationFixtureTests: XCTestCase {
         XCTAssertEqual(failed.failedCount, 2)
     }
 
-    func testInstalledFixtureClearsBusyStateAndBlocksLiveEntryPoints() {
-        let store = ScanStore()
+    func testInstalledFixtureClearsBusyStateAndBlocksLiveEntryPoints() throws {
+        let store = try ScanStore.makeForTests(for: self)
         store.installDebugAppUpdatePresentationFixture(.summary)
         let installedState = store.appUpdatePresentationState
 

@@ -111,9 +111,9 @@ enum MacAppStoreExecutableLocator {
                   let permissions = attributes[.posixPermissions] as? NSNumber else {
                 return false
             }
-            let ownerID = owner.uint32Value
-            return (ownerID == 0 || ownerID == getuid())
-                && (permissions.uint16Value & 0o002) == 0
+            return AppUpdateSourcePermissions.isTrusted(owner: owner.uint32Value,
+                group: (attributes[.groupOwnerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max,
+                mode: permissions.uint16Value)
         }
     }
 }
@@ -212,7 +212,7 @@ enum MacAppStoreAutomaticUpdateSupport {
                 executableURL: executableURL,
                 environment: environment
             ),
-            requiresAdministrator: false,
+            requiresAdministrator: true,
             applicationsToQuit: application.isRunning ? [application.bundleIdentifier] : [],
             downloadURL: nil,
             expectedBundleIdentifier: application.bundleIdentifier,
@@ -317,9 +317,12 @@ final class MacAppStoreProvider: ApplicationUpdateProvider, @unchecked Sendable 
     ) throws -> String
     private let stateLock = NSLock()
     private var activeUpdates = [String: MacAppStoreCommandCancellation]()
+    private var preparedApplications = [String: InstalledApplication]()
+    private let authorizedUpgrade: @Sendable (UInt64) async throws -> Void
     private var cachedOutdated: (date: Date, records: [String: AppStoreOutdatedInfo])?
 
     init(
+        authorizedUpgrade: @escaping @Sendable (UInt64) async throws -> Void = { try await AppUpdateBatchAuthorization.shared.upgrade(productID: $0) },
         receiptVerifier: any MacAppStoreReceiptVerifying = MacAppStoreReceiptVerifier(),
         catalogResolver: any AppStoreCatalogResolving = AppStoreCatalogResolver(),
         storefront: String = AppStoreCatalogResolver.currentStorefront,
@@ -348,6 +351,7 @@ final class MacAppStoreProvider: ApplicationUpdateProvider, @unchecked Sendable 
             )
         }
     ) {
+        self.authorizedUpgrade = authorizedUpgrade
         self.receiptVerifier = receiptVerifier
         self.catalogResolver = catalogResolver
         self.storefront = AppStoreCatalogResolver.normalizedStorefront(storefront)
@@ -376,15 +380,17 @@ final class MacAppStoreProvider: ApplicationUpdateProvider, @unchecked Sendable 
             evidence.append("mas-outdated")
             evidence.append("\(MacAppStoreAutomaticUpdateSupport.evidencePrefix)\(productID)")
         }
-        return ApplicationUpdateSourceInfo(
-            providerIdentifier: identifier,
-            evidence: evidence,
-            requiresUserInteraction: true,
-            canAutomaticallyUpdate: false
-        )
+        let automatic = masExecutableProvider() != nil && record != nil
+        if automatic { evidence.append("mas-executable-trusted") }
+        return ApplicationUpdateSourceInfo(providerIdentifier: identifier, evidence: evidence,
+            requiresUserInteraction: !automatic, canAutomaticallyUpdate: automatic)
     }
 
     func checkForUpdate(_ application: InstalledApplication) async throws -> ApplicationUpdateCheckResult {
+        if masExecutableProvider() != nil, let record = await matchingOutdatedRecord(for: application), let productID = record.productID {
+            return .init(status: .automaticallyUpdatable, availableVersion: .init(marketing: record.latestVersion), releaseDate: nil,
+                releaseNotes: nil, downloadSize: nil, warning: nil, appStoreProductURL: MacAppStoreAutomaticUpdateSupport.productURL(for: productID))
+        }
         switch try await catalogResolver.resolve(
             bundleIdentifier: application.bundleIdentifier,
             storefront: storefront
@@ -430,14 +436,40 @@ final class MacAppStoreProvider: ApplicationUpdateProvider, @unchecked Sendable 
     }
 
     func prepareUpdate(_ application: InstalledApplication) async throws -> PreparedApplicationUpdate {
-        throw ApplicationScanningError.providerUnsupported("mac-app-store-system-confirmation-required")
+        guard MacAppStoreAutomaticUpdateSupport.isEligible(application), let mas = masExecutableProvider(),
+              let record = await matchingOutdatedRecord(for: application, forceRefresh: true),
+              record.productID == MacAppStoreAutomaticUpdateSupport.productIdentifier(from: application.appStoreProductURL),
+              let recipe = MacAppStoreAutomaticUpdateSupport.makeRecipe(application: application, executableURL: mas, environment: environmentProvider()) else {
+            throw ApplicationScanningError.providerUnsupported("mac-app-store-recheck-failed")
+        }
+        stateLock.withLock { preparedApplications[application.id] = application }
+        return .init(applicationID: application.id, providerIdentifier: identifier, originalIdentity: application.identity,
+            originalVersion: application.installedVersion, targetVersion: application.availableVersion, providerPayload: ["product-id": recipe.arguments[1]], executionRecipe: recipe)
     }
 
     func install(
         _ preparedUpdate: PreparedApplicationUpdate,
         progress: @escaping @Sendable (ApplicationUpdateProgressEvent) -> Void
     ) async throws -> ApplicationUpdateInstallResult {
-        throw ApplicationScanningError.providerUnsupported("mac-app-store-system-confirmation-required")
+        guard preparedUpdate.providerIdentifier == identifier,
+              let application = stateLock.withLock({ preparedApplications[preparedUpdate.applicationID] }),
+              application.identity == preparedUpdate.originalIdentity, let recipe = preparedUpdate.executionRecipe,
+              MacAppStoreAutomaticUpdateSupport.isValid(recipe, for: preparedUpdate),
+              masExecutableProvider()?.standardizedFileURL == recipe.executableURL.standardizedFileURL,
+              await hasVerifiedAppStoreEvidence(application),
+              let id = MacAppStoreAutomaticUpdateSupport.productIdentifier(from: application.appStoreProductURL) else { throw ProviderBackedUpdateExecutorError.applicationNoLongerEligible }
+        defer { _ = stateLock.withLock { preparedApplications.removeValue(forKey: application.id) } }
+        progress(.init(applicationID: application.id, state: .installing, fraction: nil, detail: L10n.text("App Store 正在更新", "App Store is updating")))
+        try Task.checkCancellation()
+        do { try await authorizedUpgrade(id) }
+        catch {
+            let text = error.localizedDescription.lowercased()
+            if text.contains("sign in") || text.contains("not signed") || text.contains("apple account") {
+                return .init(applicationID: application.id, state: .skipped, observedVersion: nil, detail: L10n.text("未登录 App Store，请打开 App Store 更新", "Not signed in; open App Store to update"))
+            }
+            throw error
+        }
+        return .init(applicationID: application.id, state: .needsReconciliation, observedVersion: nil, detail: L10n.text("正在核验 App Store 已安装版本", "Verifying installed App Store version"))
     }
 
     func cancelUpdate(for application: InstalledApplication) async {
@@ -474,10 +506,12 @@ final class MacAppStoreProvider: ApplicationUpdateProvider, @unchecked Sendable 
             records = await Task.detached(priority: .utility) { provider() }.value
             stateLock.withLock { cachedOutdated = (Date(), records) }
         }
-        return MacAppStoreAutomaticUpdateSupport.matchingRecord(
-            for: application,
-            in: records
-        )
+        guard let record = MacAppStoreAutomaticUpdateSupport.matchingRecord(for: application, in: records),
+              case let .matched(entry) = try? await catalogResolver.resolve(bundleIdentifier: application.bundleIdentifier, storefront: storefront),
+              MacAppStoreAutomaticUpdateSupport.productIdentifier(from: entry.productURL) == record.productID,
+              entry.version == ApplicationVersion(marketing: record.latestVersion),
+              application.availableVersion == nil || application.availableVersion == entry.version else { return nil }
+        return record
     }
 }
 

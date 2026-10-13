@@ -125,9 +125,10 @@ final class HardwareControlPresentationTests: XCTestCase {
         XCTAssertTrue(palette.contains("enable: { Task { await fanControl.registerHelper() } }"))
         XCTAssertTrue(palette.contains("fan-control-layout-toggle"))
         XCTAssertFalse(palette.contains("if showsExpandedControls, fanControl.helperState == .enabled"))
-        let rpmPosition = try XCTUnwrap(palette.range(of: "                fanReadbackRows")).lowerBound
-        let helperGate = try XCTUnwrap(palette.range(of: "                    if fanControl.helperState != .enabled", range: rpmPosition..<palette.endIndex)).lowerBound
+        let rpmPosition = try XCTUnwrap(palette.range(of: "Text(currentFanRPM)")).lowerBound
+        let helperGate = try XCTUnwrap(palette.range(of: "if fanControl.helperState != .enabled", range: rpmPosition..<palette.endIndex)).lowerBound
         XCTAssertLessThan(rpmPosition, helperGate, "Read-only RPM remains above the Helper-only action")
+        XCTAssertTrue(palette.contains("fanReadbackRows"), "Per-fan readback stays available in Details")
     }
 
     func testConnectedHelperDoesNotTurnReadOnlyTelemetryOrUnknownModeIntoControl() {
@@ -277,10 +278,20 @@ final class HardwareControlPresentationTests: XCTestCase {
 
 #if DEBUG
     func testAllRequiredDemoStatesResolveToConsistentProfiles() {
-        XCTAssertEqual(MiniWindowDemoData.HardwareControlDemoState.allCases.count, 22)
+        XCTAssertEqual(MiniWindowDemoData.HardwareControlDemoState.allCases.count, 26)
         for state in MiniWindowDemoData.HardwareControlDemoState.allCases {
             _ = MiniWindowDemoData.hardwareControlProfile(for: state)
         }
+
+        // D73 adds trust failure and unavailable helper fixtures without dropping any old case.
+        XCTAssertEqual(MiniWindowDemoData.hardwareControlProfile(for: .helperUntrusted).helperState, .signatureRejected)
+        XCTAssertNil(MiniWindowDemoData.hardwareControlProfile(for: .helperUntrusted).observedMode)
+        XCTAssertEqual(MiniWindowDemoData.hardwareControlProfile(for: .helperUnavailable).helperState, .unavailable)
+        XCTAssertNil(MiniWindowDemoData.hardwareControlProfile(for: .helperUnavailable).observedMode)
+
+        let maximum = MiniWindowDemoData.hardwareControlProfile(for: .fanMaximum)
+        XCTAssertEqual(maximum.observedMode, .maximum)
+        XCTAssertEqual(maximum.fanReadings.first?.actualRPM, maximum.fanReadings.first?.maximumRPM)
 
         let manual = MiniWindowDemoData.hardwareControlProfile(for: .fanManual65)
         XCTAssertEqual(manual.observedMode, .manual)
@@ -292,6 +303,15 @@ final class HardwareControlPresentationTests: XCTestCase {
         XCTAssertNil(readOnly.fanReadings.first?.normalizedPercent)
         XCTAssertTrue(MiniWindowDemoData.hardwareControlProfile(for: .fanless).fanReadings.isEmpty)
         XCTAssertEqual(MiniWindowDemoData.hardwareControlProfile(for: .dualFan).fanReadings.count, 2)
+        // Review P2-2: manual control with two fans, the state that shows the
+        // "双风扇同步" switch in screenshots.
+        let dualManual = MiniWindowDemoData.hardwareControlProfile(for: .dualFanManual)
+        XCTAssertEqual(dualManual.observedMode, .manual)
+        XCTAssertEqual(dualManual.manualPercentage, 65)
+        XCTAssertEqual(dualManual.fanReadings.count, 2)
+        for reading in dualManual.fanReadings {
+            XCTAssertEqual(reading.normalizedPercent ?? -1, 65, accuracy: 0.001)
+        }
         XCTAssertFalse(MiniWindowDemoData.hardwareControlProfile(for: .desktopMac).hasInternalBattery)
         XCTAssertFalse(
             MiniWindowDemoData.hardwareControlProfile(for: .noHighPower)
@@ -353,9 +373,9 @@ final class HardwareControlPresentationTests: XCTestCase {
     }
 
     func testSuccessfulRestoreReplyWithoutModeReadbackKeepsAutomaticUnconfirmed() async {
-        let suite = "HardwareControlPresentationTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         var operations: [FanControlHelperRequest.Operation] = []
         let coordinator = FanControlCoordinator(
             defaults: defaults,

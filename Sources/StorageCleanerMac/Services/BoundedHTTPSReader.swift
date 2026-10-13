@@ -63,6 +63,10 @@ final class SameOriginRedirectPolicy: NSObject, URLSessionTaskDelegate, Sendable
 enum PublicNetworkConsent {
     static let addressKey = "privacy.public-network-address.allowed.v1"
     static let countryKey = "privacy.public-network-country.allowed.v1"
-    static var allowsAddress: Bool { UserDefaults.standard.bool(forKey: addressKey) }
+    static let defaultAllowsAddress = true
+    static var allowsAddress: Bool { allowsAddress(in: .standard) }
+    static func allowsAddress(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: addressKey) == nil ? defaultAllowsAddress : defaults.bool(forKey: addressKey)
+    }
     static var allowsCountry: Bool { allowsAddress && UserDefaults.standard.bool(forKey: countryKey) }
 }

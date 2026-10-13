@@ -1,87 +1,6 @@
 import Foundation
 import SwiftUI
 
-enum SmartCareHeroMode: Equatable {
-    case ready
-    case scanning
-    case complete(score: Int)
-}
-
-struct SmartCareHeroVisual: View {
-    let mode: SmartCareHeroMode
-
-    var body: some View {
-        VStack(spacing: AppDesignTokens.Spacing.small) {
-            Image(systemName: statusSymbol)
-                .symbolRenderingMode(.hierarchical)
-                .font(AppDesignTokens.Typography.heroTitle)
-                .foregroundStyle(heroTint)
-
-            if let completedScore {
-                Text("\(completedScore)")
-                    .font(AppDesignTokens.Typography.heroTitle)
-                    .monospacedDigit()
-                    .appNumericTransition(value: completedScore)
-            }
-
-            Text(statusTitle)
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
-
-            if mode == .scanning {
-                ProgressView()
-                    .progressViewStyle(.linear)
-                    .tint(heroTint)
-                    .frame(maxWidth: 160)
-                    .accessibilityLabel(statusTitle)
-            }
-        }
-        .frame(maxWidth: 180)
-        .accessibilityHidden(true)
-    }
-
-    private var completedScore: Int? {
-        if case .complete(let score) = mode {
-            return score
-        }
-        return nil
-    }
-
-    private var statusSymbol: String {
-        switch mode {
-        case .ready:
-            "waveform.path.ecg"
-        case .scanning:
-            "scope"
-        case .complete:
-            "checkmark.seal.fill"
-        }
-    }
-
-    private var statusTitle: String {
-        switch mode {
-        case .ready:
-            L10n.text("智能关怀", "Smart Care")
-        case .scanning:
-            L10n.text("正在分析", "Analyzing")
-        case .complete:
-            L10n.text("存储评分", "Storage Score")
-        }
-    }
-
-    private var heroTint: Color {
-        switch mode {
-        case .ready:
-            AppDesignTokens.Palette.primary
-        case .scanning:
-            AppDesignTokens.Palette.information
-        case .complete:
-            AppDesignTokens.Palette.success
-        }
-    }
-
-}
-
 struct SmartCareGauge: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var renderedProgress: CGFloat = 0
@@ -148,25 +67,18 @@ struct SmartCareMetric: View {
     let tint: Color
 
     var body: some View {
-        HStack(spacing: AppDesignTokens.Spacing.small) {
-            Image(systemName: systemImage)
-                .font(AppDesignTokens.Typography.compactLabelEmphasis)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(AppDesignTokens.Typography.dataValue)
                 .foregroundStyle(tint)
-                .frame(width: 20)
-                .accessibilityHidden(true)
+                .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
+                .appNumericTransition(value: value)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(value)
-                    .font(AppDesignTokens.Typography.dataValue)
-                    .monospacedDigit()
-                    .fixedSize(horizontal: false, vertical: true)
-                    .appNumericTransition(value: value)
-
-                Text(title)
-                    .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(title)
+                .font(AppDesignTokens.Typography.compactLabel)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .ignore)
@@ -185,6 +97,11 @@ enum AppEmptyStateDensity {
     case inline
 }
 
+enum AppStateIconRole: CaseIterable, Equatable, Sendable {
+    case decorative
+    case result
+}
+
 struct AppStateIconRing: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -193,6 +110,9 @@ struct AppStateIconRing: View {
     var size: CGFloat = 168
     var progress: Double? = nil
     var isActive = false
+    // Existing live consumers show real progress or operation results. Empty
+    // states gate this view on loading; a decorative caller can opt out.
+    var role: AppStateIconRole = .result
 
     private var trackWidth: CGFloat {
         max(6, size * 0.095)
@@ -204,6 +124,13 @@ struct AppStateIconRing: View {
 
     private var renderedProgress: CGFloat {
         CGFloat(min(1, max(0, progress ?? 0)))
+    }
+
+    var showsStaticStatus: Bool { role == .result }
+
+    var renderedSize: CGFloat {
+        if progress != nil { return size }
+        return isActive || showsStaticStatus ? 32 : 0
     }
 
     var body: some View {
@@ -230,14 +157,14 @@ struct AppStateIconRing: View {
                 ProgressView()
                     .controlSize(.regular)
                     .tint(tint)
-            } else {
+            } else if showsStaticStatus {
                 Image(systemName: systemImage)
                     .symbolRenderingMode(.hierarchical)
                     .font(.system(size: 24, weight: .regular))
                     .foregroundStyle(tint)
             }
         }
-        .frame(width: progress == nil ? 32 : size, height: progress == nil ? 32 : size)
+        .frame(width: renderedSize, height: renderedSize)
         .accessibilityHidden(true)
     }
 }
@@ -268,7 +195,9 @@ struct AppEmptyState<Action: View>: View {
 
     var body: some View {
         VStack(spacing: AppDesignTokens.Spacing.medium) {
-            AppStateIconRing(systemImage: systemImage, isActive: isLoading)
+            if isLoading {
+                AppStateIconRing(systemImage: systemImage, isActive: isLoading)
+            }
 
             VStack(spacing: AppDesignTokens.Spacing.compact) {
                 Text(title)
@@ -324,29 +253,65 @@ extension AppEmptyState where Action == EmptyView {
 }
 
 struct AppPageHeader<Actions: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.moduleTheme) private var moduleTheme
     @Environment(\.windowLayoutMetrics) private var layout
+    @Environment(\.pageLayout) private var pageLayout
 
     let title: String
-    let subtitle: String?
-    let systemImage: String
     var isHero = false
+    /// D53 §2.3: live-data tool pages never take the full header. `nil`
+    /// treats hero headers as landing headers and the rest as tool headers.
+    var role: PageLayout.PageRole? = nil
     @ViewBuilder let actions: Actions
 
+    init(title: String, subtitle: String? = nil, systemImage: String = "",
+         isHero: Bool = false, role: PageLayout.PageRole? = nil,
+         @ViewBuilder actions: () -> Actions) {
+        self.title = title
+        self.isHero = isHero
+        self.role = role
+        self.actions = actions()
+    }
+
+    /// Headers built with `{ EmptyView() }` have no action row at all, so
+    /// they never reserve its height or stack below the title for it.
+    private var hasActions: Bool { Actions.self != EmptyView.self }
+
     var body: some View {
-        Group {
-            if isHero {
-                HStack(spacing: 12) {
-                    titleBlock
-                    Spacer(minLength: 0)
+        if moduleTheme.isImmersive {
+            // UI 2.0 (D53): every module page shares the PageHero look; its
+            // form follows the detail size class (§2.3).
+            PageHero(
+                title: title,
+                form: heroForm
+            ) {
+                actions
+            }
+        } else {
+            neutralHeader
+        }
+    }
+
+    private var heroForm: PageLayout.HeroForm {
+        let resolved = pageLayout ?? PageLayout.approximated(from: layout)
+        let pageRole = role ?? (isHero && moduleTheme.isImmersive ? .landing : .tool)
+        return resolved.heroForm(for: pageRole)
+    }
+
+    /// Neutral (non-module) surfaces keep the native header.
+    private var neutralHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: AppDesignTokens.Spacing.large) {
+                titleBlock(wrapsTitle: false)
+                Spacer(minLength: AppDesignTokens.Spacing.medium)
+                if hasActions { actionBlock }
+            }
+            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+                titleBlock(wrapsTitle: true)
+                if hasActions {
                     actionBlock
-                }
-            } else if layout.density == .compact {
-                verticalLayout
-            } else {
-                ViewThatFits(in: .horizontal) {
-                    horizontalLayout
-                    verticalLayout
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
         }
@@ -357,61 +322,22 @@ struct AppPageHeader<Actions: View>: View {
             alignment: .leading
         )
         .overlay(alignment: .bottom) {
-            if !moduleTheme.isImmersive {
-                Divider()
-            }
+            Divider()
         }
         .accessibilityElement(children: .contain)
     }
 
-    private var titleBlock: some View {
-        let tint = moduleTheme.isImmersive
-            ? moduleTheme.accent
-            : AppDesignTokens.Palette.accent
-        return HStack(alignment: .center, spacing: AppDesignTokens.Spacing.large) {
-            if isHero && moduleTheme.isImmersive {
-                Image(systemName: systemImage)
-                    .symbolRenderingMode(.hierarchical)
-                    .font(.system(size: layout.isShort ? 36 : 44, weight: .medium))
-                    .foregroundStyle(systemImage == ReviewFilter.updater.systemImage ? Color.cyan : tint)
-                    .frame(width: layout.isShort ? 64 : GoldenLandingMetrics.headerIconSide(for: systemImage), height: layout.isShort ? 64 : GoldenLandingMetrics.headerIconSide(for: systemImage))
-                    .background(
-                        LinearGradient(colors: [tint.opacity(0.28), tint.opacity(0.10)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                        in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .strokeBorder(tint.opacity(0.48), lineWidth: 1)
-                    }
-                    .accessibilityHidden(true)
-            } else {
-                AppSymbolIcon(
-                    systemImage: systemImage,
-                    role: .pageFeature,
-                    tint: tint,
-                    isDecorative: true
-                )
-            }
-
-            VStack(alignment: .leading, spacing: AppDesignTokens.Layout.textTightSpacing) {
-                Text(title)
-                    .font(isHero ? .system(size: layout.isShort ? 26 : GoldenLandingMetrics.headerTitleSize(for: systemImage), weight: .semibold) : AppTypography.pageTitle)
-                    .foregroundStyle(
-                        moduleTheme.isImmersive ? moduleTheme.primaryText : AppDesignTokens.Palette.primaryText
-                    )
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(AppDesignTokens.Typography.pageSubtitle)
-                        .foregroundStyle(
-                            moduleTheme.isImmersive ? moduleTheme.secondaryText : AppDesignTokens.Palette.secondaryText
-                        )
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+    private func titleBlock(wrapsTitle: Bool) -> some View {
+        Text(title)
+            .font(AppTypography.pageTitle)
+            .foregroundStyle(AppDesignTokens.Palette.primaryText)
+            .fixedSize(horizontal: !wrapsTitle, vertical: true)
+            .accessibilityAddTraits(.isHeader)
             .layoutPriority(1)
-        }
+#if DEBUG
+            .layoutProbe("pageHeader.title")
+            .layoutProbe("pageHeader.titleBlock")
+#endif
     }
 
     private var actionBlock: some View {
@@ -419,33 +345,20 @@ struct AppPageHeader<Actions: View>: View {
             HStack(spacing: AppDesignTokens.Spacing.small) {
                 actions
             }
-
             VStack(alignment: .trailing, spacing: AppDesignTokens.Spacing.small) {
                 actions
             }
         }
+#if DEBUG
+        .layoutProbe("pageHeader.actions")
+#endif
         .font(AppDesignTokens.Typography.toolbar)
+        .appButtonChrome(.toolbar)
         .controlSize(.regular)
         .frame(
             minHeight: AppControlSizes.iconHitRegion,
             alignment: .trailing
         )
-    }
-
-    private var horizontalLayout: some View {
-        HStack(alignment: .center, spacing: AppDesignTokens.Spacing.large) {
-            titleBlock
-            Spacer(minLength: AppDesignTokens.Spacing.medium)
-            actionBlock
-        }
-    }
-
-    private var verticalLayout: some View {
-        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-            titleBlock
-            actionBlock
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
     }
 }
 

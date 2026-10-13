@@ -21,7 +21,7 @@ private enum HelperPerformanceTelemetry {
 }
 
 private enum FanControlHelperProtocolContract {
-    static let currentVersion = 2
+    static let currentVersion = HardwareControlProtocol.currentVersion
 }
 
 private struct FanControlHelperRequest: Codable {
@@ -37,6 +37,9 @@ private struct FanControlHelperRequest: Codable {
         case updateFanCurve
         case getFanCurveRuntimeState
         case deactivateFanCurve
+        case readMacMiniMode
+        case setMacMiniMode
+        case samplePowerMetrics
     }
 
     let protocolVersion: Int?
@@ -50,6 +53,7 @@ private struct FanControlHelperRequest: Codable {
     let powerModeValue: Int?
     let curveProfile: FanCurveProfile?
     let curveLeaseID: UUID?
+    let macMiniMode: MacMiniMode?
 }
 
 private enum FanControlHelperErrorCode: String, Codable {
@@ -60,6 +64,7 @@ private enum FanControlHelperErrorCode: String, Codable {
     case smcReadFailed
     case smcWriteFailed
     case fanVerificationFailed
+    case fanCrashRecoveryFailed
     case fanLeaseExpired
     case partialFanWriteFailure
     case invalidCurvePointCount
@@ -77,6 +82,12 @@ private enum FanControlHelperErrorCode: String, Codable {
     case curveVerificationFailed
     case curveLeaseExpired
     case thermalProtectionActivated
+    case macMiniModeStateUnavailable
+    case macMiniModePersistenceFailed
+    case macMiniModeCommandFailed
+    case macMiniModeVerificationFailed
+    case macMiniModeSleepFailed
+    case macMiniModeConflict
 }
 
 private enum PowerModeSettingKey: String, Codable {
@@ -140,6 +151,8 @@ private struct FanControlHelperReply: Codable {
     let powerConfiguration: PowerConfiguration?
     let curveRuntimeState: FanCurveRuntimeState?
     let errorCode: FanControlHelperErrorCode?
+    let macMiniModeStatus: MacMiniModeStatus?
+    let powerSampleResult: PowermetricsResult?
 
     init(
         protocolVersion: Int = FanControlHelperProtocolContract.currentVersion,
@@ -149,7 +162,9 @@ private struct FanControlHelperReply: Codable {
         appliedTargetRPMByFan: [Int: Int],
         powerConfiguration: PowerConfiguration? = nil,
         curveRuntimeState: FanCurveRuntimeState? = nil,
-        errorCode: FanControlHelperErrorCode? = nil
+        errorCode: FanControlHelperErrorCode? = nil,
+        macMiniModeStatus: MacMiniModeStatus? = nil,
+        powerSampleResult: PowermetricsResult? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.operation = operation
@@ -159,6 +174,8 @@ private struct FanControlHelperReply: Codable {
         self.powerConfiguration = powerConfiguration
         self.curveRuntimeState = curveRuntimeState
         self.errorCode = errorCode
+        self.macMiniModeStatus = macMiniModeStatus
+        self.powerSampleResult = powerSampleResult
     }
 
     func echoing(_ operation: FanControlHelperRequest.Operation) -> Self {
@@ -169,7 +186,9 @@ private struct FanControlHelperReply: Codable {
             appliedTargetRPMByFan: appliedTargetRPMByFan,
             powerConfiguration: powerConfiguration,
             curveRuntimeState: curveRuntimeState,
-            errorCode: errorCode
+            errorCode: errorCode,
+            macMiniModeStatus: macMiniModeStatus,
+            powerSampleResult: powerSampleResult
         )
     }
 }
@@ -199,6 +218,14 @@ private final class FanControlHelperDaemon:
     private let watchdogQueue = DispatchQueue(
         label: "\(StorageCleanerBuildIdentity.helperLabel).watchdog"
     )
+    private let startupSafety = FanControlStartupSafety()
+    // Validated before the listener is exposed; never re-derived from an
+    // updated on-disk image while this old process is serving connections.
+    private let startupIdentity: CodeSigningCheck.StartupIdentity?
+    private let upgradeLedger = HelperUpgradeLedger(label: StorageCleanerBuildIdentity.helperLabel)
+    // commandQueue confined; a final check must match this exact candidate.
+    private var replacementForTermination: CodeSigningCheck.ReplacementIdentity?
+    private var cancelledHandoffKeepsResident = false
     private var connections: [NSXPCConnection] = []
     private var forcedFanIDs: Set<Int> = []
     private var forcedTargetRPMByFan: [Int: Int] = [:]
@@ -208,20 +235,66 @@ private final class FanControlHelperDaemon:
     private var fanCurveController: FanCurveController?
     private var fanCurveTimer: DispatchSourceTimer?
     private var lastFanCurveRuntimeState = FanCurveRuntimeState.inactive
+    // These members are confined to commandQueue, independently of the fan lease.
+    private var macMiniRuntime: MacMiniModeRuntime?
+    private var idleExitWork: DispatchWorkItem?
+    private var terminationSources: [DispatchSourceSignal] = []
+    private var isTerminating = false
+    private let requestLock = NSLock()
+    private var pendingRequestCount = 0
+    private var pendingPowerSamples = 0
+    private let powerSamplingRunner: PowermetricsProcessRunner
+    private let powerSampling: PowermetricsSamplingCoordinator
+    private let powerSamplingClients = PowermetricsClientGate()
+    /// Signing checks for sampling run here, never on an XPC delivery queue that
+    /// also carries fan writes and lease renewals.
+    private let powerSamplingVerificationQueue = DispatchQueue(
+        label: "StorageCleanerMac.helper.powerSamplingVerification", qos: .utility)
+    private var acceptsRequests = true
 
     override init() {
+        let runner = PowermetricsProcessRunner()
+        powerSamplingRunner = runner
+        powerSampling = runner.makeCoordinator()
+        do {
+            startupIdentity = try CodeSigningCheck.captureStartupIdentity()
+            if startupIdentity == nil {
+                NSLog("Helper startup signature snapshot unavailable; caller authentication stays closed.")
+            }
+        } catch {
+            startupIdentity = nil
+            NSLog("Helper startup signing snapshot failed: \(error)")
+        }
         super.init()
         listener.delegate = self
     }
 
     func run() {
-        guard recoverPreviousControlIfNeeded() else {
-            NSLog("Fan-control helper could not restore automatic control after a previous crash.")
-            exit(EXIT_FAILURE)
+        commandQueue.sync {
+            let runtime = MacMiniModeRuntime(queue: commandQueue) { [unowned self] command in
+                self.runPMSet(command.arguments).succeeded
+            }
+            runtime.didBecomeIdle = { [weak self] in self?.scheduleIdleExit() }
+            macMiniRuntime = runtime
+            startTerminationHandlers()
         }
-        startWatchdog()
-        startFanCurveTimer()
+        let startupState = startupSafety.start(recoverFans: {
+            smcQueue.sync { recoverPreviousControlIfNeeded() }
+        }, prepareMacMiniForTermination: {
+            _ = commandQueue.sync { macMiniRuntime?.prepareForTermination() }
+        })
+        startupSafety.startNormalWork {
+            commandQueue.sync { macMiniRuntime?.start() }
+            startWatchdog()
+            startFanCurveTimer()
+        }
+        if startupState == .recoveryFailed {
+            NSLog("%@", FanControlStartupSafety.failureMessageChinese)
+            // Only authenticated fault replies are served. After disconnect,
+            // normal idle exit uses EXIT_SUCCESS, avoiding a KeepAlive loop.
+        }
         listener.resume()
+        commandQueue.async { [weak self] in self?.scheduleIdleExit() }
         RunLoop.current.run()
     }
 
@@ -230,13 +303,25 @@ private final class FanControlHelperDaemon:
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
         do {
-            guard let token = CodeSigningCheck.auditToken(for: newConnection),
-                  try CodeSigningCheck.clientMatchesHelper(auditToken: token) else {
+            guard let startupIdentity,
+                  let token = CodeSigningCheck.auditToken(for: newConnection),
+                  try CodeSigningCheck.clientMatchesHelper(auditToken: token, helperIdentity: startupIdentity.signing) else {
                 NSLog("Rejected fan-control XPC client with mismatched code signing.")
                 return false
             }
+            // Only a client that passed ALL original listener checks may even
+            // inspect handoff eligibility. Extra seal/team/path checks do not
+            // expand normal fan-control authority.
+            if let replacement = try CodeSigningCheck.shouldYieldToReplacement(auditToken: token, startup: startupIdentity),
+               let runningBuild = startupIdentity.signing.signedBuild,
+               upgradeLedger.permits(target: replacement.build, running: runningBuild, at: ProcessInfo.processInfo.systemUptime) {
+                commandQueue.async { [weak self] in
+                    self?.terminateForReplacementOrSignal(isReplacement: true, replacement: replacement)
+                }
+                return false
+            }
         } catch {
-            NSLog("Rejected fan-control XPC client: \(error.localizedDescription)")
+            NSLog("Rejected fan-control XPC client: \(error)")
             return false
         }
 
@@ -246,18 +331,22 @@ private final class FanControlHelperDaemon:
         newConnection.exportedObject = self
         newConnection.invalidationHandler = { [weak self, weak newConnection] in
             guard let self, let newConnection else { return }
-            let shouldExit = smcQueue.sync {
+            smcQueue.sync {
+                powerSamplingClients.forget(connection: ObjectIdentifier(newConnection))
                 connections.removeAll { $0 === newConnection }
-                restoreAllFans()
-                return connections.isEmpty
+                if startupSafety.isReady { restoreAllFans() }
             }
-            if shouldExit {
-                exit(EXIT_SUCCESS)
+            commandQueue.async { [weak self] in self?.scheduleIdleExit() }
+        }
+        let admitted = smcQueue.sync {
+            requestLock.withLock {
+                guard acceptsRequests else { return false }
+                connections.append(newConnection)
+                powerSamplingClients.register(connection: ObjectIdentifier(newConnection))
+                return true
             }
         }
-        smcQueue.sync {
-            connections.append(newConnection)
-        }
+        guard admitted else { return false }
         newConnection.resume()
         return true
     }
@@ -271,6 +360,11 @@ private final class FanControlHelperDaemon:
                 "Fan-control request exceeds the maximum encoded size.",
                 errorCode: .invalidRequest
             )))
+            return
+        }
+        struct Header: Decodable { let operation: FanControlHelperRequest.Operation }
+        if (try? JSONDecoder().decode(Header.self, from: requestData).operation) == .samplePowerMetrics {
+            executePowerSample(requestData, reply: reply)
             return
         }
         let request: FanControlHelperRequest
@@ -289,11 +383,79 @@ private final class FanControlHelperDaemon:
              .validateFanCurve, .activateFanCurve, .updateFanCurve,
              .getFanCurveRuntimeState, .deactivateFanCurve:
             smcQueue
-        case .ping, .readPowerConfiguration, .applyPowerMode:
+        case .ping, .readPowerConfiguration, .applyPowerMode,
+             .readMacMiniMode, .setMacMiniMode, .samplePowerMetrics:
             commandQueue
         }
+        let accepted = requestLock.withLock {
+            guard acceptsRequests else { return false }
+            pendingRequestCount += 1
+            return true
+        }
+        guard accepted else {
+            reply(Self.encoded(failure("Helper is terminating.", operation: request.operation, errorCode: .invalidRequest)))
+            return
+        }
         queue.async { [self] in
+            defer {
+                requestLock.withLock { pendingRequestCount -= 1 }
+                commandQueue.async { [weak self] in self?.scheduleIdleExit() }
+            }
             reply(Self.encoded(handle(request)))
+        }
+    }
+
+    /// Shares the authenticated listener, but no hardware executor or policy lock.
+    private func executePowerSample(_ data: Data, reply: @escaping @Sendable (Data) -> Void) {
+        @Sendable func finish(_ result: PowermetricsResult) {
+            let succeeded: Bool
+            if case .sample = result { succeeded = true } else { succeeded = false }
+            reply(Self.encoded(FanControlHelperReply(operation: .samplePowerMetrics,
+                success: succeeded, message: "Read-only power sampling result.",
+                appliedTargetRPMByFan: [:], powerSampleResult: result)))
+        }
+        guard (try? PowermetricsSamplingRequest.decode(data)) != nil else {
+            finish(.failure(.invalidRequest)); return
+        }
+        // current() is used synchronously on the XPC dispatch thread. Do not
+        // move this lookup into Task, or fall back to a caller-supplied PID.
+        guard let connection = NSXPCConnection.current(),
+              let token = CodeSigningCheck.auditToken(for: connection) else {
+            finish(.failure(.unauthorized)); return
+        }
+        let connectionID = ObjectIdentifier(connection)
+        // Cheap per-connection interval before any Security work; refused
+        // attempts count too, so a flood cannot buy repeated seal checks.
+        guard let admission = powerSamplingClients.admitAttempt(connection: connectionID,
+                                                               now: PowermetricsMonotonicClock.seconds) else {
+            finish(.failure(.throttled)); return
+        }
+        guard startupSafety.isReady else { finish(.failure(.unavailable)); return }
+        let accepted = requestLock.withLock {
+            guard acceptsRequests, pendingPowerSamples < PowermetricsSamplingCoordinator.maximumWaiters else { return false }
+            pendingRequestCount += 1
+            pendingPowerSamples += 1
+            return true
+        }
+        guard accepted else { finish(.failure(.busy)); return }
+        let client = CodeSigningCheck.clientProcess(of: token)
+        powerSamplingVerificationQueue.async { [self] in
+            // Cheap identity check on every request; the full seal check only
+            // once per connection and process instance (pid + pidversion).
+            let authorized = powerSamplingClients.authorize(
+                admission: admission, process: client,
+                cheapCheck: { try CodeSigningCheck.powerSamplingClientIdentityMatches(auditToken: token) },
+                sealCheck: { try CodeSigningCheck.powerSamplingClientSealIsValid(auditToken: token) })
+            Task { [self] in
+                // An unauthorized caller neither launches nor consumes the throttle.
+                let result = await powerSampling.request(authorized: authorized)
+                finish(result)
+                requestLock.withLock {
+                    pendingRequestCount -= 1
+                    pendingPowerSamples -= 1
+                }
+                commandQueue.async { [weak self] in self?.scheduleIdleExit() }
+            }
         }
     }
 
@@ -305,14 +467,37 @@ private final class FanControlHelperDaemon:
                 errorCode: .invalidRequest
             )
         }
-        guard protocolVersion == FanControlHelperProtocolContract.currentVersion else {
+        guard HardwareControlProtocol.accepts(protocolVersion) else {
             return failure(
                 "Unsupported fan-control protocol version \(protocolVersion).",
                 operation: request.operation,
                 errorCode: .invalidRequest
             )
         }
+        guard request.operation == .setMacMiniMode || request.macMiniMode == nil else {
+            return failure("Unexpected Mac mini mode payload.", operation: request.operation, errorCode: .invalidRequest)
+        }
 
+        // Fault-mode recovery has its own executor: no fan or curve operation
+        // can enter it, and mode ON is explicitly excluded.
+        if FanControlStartupSafety.permitsSleepRecovery(operation: request.operation.rawValue, mode: request.macMiniMode,
+            hasEmptyPayload: hasEmptyPayload(request, allowingMacMiniMode: request.operation == .setMacMiniMode)) {
+            return startupSafety.dispatchSleepRecovery(recover: {
+                handleMacMiniMode(request).echoing(request.operation)
+            }, reject: { _ in
+                failure(FanControlStartupSafety.failureMessageChinese, operation: request.operation,
+                        errorCode: .fanCrashRecoveryFailed)
+            })
+        }
+        return startupSafety.dispatch(execute: {
+            handleReady(request)
+        }, reject: { _ in
+            failure(FanControlStartupSafety.failureMessageChinese, operation: request.operation,
+                    errorCode: .fanCrashRecoveryFailed)
+        })
+    }
+
+    private func handleReady(_ request: FanControlHelperRequest) -> FanControlHelperReply {
         let response = switch request.operation {
         case .ping:
             ping(request)
@@ -336,6 +521,10 @@ private final class FanControlHelperDaemon:
             getFanCurveRuntimeState(request)
         case .deactivateFanCurve:
             deactivateFanCurve(request)
+        case .readMacMiniMode, .setMacMiniMode:
+            handleMacMiniMode(request)
+        case .samplePowerMetrics:
+            failure("Sampling requires the strict read-only envelope.", errorCode: .invalidRequest)
         }
         return response.echoing(request.operation)
     }
@@ -382,7 +571,9 @@ private final class FanControlHelperDaemon:
         )
     }
 
-    private func hasEmptyPayload(_ request: FanControlHelperRequest) -> Bool {
+    private func hasEmptyPayload(
+        _ request: FanControlHelperRequest, allowingMacMiniMode: Bool = false
+    ) -> Bool {
         request.targetRPMByFan.isEmpty
             && request.automaticFanIDs.isEmpty
             && !request.allowsRPMDecrease
@@ -392,6 +583,145 @@ private final class FanControlHelperDaemon:
             && request.powerModeValue == nil
             && request.curveProfile == nil
             && request.curveLeaseID == nil
+            && (allowingMacMiniMode || request.macMiniMode == nil)
+    }
+
+    private func handleMacMiniMode(_ request: FanControlHelperRequest) -> FanControlHelperReply {
+        guard !isTerminating,
+              hasEmptyPayload(request, allowingMacMiniMode: request.operation == .setMacMiniMode),
+              let macMiniRuntime else {
+            return failure("Rejected Mac mini mode request.", errorCode: .invalidRequest)
+        }
+        let status: MacMiniModeStatus
+        if request.operation == .setMacMiniMode {
+            guard let mode = request.macMiniMode else {
+                return failure("Missing Mac mini mode.", errorCode: .invalidRequest)
+            }
+            status = startupSafety.isReady ? macMiniRuntime.setMode(mode) : macMiniRuntime.disableForRemoval()
+        } else {
+            status = macMiniRuntime.status()
+        }
+        let code: FanControlHelperErrorCode? = switch status.failure {
+        case .stateUnavailable?: .macMiniModeStateUnavailable
+        case .persistenceFailed?: .macMiniModePersistenceFailed
+        case .commandFailed?: .macMiniModeCommandFailed
+        case .verificationFailed?: .macMiniModeVerificationFailed
+        case .sleepRequestFailed?: .macMiniModeSleepFailed
+        case .conflictingIdentity?: .macMiniModeConflict
+        case nil: nil
+        }
+        return FanControlHelperReply(
+            success: code == nil, message: code == nil ? "Mac mini mode state read." : "Mac mini mode remains unconfirmed.",
+            appliedTargetRPMByFan: [:], errorCode: code, macMiniModeStatus: status
+        )
+    }
+
+    private func scheduleIdleExit() {
+        idleExitWork?.cancel()
+        guard !isTerminating, !cancelledHandoffKeepsResident else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.isTerminating, !self.cancelledHandoffKeepsResident else { return }
+            // Admission and the final idle decision share the same queue/lock
+            // order, so no connection can arrive between the check and exit.
+            self.smcQueue.sync {
+                self.requestLock.withLock {
+                    guard MacMiniHelperIdlePolicy.mayExit(
+                        connectionCount: self.connections.count,
+                        pendingRequests: self.pendingRequestCount,
+                        hasFanWork: !self.forcedFanIDs.isEmpty || self.fanCurveController != nil || self.watchdogRestorePending,
+                        requiresResidentHelper: self.startupSafety.requiresResidentHelper(
+                            macMiniRequested: self.macMiniRuntime?.requiresResidentHelper != false
+                        )
+                    ) else { return }
+                    self.acceptsRequests = false
+                    exit(EXIT_SUCCESS)
+                }
+            }
+        }
+        idleExitWork = work
+        commandQueue.asyncAfter(deadline: .now() + 15, execute: work)
+    }
+
+    private func startTerminationHandlers() {
+        for number in [SIGTERM, SIGINT] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: commandQueue)
+            source.setEventHandler { [weak self] in
+                self?.terminateForReplacementOrSignal(isReplacement: false)
+            }
+            source.resume()
+            terminationSources.append(source)
+        }
+    }
+
+    /// commandQueue confined; serialize with pmset work and reuse the same
+    /// recovery executors as SIGTERM. No unchecked client reaches this method.
+    private func terminateForReplacementOrSignal(isReplacement: Bool, replacement: CodeSigningCheck.ReplacementIdentity? = nil) {
+        guard !isTerminating else { return }
+        replacementForTermination = replacement
+        isTerminating = true
+        requestLock.withLock { acceptsRequests = false }
+        self.powerSamplingRunner.stopForTermination()
+        idleExitWork?.cancel()
+        finishTerminationWhenDrained(isReplacement: isReplacement)
+    }
+
+    private func finishTerminationWhenDrained(isReplacement: Bool) {
+        // A request admitted just before the gate closed may not yet have
+        // reached its executor. Drain its counted work before the final restore.
+        guard requestLock.withLock({ pendingRequestCount == 0 }) else {
+            commandQueue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+                self?.finishTerminationWhenDrained(isReplacement: isReplacement)
+            }
+            return
+        }
+        let recovered = HelperUpgradeSafety.prepareForExit(stopRequestsAndSampling: {
+            smcQueue.sync {
+                fanCurveTimer?.cancel()
+                fanCurveTimer = nil
+                fanCurveController = nil
+                watchdog?.cancel()
+                watchdog = nil
+            }
+        }, restoreSleep: {
+            macMiniRuntime?.prepareForTermination() == true
+        }, restoreFans: {
+            // Startup failure has already tried recovery and latched the
+            // marker. Do not dispatch additional writes in a failed process.
+            !startupSafety.isReady || smcQueue.sync { restoreAllFans() }
+        })
+        let keepRequestedMode = macMiniRuntime?.requiresResidentHelper == true
+        // KeepAlive is SuccessfulExit=false. A successful upgrade is on demand;
+        // restoration failure (marker preserved) or an enabled sleep policy
+        // needs an immediate new process, just like the existing signal path.
+        let success = !startupSafety.isReady || (recovered && !keepRequestedMode)
+        let exitProcess = {
+            NSLog("Helper termination replacement=%@ recovery=%@ successfulExit=%@",
+                  String(isReplacement), String(recovered), String(success))
+            exit(success ? EXIT_SUCCESS : EXIT_FAILURE)
+        }
+        guard isReplacement else { exitProcess(); return }
+        HelperUpgradeSafety.finishHandoff(revalidateAndRecord: {
+            guard let startupIdentity, let runningBuild = startupIdentity.signing.signedBuild,
+                  let replacement = replacementForTermination else { return false }
+            return upgradeLedger.commitIfPermitted(target: replacement.build, running: runningBuild, at: ProcessInfo.processInfo.systemUptime) {
+                // Fresh SecStaticCode: repeat seal/chain/team/path/version checks
+                // after drain/recovery, and require the initially inspected image.
+                try CodeSigningCheck.validatedReplacement(startup: startupIdentity) == replacement
+            }
+        }, resumeService: {
+            cancelledHandoffKeepsResident = true
+            replacementForTermination = nil
+            isTerminating = false
+            powerSamplingRunner.resumeAfterCancelledTermination()
+            if startupSafety.isReady {
+                macMiniRuntime?.start()
+                smcQueue.sync { startWatchdog(); startFanCurveTimer() }
+            }
+            requestLock.withLock { acceptsRequests = true }
+            scheduleIdleExit()
+            NSLog("Helper handoff cancelled: final image validation or protected cooldown denied it; service resumed.")
+        }, exitProcess: exitProcess)
     }
 
     private func readPowerConfiguration(
@@ -541,12 +871,7 @@ private final class FanControlHelperDaemon:
                 signpostState
             )
         }
-        let isRead = arguments == ["-g", "custom"]
-        let isWrite = arguments.count == 3
-            && ["-b", "-c"].contains(arguments[0])
-            && ["powermode", "lowpowermode"].contains(arguments[1])
-            && Int(arguments[2]) != nil
-        guard isRead || isWrite else {
+        guard HelperPMSetWhitelist.permits(arguments) else {
             return PMSetResult(
                 terminationStatus: -1,
                 standardOutput: "",
@@ -1322,7 +1647,7 @@ private final class FanControlHelperDaemon:
 
     private static func encoded(_ reply: FanControlHelperReply) -> Data {
         (try? JSONEncoder().encode(reply)) ?? Data(
-            #"{"protocolVersion":2,"operation":null,"success":false,"message":"Reply encoding failed.","appliedTargetRPMByFan":{}}"#
+            #"{"protocolVersion":4,"operation":null,"success":false,"message":"Reply encoding failed.","appliedTargetRPMByFan":{}}"#
                 .utf8
         )
     }
@@ -1969,7 +2294,7 @@ private enum CodeSigningCheckError: Error {
     case failed(OSStatus)
 }
 
-private enum CodeSigningCheck {
+enum CodeSigningCheck {
     private static let mainApplicationIdentifier =
         StorageCleanerBuildIdentity.appBundleIdentifier
 
@@ -1992,18 +2317,195 @@ private enum CodeSigningCheck {
         return nil
     }
 
-    static func clientMatchesHelper(auditToken: audit_token_t) throws -> Bool {
-        let helperIdentity = try signingIdentityForSelf()
+    static func clientMatchesHelper(auditToken: audit_token_t, helperIdentity: SigningIdentity) throws -> Bool {
         let clientIdentity = try signingIdentity(for: auditToken)
-        return !helperIdentity.certificates.isEmpty
-            && helperIdentity.certificates == clientIdentity.certificates
-            && clientIdentity.identifier == mainApplicationIdentifier
+        return HelperClientSigningPolicy.permits(
+            helperCertificates: helperIdentity.certificates.map { SecCertificateCopyData($0) as Data },
+            clientCertificates: clientIdentity.certificates.map { SecCertificateCopyData($0) as Data },
+            clientIdentifier: clientIdentity.identifier, expectedIdentifier: mainApplicationIdentifier)
+    }
+
+    struct StartupIdentity {
+        let signing: SigningIdentity
+        let executableURL: URL
+        let stamp: HelperExecutableStamp
+    }
+
+    static func captureStartupIdentity() throws -> StartupIdentity? {
+        // A daemon embedded in Contents/Resources must identify its process
+        // image, not rely on Foundation's interpretation of the enclosing app.
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        guard size > 0, size <= 65_536 else { return nil }
+        var path = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&path, &size) == 0 else { return nil }
+        let bytes = path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        guard let imagePath = String(bytes: bytes, encoding: .utf8) else { return nil }
+        let url = URL(fileURLWithPath: imagePath).standardizedFileURL
+        guard let before = HelperExecutableStamp.read(at: url) else { return nil }
+        let signing = try signingIdentityForSelf()
+        guard !signing.certificates.isEmpty, signing.codeHash?.isEmpty == false,
+              signing.executableURL?.standardizedFileURL.path == url.standardizedFileURL.path,
+              HelperExecutableStamp.read(at: url) == before else { return nil }
+        return .init(signing: signing, executableURL: url, stamp: before)
+    }
+
+    struct ReplacementIdentity: Equatable, Sendable {
+        let stamp: HelperExecutableStamp
+        let codeHash: Data
+        let build: HelperSignedBuildVersion
+    }
+
+    static func shouldYieldToReplacement(auditToken: audit_token_t, startup: StartupIdentity) throws -> ReplacementIdentity? {
+        guard try powerSamplingClientIdentityMatches(auditToken: auditToken),
+              try powerSamplingClientSealIsValid(auditToken: auditToken) else { return nil }
+        return try validatedReplacement(startup: startup)
+    }
+
+    static func validatedReplacement(startup: StartupIdentity) throws -> ReplacementIdentity? {
+        let expectedPath = StorageCleanerBuildIdentity.installedApplicationPath
+            + "/Contents/Resources/StorageCleanerFanControlHelper"
+        guard startup.executableURL.standardizedFileURL.path == expectedPath,
+              let stamp = HelperExecutableStamp.read(at: startup.executableURL), stamp != startup.stamp,
+              startup.signing.teamIdentifier == PowermetricsClientPolicy.teamIdentifier else { return nil }
+        // Validate the replacement itself with full resources and the original
+        // signing chain; metadata alone must not permit an unsigned swap/DoS.
+        var code: SecStaticCode?
+        try check(SecStaticCodeCreateWithPath(startup.executableURL as CFURL, [], &code))
+        guard let code else { return nil }
+        try check(SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckNestedCode | kSecCSCheckAllArchitectures), nil))
+        let replacement = try signingIdentity(for: code)
+        let replacementValid = replacement.identifier == StorageCleanerBuildIdentity.helperLabel
+            && replacement.teamIdentifier == startup.signing.teamIdentifier
+            && replacement.certificates == startup.signing.certificates
+            && replacement.executableURL?.standardizedFileURL.path == expectedPath
+            && HelperExecutableStamp.read(at: startup.executableURL) == stamp
+        guard HelperUpgradeSafety.shouldYield(originalClientValid: true, installedTeamClientValid: true,
+            startupStamp: startup.stamp, currentStamp: stamp,
+            runningCodeHash: startup.signing.codeHash, replacementCodeHash: replacement.codeHash,
+            runningBuild: startup.signing.signedBuild, replacementBuild: replacement.signedBuild,
+            replacementSignatureValid: replacementValid),
+              let build = replacement.signedBuild, let hash = replacement.codeHash else { return nil }
+        return ReplacementIdentity(stamp: stamp, codeHash: hash, build: build)
+    }
+
+    static func clientProcess(of auditToken: audit_token_t) -> PowermetricsClientGate.ClientProcess {
+        // Same fields libbsm's audit_token_to_pid/_pidversion read (val[5], val[7]);
+        // read directly so the helper does not need to link libbsm.
+        PowermetricsClientGate.ClientProcess(pid: Int32(bitPattern: auditToken.val.5),
+                                             pidVersion: Int32(bitPattern: auditToken.val.7))
+    }
+
+    private static func powerSamplingGuestCode(auditToken: audit_token_t) throws -> (SecCode, SecStaticCode)? {
+        let tokenData = withUnsafeBytes(of: auditToken) { Data($0) } as CFData
+        var code: SecCode?
+        try check(SecCodeCopyGuestWithAttributes(nil,
+            [kSecGuestAttributeAudit: tokenData] as CFDictionary, [], &code))
+        guard let code else { return nil }
+        var staticCode: SecStaticCode?
+        try check(SecCodeCopyStaticCode(code, [], &staticCode))
+        guard let staticCode else { return nil }
+        return (code, staticCode)
+    }
+
+    /// Cheap relative to the full seal: dynamic validity of the running code,
+    /// then identifier, team and installed paths from its signing information.
+    static func powerSamplingClientIdentityMatches(auditToken: audit_token_t) throws -> Bool {
+        guard let (code, staticCode) = try powerSamplingGuestCode(auditToken: auditToken) else { return false }
+        try check(SecCodeCheckValidity(code, [], nil))
+        var information: CFDictionary?
+        try check(SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information))
+        let values = information as? [String: Any]
+        guard let identifier = values?[kSecCodeInfoIdentifier as String] as? String,
+              let team = values?[kSecCodeInfoTeamIdentifier as String] as? String,
+              let executable = values?[kSecCodeInfoMainExecutable as String] as? URL else { return false }
+        return PowermetricsClientPolicy.permits(identifier: identifier, team: team, executableURL: executable,
+            helperApplicationURL: MacMiniApplicationIdentity.applicationURL(executableURL: Bundle.main.executableURL))
+    }
+
+    /// Expensive (tens of ms or more): full static seal, including resources
+    /// and nested code. Cached per connection and process instance by the gate.
+    static func powerSamplingClientSealIsValid(auditToken: audit_token_t) throws -> Bool {
+        guard let (_, staticCode) = try powerSamplingGuestCode(auditToken: auditToken) else { return false }
+        try check(SecStaticCodeCheckValidity(staticCode, SecCSFlags(rawValue: kSecCSCheckNestedCode), nil))
+        return true
+    }
+
+    static func macMiniExpectedIdentity(at url: URL, applicationIdentifier: String = mainApplicationIdentifier) throws -> MacMiniApplicationIdentity? {
+        let helper = try signingIdentityForSelf()
+        guard !helper.certificates.isEmpty else { return nil }
+        let identity: String
+        if !helper.teamIdentifier.isEmpty {
+            identity = "team:" + helper.teamIdentifier
+        } else {
+            var ownCode: SecCode?
+            try check(SecCodeCopySelf([], &ownCode))
+            guard let ownCode else { return nil }
+            var ownStaticCode: SecStaticCode?
+            try check(SecCodeCopyStaticCode(ownCode, [], &ownStaticCode))
+            guard let ownStaticCode else { return nil }
+            var requirement: SecRequirement?
+            try check(SecCodeCopyDesignatedRequirement(ownStaticCode, [], &requirement))
+            guard let requirement else { return nil }
+            var string: CFString?
+            try check(SecRequirementCopyString(requirement, [], &string))
+            guard let string else { return nil }
+            let ownClause = "identifier \"\(helper.identifier)\""
+            let appClause = "identifier \"\(applicationIdentifier)\""
+            let ownText = string as String
+            guard ownText.contains(ownClause) else { return nil }
+            identity = "requirement:" + ownText.replacingOccurrences(of: ownClause, with: appClause)
+        }
+        return MacMiniApplicationIdentity(installationPath: url.standardizedFileURL.path, signingIdentity: identity)
+    }
+
+    /// Unknown Security/I/O errors are retryable, not signing mismatches.
+    static func validateMacMiniApplication(_ expected: MacMiniApplicationIdentity,
+                                           identifier: String) -> Bool? {
+        let url = URL(fileURLWithPath: expected.installationPath)
+        do {
+            let application = try signingIdentity(at: url)
+            guard !application.identifier.isEmpty else { return nil }
+            let helperTeam: String
+            var satisfiesRequirement = false
+            if expected.signingIdentity.hasPrefix("team:") {
+                helperTeam = String(expected.signingIdentity.dropFirst("team:".count))
+            } else if expected.signingIdentity.hasPrefix("requirement:") {
+                helperTeam = ""
+                let text = String(expected.signingIdentity.dropFirst("requirement:".count))
+                var requirement: SecRequirement?
+                try check(SecRequirementCreateWithString(text as CFString, [], &requirement))
+                var code: SecStaticCode?
+                try check(SecStaticCodeCreateWithPath(url as CFURL, [], &code))
+                guard let code, let requirement else { return nil }
+                try check(SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSDoNotValidateResources), requirement))
+                satisfiesRequirement = true
+            } else { return false }
+            return MacMiniApplicationTrust.matches(
+                applicationIdentifier: application.identifier, expectedIdentifier: identifier,
+                applicationTeam: application.teamIdentifier, helperTeam: helperTeam,
+                satisfiesDesignatedRequirement: satisfiesRequirement
+            )
+        } catch CodeSigningCheckError.failed(let status) {
+            // These Security statuses prove mismatch. Missing resources and
+            // other intermittent reads remain unknown until a later retry.
+            if [errSecCSUnsigned, errSecCSSignatureFailed, errSecCSReqFailed].contains(status) { return false }
+            return nil
+        } catch { return nil }
     }
 
     struct SigningIdentity {
         let identifier: String
         let teamIdentifier: String
         let certificates: [SecCertificate]
+        let executableURL: URL?
+        let codeHash: Data?
+        let signedBuild: HelperSignedBuildVersion?
+        init(identifier: String, teamIdentifier: String, certificates: [SecCertificate], executableURL: URL? = nil, codeHash: Data? = nil, signedBuild: HelperSignedBuildVersion? = nil) {
+            self.identifier = identifier; self.teamIdentifier = teamIdentifier
+            self.certificates = certificates; self.executableURL = executableURL; self.codeHash = codeHash
+            self.signedBuild = signedBuild
+        }
     }
 
     static func signingIdentity(at url: URL) throws -> SigningIdentity {
@@ -2021,6 +2523,7 @@ private enum CodeSigningCheck {
         guard let code else {
             return SigningIdentity(identifier: "", teamIdentifier: "", certificates: [])
         }
+        try check(SecCodeCheckValidity(code, [], nil))
         var staticCode: SecStaticCode?
         try check(SecCodeCopyStaticCode(code, [], &staticCode))
         guard let staticCode else {
@@ -2066,12 +2569,24 @@ private enum CodeSigningCheck {
             &information
         ))
         let values = information as? [String: Any]
+        // Security's signing information for the standalone executable uses
+        // its embedded __TEXT,__info_plist. Never read the enclosing App plist,
+        // BuildInfo.plist, a sidecar or an XPC-provided version as authority.
+        let signedInfo = values?[kSecCodeInfoPList as String] as? [String: Any]
+        let signedBuild: HelperSignedBuildVersion?
+        if signedInfo?["CFBundleIdentifier"] as? String == StorageCleanerBuildIdentity.helperLabel,
+           let text = signedInfo?["CFBundleVersion"] as? String {
+            signedBuild = HelperSignedBuildVersion(text)
+        } else { signedBuild = nil }
         return SigningIdentity(
             identifier: values?[kSecCodeInfoIdentifier as String] as? String ?? "",
             teamIdentifier: values?[kSecCodeInfoTeamIdentifier as String] as? String ?? "",
             certificates: values?[
                 kSecCodeInfoCertificates as String
-            ] as? [SecCertificate] ?? []
+            ] as? [SecCertificate] ?? [],
+            executableURL: values?[kSecCodeInfoMainExecutable as String] as? URL,
+            codeHash: values?[kSecCodeInfoUnique as String] as? Data,
+            signedBuild: signedBuild
         )
     }
 

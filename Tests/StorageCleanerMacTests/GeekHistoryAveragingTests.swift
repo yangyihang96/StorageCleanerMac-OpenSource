@@ -12,6 +12,22 @@ final class GeekHistoryAveragingTests: XCTestCase {
               downBytesPerSecond: Int64(value * 100), upBytesPerSecond: Int64(value * 10))
     }
 
+    func testOrderedAndUnorderedWindowsKeepStableTiesAndMeasuredWeights() throws {
+        let start = end.addingTimeInterval(-6)
+        for offsets in [[1.0, 3, 3, 5], [5.0, 3, 1, 3]] {
+            let dates = offsets.map { start.addingTimeInterval($0) }
+            let windows = GeekHistoryAveraging.windows(dates: dates, interval: 6,
+                start: start, referenceDate: end,
+                intervalStart: { dates[$0].addingTimeInterval(-offsets[$0]) })
+            let window = try XCTUnwrap(windows.first)
+            let expected = dates.indices.sorted {
+                dates[$0] == dates[$1] ? $0 < $1 : dates[$0] < dates[$1]
+            }
+            XCTAssertEqual(window.indices, expected)
+            XCTAssertEqual(window.weights, expected.map { offsets[$0] })
+        }
+    }
+
     func testHourAndDayHave600FixedWindowsIndependentOfScreenWidth() {
         for (duration, interval) in [(3600.0, 6.0), (86400.0, 144.0)] {
             XCTAssertEqual(GeekHistoryAveraging.interval(for: duration), interval)
@@ -111,6 +127,33 @@ final class GeekHistoryAveragingTests: XCTestCase {
             }
         }
         XCTAssertEqual(points, original)
+    }
+
+    func testPreparedLongCPUReusesCompleteBucketsWithoutChangingDisplayedMeans() throws {
+        let start = end.addingTimeInterval(-3600)
+        var points = (0..<3600).map { index in
+            point(date: start.addingTimeInterval(Double(index) + 0.25),
+                  value: index.isMultiple(of: 2) ? 10 : 90)
+        }
+        points[450] = .init(date: points[450].date, cpuTotal: nil, cpuUser: 7.5,
+            cpuSystem: 2.5, gpu: nil, memory: nil, chipTemperature: nil, fanRPM: nil,
+            downBytesPerSecond: nil, upBytesPerSecond: nil)
+        let direct = GeekCPUHistoryFrame.prepare(points: points, plotRect: plot, duration: 3600,
+            referenceDate: end, samplingInterval: 1, displayScale: 2)
+        let prepared = GeekPreparedLineFrame(points: points, channels: [.cpuUser, .cpuSystem],
+            plot: plot, duration: 3600, reference: end, samplingInterval: 1,
+            scale: 2, stacked: true, valueRange: 0...100)
+        let shared = try XCTUnwrap(prepared.cpu)
+        XCTAssertEqual(shared.marks.count, direct.marks.count)
+        for (actual, expected) in zip(shared.marks, direct.marks) {
+            XCTAssertEqual(actual.bucket.x, expected.bucket.x)
+            XCTAssertEqual(actual.mean.cpuUser!, expected.mean.cpuUser!, accuracy: 0.001)
+            XCTAssertEqual(actual.mean.cpuSystem!, expected.mean.cpuSystem!, accuracy: 0.001)
+            let bucketIndex = try XCTUnwrap(prepared.buckets.firstIndex { $0.x == actual.bucket.x })
+            XCTAssertEqual(prepared.values[bucketIndex][0]!, expected.mean.cpuUser!, accuracy: 0.001)
+            XCTAssertEqual(prepared.values[bucketIndex][1]!, expected.mean.cpuSystem!, accuracy: 0.001)
+        }
+        XCTAssertFalse(shared.marks.flatMap { $0.bucket.indices }.contains(450))
     }
 
     func testGroupsAreAveragedBeforeScreenProjectionAndMissingIsNotZero() {

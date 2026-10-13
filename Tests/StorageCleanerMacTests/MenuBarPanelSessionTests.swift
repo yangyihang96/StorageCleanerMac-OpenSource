@@ -71,7 +71,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testUnknownGlobalSourceWithinVisibleCascadeIsNotAnOutsideClick() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(panel: makePanel(), geometryStore: fixture.store,
                                   fixedVisibleFrame: Self.deterministicVisibleFrame, presentsPanelOnShow: false)
         defer { session.teardown() }
@@ -94,7 +94,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testKnownForeignWindowAtSameCoordinatesStillDismisses() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(panel: makePanel(), geometryStore: fixture.store,
                                   fixedVisibleFrame: Self.deterministicVisibleFrame, presentsPanelOnShow: false)
         defer { session.teardown() }
@@ -124,6 +124,30 @@ final class MenuBarPanelSessionTests: XCTestCase {
         width: 1_440,
         height: 900
     )
+
+    func testSecondarySelectionUsesPreferredContentSizeInItsFirstLayout() throws {
+        let screen = try requireScreen()
+        let fixture = try makeGeometryFixture()
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
+        let session = makeSession(
+            panel: makePanel(), geometryStore: fixture.store,
+            fixedVisibleFrame: Self.deterministicVisibleFrame,
+            presentsPanelOnShow: false
+        )
+        defer { session.teardown() }
+        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
+
+        let preferred = CGSize(width: 345, height: 500)
+        let expected = GeekPanelPresentationMetrics.normalizedDetailSize(
+            preferred, for: .processor, density: .geek
+        )
+        session.setGeekSection(.processor, preferredDetailSize: preferred)
+
+        XCTAssertEqual(session.geekSection, .processor)
+        XCTAssertEqual(session.detailColumnSize, expected)
+        XCTAssertEqual(session.visibleAttachedContentFramesForTesting.first?.size, expected)
+        XCTAssertTrue(Self.deterministicVisibleFrame.contains(session.panel.frame))
+    }
 
     private final class PointerLocationBox {
         var value: NSPoint
@@ -163,7 +187,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let fixture = try makeGeometryFixture()
         defer {
             panel.close()
-            fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+            TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
         }
         let session = makeSession(
             panel: panel,
@@ -217,7 +241,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
         defer {
-            fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+            TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
         }
         let session = makeSession(
             panel: panel,
@@ -257,7 +281,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             let panel = makePanel()
             let fixture = try makeGeometryFixture()
             defer {
-                fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+                TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
             }
             let session = makeSession(
                 panel: panel,
@@ -292,19 +316,20 @@ final class MenuBarPanelSessionTests: XCTestCase {
             )
             XCTAssertEqual(panel.contentMinSize, panel.frame.size, density.rawValue)
             XCTAssertEqual(panel.contentMaxSize, panel.frame.size, density.rawValue)
-            XCTAssertEqual(panel.frame.maxX, overviewFrame.maxX, accuracy: 0.5)
+            XCTAssertTrue(Self.deterministicVisibleFrame.contains(panel.frame))
             XCTAssertTrue(
                 session.visibleAttachedContentFramesForTesting.contains {
-                    approximatelyEqual($0, overviewFrame)
+                    $0.size == overviewFrame.size
                 },
                 density.rawValue
             )
             XCTAssertFalse(panel.styleMask.contains(.resizable), density.rawValue)
 
+            let reflowedOverview = try XCTUnwrap(session.visibleAttachedContentFramesForTesting.last)
             session.setGeekSection(.overview)
 
             XCTAssertEqual(session.geekSection, .overview, density.rawValue)
-            assertRect(panel.frame, equals: overviewFrame)
+            assertRect(panel.frame, equals: reflowedOverview)
             XCTAssertEqual(panel.contentMinSize, density.idealSize, density.rawValue)
             XCTAssertEqual(panel.contentMaxSize, density.idealSize, density.rawValue)
         }
@@ -358,7 +383,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
         defer {
-            fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+            TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
         }
         let session = makeSession(
             panel: panel,
@@ -413,7 +438,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(
             panel: panel,
             initialDensity: .geek,
@@ -446,7 +471,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let frames = session.visibleAttachedContentFramesForTesting
         XCTAssertEqual(frames.count, 2)
         XCTAssertEqual(frames[0].size, expectedDetailSize)
-        XCTAssertTrue(frames.contains { approximatelyEqual($0, overviewFrame) })
+        XCTAssertTrue(frames.contains { $0.size == overviewFrame.size })
         XCTAssertEqual(frames[0].maxY, frames[1].maxY - 135, accuracy: 0.001)
         assertPairwiseDisjoint(frames)
 
@@ -494,7 +519,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let wideVisibleFrame = NSRect(x: 0, y: 0, width: 2_400, height: 1_200)
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(
             panel: panel,
             initialDensity: .geek,
@@ -534,7 +559,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
                 tertiarySize: energyModeSize,
                 sourceOffset: 300
             ),
-            479
+            300
         )
         let expectedDetailTopOffset = GeekPanelPresentationMetrics.detailVerticalOffset(
             for: .power,
@@ -556,7 +581,14 @@ final class MenuBarPanelSessionTests: XCTestCase {
             frames[0].maxY - 300,
             accuracy: 0.001
         )
-        XCTAssertEqual(panel.frame.height, expectedTertiaryTopOffset + energyModeSize.height)
+        XCTAssertEqual(
+            panel.frame.height,
+            max(
+                GeekPanelPresentationMetrics.overviewSize.height,
+                GeekPanelPresentationMetrics.detailSize(for: .power).height,
+                expectedTertiaryTopOffset + energyModeSize.height
+            )
+        )
         XCTAssertGreaterThan(
             panel.frame.height,
             GeekPanelPresentationMetrics.overviewSize.height
@@ -605,7 +637,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
 
         session.setTertiaryPresented(false)
         XCTAssertFalse(session.isTertiaryPresented)
-        XCTAssertEqual(session.tertiaryColumnSize, GeekPanelPresentationMetrics.tertiarySize)
+        XCTAssertEqual(session.tertiaryColumnSize, historySize, "Closing preserves the selected history geometry")
         XCTAssertNil(session.tertiarySourceOffset)
     }
 
@@ -614,8 +646,11 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let visibleFrame = NSRect(x: 0, y: 0, width: 2_400, height: 1_200)
         let panel = makePanel()
         let hoverController = HoverIntentController()
+        // This ownership fixture must not depend on the user moving the desktop pointer.
+        // Reflow pointer-retention behavior is covered by dedicated movement tests.
         let panelCoordinator = GeekPanelCoordinator(
-            hoverIntentController: hoverController
+            hoverIntentController: hoverController,
+            pointerLocationProvider: { NSPoint(x: -10_000, y: -10_000) }
         )
         let paletteCoordinator = ControlPaletteCoordinator(
             fixedVisibleFrame: visibleFrame,
@@ -628,6 +663,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             initialDensity: .geek,
             panelCoordinator: panelCoordinator,
             controlPaletteCoordinator: paletteCoordinator,
+            pointerLocationProvider: { NSPoint(x: -10_000, y: -10_000) },
             fixedVisibleFrame: visibleFrame,
             presentsPanelOnShow: false
         )
@@ -682,8 +718,11 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let visibleFrame = NSRect(x: 0, y: 0, width: 2_400, height: 1_200)
         let panel = makePanel()
         let hoverController = HoverIntentController()
+        // This ownership fixture must not depend on the user moving the desktop pointer.
+        // Reflow pointer-retention behavior is covered by dedicated movement tests.
         let panelCoordinator = GeekPanelCoordinator(
-            hoverIntentController: hoverController
+            hoverIntentController: hoverController,
+            pointerLocationProvider: { NSPoint(x: -10_000, y: -10_000) }
         )
         let paletteCoordinator = ControlPaletteCoordinator(
             fixedVisibleFrame: visibleFrame,
@@ -696,6 +735,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             initialDensity: .geek,
             panelCoordinator: panelCoordinator,
             controlPaletteCoordinator: paletteCoordinator,
+            pointerLocationProvider: { NSPoint(x: -10_000, y: -10_000) },
             fixedVisibleFrame: visibleFrame,
             presentsPanelOnShow: false
         )
@@ -761,8 +801,11 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let visibleFrame = NSRect(x: 0, y: 0, width: 2_400, height: 1_200)
         let panel = makePanel()
         let hoverController = HoverIntentController()
-        let panelCoordinator = GeekPanelCoordinator(hoverIntentController: hoverController)
         let palettePointer = PointerLocationBox(NSPoint(x: -10_000, y: -10_000))
+        let panelCoordinator = GeekPanelCoordinator(
+            hoverIntentController: hoverController,
+            pointerLocationProvider: { palettePointer.value }
+        )
         let paletteCoordinator = ControlPaletteCoordinator(
             fixedVisibleFrame: visibleFrame,
             presentsPanelOnShow: false,
@@ -774,6 +817,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             initialDensity: .geek,
             panelCoordinator: panelCoordinator,
             controlPaletteCoordinator: paletteCoordinator,
+            pointerLocationProvider: { palettePointer.value },
             fixedVisibleFrame: visibleFrame,
             presentsPanelOnShow: false
         )
@@ -854,8 +898,11 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let visibleFrame = NSRect(x: 0, y: 0, width: 2_400, height: 1_200)
         let panel = makePanel()
         let hoverController = HoverIntentController()
-        let panelCoordinator = GeekPanelCoordinator(hoverIntentController: hoverController)
         let palettePointer = PointerLocationBox(NSPoint(x: -10_000, y: -10_000))
+        let panelCoordinator = GeekPanelCoordinator(
+            hoverIntentController: hoverController,
+            pointerLocationProvider: { palettePointer.value }
+        )
         let paletteCoordinator = ControlPaletteCoordinator(
             fixedVisibleFrame: visibleFrame,
             presentsPanelOnShow: false,
@@ -867,6 +914,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             initialDensity: .geek,
             panelCoordinator: panelCoordinator,
             controlPaletteCoordinator: paletteCoordinator,
+            pointerLocationProvider: { palettePointer.value },
             fixedVisibleFrame: visibleFrame,
             presentsPanelOnShow: false
         )
@@ -996,7 +1044,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(
             panel: panel,
             initialDensity: .geek,
@@ -1067,8 +1115,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
             .memory: 135,
             .disk: 254,
             .network: 0,
-            .sensors: 130,
-            .power: 287,
+            .sensors: 174,
+            .power: 152,
             .cleanup: 0,
         ]
 
@@ -1101,7 +1149,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             let panel = makePanel()
             let fixture = try makeGeometryFixture()
             defer {
-                fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+                TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
             }
             fixture.store.save(
                 frame: NSRect(
@@ -1137,7 +1185,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testAttachedDetailFlipsRightWithoutMovingOverviewAtTheLeftEdge() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let panel = makePanel()
         let settingsState = MenuBarPanelSettingsState(
             initialDensity: .geek,
@@ -1209,10 +1257,10 @@ final class MenuBarPanelSessionTests: XCTestCase {
         assertRect(panel.frame, equals: overviewFrame)
     }
 
-    func testNarrowScreenKeepsOverviewAndSecondaryWhileTertiaryIsUnavailable() throws {
+    func testNarrowScreenRetainsTertiaryThroughCompactBackNavigation() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let panel = makePanel()
         let settingsState = MenuBarPanelSettingsState(
             initialDensity: .geek,
@@ -1240,28 +1288,29 @@ final class MenuBarPanelSessionTests: XCTestCase {
 
         XCTAssertEqual(session.secondaryPresentationMode, .adjacent)
         XCTAssertEqual(settingsState.secondaryPresentationMode, .adjacent)
-        XCTAssertEqual(session.tertiaryPresentationMode, .unavailable)
-        XCTAssertEqual(settingsState.tertiaryPresentationMode, .unavailable)
-        XCTAssertEqual(
-            panel.frame.size,
-            GeekPanelPresentationMetrics.expandedSize(for: .network, density: .geek)
-        )
-        let visibleFrames = session.visibleAttachedContentFramesForTesting
-        XCTAssertEqual(visibleFrames.count, 2)
-        XCTAssertTrue(visibleFrames.contains { approximatelyEqual($0, overviewFrame) })
-        assertPairwiseDisjoint(visibleFrames)
+        XCTAssertEqual(session.tertiaryPresentationMode, .column)
+        XCTAssertEqual(settingsState.tertiaryPresentationMode, .column)
+        XCTAssertTrue(settingsState.cascadeLayout?.isCompact == true)
+        XCTAssertTrue(narrowVisibleFrame.insetBy(dx: 8, dy: 8).contains(panel.frame))
+        XCTAssertEqual(session.geekSection, .network)
+        _ = try XCTUnwrap(settingsState.cascadeLayout?.parentFrame)
+        session.setTertiaryPresented(true)
+        XCTAssertTrue(session.isTertiaryPresented, "Space constraints must not discard the route")
 
         session.setGeekSection(.overview)
 
         XCTAssertEqual(session.secondaryPresentationMode, .adjacent)
         XCTAssertEqual(settingsState.secondaryPresentationMode, .adjacent)
-        assertRect(panel.frame, equals: overviewFrame)
+        XCTAssertEqual(panel.frame.size, overviewFrame.size)
+        XCTAssertEqual(panel.frame.maxY, overviewFrame.maxY, accuracy: 0.5)
+        XCTAssertTrue(screen.visibleFrame.contains(panel.frame))
+        XCTAssertFalse(session.isTertiaryPresented)
     }
 
     func testSessionConsumesVerticallyStackedCascadeFramesWhenBothSidesAreTooNarrow() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let panel = makePanel()
         let settingsState = MenuBarPanelSettingsState(
             initialDensity: .geek,
@@ -1291,12 +1340,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let frames = session.visibleAttachedContentFramesForTesting
         XCTAssertEqual(frames.count, 2)
         let detailFrame = try XCTUnwrap(frames.first)
-        XCTAssertTrue(frames.contains { approximatelyEqual($0, overviewFrame) })
-        XCTAssertEqual(
-            overviewFrame.minY - detailFrame.maxY,
-            MiniWindowStyleTokens.cascadeGap,
-            accuracy: 0.5
-        )
+        XCTAssertTrue(frames.contains { $0.size == overviewFrame.size })
+        XCTAssertTrue(frames.allSatisfy { constrainedVisibleFrame.insetBy(dx: 8, dy: 8).contains($0) })
         XCTAssertTrue(constrainedVisibleFrame.insetBy(dx: 8, dy: 8).contains(panel.frame))
         XCTAssertTrue(settingsState.cascadeLayout?.childFrames.contains {
             approximatelyEqual($0, detailFrame)
@@ -1308,7 +1353,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(
             panel: panel,
             initialDensity: .simple,
@@ -1349,7 +1394,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(
             panel: panel,
             initialDensity: .complex,
@@ -1380,7 +1425,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             let panel = makePanel()
             let fixture = try makeGeometryFixture()
             defer {
-                fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+                TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
             }
             let session = makeSession(
                 panel: panel,
@@ -1407,17 +1452,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
 
             let stored = try XCTUnwrap(fixture.store.storedFrame(for: density))
             XCTAssertEqual(stored.size, density.idealSize, density.rawValue)
-            XCTAssertEqual(
-                stored.minX,
-                movedExpandedFrame.minX
-                    + GeekPanelPresentationMetrics.detailSize(
-                        for: .network,
-                        density: density
-                    ).width
-                    + MiniWindowStyleTokens.cascadeGap,
-                accuracy: 0.5,
-                density.rawValue
-            )
+            let currentOverview = try XCTUnwrap(session.visibleAttachedContentFramesForTesting.last)
+            XCTAssertEqual(stored.minX, currentOverview.minX, accuracy: 0.5, density.rawValue)
             XCTAssertEqual(
                 stored.maxY,
                 movedExpandedFrame.maxY,
@@ -1432,7 +1468,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(panel: panel, geometryStore: fixture.store)
         defer { session.teardown() }
 
@@ -1467,7 +1503,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let settingsState = MenuBarPanelSettingsState(
             initialDensity: .geek,
             defaults: fixture.defaults
@@ -1549,11 +1585,12 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testApplicationDeactivationClosesPanel() async throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         var dismissCount = 0
         let session = makeSession(
             panel: makePanel(),
             geometryStore: fixture.store,
+            applicationIsActiveProvider: { false },
             onDismiss: { dismissCount += 1 }
         )
         defer { session.teardown() }
@@ -1564,11 +1601,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
             name: NSApplication.didResignActiveNotification,
             object: NSApp
         )
-        for _ in 0..<50 where session.isPresented {
-            await Task.yield()
-        }
-
-        XCTAssertFalse(session.isPresented)
+        let didClose = await eventually { !session.isPresented }
+        XCTAssertTrue(didClose)
         XCTAssertFalse(session.isTornDown)
         XCTAssertFalse(session.panel.isVisible)
         XCTAssertEqual(dismissCount, 1)
@@ -1663,7 +1697,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testMouseDownKeepsPanelFamilyAndAnchorButClosesForUnrelatedWindow() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let panel = makePanel()
         let anchor = makeAnchor(on: screen)
         var triggerFrame = anchor
@@ -1727,7 +1761,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testGlobalMouseDownOutsideClosesPanel() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(panel: makePanel(), geometryStore: fixture.store)
         defer { session.teardown() }
         let anchor = makeAnchor(on: screen)
@@ -1751,7 +1785,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         try [PanelDensity.complex, .geek].forEach { density in
             let fixture = try makeGeometryFixture()
             defer {
-                fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+                TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
             }
             let panel = makePanel()
             let session = makeSession(
@@ -1798,7 +1832,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         try [PanelDensity.complex, .geek].forEach { density in
             let fixture = try makeGeometryFixture()
             defer {
-                fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+                TestPreferenceDomain.cleanup(suiteName: fixture.suiteName)
             }
             let panel = makePanel()
             let session = makeSession(
@@ -1835,7 +1869,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let panel = makePanel()
         let coordinator = GeekPanelCoordinator()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(
             panel: panel,
             initialDensity: .geek,
@@ -1885,12 +1919,12 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertFalse(coordinator.isPointerWithinHoverEnvelope)
     }
 
-    func testPointerCanMoveAcrossTheJoinedEdgeIntoDetail() throws {
+    func testPointerCanMoveAcrossTheSharedSeamIntoDetail() throws {
         let screen = try requireScreen()
         let panel = makePanel()
         let coordinator = GeekPanelCoordinator()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(
             panel: panel,
             initialDensity: .geek,
@@ -1933,7 +1967,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let panel = makePanel()
         let coordinator = GeekPanelCoordinator()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
 
         let pointerLocation = PointerLocationBox(NSPoint(
             x: screen.visibleFrame.minX - 20,
@@ -2000,10 +2034,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
             "Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"
         )
 
-        XCTAssertTrue(chromeSource.contains(
-            ".popover(isPresented: geekEditorBinding, arrowEdge: .trailing)"
-        ))
-        XCTAssertTrue(chromeSource.contains("GeekDashboardEditor(state: state)"))
+        XCTAssertTrue(chromeSource.contains("openSettings()"))
+        XCTAssertFalse(chromeSource.contains("GeekDashboardEditor(state: state)"))
         XCTAssertFalse(chromeSource.contains("resize(contentSize:"))
         XCTAssertFalse(controllerSource.contains("setPanelSettingsPresented"))
     }
@@ -2011,7 +2043,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testShowInstallsPersistentPanelHandlersOnceAndTeardownRemovesThem() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let panel = makePanel()
         let session = makeSession(panel: panel, geometryStore: fixture.store)
         let anchor = makeAnchor(on: screen)
@@ -2036,7 +2068,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testHideAndShowThirtyTimesReusePanelAndHostingControllerWithoutHandlerGrowth() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let panel = makePanel()
         let session = makeSession(panel: panel, geometryStore: fixture.store)
         defer { session.teardown() }
@@ -2067,13 +2099,14 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testOneHundredSecondaryOpenCloseCyclesReusePanelAndHandlers() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let panel = makePanel()
-        let coordinator = GeekPanelCoordinator()
+        let coordinator = GeekPanelCoordinator(pointerLocationProvider: { NSPoint(x: -10_000, y: -10_000) })
         let session = makeSession(
             panel: panel,
             geometryStore: fixture.store,
-            panelCoordinator: coordinator
+            panelCoordinator: coordinator,
+            pointerLocationProvider: { NSPoint(x: -10_000, y: -10_000) }
         )
         defer { session.teardown() }
         let anchor = makeAnchor(on: screen)
@@ -2102,7 +2135,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         var closeCount = 0
         let session = makeSession(
             panel: panel,
@@ -2129,7 +2162,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let screen = try requireScreen()
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let session = makeSession(panel: panel, geometryStore: fixture.store)
 
         XCTAssertTrue(MenuBarPanelIdleReclamationPolicy.shouldReclaim(session))
@@ -2180,6 +2213,94 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertNil(session.handleKeyEvent(panelEscape, sourceWindow: panel))
         XCTAssertFalse(session.isPresented)
         XCTAssertFalse(session.isTornDown)
+    }
+
+    func testNativeRangeMenuKeepsHoverDetailOpenUntilSelectionCompletes() async throws {
+        let screen = try requireScreen()
+        let outside = NSPoint(x: screen.frame.maxX + 100, y: screen.frame.maxY + 100)
+        let coordinator = GeekPanelCoordinator(pointerLocationProvider: { outside })
+        let panel = makePanel()
+        let session = makeSession(
+            panel: panel,
+            initialDensity: .geek,
+            panelCoordinator: coordinator,
+            pointerLocationProvider: { outside },
+            presentsPanelOnShow: false
+        )
+        defer { session.teardown() }
+        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
+
+        let menu = NSMenu(title: "History range")
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        panel.onPointerLocationChanged?(outside)
+        XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
+        XCTAssertFalse(session.handleMouseDown(
+            sourceWindow: nil,
+            screenLocation: outside,
+            eventWindowNumber: 123_456
+        ))
+        XCTAssertTrue(session.isPresented)
+
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
+        XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertFalse(coordinator.isPointerWithinHoverEnvelope)
+        XCTAssertTrue(session.isPresented)
+    }
+
+    func testMenuSelectionDoesNotCloseNonactivatingPanelOnTransientDeactivation() async throws {
+        let screen = try requireScreen()
+        let panel = makePanel()
+        let session = makeSession(
+            panel: panel,
+            initialDensity: .geek,
+            applicationIsActiveProvider: { false },
+            presentsPanelOnShow: false
+        )
+        defer { session.teardown() }
+        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
+
+        let menu = NSMenu(title: "History range")
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(session.isPresented, "The native menu's focus change is not an outside click")
+    }
+
+    func testMenuTrackingCancelsDeactivationThatArrivedFirst() async throws {
+        let screen = try requireScreen()
+        let panel = makePanel()
+        let session = makeSession(
+            panel: panel,
+            applicationIsActiveProvider: { false },
+            presentsPanelOnShow: false
+        )
+        defer { session.teardown() }
+        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
+
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        let menu = NSMenu(title: "History range")
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(session.isPresented)
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
+    }
+
+    func testActualDeactivationWithoutMenuStillClosesPanel() async throws {
+        let screen = try requireScreen()
+        let panel = makePanel()
+        let session = makeSession(
+            panel: panel,
+            applicationIsActiveProvider: { false },
+            presentsPanelOnShow: false
+        )
+        defer { session.teardown() }
+        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
+
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertFalse(session.isPresented)
     }
 
     func testEscapeFromAnotherAppWindowClosesPresentedPanel() throws {
@@ -2276,7 +2397,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
         panel: MenuBarStatusPanel,
         initialDensity: PanelDensity = .simple,
         initialOverviewSize: CGSize? = nil,
-        geometryStore: PanelGeometryStore = PanelGeometryStore(),
+        geometryStore: PanelGeometryStore? = nil,
         panelSettingsState: MenuBarPanelSettingsState? = nil,
         panelCoordinator: GeekPanelCoordinator? = nil,
         controlPaletteCoordinator: ControlPaletteCoordinator? = nil,
@@ -2295,7 +2416,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             rootView: AnyView(EmptyView()),
             initialDensity: initialDensity,
             initialOverviewSize: initialOverviewSize,
-            geometryStore: geometryStore,
+            geometryStore: geometryStore ?? PanelGeometryStore(defaults: TestPreferenceDomain.make(for: self)),
             panelSettingsState: panelSettingsState,
             panelCoordinator: panelCoordinator,
             controlPaletteCoordinator: controlPaletteCoordinator,
@@ -2320,9 +2441,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
         defaults: UserDefaults,
         suiteName: String
     ) {
-        let suiteName = "MenuBarPanelSessionTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.removePersistentDomain(forName: suiteName)
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
         return (PanelGeometryStore(defaults: defaults), defaults, suiteName)
     }
 

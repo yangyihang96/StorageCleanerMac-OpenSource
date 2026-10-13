@@ -51,8 +51,10 @@ final class RuntimeWorkflowPresentationTests: XCTestCase {
                         }.padding(16)
                     }
                     .environment(\.moduleTheme, theme)
+                    .environment(\.colorScheme, scheme)
                     .preferredColorScheme(scheme)
                     let host = NSHostingView(rootView: root)
+                    host.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
                     host.sizingOptions = []
                     host.frame = CGRect(x: 0, y: 0, width: width, height: 520)
                     for _ in 0..<4 {

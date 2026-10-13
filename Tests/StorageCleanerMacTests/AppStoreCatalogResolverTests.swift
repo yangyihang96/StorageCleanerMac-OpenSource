@@ -93,8 +93,7 @@ final class AppStoreCatalogResolverTests: XCTestCase {
         let provider = MacAppStoreProvider(
             receiptVerifier: AlwaysValidReceiptVerifier(),
             catalogResolver: FixedCatalogResolver(result: .matched(entry)),
-            storefront: "au"
-        )
+            storefront: "au", masExecutableProvider: { nil }, outdatedProvider: { [:] })
         let application = app(version: "1.0")
 
         let result = try await provider.checkForUpdate(application)
@@ -119,8 +118,7 @@ final class AppStoreCatalogResolverTests: XCTestCase {
         )
         let provider = MacAppStoreProvider(
             receiptVerifier: AlwaysValidReceiptVerifier(),
-            catalogResolver: FixedCatalogResolver(result: .matched(entry))
-        )
+            catalogResolver: FixedCatalogResolver(result: .matched(entry)), masExecutableProvider: { nil }, outdatedProvider: { [:] })
 
         let result = try await provider.checkForUpdate(app(version: "2.0"))
 
@@ -143,8 +141,7 @@ final class AppStoreCatalogResolverTests: XCTestCase {
         let registry = ApplicationUpdateProviderRegistry(providers: [
             MacAppStoreProvider(
                 receiptVerifier: AlwaysValidReceiptVerifier(),
-                catalogResolver: FixedCatalogResolver(result: .matched(entry))
-            ),
+                catalogResolver: FixedCatalogResolver(result: .matched(entry)), masExecutableProvider: { nil }, outdatedProvider: { [:] }),
             ManualUpdateProvider(),
         ])
 
@@ -159,8 +156,7 @@ final class AppStoreCatalogResolverTests: XCTestCase {
     func testProviderPropagatesCancellation() async {
         let provider = MacAppStoreProvider(
             receiptVerifier: AlwaysValidReceiptVerifier(),
-            catalogResolver: CancellingCatalogResolver()
-        )
+            catalogResolver: CancellingCatalogResolver(), masExecutableProvider: { nil }, outdatedProvider: { [:] })
 
         do {
             _ = try await provider.checkForUpdate(app(version: "1.0"))

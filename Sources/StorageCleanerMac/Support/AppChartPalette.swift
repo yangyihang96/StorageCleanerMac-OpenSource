@@ -33,8 +33,8 @@ enum PanelAppearancePreferences {
     }
 }
 
-/// This setting applies only to the menu-bar cascade. Leaving its stored value
-/// unset preserves the pre-1.9.9 appearance behavior for existing users.
+/// This setting applies only to the menu-bar cascade. An unset or `system`
+/// value inherits the app appearance, which itself may follow macOS.
 enum MiniWindowAppearance: String, CaseIterable, Identifiable {
     case system
     case light
@@ -45,14 +45,64 @@ enum MiniWindowAppearance: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .system:
-            L10n.text("跟随系统", "Follow System")
+            L10n.text("跟随软件外观", "Follow App Appearance")
         case .light:
-            L10n.text("始终浅色", "Always Light")
+            L10n.text("日间石墨", "Day Graphite")
         case .dark:
-            L10n.text("始终深色", "Always Dark")
+            L10n.text("夜间近黑", "Night Black")
         }
     }
 
+    var preferredColorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+
+    static func resolvedPreferredColorScheme(
+        miniWindowRawValue: String,
+        appRawValue: String
+    ) -> ColorScheme? {
+        if let override = Self(rawValue: miniWindowRawValue), override != .system {
+            return override.preferredColorScheme
+        }
+        return (AppAppearance(rawValue: appRawValue) ?? .system).preferredColorScheme
+    }
+}
+
+/// Both mini-window palettes use dark controls and text. The visual mode only
+/// selects the chrome: graphite in daylight, near-black at night.
+enum MiniWindowVisualMode: Equatable {
+    case graphite
+    case black
+
+    static func resolve(
+        miniWindowRawValue: String,
+        appRawValue: String,
+        systemColorScheme: ColorScheme
+    ) -> Self {
+        let appearance = MiniWindowAppearance.resolvedPreferredColorScheme(
+            miniWindowRawValue: miniWindowRawValue,
+            appRawValue: appRawValue
+        ) ?? systemColorScheme
+        return appearance == .dark ? .black : .graphite
+    }
+}
+
+private struct MiniWindowVisualModeKey: EnvironmentKey {
+    static let defaultValue: MiniWindowVisualMode = .black
+}
+
+extension EnvironmentValues {
+    var miniWindowVisualMode: MiniWindowVisualMode {
+        get { self[MiniWindowVisualModeKey.self] }
+        set { self[MiniWindowVisualModeKey.self] = newValue }
+    }
+}
+
+extension AppAppearance {
     var preferredColorScheme: ColorScheme? {
         switch self {
         case .system: nil
@@ -98,7 +148,7 @@ enum PanelColorTheme: String, CaseIterable, Identifiable {
         case .mint:
             "#63E6BE"
         case .graphite:
-            "#8E8E93"
+            nil
         }
     }
 
@@ -163,6 +213,18 @@ enum PanelColorTheme: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Built-in themes color the chart, not the panel surface. This keeps
+    /// graphite chrome neutral in both appearances even with a violet graph.
+    /// An explicitly chosen custom background remains available unchanged.
+    static func backgroundTint(storedTheme: String, backgroundHex: String, chartHex: String) -> Color? {
+        let theme = resolved(storedTheme: storedTheme, backgroundHex: backgroundHex, chartHex: chartHex)
+        guard theme == .custom else { return nil }
+        guard let color = PanelAppearancePreferences.color(from: resolvedBackgroundHex(
+            storedTheme: storedTheme, customHex: backgroundHex, chartHex: chartHex
+        ) ?? "") else { return nil }
+        return color.opacity(MiniWindowStyleTokens.panelBackgroundTintOpacity)
+    }
+
     /// Keep saved hues intact, but give the built-in pastel series a deeper
     /// daylight variant. A user's custom RGB value remains their choice.
     static func chartColor(storedTheme: String, backgroundHex: String, customHex: String) -> Color? {
@@ -175,7 +237,7 @@ enum PanelColorTheme: String, CaseIterable, Identifiable {
         case .ocean: light = 0x016CA6
         case .violet: light = 0x8733B4
         case .mint: light = 0x087663
-        case .graphite: light = 0x60606A
+        case .graphite: return nil
         case .system, .custom: return color
         }
         return AppAppearanceColors.adaptive(light: light, dark: color)
@@ -208,7 +270,10 @@ enum AppChartPalette {
     /// Warm activity series used when paired with the primary blue series.
     /// Kept stable across appearances so compact stacked bars remain legible.
     private static let activityRose = AppAppearanceColors.adaptive(
-        light: 0xB53368, dark: Color(red: 0.90, green: 0.36, blue: 0.61)
+        light: 0xBD286D, dark: MonitorPalette.pink
+    )
+    private static let compressedGold = AppAppearanceColors.adaptive(
+        light: 0x906500, dark: MonitorPalette.yellow
     )
 
     static let primary = AppDesignTokens.Palette.information
@@ -216,12 +281,12 @@ enum AppChartPalette {
     static let cpu = AppDesignTokens.Palette.information
     static let cpuUser = AppDesignTokens.Palette.information
     static let cpuSystem = activityRose
-    static let gpu = AppDesignTokens.Palette.diagnostic
-    static let memory = AppDesignTokens.Palette.storage
-    static let memoryAppOrOther = AppDesignTokens.Palette.storage
-    static let memoryWired = AppDesignTokens.Palette.diagnostic
-    static let memoryCompressed = activityRose
-    static let network = AppDesignTokens.Palette.tertiary
+    static let gpu = AppDesignTokens.Palette.information
+    static let memory = AppDesignTokens.Palette.information
+    static let memoryAppOrOther = AppDesignTokens.Palette.information
+    static let memoryWired = activityRose
+    static let memoryCompressed = compressedGold
+    static let network = AppDesignTokens.Palette.information
     static let energy = AppDesignTokens.Palette.warning
     static let download = AppDesignTokens.Palette.information
     static let upload = activityRose

@@ -83,10 +83,10 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertFalse(coordinator.isRefreshInFlight)
     }
 
-    func testSlowMemoryReadDoesNotBlockLiveCPUAndNetworkAndRemainsSingleFlight() async {
+    func testSlowMemoryReadDoesNotBlockLiveCPUAndNetworkAndRemainsSingleFlight() async throws {
         let snapshot = makeMemorySnapshot(generatedAt: Date(), topProcesses: [])
         let probe = SuspendedMenuMemoryProbe(snapshot: snapshot)
-        let store = ScanStore(menuBarMemoryStatusProvider: { await probe.sample() })
+        let store = try ScanStore.makeForTests(for: self, menuBarMemoryStatusProvider: { await probe.sample() })
         store.refreshMenuBarLiveStatus()
         await waitForLiveSnapshot(store)
         XCTAssertNotNil(store.menuBarMonitorState.snapshot)
@@ -105,9 +105,9 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertNil(store.memorySnapshot, "Status reads must preserve the separate process snapshot")
     }
 
-    func testPauseDiscardsAnOutstandingMemoryStatusRead() async {
+    func testPauseDiscardsAnOutstandingMemoryStatusRead() async throws {
         let probe = SuspendedMenuMemoryProbe(snapshot: makeMemorySnapshot(generatedAt: Date(), topProcesses: []))
-        let store = ScanStore(menuBarMemoryStatusProvider: { await probe.sample() })
+        let store = try ScanStore.makeForTests(for: self, menuBarMemoryStatusProvider: { await probe.sample() })
         store.refreshMenuBarLiveStatus()
         await waitForLiveSnapshot(store)
         store.toggleMenuBarRefreshPaused()
@@ -121,10 +121,10 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertNotNil(store.menuBarDisplayMemorySnapshot)
     }
 
-    func testLiveMemoryProcessesCoalesceRefreshAndPreserveASelectionMadeDuringRead() async {
+    func testLiveMemoryProcessesCoalesceRefreshAndPreserveASelectionMadeDuringRead() async throws {
         let snapshot = makeMemorySnapshot(generatedAt: Date(), topProcesses: [])
         let probe = SuspendedMenuMemoryProbe(snapshot: snapshot)
-        let store = ScanStore(menuBarMemoryProcessProvider: { await probe.sample() })
+        let store = try ScanStore.makeForTests(for: self, menuBarMemoryProcessProvider: { await probe.sample() })
         let consumer = attachProcessConsumer(to: store)
         defer { store.menuBarAuxiliaryMonitorState.unregisterConsumer(consumer) }
         store.refreshMenuBarMemoryProcesses()
@@ -152,9 +152,9 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertEqual(finalCalls, 2, "A current process reading must be reused for five seconds")
     }
 
-    func testClosingMemoryPageDiscardsPendingProcessRead() async {
+    func testClosingMemoryPageDiscardsPendingProcessRead() async throws {
         let probe = SuspendedMenuMemoryProbe(snapshot: makeMemorySnapshot(generatedAt: Date(), topProcesses: []))
-        let store = ScanStore(menuBarMemoryProcessProvider: { await probe.sample() })
+        let store = try ScanStore.makeForTests(for: self, menuBarMemoryProcessProvider: { await probe.sample() })
         let consumer = attachProcessConsumer(to: store)
         defer { store.menuBarAuxiliaryMonitorState.unregisterConsumer(consumer) }
         store.refreshMenuBarMemoryProcesses()
@@ -312,7 +312,7 @@ final class ScanStorePerformanceTests: XCTestCase {
     }
 
     func testMenuDisplayMemorySnapshotFallsBackToPrimary() throws {
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         let primary = makeMemorySnapshot(
             generatedAt: Date(timeIntervalSince1970: 300),
             topProcesses: []
@@ -382,36 +382,31 @@ final class ScanStorePerformanceTests: XCTestCase {
     }
 
     func testAdvancedMenuDetailPageKeepsStableScrollIdentity() throws {
-        let source = try sourceText(at: "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift")
-        let componentsSource = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
-        )
-        let headerSource = try XCTUnwrap(
-            componentsSource.components(separatedBy: "    var header: some View {").dropFirst().first?
-                .components(separatedBy: "    var moduleRail: some View {").first
-        )
-        let moduleRailSource = try XCTUnwrap(
-            componentsSource.components(separatedBy: "    var moduleRail: some View {").dropFirst().first?
-                .components(separatedBy: "    func railSelectionDistance").first
-        )
-        let detailPageSource = try XCTUnwrap(
-            source.components(separatedBy: "    var detailPage: some View {").dropFirst().first?
-                .components(separatedBy: "    func refreshProcessorTelemetry").first
-        )
-
-        XCTAssertFalse(headerSource.contains(".contentTransition("))
-        XCTAssertFalse(headerSource.contains(".animation("))
-        XCTAssertEqual(moduleRailSource.components(separatedBy: "selectedSection = section").count - 1, 1)
-        XCTAssertTrue(moduleRailSource.contains("withAnimation("))
-        XCTAssertEqual(detailPageSource.components(separatedBy: "ScrollView(.vertical)").count - 1, 1)
-        XCTAssertFalse(detailPageSource.contains(".id(selectedSection)"))
-        XCTAssertFalse(detailPageSource.contains(".transition("))
-        XCTAssertFalse(detailPageSource.contains(".animation("))
+        // D64 retires the rail/header scroll view. Its live replacement keeps
+        // lazy route construction and a stable, unanimated scroll identity.
+        let root = try D64MenuBarSource.source("MenuBarAdvancedStatusView.swift")
+        let boundary = try r2SourceDeclaration("private var liveCurrentContent: AnyView", in: root)
+        XCTAssertTrue(boundary.contains("geekDetailPage"))
+        XCTAssertFalse(boundary.contains("MenuBarObservedObjectBoundary"))
+        let geek = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarGeekPanel.swift")
+        let route = try r2SourceDeclaration("var geekDetailPage: AnyView", in: geek)
+        XCTAssertTrue(route.contains("if selectedSection == .overview"))
+        XCTAssertTrue(route.contains("AnyView(geekOverviewPage)"))
+        XCTAssertTrue(route.contains("AnyView(geekSelectedDetailPage)"))
+        let detail = try r2SourceDeclaration("var geekSelectedDetailPage:", in: geek)
+        XCTAssertTrue(detail.contains("GeekDetailPageFrame(isPaused: store.isMenuBarRefreshPaused)"))
+        XCTAssertEqual(detail.components(separatedBy: ".id(selectedSection)").count - 1, 1)
+        XCTAssertFalse(detail.contains("ScrollView("))
+        XCTAssertFalse(detail.contains(".id(historyReferenceDate)"))
+        XCTAssertFalse(detail.contains(".id(monitorState"))
+        XCTAssertFalse(detail.contains(".transition("))
+        XCTAssertFalse(detail.contains(".animation("))
+        XCTAssertTrue(detail.contains("requestedGeekPage"))
     }
 
-    func testHistoryBootstrapDoesNotReadDuringStoreInitialization() async {
+    func testHistoryBootstrapDoesNotReadDuringStoreInitialization() async throws {
         let loader = RecordingHistoryLoader(result: makeHistorySnapshot())
-        let store = ScanStore(historyLoader: loader)
+        let store = try ScanStore.makeForTests(for: self, historyLoader: loader)
 
         let initialLoadCount = await loader.loadCount()
         XCTAssertEqual(initialLoadCount, 0)
@@ -426,10 +421,10 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertEqual(store.cleanupHistorySummary.entries.count, 1)
     }
 
-    func testHistoryBootstrapCoalescesConcurrentAndRepeatedCalls() async {
+    func testHistoryBootstrapCoalescesConcurrentAndRepeatedCalls() async throws {
         let expected = makeHistorySnapshot()
         let loader = RecordingHistoryLoader(result: expected, startsSuspended: true)
-        let store = ScanStore(historyLoader: loader)
+        let store = try ScanStore.makeForTests(for: self, historyLoader: loader)
         var scanPublications = 0
         var cleanupPublications = 0
         let scanSubscription = store.$scanHistorySummary
@@ -457,11 +452,11 @@ final class ScanStorePerformanceTests: XCTestCase {
         withExtendedLifetime((scanSubscription, cleanupSubscription)) {}
     }
 
-    func testHistoryBootstrapRejectsStaleResultAfterScanHistoryMutation() async {
+    func testHistoryBootstrapRejectsStaleResultAfterScanHistoryMutation() async throws {
         let stale = makeHistorySnapshot(scanDate: 100, cleanupDate: 100)
         let current = makeHistorySnapshot(scanDate: 900, cleanupDate: 900)
         let loader = RecordingHistoryLoader(result: stale, startsSuspended: true)
-        let store = ScanStore(historyLoader: loader)
+        let store = try ScanStore.makeForTests(for: self, historyLoader: loader)
 
         let bootstrap = Task { await store.loadPersistedHistoryIfNeeded() }
         await loader.waitUntilLoadStarts()
@@ -475,11 +470,11 @@ final class ScanStorePerformanceTests: XCTestCase {
         XCTAssertEqual(loadCount, 1)
     }
 
-    func testHistoryBootstrapRejectsStaleResultAfterCleanupHistoryMutation() async {
+    func testHistoryBootstrapRejectsStaleResultAfterCleanupHistoryMutation() async throws {
         let stale = makeHistorySnapshot(scanDate: 100, cleanupDate: 100)
         let current = makeHistorySnapshot(scanDate: 900, cleanupDate: 900)
         let loader = RecordingHistoryLoader(result: stale, startsSuspended: true)
-        let store = ScanStore(historyLoader: loader)
+        let store = try ScanStore.makeForTests(for: self, historyLoader: loader)
 
         let bootstrap = Task { await store.loadPersistedHistoryIfNeeded() }
         await loader.waitUntilLoadStarts()
@@ -495,7 +490,7 @@ final class ScanStorePerformanceTests: XCTestCase {
 
     func testScanHistoryLoadReturnsNewestBoundedEntries() throws {
         let (defaults, suiteName) = makeTemporaryDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let dates = (0..<65).map { ($0 * 17) % 65 }
         let entries = dates.map { makeScanEntry(date: TimeInterval($0)) }
         defaults.set(try JSONEncoder().encode(entries), forKey: ScanHistoryService.defaultsKey)
@@ -508,7 +503,7 @@ final class ScanStorePerformanceTests: XCTestCase {
 
     func testCleanupHistoryLoadReturnsNewestBoundedEntries() throws {
         let (defaults, suiteName) = makeTemporaryDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let dates = (0..<85).map { ($0 * 19) % 85 }
         let entries = dates.map { value in
             CleanupHistoryEntry(
@@ -541,7 +536,7 @@ final class ScanStorePerformanceTests: XCTestCase {
         )
 
         for path in [
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift",
             "Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"
         ] {
@@ -626,8 +621,8 @@ final class ScanStorePerformanceTests: XCTestCase {
     }
 
     private func makeTemporaryDefaults() -> (UserDefaults, String) {
-        let suiteName = "ScanStorePerformanceTests-\(UUID().uuidString)"
-        return (UserDefaults(suiteName: suiteName)!, suiteName)
+        let suiteName = TestPreferenceDomain.makeSuite()
+        return (TestPreferenceDomain.open(suiteName: suiteName)!, suiteName)
     }
 
     private func sourceText(at relativePath: String) throws -> String {

@@ -3,9 +3,9 @@ import XCTest
 
 final class UnifiedMenuBarPanelTests: XCTestCase {
     func testPanelOffersGeekOnlyAndMigratesEarlierPreferences() throws {
-        let suiteName = "UnifiedMenuBarPanelTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
         XCTAssertEqual(PanelDensity.menuBarChoices, [.geek])
         XCTAssertEqual(PanelDensity.defaultValue, .geek)
@@ -267,8 +267,12 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
     }
 
     @MainActor
-    func testBackgroundDiskHistoryKeepsRealSamplesWhenThePanelIsClosed() async {
-        XCTAssertEqual(MenuBarAuxiliaryMonitorState.diskIOSamplingInterval, .seconds(2))
+    /// Standalone branch (no resident sampling context attached, e.g. a
+    /// probe without the status item). The production branch with the
+    /// controller's context is covered by
+    /// `testProductionContextKeepsBackgroundDiskHistoryOff` (D71④).
+    func testStandaloneBackgroundDiskHistoryKeepsRealSamplesWithoutSamplingContext() async {
+        XCTAssertEqual(MenuBarAuxiliaryMonitorState.diskIOSamplingInterval, .seconds(5))
         let first = NativeDiskIOCounters(
             date: Date(timeIntervalSinceReferenceDate: 10_000),
             readBytes: 1_000,
@@ -302,6 +306,24 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         state.refreshBackgroundDiskHistory(force: true)
         await Task.yield()
         XCTAssertEqual(state.nativeDiskIOHistory.count, 1)
+    }
+
+    @MainActor
+    func testProductionContextKeepsBackgroundDiskHistoryOff() async {
+        let provider = DiskCounterProviderSequence([NativeDiskIOCounters(
+            date: Date(timeIntervalSinceReferenceDate: 10_000), readBytes: 1_000, writtenBytes: 2_000,
+            readOperations: 10, writeOperations: 20, driverCount: 1)])
+        let state = MenuBarAuxiliaryMonitorState(diskCounterProvider: { provider.next() }, powerHistoryURL: nil)
+        let context = MenuBarSamplingContext()
+        context.configure(statusMode: .deviceStatus, statusVisible: true, panelVisible: false,
+                          customFanControlActive: false, paused: false)
+        state.attachSamplingContext(context)
+        state.refreshBackgroundDiskHistory(force: true)
+        await waitUntil { !state.isLocalDataRefreshActive }
+        XCTAssertEqual(provider.readCount, 0, "Production background disk sampling must not call the provider")
+        XCTAssertNil(state.nativeDiskIOCounters)
+        XCTAssertTrue(state.nativeDiskIOHistory.isEmpty)
+        state.setPaused(true)
     }
 
     func testMenuBarRefreshKeepsClosedPanelMetricHistoryAndPauseStateInSync() throws {
@@ -386,9 +408,9 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
 
     @MainActor
     func testPanelSectionsPersistAcrossSettingsAndPanelRecreation() throws {
-        let suiteName = "UnifiedMenuBarPanelTests.Sections.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
         let first = MenuBarPanelSettingsState(
             initialDensity: .simple,
@@ -417,7 +439,10 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         let root = try sourceText("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift")
         let settings = try sourceText("Sources/StorageCleanerMac/Views/SettingsView.swift")
 
-        XCTAssertTrue(root.contains("miniWindowAppearanceRawValue"))
+        let appearance = try sourceText("Sources/StorageCleanerMac/Support/PanelAppearanceEnvironment.swift")
+        XCTAssertTrue(root.contains("PanelAppearanceEnvironment(forcedVisualMode: captureVisualMode)"))
+        XCTAssertTrue(appearance.contains("@AppStorage(PanelAppearancePreferences.miniWindowAppearanceKey)"))
+        XCTAssertFalse(appearance.contains(".id("))
         XCTAssertTrue(root.contains(".id(languageRawValue)"))
         XCTAssertFalse(root.contains(".id(languageRawValue + appearanceRawValue)"))
         XCTAssertTrue(settings.contains("MiniWindowAppearance.allCases"))
@@ -475,7 +500,8 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertFalse(complexProcessor.needsDiskIOSampling)
         XCTAssertTrue(geekNetwork.needsNetworkInterface)
         XCTAssertTrue(geekNetwork.needsPublicNetworkAddress)
-        XCTAssertTrue(geekNetwork.needsNetworkProcesses)
+        XCTAssertFalse(geekNetwork.needsNetworkProcesses)
+        XCTAssertTrue(PanelDensity.geek.auxiliaryDemand(for: .network, tertiaryVisible: true).needsNetworkProcesses)
         XCTAssertTrue(geekNetwork.needsDiskIOSampling)
         XCTAssertTrue(geekNetwork.needsProcessorTelemetry)
         XCTAssertTrue(geekOverview.needsProcessorTelemetry)
@@ -549,77 +575,42 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
     }
 
     func testAdvancedPanelKeepsLiveObservationBelowShellAndNavigation() throws {
-        let source = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"
-        )
-        let rootProperties = try XCTUnwrap(
-            source.components(separatedBy: "struct MenuBarAdvancedStatusView: View {").last?
-                .components(separatedBy: "    init(").first
-        )
-        let shell = try XCTUnwrap(
-            source.components(separatedBy: "    var body: some View {").dropFirst().first?
-                .components(separatedBy: "    @ViewBuilder\n    private var liveHeader").first
-        )
-        let liveContent = try XCTUnwrap(
-            source.components(separatedBy: "    private var liveCurrentContent: some View {").last?
-                .components(separatedBy: "    @ViewBuilder\n    private var liveGeekOverview").first
-        )
-
-        XCTAssertTrue(rootProperties.contains("let store: ScanStore"))
-        XCTAssertTrue(rootProperties.contains("let monitorState: MenuBarMonitorState"))
-        XCTAssertTrue(rootProperties.contains("let auxiliaryState: MenuBarAuxiliaryMonitorState"))
-        XCTAssertTrue(rootProperties.contains("let fanControl: FanControlCoordinator"))
-        XCTAssertFalse(rootProperties.contains("@ObservedObject var store"))
-        XCTAssertFalse(rootProperties.contains("@ObservedObject var monitorState"))
-        XCTAssertFalse(rootProperties.contains("@ObservedObject var auxiliaryState"))
-        XCTAssertFalse(rootProperties.contains("@ObservedObject var fanControl"))
-
+        let source = try D64MenuBarSource.source("MenuBarAdvancedStatusView.swift")
+        let rootProperties = try XCTUnwrap(source.components(separatedBy: "struct MenuBarAdvancedStatusView: View {").last?
+            .components(separatedBy: "    init(").first)
+        for dependency in ["store: ScanStore", "monitorState: MenuBarMonitorState", "auxiliaryState: MenuBarAuxiliaryMonitorState", "fanControl: FanControlCoordinator"] {
+            XCTAssertTrue(rootProperties.contains("let " + dependency))
+            XCTAssertFalse(rootProperties.contains("@ObservedObject var " + dependency))
+        }
+        let shell = try r2SourceDeclaration("private var panelSurface:", in: source)
         XCTAssertTrue(shell.contains("PanelShell("))
-        XCTAssertTrue(shell.contains("liveHeader"))
-        XCTAssertTrue(shell.contains("moduleRail"))
+        XCTAssertTrue(shell.contains("GeekAttachedPanelShell("))
+        XCTAssertTrue(shell.contains("showsHeader: false"))
+        XCTAssertTrue(shell.contains("showsNavigation: false"))
         XCTAssertTrue(shell.contains("liveCurrentContent"))
-        let sharedShellSource = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"
-        )
-        XCTAssertTrue(
-            sharedShellSource.contains(".fixedSize(horizontal: false, vertical: true)"),
-            "The fixed-size Panel must not compress its shared header when a page has dense content"
-        )
-        XCTAssertTrue(source.contains("private struct MenuBarObservedObjectBoundary"))
-        XCTAssertTrue(source.contains("private struct MenuBarAdvancedSamplingCoordinator"))
-
-        let expectedDependencies: [PanelSection: Set<String>] = [
-            .overview: ["store", "monitorState", "auxiliaryState", "computerHealthStore", "fanControl"],
-            .processor: ["store", "monitorState", "auxiliaryState"],
-            .memory: ["store", "monitorState"],
-            .disk: ["store", "auxiliaryState", "computerHealthStore"],
-            .network: ["monitorState", "auxiliaryState", "computerHealthStore"],
-            .sensors: ["monitorState", "auxiliaryState", "computerHealthStore", "fanControl"],
-            .power: ["store", "auxiliaryState", "computerHealthStore"],
-            .cleanup: ["store", "auxiliaryState"]
+        XCTAssertFalse(shell.contains("MenuBarObservedObjectBoundary("))
+        let live = try r2SourceDeclaration("private var liveCurrentContent:", in: source)
+        XCTAssertTrue(live.contains("geekDetailPage"))
+        XCTAssertFalse(live.contains("MenuBarObservedObjectBoundary("))
+        XCTAssertTrue(source.contains("struct MenuBarAdvancedSamplingCoordinator: View"))
+        // Live-card domains replace the dormant per-page subscriptions, with
+        // the existing domain-specific regression suite retaining budgets.
+        let cards = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarLiveCard.swift")
+        XCTAssertTrue(cards.contains("@StateObject var model: MenuBarCardModel"))
+        XCTAssertTrue(cards.contains("MenuBarLiveCard(page: page, traceID: identity,"))
+        let domainsByPage: [(String, [String])] = [
+            ("GeekProcessorView.swift", [".cpu", ".energyProcesses", ".sensors"]),
+            ("GeekMemoryView.swift", [".memory", ".memoryProcesses"]),
+            ("GeekDiskView.swift", [".capacity", ".diskIO", ".energyProcesses"]),
+            ("GeekNetworkView.swift", [".network", ".networkInterface"]),
+            ("GeekSensorsView.swift", [".sensors", ".controls"]),
+            ("GeekPowerView.swift", [".battery", ".controls", ".energyProcesses"]),
         ]
-        let dependencyNames = [
-            "store",
-            "monitorState",
-            "auxiliaryState",
-            "computerHealthStore",
-            "fanControl"
-        ]
-
-        for (index, section) in PanelSection.allCases.enumerated() {
-            let start = "case .\(section.rawValue):"
-            let suffix = try XCTUnwrap(liveContent.components(separatedBy: start).last)
-            let segment: String
-            if index + 1 < PanelSection.allCases.count {
-                let next = "case .\(PanelSection.allCases[index + 1].rawValue):"
-                segment = try XCTUnwrap(suffix.components(separatedBy: next).first)
-            } else {
-                segment = suffix
+        for (file, domains) in domainsByPage {
+            let page = try D64MenuBarSource.source("MenuBarAdvanced/" + file)
+            for domain in domains {
+                XCTAssertTrue(page.contains("liveCard(" + domain), "\(file): \(domain)")
             }
-            let actual = Set(dependencyNames.filter {
-                segment.contains("MenuBarObservedObjectBoundary(model: \($0))")
-            })
-            XCTAssertEqual(actual, expectedDependencies[section], section.rawValue)
         }
     }
 
@@ -692,64 +683,38 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertFalse(panel.contains("prefetchGeekDetailSnapshots"))
         XCTAssertFalse(panel.contains("store.refreshEnergyImpact("))
         XCTAssertFalse(panel.contains("store.refreshMemory("))
-        XCTAssertTrue(view.contains("store.updateMenuBarProcessConsumer(consumerID, section: selectedSection)"))
+        // r2-mini-sampling (D71④): process lists start only when the
+        // matching tertiary page is visible, not on the secondary page.
+        XCTAssertTrue(view.contains("store.updateMenuBarProcessConsumer(consumerID, section: processSection)"))
+        XCTAssertTrue(view.contains("MenuBarProcessSamplingDemand.section(selectedSection, tertiaryVisible: tertiaryVisible)"))
         XCTAssertTrue(view.contains("store.updateMenuBarProcessConsumer(consumerID, section: nil)"))
     }
 
     func testMenuBarSeparatesFreshDisplayMemoryFromProcessSnapshots() throws {
-        let components = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
-        )
-        let status = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"
-        )
-        let geek = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
-        )
-        let memory = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift"
-        )
-        let combined = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarCombinedPanel.swift"
-        )
-        let displaySnapshot = try XCTUnwrap(
-            components.components(separatedBy: "var memorySnapshot: MemorySnapshot? {").last?
-                .components(separatedBy: "    var processMemorySnapshot").first
-        )
-        let processSnapshot = try XCTUnwrap(
-            components.components(separatedBy: "var processMemorySnapshot: MemorySnapshot? {").last?
-                .components(separatedBy: "    var storageSnapshot").first
-        )
-
-        XCTAssertTrue(displaySnapshot.contains("store.menuBarDisplayMemorySnapshot"))
-        XCTAssertFalse(displaySnapshot.contains("store.memorySnapshot"))
-        XCTAssertTrue(processSnapshot.contains("store.memorySnapshot"))
-        XCTAssertTrue(status.contains("return store.menuBarDisplayMemorySnapshot"))
-        XCTAssertTrue(status.contains("else if hasCurrentMemoryPressure"))
-        XCTAssertTrue(status.contains("switch displayMemorySnapshot?.reportablePressureLevel"))
-        XCTAssertFalse(status.contains("switch displayMemorySnapshot?.pressureLevel"))
-        XCTAssertTrue(status.contains("private var snapshot: MemorySnapshot?"))
-        XCTAssertTrue(status.contains("store.memorySnapshot"))
-        XCTAssertTrue(geek.contains("processMemorySnapshot?.topProcesses"))
+        let components = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarAdvancedComponents.swift")
+        let display = try r2SourceDeclaration("var memorySnapshot:", in: components)
+        XCTAssertTrue(display.contains("store.menuBarDisplayMemorySnapshot"))
+        XCTAssertFalse(display.contains("store.memorySnapshot"))
+        XCTAssertFalse(components.contains("var processMemorySnapshot:"))
+        let memory = try D64MenuBarSource.source("MenuBarAdvanced/GeekMemoryView.swift")
         XCTAssertTrue(memory.contains("store.menuBarPreparedMemoryApps"))
-        XCTAssertTrue(combined.contains("if let memorySnapshot = processMemorySnapshot"))
+        XCTAssertTrue(memory.contains("memorySnapshot.map(swapUsageText)"))
+        XCTAssertTrue(components.contains("memorySnapshot?.reportablePressureLevel"))
+        XCTAssertFalse(components.contains("memorySnapshot?.pressureLevel"))
+        let geek = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarGeekPanel.swift")
+        XCTAssertFalse(geek.contains("processMemorySnapshot?.topProcesses"))
+        XCTAssertFalse(geek.contains("var geekTopProcesses:"))
+        XCTAssertTrue(memory.contains("liveCard(.memoryProcesses)"))
+        let cards = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarLiveCard.swift")
+        XCTAssertTrue(cards.contains("value.dates = [store.memorySnapshot?.generatedAt]"))
     }
 
     func testMenuBarDiskCapacityUsesUserFacingFieldsAndDecimalFormatting() throws {
-        let status = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"
-        )
         let components = try sourceText(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
         )
-        let diskPanel = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarDiskPanel.swift"
-        )
-        let combined = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarCombinedPanel.swift"
-        )
-        let geek = try sourceText(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
+        let overview = try sourceText(
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPresentation.swift"
         )
         let geekDisk = try sourceText(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDiskView.swift"
@@ -757,31 +722,54 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         let cleanup = try sourceText(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekCleanupView.swift"
         )
+        let geek = try sourceText(
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
+        )
+        let capacity = try sourceText(
+            "Sources/StorageCleanerMac/Services/StorageCapacityService.swift"
+        )
         let tertiary = try sourceText(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift"
         )
         let hover = try sourceText(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift"
         )
-        let userFacing = [status, components, diskPanel, combined, geek, geekDisk, cleanup]
-            .joined(separator: "\n")
+        // D14/D64: trace the live used-space card and the available-space
+        // cleanup tile back to the shared user-facing capacity calculation.
+        // userUsedBytes is a model input, not a literal rendered by the card.
+        let used = try r2SourceDeclaration("var userUsedBytes:", in: capacity)
+        let usedRatio = try r2SourceDeclaration("var userUsedRatio:", in: capacity)
+        let availableRatio = try r2SourceDeclaration("var userAvailableRatio:", in: capacity)
+        XCTAssertTrue(used.contains("totalBytes - userAvailableBytes"))
+        XCTAssertTrue(usedRatio.contains("Double(userUsedBytes) / Double(totalBytes)"))
+        XCTAssertTrue(availableRatio.contains("Double(userAvailableBytes) / Double(totalBytes)"))
+        let diskCard = try r2SourceDeclaration("struct GeekDiskPresentation:", in: overview)
+        XCTAssertTrue(diskCard.contains("usedPercent: storageSnapshot.userUsedPercent"))
+        XCTAssertTrue(diskCard.contains("ByteFormat.storageString(storageSnapshot.userAvailableBytes)"))
+        XCTAssertTrue(diskCard.contains("proxy.size.width * storageSnapshot.userUsedRatio"))
+        XCTAssertTrue(geekDisk.contains("capacity?.userUsedRatio"))
+        let cleanupDisk = try r2SourceDeclaration("var geekCleanupDiskTile:", in: geek)
+        XCTAssertTrue(cleanupDisk.contains("ByteFormat.storageString($0.userAvailableBytes)"))
+        XCTAssertTrue(cleanupDisk.contains("progress: storageSnapshot?.userAvailableRatio"))
 
-        for field in [
-            "userAvailableBytes",
-            "userUsedBytes",
-            "userAvailableRatio",
-            "userUsedRatio",
-            "userUsedPercent",
-        ] {
-            XCTAssertTrue(userFacing.contains(field), field)
-        }
-        XCTAssertTrue(components.contains("ByteFormat.storageString(abs(value))"))
-        for source in [status, diskPanel, combined, geek, geekDisk, cleanup, hover] {
+        let gigabyte: Int64 = 1_000_000_000
+        let snapshot = StorageCapacitySnapshot(
+            totalBytes: 1_000 * gigabyte, availableBytes: 300 * gigabyte,
+            availableForImportantUsageBytes: 560 * gigabyte
+        )
+        XCTAssertEqual(snapshot.userAvailableBytes, 560 * gigabyte)
+        XCTAssertEqual(snapshot.userUsedBytes, 440 * gigabyte)
+        XCTAssertEqual(snapshot.userAvailableRatio, 0.56, accuracy: 1e-12)
+        XCTAssertEqual(snapshot.userUsedRatio, 0.44, accuracy: 1e-12)
+        XCTAssertEqual(snapshot.userUsedPercent, 44)
+        XCTAssertEqual(snapshot.usedRatio, 0.70, accuracy: 1e-12)
+        XCTAssertFalse(components.contains("func capacitySevenDayDeltaText("))
+        for source in [overview, geek, geekDisk, cleanup, hover] {
             XCTAssertTrue(source.contains("ByteFormat.storageString("))
         }
         XCTAssertTrue(tertiary.contains("GeekDiskIOHoverDetail("))
-        XCTAssertFalse(status.contains("storageSnapshot?.usedRatio"))
-        XCTAssertFalse(combined.contains("storageSnapshot.usedRatio"))
+        XCTAssertFalse(geekDisk.contains("storageSnapshot?.usedRatio"))
+        XCTAssertFalse(overview.contains("storageSnapshot.usedRatio"))
         XCTAssertFalse(geekDisk.contains("volume.capacity.usedRatio"))
     }
 
@@ -822,7 +810,9 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         )
 
         XCTAssertEqual(GeekProcessorCoreLayout.valueFontSize, 8)
-        XCTAssertTrue(components?.contains(".fixedSize(horizontal: true, vertical: true)") == true)
+        XCTAssertTrue(components?.contains(".minimumScaleFactor(0.75)") == true)
+        XCTAssertTrue(components?.contains("contentDiameter / sqrt(2)") == true)
+        XCTAssertFalse(components?.contains(".fixedSize(horizontal: true, vertical: true)") == true)
         XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 18), 2)
         XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 18), 102)
         XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 19), 3)
@@ -893,10 +883,7 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
     }
 
     private func sourceText(_ relativePath: String) throws -> String {
-        try String(
-            contentsOf: projectRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        try SettingsSourceContract.source(at: projectRoot.appendingPathComponent(relativePath))
     }
 
     private var projectRoot: URL {
@@ -938,6 +925,8 @@ private final class NetworkProcessProviderSequence: @unchecked Sendable {
 private final class DiskCounterProviderSequence: @unchecked Sendable {
     private let lock = NSLock()
     private var counters: [NativeDiskIOCounters]
+    private var calls = 0
+    var readCount: Int { lock.withLock { calls } }
 
     init(_ counters: [NativeDiskIOCounters]) {
         self.counters = counters
@@ -945,7 +934,8 @@ private final class DiskCounterProviderSequence: @unchecked Sendable {
 
     func next() -> NativeDiskIOCounters? {
         lock.withLock {
-            counters.isEmpty ? nil : counters.removeFirst()
+            calls += 1
+            return counters.isEmpty ? nil : counters.removeFirst()
         }
     }
 }

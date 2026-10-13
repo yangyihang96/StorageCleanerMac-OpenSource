@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import IOKit
 
-/// Best-effort Apple Silicon CPU operating-point telemetry.
+/// Best-effort Apple Silicon CPU and GPU operating-point telemetry.
 ///
 /// IOReport is a private SPI. Every discovery, decoding and mapping step is
 /// validated and fails closed so an OS or SoC layout change hides the dynamic
@@ -12,6 +12,20 @@ enum CPUPerformanceStateService {
         let processorModel: String
         let performanceLevels: [PerformanceLevel]
         let clusters: [ClusterReading]
+        /// BOARD N16-1: the GPU's operating point over the same interval.
+        var gpu: GPUReading? = nil
+    }
+
+    /// The GPU over one IOReport interval ("GPU Stats" › "GPU Performance
+    /// States" › GPUPH, weighted by the pmgr GPU DVFS table).
+    struct GPUReading: Equatable, Sendable {
+        /// The residency-weighted frequency of the active states; nil when
+        /// the GPU was off for the whole interval (idle, not zero).
+        let frequencyMHz: Double?
+        /// The share of the interval the GPU was not off (0...1).
+        let activeRatio: Double
+        /// The table's highest operating point (a ring's scale).
+        let maximumFrequencyMHz: Double
     }
 
     struct PerformanceLevel: Equatable, Sendable {
@@ -68,8 +82,12 @@ enum CPUPerformanceStateService {
     }
     private static let inactiveStateNames: Set<String> = ["IDLE", "DOWN", "OFF"]
     private static let validFrequencyMHz = 300.0...8_000.0
+    /// Apple GPUs run between a few hundred megahertz and about two gigahertz.
+    private static let validGPUFrequencyMHz = 100.0...3_000.0
     private static let validVoltageVolts = 0.4...1.5
     private static let latestVerifiedDynamicTelemetryOSMajor = 27
+    /// Energy Model counters were verified on macOS 27.2 (Mac17,9).
+    static let latestVerifiedEnergyModelOSMajor = 27
 
     /// Static model and perflevel topology do not need an IOReport delta.
     static func staticSnapshot() -> Snapshot? {
@@ -130,6 +148,84 @@ enum CPUPerformanceStateService {
             }
             return states
         }
+    }
+
+    /// The pmgr GPU table (`voltage-states9`): its first record is the
+    /// powered-off state (0 Hz, a retention voltage), the rest are the
+    /// operating points P1…Pn in ascending order, optionally followed by
+    /// all-zero padding.
+    static func decodeGPUDVFSStates(_ data: Data) -> [DVFSState]? {
+        let recordSize = 8
+        guard !data.isEmpty, data.count.isMultiple(of: recordSize) else { return nil }
+
+        return data.withUnsafeBytes { raw -> [DVFSState]? in
+            var states: [DVFSState] = []
+            var isPadding = false
+            for offset in stride(from: 0, to: raw.count, by: recordSize) {
+                let rawFrequency = raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                let rawVoltage = raw.loadUnaligned(fromByteOffset: offset + 4, as: UInt32.self)
+                // Review P2-4: padding is only at the end. A zero record
+                // followed by an operating point would shift every later P
+                // state onto the wrong clock, so the table is not read.
+                guard !isPadding || (rawFrequency == 0 && rawVoltage == 0) else { return nil }
+                if rawFrequency == 0 {
+                    // Only the leading powered-off record and padding have
+                    // no clock.
+                    guard offset == 0 || rawVoltage == 0 else { return nil }
+                    isPadding = offset > 0
+                    continue
+                }
+                guard let frequencyMHz = normalizedFrequencyMHz(rawFrequency, valid: validGPUFrequencyMHz),
+                      let voltageVolts = normalizedVoltageVolts(rawVoltage) else {
+                    return nil
+                }
+                if let previous = states.last {
+                    guard frequencyMHz > previous.frequencyMHz,
+                          voltageVolts >= previous.voltageVolts else { return nil }
+                }
+                states.append(DVFSState(frequencyMHz: frequencyMHz, voltageVolts: voltageVolts))
+            }
+            return states.isEmpty ? nil : states
+        }
+    }
+
+    /// The GPU's operating point over an interval: GPUPH residencies (OFF,
+    /// then P1…P15) against the table's operating points. The P states map
+    /// in order onto the operating points; P states past the end of the table
+    /// must have no residency, and any other shape fails closed.
+    static func gpuReading(
+        residencies: [StateResidency],
+        states: [DVFSState]
+    ) -> GPUReading? {
+        guard !states.isEmpty,
+              let maximum = states.last?.frequencyMHz,
+              let firstActive = residencies.firstIndex(where: { !isInactiveState($0.name) }),
+              residencies[..<firstActive].allSatisfy({ isInactiveState($0.name) }) else { return nil }
+        let active = Array(residencies[firstActive...])
+        guard active.count >= states.count,
+              active.enumerated().allSatisfy({ index, state in
+                  state.name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "P\(index + 1)"
+              }),
+              active.dropFirst(states.count).allSatisfy({ $0.value == 0 }) else { return nil }
+
+        let offTotal = residencies[..<firstActive].reduce(0.0) { $0 + Double($1.value) }
+        let activeTotal = active.reduce(0.0) { $0 + Double($1.value) }
+        let total = offTotal + activeTotal
+        guard total > 0 else { return nil }
+        guard activeTotal > 0 else {
+            return GPUReading(frequencyMHz: nil, activeRatio: 0, maximumFrequencyMHz: maximum)
+        }
+        var weighted = 0.0
+        for (residency, state) in zip(active, states) {
+            weighted += Double(residency.value) * state.frequencyMHz
+        }
+        let frequencyMHz = weighted / activeTotal
+        guard frequencyMHz.isFinite, validGPUFrequencyMHz.contains(frequencyMHz) else { return nil }
+        return GPUReading(
+            frequencyMHz: frequencyMHz,
+            activeRatio: min(1, max(0, activeTotal / total)),
+            maximumFrequencyMHz: maximum
+        )
     }
 
     static func decodeACCClusterVoltageStateIndices(_ data: Data) -> [Int]? {
@@ -259,7 +355,10 @@ enum CPUPerformanceStateService {
         }
     }
 
-    private static func normalizedFrequencyMHz(_ raw: UInt32) -> Double? {
+    private static func normalizedFrequencyMHz(
+        _ raw: UInt32,
+        valid: ClosedRange<Double> = validFrequencyMHz
+    ) -> Double? {
         guard raw > 0 else { return nil }
         let value = Double(raw)
         let mhz: Double
@@ -270,7 +369,7 @@ enum CPUPerformanceStateService {
         } else {
             mhz = value
         }
-        return mhz.isFinite && validFrequencyMHz.contains(mhz) ? mhz : nil
+        return mhz.isFinite && valid.contains(mhz) ? mhz : nil
     }
 
     private static func normalizedVoltageVolts(_ raw: UInt32) -> Double? {
@@ -325,17 +424,24 @@ enum CPUPerformanceStateService {
         let processorModel: String
         let performanceLevels: [PerformanceLevel]
         let tables: [DVFSTable]
+        /// The GPU's operating points (pmgr `voltage-states9`), if readable.
+        let gpuStates: [DVFSState]?
     }
 
     private final class Store: @unchecked Sendable {
         private let configuration: StaticConfiguration?
         private let client: IOReportClient?
+        private let gpuClient: IOReportClient?
 
         init() {
             configuration = Self.loadConfiguration()
             let osMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
-            client = osMajor <= latestVerifiedDynamicTelemetryOSMajor
-                ? IOReportClient()
+            let isVerifiedOS = osMajor <= latestVerifiedDynamicTelemetryOSMajor
+            client = isVerifiedOS
+                ? IOReportClient(group: "CPU Stats", subgroup: "CPU Complex Performance States")
+                : nil
+            gpuClient = isVerifiedOS && configuration?.gpuStates != nil
+                ? IOReportClient(group: "GPU Stats", subgroup: "GPU Performance States")
                 : nil
         }
 
@@ -359,9 +465,31 @@ enum CPUPerformanceStateService {
             )
         }
 
+        /// The CPU clusters and the GPU over the interval since the previous
+        /// call. Either part fails closed on its own: a GPU reading is kept
+        /// when the clusters cannot be mapped, and the other way round.
         func sampleCurrentSnapshot() -> Snapshot? {
-            guard let configuration,
-                  let delta = client?.nextDelta(),
+            guard let configuration else { return nil }
+            let gpu = sampleGPU(configuration: configuration)
+            let clusters = sampleClusters(configuration: configuration)
+            guard clusters != nil || gpu != nil else { return nil }
+            return Snapshot(
+                processorModel: configuration.processorModel,
+                performanceLevels: configuration.performanceLevels,
+                clusters: clusters ?? [],
+                gpu: gpu
+            )
+        }
+
+        private func sampleGPU(configuration: StaticConfiguration) -> GPUReading? {
+            guard let states = configuration.gpuStates,
+                  let delta = gpuClient?.nextDelta(),
+                  let channel = gpuClient?.gpuPerformanceChannel(from: delta) else { return nil }
+            return gpuReading(residencies: channel.residencies, states: states)
+        }
+
+        private func sampleClusters(configuration: StaticConfiguration) -> [ClusterReading]? {
+            guard let delta = client?.nextDelta(),
                   let channels = client?.clusterChannels(from: delta),
                   let assignments = makeClusterAssignments(
                     channels: channels,
@@ -408,14 +536,10 @@ enum CPUPerformanceStateService {
                 ))
             }
             guard !readings.isEmpty else { return nil }
-            return Snapshot(
-                processorModel: configuration.processorModel,
-                performanceLevels: configuration.performanceLevels,
-                clusters: readings.sorted {
-                    ($0.performanceLevelIndex, $0.identifier)
-                        < ($1.performanceLevelIndex, $1.identifier)
-                }
-            )
+            return readings.sorted {
+                ($0.performanceLevelIndex, $0.identifier)
+                    < ($1.performanceLevelIndex, $1.identifier)
+            }
         }
 
         private static func loadConfiguration() -> StaticConfiguration? {
@@ -443,11 +567,13 @@ enum CPUPerformanceStateService {
             return StaticConfiguration(
                 processorModel: processorModel,
                 performanceLevels: levels,
-                tables: loadDVFSTables() ?? []
+                tables: pmgrValue(loadDVFSTables(pmgr:)) ?? [],
+                gpuStates: pmgrValue(loadGPUDVFSStates(pmgr:))
             )
         }
 
-        private static func loadDVFSTables() -> [DVFSTable]? {
+        /// `read` applied to the pmgr registry entry.
+        private static func pmgrValue<Value>(_ read: (io_registry_entry_t) -> Value?) -> Value? {
             var iterator: io_iterator_t = 0
             guard IOServiceGetMatchingServices(
                 kIOMainPortDefault,
@@ -466,27 +592,35 @@ enum CPUPerformanceStateService {
                     entry = IOIteratorNext(iterator)
                     continue
                 }
-
-                let indices: [Int]
-                if let accData = registryData(entry: currentEntry, key: "acc-clusters") {
-                    guard let discovered = decodeACCClusterVoltageStateIndices(accData) else {
-                        return nil
-                    }
-                    indices = discovered
-                } else {
-                    indices = [1, 5]
-                }
-
-                var tables: [DVFSTable] = []
-                for index in indices {
-                    let key = "voltage-states\(index)-sram"
-                    guard let data = registryData(entry: currentEntry, key: key),
-                          let states = decodeDVFSStates(data) else { return nil }
-                    tables.append(DVFSTable(sourceKey: key, states: states))
-                }
-                return tables
+                return read(currentEntry)
             }
             return nil
+        }
+
+        private static func loadDVFSTables(pmgr: io_registry_entry_t) -> [DVFSTable]? {
+            let indices: [Int]
+            if let accData = registryData(entry: pmgr, key: "acc-clusters") {
+                guard let discovered = decodeACCClusterVoltageStateIndices(accData) else {
+                    return nil
+                }
+                indices = discovered
+            } else {
+                indices = [1, 5]
+            }
+
+            var tables: [DVFSTable] = []
+            for index in indices {
+                let key = "voltage-states\(index)-sram"
+                guard let data = registryData(entry: pmgr, key: key),
+                      let states = decodeDVFSStates(data) else { return nil }
+                tables.append(DVFSTable(sourceKey: key, states: states))
+            }
+            return tables
+        }
+
+        /// The GPU table the GPUPH states map onto (M1 to M5).
+        private static func loadGPUDVFSStates(pmgr: io_registry_entry_t) -> [DVFSState]? {
+            registryData(entry: pmgr, key: "voltage-states9").flatMap(decodeGPUDVFSStates)
         }
 
         private static func registryData(entry: io_registry_entry_t, key: String) -> Data? {
@@ -660,17 +794,97 @@ actor CPUPerformanceSnapshotCoordinator {
     }
 }
 
+/// Read-only IOReport "Energy Model" counters (DECISIONS D57): the energy
+/// each SoC block has used, for the power page's chip breakdown. Reuses this
+/// file's IOReport subscription plumbing; only copy, subscribe, sample and
+/// value-reading functions are called. Fails closed (nil) when the group,
+/// the unit or value functions, or a verified OS are missing.
+final class EnergyModelCounterReader: @unchecked Sendable {
+    private let client: IOReportClient
+    private let symbols: IOReportSymbols
+    private let unitLabel: IOReportSymbols.ChannelGetString
+    private let simpleValue: IOReportSymbols.SimpleGetIntegerValue
+    private let ticksToSeconds: Double
+
+    init?(
+        osMajor: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    ) {
+        guard osMajor <= CPUPerformanceStateService.latestVerifiedEnergyModelOSMajor,
+              let symbols = IOReportSymbols.shared,
+              let unitLabel = symbols.channelGetUnitLabel,
+              let simpleValue = symbols.simpleGetIntegerValue,
+              let client = IOReportClient(group: "Energy Model", subgroup: nil) else { return nil }
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom > 0 else { return nil }
+        self.client = client
+        self.symbols = symbols
+        self.unitLabel = unitLabel
+        self.simpleValue = simpleValue
+        self.ticksToSeconds = Double(timebase.numer) / Double(timebase.denom) / 1_000_000_000
+    }
+
+    /// Seconds on the same clock as the counters' update timestamps.
+    func now() -> Double {
+        Double(mach_absolute_time()) * ticksToSeconds
+    }
+
+    /// Seconds on a clock that keeps running while the system sleeps
+    /// (mach_absolute_time stops), to notice a gap between samples.
+    func continuousNow() -> Double {
+        Double(mach_continuous_time()) * ticksToSeconds
+    }
+
+    /// The current cumulative counters of the channels the power page uses.
+    func read() -> [SoCEnergyCounter]? {
+        guard let sample = client.currentSample(),
+              let entries = (sample as NSDictionary)["IOReportChannels"] as? [NSDictionary] else {
+            return nil
+        }
+        let readAt = mach_absolute_time()
+        var counters: [SoCEnergyCounter] = []
+        for entry in entries {
+            let channel = unsafeBitCast(entry, to: CFDictionary.self)
+            guard let name = symbols.channelGetName(channel)?.takeUnretainedValue() as String?,
+                  SoCEnergyChannelClassifier.role(forChannel: name) != nil,
+                  let unit = unitLabel(channel)?.takeUnretainedValue() as String? else { continue }
+            let value = simpleValue(channel, 0)
+            let updatedAt = Self.updateTimestamp(
+                rawElements: entry["RawElements"] as? Data,
+                expectedValue: value,
+                notAfter: readAt
+            ).map { Double($0) * ticksToSeconds }
+            counters.append(SoCEnergyCounter(name: name, unitLabel: unit, value: value, updatedAt: updatedAt))
+        }
+        return counters.isEmpty ? nil : counters
+    }
+
+    /// When the driver last updated a simple channel: `IOReportElement`
+    /// (IOKit/IOReportTypes.h) is provider_id, channel_id, channel_type,
+    /// timestamp (mach_absolute_time) and the values, 64 bytes for one
+    /// element. The layout is checked against the value the library reports;
+    /// any mismatch gives nil and the estimator falls back to its window.
+    static func updateTimestamp(rawElements: Data?, expectedValue: Int64, notAfter: UInt64) -> UInt64? {
+        guard let rawElements, rawElements.count == 64 else { return nil }
+        return rawElements.withUnsafeBytes { raw -> UInt64? in
+            let timestamp = raw.loadUnaligned(fromByteOffset: 24, as: UInt64.self)
+            let value = raw.loadUnaligned(fromByteOffset: 32, as: Int64.self)
+            guard value == expectedValue, timestamp > 0, timestamp <= notAfter else { return nil }
+            return timestamp
+        }
+    }
+}
+
 private final class IOReportClient: @unchecked Sendable {
     private let symbols: IOReportSymbols
     private let subscription: UnsafeMutableRawPointer
     private let subscribedChannels: CFMutableDictionary
     private var previousSample: CFDictionary?
 
-    init?() {
+    init?(group: String, subgroup: String?) {
         guard let symbols = IOReportSymbols.shared,
               let desired = symbols.copyChannelsInGroup(
-                "CPU Stats" as CFString,
-                "CPU Complex Performance States" as CFString,
+                group as CFString,
+                subgroup.map { $0 as CFString },
                 0, 0, 0
               )?.takeRetainedValue() else { return nil }
 
@@ -704,7 +918,28 @@ private final class IOReportClient: @unchecked Sendable {
         )?.takeRetainedValue()
     }
 
+    /// An absolute sample (cumulative counters), without a delta.
+    func currentSample() -> CFDictionary? {
+        symbols.createSamples(subscription, subscribedChannels, nil)?.takeRetainedValue()
+    }
+
     func clusterChannels(from sample: CFDictionary) -> [CPUPerformanceStateService.ClusterStateChannel]? {
+        stateChannels(from: sample, subgroup: "CPU Complex Performance States", where: isCPUClusterIdentifier)
+    }
+
+    /// The GPU's performance-state channel (GPUPH: OFF, P1…P15).
+    func gpuPerformanceChannel(from sample: CFDictionary) -> CPUPerformanceStateService.ClusterStateChannel? {
+        guard let channels = stateChannels(
+            from: sample, subgroup: "GPU Performance States", where: { $0 == "GPUPH" }
+        ), channels.count == 1 else { return nil }
+        return channels.first
+    }
+
+    private func stateChannels(
+        from sample: CFDictionary,
+        subgroup expectedSubgroup: String,
+        where accepts: (String) -> Bool
+    ) -> [CPUPerformanceStateService.ClusterStateChannel]? {
         guard let entries = (sample as NSDictionary)["IOReportChannels"] as? [NSDictionary] else {
             return nil
         }
@@ -713,9 +948,9 @@ private final class IOReportClient: @unchecked Sendable {
         for entry in entries {
             let channel = unsafeBitCast(entry, to: CFDictionary.self)
             let subgroup = symbols.channelGetSubGroup(channel)?.takeUnretainedValue() as String? ?? ""
-            guard subgroup == "CPU Complex Performance States" else { continue }
+            guard subgroup == expectedSubgroup else { continue }
             let identifier = symbols.channelGetName(channel)?.takeUnretainedValue() as String? ?? ""
-            guard isCPUClusterIdentifier(identifier) else { continue }
+            guard accepts(identifier) else { continue }
             let count = Int(symbols.stateGetCount(channel))
             guard count > 0, count <= 128 else { return nil }
 
@@ -751,7 +986,8 @@ private final class IOReportClient: @unchecked Sendable {
     }
 }
 
-private struct IOReportSymbols: @unchecked Sendable {
+fileprivate struct IOReportSymbols: @unchecked Sendable {
+    typealias SimpleGetIntegerValue = @convention(c) (CFDictionary?, Int32) -> Int64
     typealias CopyChannelsInGroup = @convention(c) (
         CFString?, CFString?, UInt64, UInt64, UInt64
     ) -> Unmanaged<CFMutableDictionary>?
@@ -782,6 +1018,10 @@ private struct IOReportSymbols: @unchecked Sendable {
     let stateGetCount: StateGetCount
     let stateGetName: StateGetName
     let stateGetResidency: StateGetResidency
+    /// Energy Model only (D57). Optional so that losing them on a future
+    /// macOS hides the chip breakdown without hiding the frequencies.
+    let channelGetUnitLabel: ChannelGetString?
+    let simpleGetIntegerValue: SimpleGetIntegerValue?
 
     static let shared: IOReportSymbols? = {
         guard let handle = dlopen("/usr/lib/libIOReport.dylib", RTLD_NOW | RTLD_LOCAL) else {
@@ -822,7 +1062,9 @@ private struct IOReportSymbols: @unchecked Sendable {
             channelGetSubGroup: channelGetSubGroup,
             stateGetCount: stateGetCount,
             stateGetName: stateGetName,
-            stateGetResidency: stateGetResidency
+            stateGetResidency: stateGetResidency,
+            channelGetUnitLabel: load("IOReportChannelGetUnitLabel", as: ChannelGetString.self),
+            simpleGetIntegerValue: load("IOReportSimpleGetIntegerValue", as: SimpleGetIntegerValue.self)
         )
     }()
 }

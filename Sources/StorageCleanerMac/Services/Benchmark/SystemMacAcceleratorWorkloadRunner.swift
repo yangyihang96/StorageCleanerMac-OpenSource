@@ -1,4 +1,7 @@
 import Foundation
+@preconcurrency import Metal
+@preconcurrency import MetalPerformanceShaders
+@preconcurrency import VideoToolbox
 
 /// Production adapter for the independent raw-only accelerator suite.
 ///
@@ -81,5 +84,56 @@ struct SystemMacAcceleratorWorkloadRunner: MacAcceleratorWorkloadRunning {
             }
             throw MacAcceleratorWorkloadError.timedOut(metric)
         }
+    }
+}
+
+/// Added v11 entry points leave mac-accelerator-suite-v1 and its 8% gate alone.
+extension SystemMacAcceleratorWorkloadRunner: MSeriesV11AcceleratorWorkloadRunning {
+    func runV11MediaSample(
+        codec: VideoMediaBenchmarkV11Codec, warmUp: Bool, maximumEncodedBytes: Int
+    ) async throws -> VideoMediaBenchmarkKernel.RunResult {
+        try await videoKernel.runV11(
+            codec: codec, warmUp: warmUp, maximumEncodedBytes: maximumEncodedBytes
+        )
+    }
+
+    func runV11RayTracingSample(warmUp: Bool) async throws -> MetalRayTracingBenchmarkKernel.RunResult {
+        try await rayTracingKernel.runV11(warmUp: warmUp)
+    }
+
+    func runV11TensorSample() async throws -> BenchmarkComponentSample {
+        try await tensorKernel.run()
+    }
+
+    /// Capability queries only: no inference, encode, shader or benchmark load.
+    /// Encoder hardware is intentionally unknown until RequireHardware session
+    /// preparation and UsingHardware readback in the media kernel.
+    static func v11Capabilities(catalogChip: AppleSiliconCatalog.Chip?)
+        -> [MSeriesV11AcceleratorID: MSeriesV11AcceleratorCapability]
+    {
+        var result = MSeriesV11Accelerators.catalogCapabilities(for: catalogChip)
+        for codec in VideoMediaBenchmarkV11Codec.allCases {
+            let ids = MSeriesV11AcceleratorUnit.media(codec).ids
+            result[ids[1], default: MSeriesV11AcceleratorCapability()].runtimeSupported
+                = VTIsHardwareDecodeSupported(codec.codecType)
+        }
+        let device = MTLCreateSystemDefaultDevice()
+        var families: Set<String> = []
+        if let device {
+#if compiler(>=6.2)
+            if #available(macOS 26.0, *), device.supportsFamily(.apple10) { families.insert("apple10") }
+#endif
+            if device.supportsFamily(.apple9) { families.insert("apple9") }
+        }
+        let raySupport = MSeriesV11RayTracingSupport.runtime(
+            supportsRaytracing: device?.supportsRaytracing, supportedFamilies: families
+        )
+        for id in [MSeriesV11AcceleratorID.rayTracingBuild, .rayTracingTraversal] {
+            result[id, default: MSeriesV11AcceleratorCapability()].runtimeSupported = raySupport
+        }
+        result[.tensorFP16] = MSeriesV11AcceleratorCapability(
+            runtimeSupported: device.map { MPSSupportsMTLDevice($0) }
+        )
+        return result
     }
 }

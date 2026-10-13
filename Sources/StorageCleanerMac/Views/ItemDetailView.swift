@@ -87,12 +87,6 @@ struct ItemDetailView: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 14) {
-            Image(systemName: item.tier.systemImage)
-                .symbolRenderingMode(.hierarchical)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(item.tier.color)
-                .frame(width: 32)
-                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.title)
@@ -116,7 +110,7 @@ struct ItemDetailView: View {
                         Divider()
                             .frame(height: 14)
 
-                        Label(L10n.text("已移到废纸篓", "Moved to Trash"), systemImage: "checkmark")
+                        Text(L10n.text("已移到废纸篓", "Moved to Trash"))
                             .font(AppDesignTokens.Typography.metadata)
                             .foregroundStyle(.secondary)
                     }
@@ -160,7 +154,7 @@ struct ItemDetailView: View {
                 Button {
                     store.copyPath(item.path)
                 } label: {
-                    Label(L10n.text("复制", "Copy"), systemImage: "doc.on.doc")
+                    Text(L10n.text("复制", "Copy"))
                 }
                 .controlSize(.regular)
             }
@@ -194,7 +188,7 @@ struct ItemDetailView: View {
                 Button(role: .destructive) {
                     store.requestTrash(item)
                 } label: {
-                    Label(L10n.text("移到废纸篓", "Move to Trash"), systemImage: "trash")
+                    Text(L10n.text("移到废纸篓", "Move to Trash"))
                 }
                 .appButtonChrome(.primary)
                 .disabled(!store.canRequestTrash(item))
@@ -203,7 +197,7 @@ struct ItemDetailView: View {
             Button {
                 store.reveal(item.openPath)
             } label: {
-                Label(L10n.text("在访达中显示", "Show in Finder"), systemImage: "folder")
+                Text(L10n.text("在访达中显示", "Show in Finder"))
             }
 
             Spacer()

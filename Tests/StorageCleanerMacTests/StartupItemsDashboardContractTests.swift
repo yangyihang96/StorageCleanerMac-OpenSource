@@ -6,18 +6,19 @@ final class StartupItemsDashboardContractTests: XCTestCase {
     func testManagementListKeepsAllResultsInNativeScrollWithFixedHeadersAndStatus() throws {
         let source = try dashboardSource()
         XCTAssertTrue(source.contains("ForEach(presentation.visibleItems)"))
+        XCTAssertTrue(source.contains("FeatureLightfieldPage(module: .startup, phase: .result"))
+        XCTAssertTrue(source.contains("LightfieldResultContent"))
+        XCTAssertTrue(source.contains("LightfieldSummary(module: .startup"))
         XCTAssertFalse(source.contains("pageSize"))
         XCTAssertFalse(source.contains("startupArtwork"))
-        for title in ["名称", "来源", "状态", "操作"] {
-            XCTAssertTrue(source.contains("Text(L10n.text(\"\(title)\""))
-        }
         XCTAssertTrue(source.contains("Showing \\(presentation.visibleItems.count) of"))
+        XCTAssertTrue(source.contains(".lightfieldResultRowBoundary()"))
     }
 
     #if DEBUG || STORAGE_CLEANER_BETA
     @MainActor
-    func testMainWindowSnapshotFixtureInstallsReadOnlyStartupResults() {
-        let store = ScanStore()
+    func testMainWindowSnapshotFixtureInstallsReadOnlyStartupResults() throws {
+        let store = try ScanStore.makeForTests(for: self)
 
         MainWindowSnapshotPipeline.installStartupItemsFixture(in: store)
 
@@ -36,128 +37,74 @@ final class StartupItemsDashboardContractTests: XCTestCase {
 
     func testDashboardIsValueDrivenManagementConsole() throws {
         let source = try dashboardSource()
-
-        XCTAssertTrue(source.contains("struct StartupItemsDashboardView: View"))
-        XCTAssertTrue(source.contains("let items: [StartupItemsDomain.Item]"))
-        XCTAssertTrue(source.contains("ManagementListPage("))
-        XCTAssertTrue(source.contains("ReviewFilter.startup.pageSubtitle"))
-        XCTAssertTrue(source.contains("let coverageAction: AnyView"))
-        XCTAssertFalse(source.contains("summaryPanel("))
-        XCTAssertTrue(source.contains("startupMetric("))
-        XCTAssertTrue(source.contains("overview(presentation)"))
-        XCTAssertTrue(source.contains("scanStatus"))
-        XCTAssertTrue(source.contains("ViewThatFits(in: .horizontal)"))
-        XCTAssertTrue(source.contains("presentation.visibleItems"))
-        XCTAssertTrue(source.contains("StartupItemsCategory"))
-        XCTAssertTrue(source.contains("GlassSegmentedControl("))
-        XCTAssertTrue(source.contains("[.all, .loginItems, .background]"))
-        XCTAssertTrue(source.contains("options: primaryCategories"))
-        XCTAssertTrue(source.contains("presentation.count(for: category)"))
-        XCTAssertFalse(source.contains("StartupItemsCategory.allCases"))
-        XCTAssertTrue(source.contains("TaskSearchField("))
-        XCTAssertTrue(source.contains("focus: $isSearchFocused"))
-        XCTAssertFalse(source.contains(".foregroundStyle(.white)"))
-        XCTAssertTrue(source.contains("List(selection: $selectedItemID)"))
-        XCTAssertTrue(source.contains("StartupItemRow("))
-        XCTAssertTrue(source.contains("StartupItemInspectorView("))
-        XCTAssertTrue(source.contains("CachedAppIconView("))
-        XCTAssertTrue(source.contains("Text(compactPurpose(item.resolvedPurpose.value))"))
-        XCTAssertTrue(source.contains("L10n.text(\"搜索启动项\""))
-        XCTAssertTrue(source.contains("Toggle("))
-        XCTAssertTrue(source.contains("AppIconButton("))
-        XCTAssertTrue(source.contains("Menu {"))
-        XCTAssertTrue(source.contains("showsTechnicalDetails"))
-        XCTAssertTrue(source.contains("includeTechnicalDetails: showsTechnicalDetails"))
-        XCTAssertTrue(source.contains("@State private var showsTechnicalDetails = false"))
-        XCTAssertTrue(source.contains("status: status"))
-        XCTAssertTrue(source.contains("source: source"))
-        XCTAssertTrue(source.contains("includeAppleSystem: showsTechnicalDetails && includeAppleSystem"))
-        XCTAssertTrue(source.contains("sort: sort"))
-        XCTAssertTrue(source.contains("@AppStorage(\"startupItems.category.v1\")"))
-        XCTAssertTrue(source.contains("@AppStorage(\"startupItems.status.v1\")"))
-        XCTAssertTrue(source.contains("@AppStorage(\"startupItems.source.v1\")"))
-        XCTAssertTrue(source.contains("@AppStorage(\"startupItems.sort.v1\")"))
-        XCTAssertFalse(source.contains("@AppStorage(\"startupItems.showsTechnicalDetails.v1\")"))
-        XCTAssertTrue(source.contains("@AppStorage(\"startupItems.includeAppleSystem.v1\")"))
-        XCTAssertTrue(source.contains("L10n.text(\"筛选与显示\", \"Filter and Display\")"))
+        for token in ["struct StartupItemsDashboardView: View", "let items: [StartupItemsDomain.Item]",
+            "FeatureLightfieldPage(", "let coverageAction: AnyView", "LightfieldSummary(", "presentation.visibleItems",
+            "StartupItemsCategory", "LightfieldTextSegments(", "[.all, .loginItems, .background]", "primaryCategories.map",
+            "TextField(", ".focused($isSearchFocused)", "StartupItemRow(", "StartupItemInspectorView(", "LightfieldAppIcon(",
+            "Text(compactPurpose(item.resolvedPurpose.value))", "L10n.text(\"搜索启动项\"", "Toggle(", "Menu {",
+            "includeTechnicalDetails: showsTechnicalDetails", "@State private var showsTechnicalDetails = false",
+            "status: status", "source: source", "sort: sort", "items: items",
+            "includeAppleSystem: showsTechnicalDetails && includeAppleSystem", "presentation.summary.manageable",
+            "LightfieldStatusGlyph(", "@AppStorage(\"startupItems.category.v1\")", "@AppStorage(\"startupItems.status.v1\")",
+            "@AppStorage(\"startupItems.source.v1\")", "@AppStorage(\"startupItems.sort.v1\")",
+            "@AppStorage(\"startupItems.includeAppleSystem.v1\")"] {
+            XCTAssertTrue(source.contains(token), token)
+        }
+        for forbidden in ["ManagementListPage(", "GlassSegmentedControl(", "List(selection:", "startupMetric(",
+            "ReviewFilter.startup.pageSubtitle", "summaryPanel(", "StartupItemsCategory.allCases", ".foregroundStyle(.white)",
+            "@AppStorage(\"startupItems.showsTechnicalDetails.v1\")", "administratorNotice(", "StartupDirectManagementButton(",
+            "manageableCandidate", "filter: .actionable", "StartupCoverageReport", "DisclosureGroup"] {
+            XCTAssertFalse(source.contains(forbidden), forbidden)
+        }
         XCTAssertFalse(source.contains("items.filter(\\.isDirectlyManageable)"))
-        XCTAssertTrue(source.contains("items: items"))
-        XCTAssertTrue(source.contains("presentation.summary.manageable"))
-        XCTAssertTrue(source.contains("item.fallbackSystemImage"))
-        XCTAssertFalse(source.contains("Button(L10n.text(\"查看详情\", \"Details\")"))
-        XCTAssertFalse(source.contains("administratorNotice("))
-        XCTAssertFalse(source.contains("StartupDirectManagementButton("))
-        XCTAssertFalse(source.contains("manageableCandidate"))
-        XCTAssertFalse(source.contains("filter: .actionable"))
-        XCTAssertFalse(source.contains("StartupCoverageReport"))
-        XCTAssertFalse(source.contains("DisclosureGroup"))
         XCTAssertFalse(source.contains("Text(\"\\(item.developerDisplayName) · \\(item.kind.title)"))
     }
 
     func testDashboardKeepsResultsVisibleAndSupportsKeyboardNavigation() throws {
         let source = try dashboardSource()
-
-        XCTAssertTrue(source.contains("if presentation.visibleItems.isEmpty, !isLoading"))
-        XCTAssertTrue(source.contains("if isLoading {"))
-        XCTAssertTrue(source.contains("StartupItemsKeyboardActions"))
-        XCTAssertTrue(source.contains(".onReceive(NotificationCenter.default.publisher(for: .storageCleanerFocusStartupItemsSearch))"))
-        XCTAssertTrue(source.contains(".onKeyPress(.return)"))
-        XCTAssertTrue(source.contains(".onKeyPress(.space)"))
-        XCTAssertTrue(source.contains("activeOperationCandidateID"))
-        XCTAssertTrue(source.contains("isPerformingOperation"))
+        for token in ["if presentation.visibleItems.isEmpty", "if isLoading {", "StartupItemsKeyboardActions",
+            ".onReceive(NotificationCenter.default.publisher(for: .storageCleanerFocusStartupItemsSearch))",
+            ".onKeyPress(.return)", ".onKeyPress(.space)", ".onKeyPress(.downArrow)", ".onKeyPress(.upArrow)",
+            "activeOperationCandidateID", "isPerformingOperation", "selectedItemID = item.id", "showsSearch = true"] {
+            XCTAssertTrue(source.contains(token), token)
+        }
     }
 
     func testCoverageActionStaysInThePageHeader() throws {
         let dashboard = try dashboardSource()
-        let utilities = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift"
-        )
-
-        let header = try XCTUnwrap(dashboard.range(of: "ManagementListPage("))
-        let coverage = try XCTUnwrap(
-            dashboard.range(of: "coverageAction", range: header.upperBound..<dashboard.endIndex)
-        )
-        let controls = try XCTUnwrap(dashboard.range(of: "} controls: {"))
-        XCTAssertLessThan(header.lowerBound, coverage.lowerBound)
-        XCTAssertLessThan(coverage.lowerBound, controls.lowerBound)
+        let utilities = try sourceText(at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
+        let controls = try XCTUnwrap(dashboard.range(of: "private func resultControls("))
+        let coverage = try XCTUnwrap(dashboard.range(of: "coverageAction", range: controls.upperBound..<dashboard.endIndex))
+        let list = try XCTUnwrap(dashboard.range(of: "struct StartupItemRow:"))
+        XCTAssertLessThan(controls.lowerBound, coverage.lowerBound)
+        XCTAssertLessThan(coverage.lowerBound, list.lowerBound)
         XCTAssertTrue(dashboard.contains("let coverageAction: AnyView"))
-        XCTAssertTrue(dashboard.contains("overview(presentation)"))
-        XCTAssertTrue(dashboard.contains("value: \"\\(presentation.summary.manageable)\""))
+        XCTAssertTrue(dashboard.contains("presentation.summary.manageable"))
+        XCTAssertTrue(dashboard.contains("if let onUndo"), "Hidden window toolbars must not hide Undo")
         XCTAssertFalse(dashboard.contains(".background(.regularMaterial"))
-
-        XCTAssertTrue(utilities.contains("coverageAction: AnyView(startupCoverageAction)"))
-        XCTAssertTrue(utilities.contains("L10n.text(\"完整扫描\", \"Full Scan\")"))
-        XCTAssertTrue(utilities.contains("L10n.text(\"系统项已读取\", \"System Items Read\")"))
-        XCTAssertTrue(utilities.contains("L10n.text(\"重试系统项\", \"Retry System Items\")"))
-        XCTAssertTrue(utilities.contains("onRefresh: { store.refreshStartupItems() }"))
-        XCTAssertTrue(utilities.contains("store.refreshStartupItems(includeBackgroundTaskDiagnostic: true)"))
-        XCTAssertFalse(utilities.contains(
-            "onRefresh: { store.refreshStartupItems(includeBackgroundTaskDiagnostic: true) }"
-        ))
-        XCTAssertFalse(utilities.contains("普通刷新保持静默"))
+        for token in ["coverageAction: AnyView(startupCoverageAction)", "L10n.text(\"完整扫描\", \"Full Scan\")",
+            "L10n.text(\"系统项已读取\", \"System Items Read\")", "L10n.text(\"重试系统项\", \"Retry System Items\")",
+            "onRefresh: { store.refreshStartupItems() }", "store.refreshStartupItems(includeBackgroundTaskDiagnostic: true)",
+            "store.undoLastStartupOperation()"] { XCTAssertTrue(utilities.contains(token), token) }
+        XCTAssertFalse(utilities.contains("onRefresh: { store.refreshStartupItems(includeBackgroundTaskDiagnostic: true) }"))
         XCTAssertFalse(utilities.contains("startupDiagnosticBanner"))
+        XCTAssertFalse(utilities.contains("普通刷新保持静默"))
     }
 
     func testStartupItemsWaitForAnExplicitSharedLandingScan() throws {
-        let utilities = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift"
-        )
+        let utilities = try sourceText(at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
         let start = try XCTUnwrap(utilities.range(of: "struct StartupItemsView: View"))
-        let end = try XCTUnwrap(
-            utilities.range(
-                of: "struct MemoryOptimizerView: View",
-                range: start.upperBound..<utilities.endIndex
-            )
-        )
+        let end = try XCTUnwrap(utilities.range(of: "struct MemoryOptimizerView: View", range: start.upperBound..<utilities.endIndex))
         let startup = String(utilities[start.lowerBound..<end.lowerBound])
-
-        XCTAssertTrue(startup.contains(
-            "if !store.hasScannedStartupItems && !store.isLoadingStartupItems"
-        ))
-        XCTAssertTrue(startup.contains("HeroScanPage("))
-        XCTAssertTrue(startup.contains("L10n.text(\"读取启动项\", \"Read Startup Items\")"))
-        XCTAssertTrue(startup.contains("action: { store.refreshStartupItems() }"))
+        for token in ["else if !store.hasScannedStartupItems", "LightfieldStartupLandingView(", "FeatureRunningTemplate(module: .startup",
+            "onCancel: store.cancelStartupScan", "onStart: { store.refreshStartupItems() }"] {
+            XCTAssertTrue(startup.contains(token), token)
+        }
         XCTAssertFalse(startup.contains(".task {"))
+        let landing = try sourceText(at: "Sources/StorageCleanerMac/Views/LightfieldStartupLandingView.swift")
+        XCTAssertTrue(landing.contains("FeatureLightfieldOptions(title:"))
+        XCTAssertEqual(landing.components(separatedBy: "isIncluded: true").count - 1, 3)
+        XCTAssertFalse(landing.contains("selection:"), "Existing startup scan scope remains fixed")
     }
 
     func testDashboardDoesNotPerformScanningOrSystemMutation() throws {
@@ -247,10 +194,23 @@ final class StartupItemsDashboardContractTests: XCTestCase {
 
         let inspector = try inspectorSource()
         XCTAssertTrue(inspector.contains("includesAdministratorRequests: true"))
+        for (startMarker, endMarker) in [
+            ("private var actionCandidate:", "private var actionCandidates:"),
+            ("private var actionCandidates:", "private var administratorActionCandidate:"),
+        ] {
+            let start = try XCTUnwrap(inspector.range(of: startMarker)).lowerBound
+            let end = try XCTUnwrap(inspector.range(of: endMarker, range: start..<inspector.endIndex)).lowerBound
+            let candidateGate = String(inspector[start..<end])
+            XCTAssertTrue(candidateGate.contains("includesAdministratorRequests: true"))
+            XCTAssertFalse(candidateGate.contains("includesAdministratorRequests: false"))
+        }
         XCTAssertTrue(inspector.contains("请求启用（需要管理员）"))
         XCTAssertTrue(inspector.contains("请求停用（需要管理员）"))
-        XCTAssertTrue(inspector.contains("当前安装可能需要先注册并批准系统控制辅助程序"))
-        XCTAssertTrue(inspector.contains("管理员操作目前没有应用内撤销"))
+        // D64 keeps the helper prerequisite, authorization and restoration boundary in one notice.
+        XCTAssertTrue(inspector.contains("系统控制辅助程序可能需注册与批准；执行需管理员授权；无应用内撤销，可反向操作恢复"))
+        XCTAssertTrue(inspector.contains("The system control helper may need registration and system approval; administrator approval required; no in-app undo, restore with the inverse action"))
+        XCTAssertTrue(inspector.contains("value: administratorActionExplanation"))
+        XCTAssertTrue(inspector.contains("? administratorActionExplanation"))
         XCTAssertTrue(inspector.contains("Button(L10n.text(\"系统设置\", \"System Settings\")"))
     }
 
@@ -315,7 +275,7 @@ final class StartupItemsDashboardContractTests: XCTestCase {
         let operationSource = String(source[start.lowerBound..<end.lowerBound])
 
         XCTAssertTrue(operationSource.contains(
-            "shouldRefresh = true\n                    try await FanControlCoordinator.shared.manageStartupItem(plan)"
+            "shouldRefresh = true\n                    try await fanControlCoordinator.manageStartupItem(plan)"
         ))
         XCTAssertEqual(
             operationSource.components(

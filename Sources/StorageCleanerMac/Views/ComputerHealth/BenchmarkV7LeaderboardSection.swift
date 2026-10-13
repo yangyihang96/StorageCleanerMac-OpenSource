@@ -110,22 +110,12 @@ struct BenchmarkV7LeaderboardSection: View {
     private var titleAndScope: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: AppDesignTokens.Spacing.small) {
-                Image(systemName: "globe.asia.australia.fill")
-                    .foregroundStyle(AppDesignTokens.Palette.primary)
-                    .accessibilityHidden(true)
                 Text(L10n.text("全球 Mac 排行榜", "Global Mac Leaderboard"))
                     .font(AppDesignTokens.Typography.cardTitle)
             }
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
 
-            Text(L10n.text(
-                "主动参与且通过资格校验的 Mac 成绩。",
-                "Scores from Macs that opted in and passed eligibility checks."
-            ))
-            .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -133,7 +123,6 @@ struct BenchmarkV7LeaderboardSection: View {
         HStack(spacing: AppDesignTokens.Spacing.small) {
             AppButton(
                 title: L10n.text("刷新", "Refresh"),
-                systemImage: "arrow.clockwise",
                 kind: .secondary,
                 controlSize: .small,
                 isDisabled: isLoading
@@ -144,7 +133,6 @@ struct BenchmarkV7LeaderboardSection: View {
             if canPublish {
                 AppButton(
                     title: publishActionTitle,
-                    systemImage: "square.and.arrow.up",
                     kind: .primary,
                     controlSize: .small,
                     isDisabled: isMutationRunning
@@ -156,7 +144,6 @@ struct BenchmarkV7LeaderboardSection: View {
             if store.lastSubmittedEntryID != nil {
                 AppButton(
                     title: L10n.text("移除我的成绩", "Remove My Result"),
-                    systemImage: "trash",
                     kind: .destructive,
                     controlSize: .small,
                     isDisabled: isMutationRunning
@@ -180,7 +167,6 @@ struct BenchmarkV7LeaderboardSection: View {
         case .submitting:
             statusLabel(
                 L10n.text("正在发布匿名成绩…", "Publishing anonymous result…"),
-                systemImage: "arrow.up.circle",
                 color: .secondary
             )
         case .submitted:
@@ -189,13 +175,11 @@ struct BenchmarkV7LeaderboardSection: View {
                     "已发布，名次稍后更新。",
                     "Published; rank updates shortly."
                 ),
-                systemImage: "checkmark.circle.fill",
                 color: AppDesignTokens.Palette.success
             )
         case .removing:
             statusLabel(
                 L10n.text("正在移除公开成绩…", "Removing public result…"),
-                systemImage: "trash",
                 color: .secondary
             )
         case .removed:
@@ -204,7 +188,6 @@ struct BenchmarkV7LeaderboardSection: View {
                     "公开成绩已移除；本机历史记录保持不变。",
                     "The public result was removed. Local history remains unchanged."
                 ),
-                systemImage: "checkmark.circle.fill",
                 color: AppDesignTokens.Palette.success
             )
         case let .failed(failure):
@@ -228,7 +211,6 @@ struct BenchmarkV7LeaderboardSection: View {
             if store.hasMore {
                 AppButton(
                     title: L10n.text("加载更多", "Load More"),
-                    systemImage: "arrow.down.circle",
                     kind: .secondary,
                     isLoading: isLoadingMore,
                     isDisabled: isLoading
@@ -256,14 +238,9 @@ struct BenchmarkV7LeaderboardSection: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(L10n.text("正在读取全球排行榜", "Loading global ranking"))
         case .loaded:
-            ContentUnavailableView(
-                L10n.text("暂无公开成绩", "No Public Results Yet"),
-                systemImage: "trophy",
-                description: Text(L10n.text(
-                    "完成当前 V7 官方测试并通过资格校验后，可在确认公开字段后参与排名。",
-                    "Complete the current official V7 benchmark and pass its eligibility checks, then confirm the public fields to participate."
-                ))
-            )
+            ContentUnavailableView {
+                Text(L10n.text("暂无公开成绩", "No Public Results Yet"))
+            }
             .frame(maxWidth: .infinity, minHeight: 140)
         case let .failed(failure):
             VStack(spacing: AppDesignTokens.Spacing.small) {
@@ -274,7 +251,6 @@ struct BenchmarkV7LeaderboardSection: View {
                 )
                 AppButton(
                     title: L10n.text("重试", "Retry"),
-                    systemImage: "arrow.clockwise",
                     kind: .secondary
                 ) {
                     Task { await store.loadFirst(force: true) }
@@ -299,7 +275,6 @@ struct BenchmarkV7LeaderboardSection: View {
             )
             AppButton(
                 title: L10n.text("重试刷新", "Retry Refresh"),
-                systemImage: "arrow.clockwise",
                 kind: .secondary,
                 controlSize: .small
             ) {
@@ -428,13 +403,15 @@ struct BenchmarkV7LeaderboardSection: View {
 
     private func statusLabel(
         _ text: String,
-        systemImage: String,
+        systemImage: String? = nil,
         color: Color
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.small) {
-            Image(systemName: systemImage)
-                .foregroundStyle(color)
-                .accessibilityHidden(true)
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .foregroundStyle(color)
+                    .accessibilityHidden(true)
+            }
             Text(text)
                 .font(AppDesignTokens.Typography.secondary)
                 .foregroundStyle(color)

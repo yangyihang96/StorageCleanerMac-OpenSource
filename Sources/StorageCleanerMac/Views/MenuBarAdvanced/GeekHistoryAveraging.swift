@@ -70,7 +70,18 @@ enum GeekHistoryAveraging {
         }
         return groups.indices.map { offset in
             let lower = Date(timeIntervalSince1970: Double(first + Int64(offset)) * interval)
-            let ordered = zip(groups[offset], weights[offset]).sorted {
+            // Live history already arrives in timestamp order. Avoid allocating
+            // and sorting pairs for every redraw, while retaining stable ordering
+            // and matching weights for imported or out-of-order observations.
+            let indices = groups[offset]
+            let isOrdered = zip(indices, indices.dropFirst()).allSatisfy {
+                dates[$0.0] <= dates[$0.1]
+            }
+            if isOrdered {
+                return Window(start: max(start, lower), end: min(referenceDate, lower.addingTimeInterval(interval)),
+                    indices: indices, weights: weights[offset])
+            }
+            let ordered = zip(indices, weights[offset]).sorted {
                 dates[$0.0] == dates[$1.0] ? $0.0 < $1.0 : dates[$0.0] < dates[$1.0]
             }
             return Window(start: max(start, lower), end: min(referenceDate, lower.addingTimeInterval(interval)),

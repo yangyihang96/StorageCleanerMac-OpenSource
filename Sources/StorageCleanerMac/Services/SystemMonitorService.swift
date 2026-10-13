@@ -2,6 +2,15 @@
 import Foundation
 
 enum SystemMonitorService {
+    static func maximumReadingAge(samplingInterval: TimeInterval) -> TimeInterval {
+        max(10, 2 * samplingInterval)
+    }
+
+    static func isReadingFresh(_ sampledAt: Date?, now: Date, samplingInterval: TimeInterval) -> Bool {
+        guard let sampledAt else { return false }
+        let age = now.timeIntervalSince(sampledAt)
+        return age.isFinite && age >= 0 && age <= maximumReadingAge(samplingInterval: samplingInterval)
+    }
     // The menu-bar total represents bytes on the physical uplink, not both
     // sides of a VPN tunnel. Keeping the `en*` allow-list also prevents a
     // provider-specific tunnel name from being counted as a second hop.
@@ -24,6 +33,11 @@ enum SystemMonitorService {
         let fanSpeedsRPM: [Int]?
         let fanReadings: [SystemFanReading]?
         let temperatureReadings: [SystemTemperatureReading]?
+        let temperatureDetails: [SystemTemperatureDetailReading]?
+        /// Zones named from SMC key names alone (D57 "依据键名推断").
+        var inferredTemperatureZones: Set<SystemTemperatureZone> = []
+        /// Ambient light (`CurrentLux`), nil when not sampled.
+        var ambientLight: HardwareReading<Double>? = nil
 
         init(
             gpuUsagePercent: Double?,
@@ -33,7 +47,10 @@ enum SystemMonitorService {
             fanCount: Int?,
             fanSpeedsRPM: [Int]? = nil,
             fanReadings: [SystemFanReading]? = nil,
-            temperatureReadings: [SystemTemperatureReading]? = nil
+            temperatureReadings: [SystemTemperatureReading]? = nil,
+            temperatureDetails: [SystemTemperatureDetailReading]? = nil,
+            inferredTemperatureZones: Set<SystemTemperatureZone> = [],
+            ambientLight: HardwareReading<Double>? = nil
         ) {
             self.gpuUsagePercent = gpuUsagePercent
             self.gpuMemoryUsedBytes = gpuMemoryUsedBytes
@@ -43,6 +60,9 @@ enum SystemMonitorService {
             self.fanSpeedsRPM = fanSpeedsRPM
             self.fanReadings = fanReadings
             self.temperatureReadings = temperatureReadings
+            self.temperatureDetails = temperatureDetails
+            self.inferredTemperatureZones = inferredTemperatureZones
+            self.ambientLight = ambientLight
         }
 
         static let empty = ThermalReadings(
@@ -53,7 +73,8 @@ enum SystemMonitorService {
             fanCount: nil,
             fanSpeedsRPM: nil,
             fanReadings: nil,
-            temperatureReadings: nil
+            temperatureReadings: nil,
+            temperatureDetails: nil
         )
 
         var hasAvailableSensorData: Bool {
@@ -63,6 +84,7 @@ enum SystemMonitorService {
                 || fanSpeedsRPM?.isEmpty == false
                 || fanReadings?.isEmpty == false
                 || temperatureReadings?.isEmpty == false
+                || temperatureDetails?.isEmpty == false
         }
     }
 
@@ -87,6 +109,7 @@ enum SystemMonitorService {
         let cpuCoreUsagePercent: [Double]?
         let loadAverage: SystemLoadAverage?
         let systemUptimeSeconds: TimeInterval
+        let systemBootAt: Date?
         let thermalState: SystemThermalState
         let thermal: ThermalReadings
         let sensorAvailability: SystemSensorAvailability
@@ -99,6 +122,7 @@ enum SystemMonitorService {
             cpuCoreUsagePercent: [Double]? = nil,
             loadAverage: SystemLoadAverage? = nil,
             systemUptimeSeconds: TimeInterval = 0,
+            systemBootAt: Date? = nil,
             thermalState: SystemThermalState = .unknown,
             thermal: ThermalReadings,
             sensorAvailability: SystemSensorAvailability? = nil,
@@ -110,6 +134,7 @@ enum SystemMonitorService {
             self.cpuCoreUsagePercent = cpuCoreUsagePercent
             self.loadAverage = loadAverage
             self.systemUptimeSeconds = max(0, systemUptimeSeconds)
+            self.systemBootAt = systemBootAt
             self.thermalState = thermalState
             self.thermal = thermal
             self.sensorAvailability = sensorAvailability
@@ -125,16 +150,25 @@ enum SystemMonitorService {
         previousNetworkSample: NetworkMonitorSample?,
         thermalSamplingInterval: TimeInterval = SystemMonitorSamplingInterval.background,
         resolvesMissingMemorySnapshot: Bool = true,
+        samplingPlan: MenuBarSamplingPlan? = nil,
         now: Date = Date()
     ) async -> SnapshotResult {
-        await SystemMonitorSampler.shared.snapshot(
+        let resolvedPlan: MenuBarSamplingPlan?
+        if let samplingPlan { resolvedPlan = samplingPlan }
+        else { resolvedPlan = await MenuBarSamplingContext.shared.plan }
+        let result = await SystemMonitorSampler.shared.snapshot(
             enabledKinds: enabledKinds,
             memorySnapshot: memorySnapshot,
             previousNetworkSample: previousNetworkSample,
             thermalSamplingInterval: thermalSamplingInterval,
             resolvesMissingMemorySnapshot: resolvesMissingMemorySnapshot,
+            samplingPlan: resolvedPlan,
             now: now
         )
+        if resolvedPlan?.cadence.suspended == false {
+            await MenuBarSamplingContext.shared.rememberPanelSnapshot(result.snapshot)
+        }
+        return result
     }
 
     static func buildSnapshot(
@@ -142,6 +176,8 @@ enum SystemMonitorService {
         memorySnapshot: MemorySnapshot?,
         previousNetworkSample: NetworkMonitorSample?,
         liveReadings: LiveReadings,
+        sensorSampledAt: Date? = nil,
+        gpuSampledAt: Date? = nil,
         now: Date
     ) -> SnapshotResult {
         let resolvedFanReadings = SMCFanSpeedService.resolvedFanReadings(
@@ -189,14 +225,20 @@ enum SystemMonitorService {
                 cpuCoreUsagePercent: liveReadings.cpuCoreUsagePercent,
                 loadAverage: liveReadings.loadAverage,
                 systemUptimeSeconds: liveReadings.systemUptimeSeconds,
+                systemBootAt: liveReadings.systemBootAt,
                 thermalState: liveReadings.thermalState,
                 fanSpeedsRPM: liveReadings.thermal.fanSpeedsRPM,
                 fanCount: liveReadings.thermal.fanCount,
                 fanReadings: resolvedFanReadings,
                 temperatureReadings: liveReadings.thermal.temperatureReadings,
+                temperatureDetails: liveReadings.thermal.temperatureDetails,
                 gpuMemoryUsedBytes: liveReadings.thermal.gpuMemoryUsedBytes,
                 sensorAvailability: liveReadings.sensorAvailability,
-                fanAvailability: liveReadings.fanAvailability
+                fanAvailability: liveReadings.fanAvailability,
+                inferredTemperatureZones: liveReadings.thermal.inferredTemperatureZones,
+                ambientLight: liveReadings.thermal.ambientLight,
+                sensorSampledAt: sensorSampledAt,
+                gpuSampledAt: gpuSampledAt
             ),
             networkSample: networkSample,
             memorySnapshot: resolvedMemorySnapshot
@@ -440,6 +482,18 @@ enum SystemMonitorService {
         return loadAverage(from: values, sampleCount: Int(sampleCount))
     }
 
+    // Read once outside SwiftUI rendering. ProcessInfo.systemUptime counts
+    // awake time, so subtracting it from the wall clock is not a boot date.
+    fileprivate static let measuredBootAt: Date? = {
+        var bootTime = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &bootTime, &size, nil, 0) == 0,
+              size == MemoryLayout<timeval>.size,
+              bootTime.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(bootTime.tv_sec)
+            + TimeInterval(bootTime.tv_usec) / 1_000_000)
+    }()
+
     static func currentThermalState() -> SystemThermalState {
         switch ProcessInfo.processInfo.thermalState {
         case .nominal:
@@ -517,7 +571,12 @@ enum SystemMonitorService {
         let fanSpeeds = fanReadings.map(\.actualRPM)
         let smcFanSpeed = SMCFanSpeedService.averageRPM(from: fanSpeeds)
         let rawTemperatures = AppleSiliconTemperatureService.currentTemperatureReadings()
-        let nativeBatteryTemperature = NativeBatteryElectricalService.snapshot()?.temperatureCelsius
+        let detailedTemperatures = Self.detailedTemperatures(
+            smcDetails: smcReadings.temperatureDetails,
+            smcPowerManagementCelsius: smcReadings.powerManagementTemperatureCelsius,
+            hidReadings: rawTemperatures
+        )
+        let nativeBatteryTemperature = MenuBarBatteryElectricalCache.shared.snapshot()?.temperatureCelsius
         let chipTemperature = [
             AppleSiliconTemperatureService.chipTemperatureCelsius(from: rawTemperatures),
             smcReadings.chipTemperatureCelsius
@@ -539,20 +598,10 @@ enum SystemMonitorService {
         if let nativeBatteryTemperature {
             hottestByZone[.battery] = nativeBatteryTemperature
         }
-        var regionalTemperatures = SystemTemperatureZone.allCases.compactMap { zone in
-            hottestByZone[zone].map {
-                SystemTemperatureReading(zone: zone, celsius: $0)
-            }
-        }
-        let hasChipRegion = regionalTemperatures.contains {
-            [.chip, .soc, .performanceCores, .superCores, .efficiencyCores].contains($0.zone)
-        }
-        if !hasChipRegion, let chipTemperature {
-            regionalTemperatures.insert(
-                SystemTemperatureReading(zone: .chip, celsius: chipTemperature),
-                at: 0
-            )
-        }
+        let regionalTemperatures = Self.regionalTemperatures(
+            hottestByZone: hottestByZone,
+            chipTemperatureCelsius: chipTemperature
+        )
 
         return ThermalReadings(
             gpuUsagePercent: nil,
@@ -562,8 +611,72 @@ enum SystemMonitorService {
             fanCount: smcReadings.fanCount,
             fanSpeedsRPM: fanSpeeds.isEmpty ? nil : fanSpeeds,
             fanReadings: fanReadings.isEmpty ? nil : fanReadings,
-            temperatureReadings: regionalTemperatures.isEmpty ? nil : regionalTemperatures
+            temperatureReadings: regionalTemperatures.isEmpty ? nil : regionalTemperatures,
+            temperatureDetails: detailedTemperatures.isEmpty ? nil : detailedTemperatures,
+            inferredTemperatureZones: smcReadings.inferredZones,
+            ambientLight: AmbientLightService.currentLux()
         )
+    }
+
+    /// The temperature card's zones. D57: the "CPU" row (`.chip`) reads the
+    /// same value as the level-one CPU ring (the chip temperature, which on
+    /// M5 is the hottest `Tp*` core), never the power-management IC.
+    static func regionalTemperatures(
+        hottestByZone: [SystemTemperatureZone: Double],
+        chipTemperatureCelsius: Double?
+    ) -> [SystemTemperatureReading] {
+        var byZone = hottestByZone
+        if let chipTemperatureCelsius {
+            byZone[.chip] = chipTemperatureCelsius
+        }
+        return SystemTemperatureZone.allCases.compactMap { zone in
+            byZone[zone].map { SystemTemperatureReading(zone: zone, celsius: $0) }
+        }
+    }
+
+    /// The hardware probes: the SMC core and GPU rows on M5, the named HID
+    /// sensors elsewhere, and one "电源管理芯片" row (HID `PMU tdie*`, else
+    /// the SMC per-PMU maxima).
+    static func detailedTemperatures(
+        smcDetails: [SystemTemperatureDetailReading],
+        smcPowerManagementCelsius: Double?,
+        hidReadings: [AppleSiliconTemperatureService.Reading]
+    ) -> [SystemTemperatureDetailReading] {
+        let pmuKeys = SMCFanSpeedService.rawTemperatureKeys(forDetailID: SystemTemperatureDetailReading.powerManagementID)
+        func smcPMU(_ celsius: Double) -> SystemTemperatureDetailReading {
+            var row = SystemTemperatureDetailReading.powerManagement(celsius: celsius)
+            row.channel = MenuBarTemperatureChannel(source: .smc, rawKey: pmuKeys.joined(separator: ","),
+                ordinal: 0, rawName: "PMU maxima", location: nil, confidence: .recognized)
+            return row
+        }
+        guard !smcDetails.isEmpty else {
+            // No verified SMC topology: HID channels are the inspector (D81).
+            var candidates = AppleSiliconTemperatureService.detailedTemperatures(from: hidReadings)
+            if !candidates.contains(where: { AppleSiliconTemperatureService.isPowerManagementTemperature($0.channel?.rawName ?? "") }),
+               let value = smcPowerManagementCelsius {
+                candidates.append(smcPMU(value))
+            }
+            return AppleSiliconTemperatureService.selectDetails(candidates)
+        }
+        // A verified SMC topology keeps its original rows plus the single D57
+        // "电源管理芯片" summary. Independent HID services are not added to the
+        // default list, so the row count and ordering stay those of the topology.
+        let smc = smcDetails.map { reading in
+            var reading = reading
+            reading.channel = MenuBarTemperatureChannel(source: .smc,
+                rawKey: SMCFanSpeedService.rawTemperatureKeys(forDetailID: reading.id).joined(separator: ","),
+                ordinal: 0, rawName: reading.name,
+                location: reading.zone.map(MenuBarTemperatureChannel.zoneTitle), confidence: .verified)
+            return reading
+        }
+        if let hidPMU = AppleSiliconTemperatureService.powerManagementTemperatureCelsius(from: hidReadings) {
+            var row = SystemTemperatureDetailReading.powerManagement(celsius: hidPMU)
+            row.channel = MenuBarTemperatureChannel(source: .hid,
+                rawKey: "PMU tdie*/tdev*", ordinal: 0, rawName: "PMU maxima",
+                location: nil, confidence: .recognized)
+            return smc + [row]
+        }
+        return smc + [smcPowerManagementCelsius.map(smcPMU)].compactMap { $0 }
     }
 
     private static func unavailableMetric(_ kind: MenuBarMetricKind, detail: String) -> SystemMonitorMetric {
@@ -602,8 +715,12 @@ actor SystemMonitorSampler {
     private static let gpuSampleTimeout: TimeInterval = 8
     private static let thermalSampleTimeout: TimeInterval = 12
 
+    private let gpuReader: @Sendable () -> GPUPerformanceSnapshot?
     private let temperatureAndFanReader: @Sendable () -> SystemMonitorService.ThermalReadings
+    typealias CPUCounterReader = @Sendable () -> (cores: [SystemMonitorService.CPUUsageTicks]?, total: SystemMonitorService.CPUUsageTicks?)
+    private let cpuCounterReader: CPUCounterReader
 
+    private var wasNetworkSampling = false
     private var previousCPUTicks: SystemMonitorService.CPUUsageTicks?
     private var previousCPUCoreTicks: [SystemMonitorService.CPUUsageTicks]?
     private var cachedGPUUsagePercent: Double?
@@ -619,13 +736,44 @@ actor SystemMonitorSampler {
     private var thermalSampleStartedAt: Date?
     private var thermalSampleGeneration: UInt64 = 0
     private var thermalSampleDidTimeOut = false
+    /// A source left the sampling plan while its physical read was running:
+    /// that read finishes (single-flight) but its value is not kept.
+    private var discardsGPUInFlight = false
+    private var discardsThermalInFlight = false
+    private var previousCPUSampleAt: Date?
+    private var lastCPUBreakdown: CPUUsageBreakdown?
+    private var lastCPUCorePercents: [Double]?
+    /// Same floor as `SystemMonitorService.networkThroughput`.
+    static let minimumCPUDeltaInterval: TimeInterval = 0.2
+    var isHardwareReadInFlight: Bool { isGPUSampleInFlight || isThermalSampleInFlight }
+
+    /// D74: sleep stops collection without dropping the presentation owner's
+    /// stored reading. Synchronous drivers retain their physical flight gate.
+    func suspendResidentSampling() {
+        clearGPUCache()
+        clearThermalCache()
+        previousCPUTicks = nil
+        previousCPUCoreTicks = nil
+        previousCPUSampleAt = nil
+        lastCPUBreakdown = nil
+        lastCPUCorePercents = nil
+        wasNetworkSampling = false
+    }
 
     init(
+        gpuReader: @escaping @Sendable () -> GPUPerformanceSnapshot? = { GPUPerformanceService.currentSnapshot() },
         temperatureAndFanReader: @escaping @Sendable () -> SystemMonitorService.ThermalReadings = {
             SystemMonitorService.temperatureAndFanReadings()
+        },
+        cpuCounterReader: @escaping CPUCounterReader = {
+            let cores = SystemMonitorService.currentCPUCoreUsageTicks()
+            return (cores, cores.map(SystemMonitorSampler.totalTicks(fromCoreTicks:))
+                ?? SystemMonitorService.currentCPUUsageTicks())
         }
     ) {
+        self.gpuReader = gpuReader
         self.temperatureAndFanReader = temperatureAndFanReader
+        self.cpuCounterReader = cpuCounterReader
     }
 
     func snapshot(
@@ -634,45 +782,75 @@ actor SystemMonitorSampler {
         previousNetworkSample: NetworkMonitorSample?,
         thermalSamplingInterval: TimeInterval = SystemMonitorSamplingInterval.background,
         resolvesMissingMemorySnapshot: Bool = true,
+        samplingPlan: MenuBarSamplingPlan? = nil,
         now: Date
     ) async -> SystemMonitorService.SnapshotResult {
-        let (cpuUsageBreakdown, cpuCoreUsagePercent) = sampleCPUIfNeeded(enabledKinds: enabledKinds)
+        let samplingKinds = samplingPlan.map { enabledKinds.intersection($0.primaryKinds) } ?? enabledKinds
+        // Review P1-1: a source that leaves the plan drops its cache, so a
+        // reopen hours later never publishes (or writes to history) an old
+        // GPU or SMC reading under the current snapshot time.
+        if !samplingKinds.contains(.gpuUsage) {
+            clearGPUCache()
+        } else if !SystemMonitorService.isReadingFresh(gpuSampledAt, now: now,
+                    samplingInterval: samplingPlan?.gpuInterval ?? Self.gpuSamplingInterval) {
+            clearGPUCache(discardInFlight: false)
+        }
+        if samplingKinds.isDisjoint(with: [.chipTemperature, .fanSpeed]) {
+            clearThermalCache()
+        } else if !SystemMonitorService.isReadingFresh(thermalSampledAt, now: now,
+                    samplingInterval: samplingPlan?.thermalInterval ?? thermalSamplingInterval) {
+            clearThermalCache(discardInFlight: false)
+        }
+        let (cpuUsageBreakdown, cpuCoreUsagePercent) = sampleCPUIfNeeded(enabledKinds: samplingKinds, now: now)
         let thermal = sampleThermalIfNeeded(
-            enabledKinds: enabledKinds,
-            thermalSamplingInterval: thermalSamplingInterval,
+            enabledKinds: samplingKinds,
+            thermalSamplingInterval: samplingPlan?.thermalInterval ?? thermalSamplingInterval,
+            gpuSamplingInterval: samplingPlan?.gpuInterval ?? Self.gpuSamplingInterval,
+            permitsStartupHardware: samplingPlan?.permitsStartupHardware ?? true,
             now: now
         )
         let sensorAvailability = sensorAvailability(
-            enabledKinds: enabledKinds,
+            enabledKinds: samplingKinds,
             thermal: thermal
         )
-        let networkSample = enabledKinds.contains(.networkSpeed)
-            ? SystemMonitorService.currentNetworkSample(now: now)
+        let networkSample = samplingKinds.contains(.networkSpeed)
+            ? MenuBarPresentationTrace.measureSample("network.counters") { SystemMonitorService.currentNetworkSample(now: now) }
             : previousNetworkSample
 
-        let resolvedMemorySnapshot = resolvesMissingMemorySnapshot
-            && enabledKinds.contains(.memoryUsage) && memorySnapshot == nil
-            ? await MemoryOptimizerService.statusSnapshot()
-            : memorySnapshot
+        let networkBaseline = wasNetworkSampling ? previousNetworkSample : nil
+        wasNetworkSampling = samplingKinds.contains(.networkSpeed)
+        let resolvedMemorySnapshot: MemorySnapshot?
+        if samplingKinds.contains(.memoryUsage) {
+            resolvedMemorySnapshot = resolvesMissingMemorySnapshot && memorySnapshot == nil
+                ? await MemoryOptimizerService.statusSnapshot() : memorySnapshot
+        } else {
+            resolvedMemorySnapshot = nil
+        }
+        let bootAt = SystemMonitorService.measuredBootAt.flatMap { $0 <= now ? $0 : nil }
 
         return SystemMonitorService.buildSnapshot(
-            enabledKinds: enabledKinds,
+            enabledKinds: samplingKinds,
             memorySnapshot: resolvedMemorySnapshot,
-            previousNetworkSample: previousNetworkSample,
+            previousNetworkSample: samplingPlan == nil ? previousNetworkSample : networkBaseline,
             liveReadings: SystemMonitorService.LiveReadings(
                 cpuUsagePercent: cpuUsageBreakdown?.totalPercent,
                 cpuUsageBreakdown: cpuUsageBreakdown,
                 cpuCoreUsagePercent: cpuCoreUsagePercent,
                 loadAverage: SystemMonitorService.currentLoadAverage(),
-                systemUptimeSeconds: ProcessInfo.processInfo.systemUptime,
+                systemUptimeSeconds: bootAt.map {
+                    max(0, now.timeIntervalSince($0))
+                } ?? ProcessInfo.processInfo.systemUptime,
+                systemBootAt: bootAt,
                 thermalState: SystemMonitorService.currentThermalState(),
                 thermal: thermal,
                 sensorAvailability: sensorAvailability,
                 fanAvailability: thermalSampledAt == nil
-                    && (enabledKinds.contains(.fanSpeed) || enabledKinds.contains(.chipTemperature))
+                    && (samplingKinds.contains(.fanSpeed) || samplingKinds.contains(.chipTemperature))
                     ? .sampling : .unavailable,
-                networkSample: networkSample
+                networkSample: samplingKinds.contains(.networkSpeed) ? networkSample : nil
             ),
+            sensorSampledAt: !samplingKinds.isDisjoint(with: [.chipTemperature, .fanSpeed]) ? thermalSampledAt : nil,
+            gpuSampledAt: samplingKinds.contains(.gpuUsage) ? gpuSampledAt : nil,
             now: now
         )
     }
@@ -682,13 +860,29 @@ actor SystemMonitorSampler {
     /// per-core sums, so a second `host_statistics` call per sample is only
     /// needed as a fallback when the per-core read fails.
     private func sampleCPUIfNeeded(
-        enabledKinds: Set<MenuBarMetricKind>
+        enabledKinds: Set<MenuBarMetricKind>,
+        now: Date
     ) -> (breakdown: CPUUsageBreakdown?, corePercents: [Double]?) {
-        guard enabledKinds.contains(.cpuUsage) else { return (nil, nil) }
+        guard enabledKinds.contains(.cpuUsage) else {
+            previousCPUTicks = nil
+            previousCPUCoreTicks = nil
+            previousCPUSampleAt = nil
+            lastCPUBreakdown = nil
+            lastCPUCorePercents = nil
+            return (nil, nil)
+        }
+        // Two refreshes in one burst (open + timer) would divide a few ticks
+        // by a near-zero interval. Keep the baseline and repeat the last
+        // real interval instead, as the network delta does.
+        if let previousCPUSampleAt, previousCPUTicks != nil,
+           now >= previousCPUSampleAt,
+           now.timeIntervalSince(previousCPUSampleAt) < Self.minimumCPUDeltaInterval {
+            return (lastCPUBreakdown, lastCPUCorePercents)
+        }
 
-        let coreTicks = SystemMonitorService.currentCPUCoreUsageTicks()
-        let totalTicks = coreTicks.map(Self.totalTicks(fromCoreTicks:))
-            ?? SystemMonitorService.currentCPUUsageTicks()
+        let (coreTicks, totalTicks) = MenuBarPresentationTrace.measureSample("cpu") {
+            cpuCounterReader()
+        }
 
         var breakdown: CPUUsageBreakdown?
         if let totalTicks {
@@ -707,6 +901,9 @@ actor SystemMonitorSampler {
             )
             previousCPUCoreTicks = coreTicks
         }
+        previousCPUSampleAt = now
+        lastCPUBreakdown = breakdown
+        lastCPUCorePercents = corePercents
 
         return (breakdown, corePercents)
     }
@@ -726,12 +923,18 @@ actor SystemMonitorSampler {
         }
     }
 
+    var activeHardwareReadCount: Int { (isGPUSampleInFlight ? 1 : 0) + (isThermalSampleInFlight ? 1 : 0) }
+
     private func sampleThermalIfNeeded(
         enabledKinds: Set<MenuBarMetricKind>,
         thermalSamplingInterval: TimeInterval,
+        gpuSamplingInterval: TimeInterval,
+        permitsStartupHardware: Bool,
         now: Date
     ) -> SystemMonitorService.ThermalReadings {
-        let gpuUsagePercent = sampleGPUIfNeeded(enabledKinds: enabledKinds, now: now)
+        // Not yet scheduled is still .sampling; no failed attempt or source date.
+        guard permitsStartupHardware else { return cachedThermal }
+        let gpuUsagePercent = sampleGPUIfNeeded(enabledKinds: enabledKinds, samplingInterval: gpuSamplingInterval, now: now)
         let thermal = sampleTemperatureAndFansIfNeeded(
             enabledKinds: enabledKinds,
             samplingInterval: thermalSamplingInterval,
@@ -740,13 +943,16 @@ actor SystemMonitorSampler {
 
         return SystemMonitorService.ThermalReadings(
             gpuUsagePercent: gpuUsagePercent,
-            gpuMemoryUsedBytes: cachedGPUMemoryUsedBytes,
+            gpuMemoryUsedBytes: enabledKinds.contains(.gpuUsage) ? cachedGPUMemoryUsedBytes : nil,
             chipTemperatureCelsius: thermal.chipTemperatureCelsius,
             fanSpeedRPM: thermal.fanSpeedRPM,
             fanCount: thermal.fanCount,
             fanSpeedsRPM: thermal.fanSpeedsRPM,
             fanReadings: thermal.fanReadings,
-            temperatureReadings: thermal.temperatureReadings
+            temperatureReadings: thermal.temperatureReadings,
+            temperatureDetails: thermal.temperatureDetails,
+            inferredTemperatureZones: thermal.inferredTemperatureZones,
+            ambientLight: thermal.ambientLight
         )
     }
 
@@ -766,12 +972,13 @@ actor SystemMonitorSampler {
 
     private func sampleGPUIfNeeded(
         enabledKinds: Set<MenuBarMetricKind>,
+        samplingInterval: TimeInterval,
         now: Date
     ) -> Double? {
         guard enabledKinds.contains(.gpuUsage) else { return nil }
 
         if let gpuSampledAt,
-           now.timeIntervalSince(gpuSampledAt) < Self.gpuSamplingInterval - 0.05 {
+           now.timeIntervalSince(gpuSampledAt) < samplingInterval - 0.05 {
             return cachedGPUUsagePercent
         }
 
@@ -794,13 +1001,14 @@ actor SystemMonitorSampler {
         isGPUSampleInFlight = true
         gpuSampleStartedAt = now
         gpuSampleDidTimeOut = false
+        let reader = gpuReader
         Task.detached(priority: .utility) { [weak self] in
-            let snapshot = GPUPerformanceService.currentSnapshot()
+            let snapshot = MenuBarPresentationTrace.measureSample("gpu.registry") { reader() }
             await self?.finishGPUSample(
                 usagePercent: snapshot?.usagePercent,
                 memoryUsedBytes: snapshot?.memoryUsedBytes,
                 generation: generation,
-                sampledAt: Date()
+                sampledAt: now
             )
         }
         return cachedGPUUsagePercent
@@ -838,7 +1046,7 @@ actor SystemMonitorSampler {
         thermalSampleDidTimeOut = false
         let reader = temperatureAndFanReader
         Task.detached(priority: .utility) { [weak self] in
-            let readings = reader()
+            let readings = MenuBarPresentationTrace.measureSample("sensors.smc-hid") { reader() }
             await self?.finishThermalSample(
                 readings,
                 generation: generation,
@@ -848,6 +1056,19 @@ actor SystemMonitorSampler {
         return cachedThermal
     }
 
+    private func clearGPUCache(discardInFlight: Bool = true) {
+        cachedGPUUsagePercent = nil
+        cachedGPUMemoryUsedBytes = nil
+        gpuSampledAt = nil
+        if discardInFlight, isGPUSampleInFlight { discardsGPUInFlight = true }
+    }
+
+    private func clearThermalCache(discardInFlight: Bool = true) {
+        cachedThermal = .empty
+        thermalSampledAt = nil
+        if discardInFlight, isThermalSampleInFlight { discardsThermalInFlight = true }
+    }
+
     private func finishGPUSample(
         usagePercent: Double?,
         memoryUsedBytes: Int64?,
@@ -855,6 +1076,13 @@ actor SystemMonitorSampler {
         sampledAt: Date
     ) {
         guard generation == gpuSampleGeneration else { return }
+        if discardsGPUInFlight {
+            discardsGPUInFlight = false
+            isGPUSampleInFlight = false
+            gpuSampleStartedAt = nil
+            gpuSampleDidTimeOut = false
+            return
+        }
         cachedGPUUsagePercent = usagePercent
         cachedGPUMemoryUsedBytes = memoryUsedBytes
         gpuSampledAt = sampledAt
@@ -869,6 +1097,13 @@ actor SystemMonitorSampler {
         sampledAt: Date
     ) {
         guard generation == thermalSampleGeneration else { return }
+        if discardsThermalInFlight {
+            discardsThermalInFlight = false
+            isThermalSampleInFlight = false
+            thermalSampleStartedAt = nil
+            thermalSampleDidTimeOut = false
+            return
+        }
         cachedThermal = readings
         thermalSampledAt = sampledAt
         isThermalSampleInFlight = false

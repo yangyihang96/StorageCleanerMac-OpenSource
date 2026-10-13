@@ -44,7 +44,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
         XCTAssertEqual(entry.outcome, .failed)
         XCTAssertEqual(entry.capability, .verifiedVisitDeletion)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("rolled back"))
+        XCTAssertEqual(entry.reason, .recordMissing)
         XCTAssertEqual(
             try fixture.remainingVisitRowIDs(),
             [try XCTUnwrap(records.first?.locator).visitRowID],
@@ -68,7 +68,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .failed)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("reused"))
+        XCTAssertEqual(entry.reason, .recordChanged)
         XCTAssertTrue(try fixture.remainingVisitRowIDs().contains(locator.visitRowID))
     }
 
@@ -86,8 +86,177 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
         XCTAssertEqual(entry.outcome, .failed)
         XCTAssertEqual(entry.capability, .verifiedVisitDeletion)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("still running"))
+        XCTAssertEqual(entry.reason, .browserRunning)
         XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
+    }
+
+    func testFailureDetailFollowsTheAppLanguageAndNamesTheRealCause() async throws {
+        let fixture = try BrowserPrivacyHistoryFixture(engine: .chromium)
+        let records = try await fixture.scannedRecords()
+        let record = try XCTUnwrap(records.first)
+        let processor = fixture.processor(
+            runningBundleIdentifiers: [try XCTUnwrap(record.browser.bundleIdentifier)]
+        )
+        let defaults = TestVolatilePreferences()
+        defer { defaults.restore() }
+
+        defaults.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        let chineseReport = await processor.process(records: [record])
+        let chinese = try XCTUnwrap(chineseReport.entries.first)
+        XCTAssertTrue(chinese.detail.contains("正在运行"), chinese.detail)
+        XCTAssertTrue(chinese.detail.contains(record.browser.displayName), chinese.detail)
+        XCTAssertFalse(chinese.detail.localizedCaseInsensitiveContains("still running"), chinese.detail)
+
+        defaults.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        let englishReport = await processor.process(records: [record])
+        let english = try XCTUnwrap(englishReport.entries.first)
+        XCTAssertTrue(english.detail.localizedCaseInsensitiveContains("still running"), english.detail)
+        XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
+    }
+
+    func testEveryProcessingReasonIsWrittenInBothLanguagesWithoutJargon() throws {
+        let jargon = [
+            "schema", "sidecar", "sqlite", "wal", "locator", "rollback", "adapter",
+            "visit id", "frecency", "parent counter", "derived index",
+        ]
+        func containsHan(_ text: String) -> Bool {
+            text.unicodeScalars.contains { (0x4E00 ... 0x9FFF).contains($0.value) }
+        }
+        var texts: [(String, String, String)] = BrowserPrivacyProcessingReason.allCases.map {
+            let pair = $0.localizedTexts(browserName: "Chrome")
+            return ("\($0)", pair.chinese, pair.english)
+        }
+        for blocker in BrowserPrivacyDirectDeletionBlocker.allCases {
+            for engine in [BrowserPrivacyEngine.safari, .chromium, .firefox] {
+                let pair = blocker.localizedTexts(browserName: "Chrome", engine: engine)
+                texts.append(("\(blocker)/\(engine)", pair.chinese, pair.english))
+            }
+        }
+        for (name, chinese, english) in texts {
+            XCTAssertTrue(containsHan(chinese), name)
+            XCTAssertFalse(containsHan(english), name)
+            XCTAssertFalse(english.isEmpty, name)
+            for word in jargon {
+                XCTAssertFalse(
+                    chinese.localizedCaseInsensitiveContains(word),
+                    "\(name): Chinese text must not fall back to the term \(word)"
+                )
+            }
+        }
+        XCTAssertEqual(
+            Set(BrowserPrivacyProcessingReason.allCases.map {
+                $0.localizedTexts(browserName: "Chrome").chinese
+            }).count,
+            BrowserPrivacyProcessingReason.allCases.count,
+            "every reason says something different"
+        )
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/StorageCleanerMac/Features/BrowserPrivacy/Processing/BrowserPrivacyHistoryProcessor.swift"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertFalse(
+            source.contains("detail: \""),
+            "processing details come from BrowserPrivacyProcessingReason, not literals"
+        )
+    }
+
+    func testReportEntryIDsStayUniqueWhenBothPartsOfAProfileEndInTheBrowser() async throws {
+        // Review probe: visit 12 is synced (manual at scan time); the other
+        // visits are refused because of unmerged writes. Both entries end as
+        // manual handling for the same profile and feed one ForEach.
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute("UPDATE visits SET is_known_to_sync = 1 WHERE id = 12")
+        let outcome = try await fixture.scanOutcome()
+        XCTAssertEqual(outcome.records.filter { $0.locator == nil }.count, 1)
+        try fixture.createSidecar("-wal")
+        let before = try fixture.tableState()
+
+        let report = await fixture.processor().process(records: outcome.records)
+
+        let ids = report.entries.map(\.id)
+        XCTAssertEqual(report.entries.count, 2)
+        XCTAssertEqual(Set(ids).count, ids.count, "duplicate report entry ids: \(ids)")
+        XCTAssertEqual(
+            Set(report.entries.map(\.deletionPath)),
+            [.direct, .inBrowser]
+        )
+        XCTAssertEqual(try fixture.tableState(), before, "nothing may be written")
+    }
+
+    func testTimeoutInsideTheTransactionRollsBackWithoutRestoringTheBackup() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        let selected = try await fixture.selectedRecords(visitIDs: [12, 21])
+        let before = try fixture.tableState()
+        let hook = ProcessorTestFlag()
+        // The deadline passes while the write transaction is open.
+        let processor = fixture.processor(inTransactionHook: { control in
+            hook.set()
+            control.timeout()
+        })
+
+        let report = await processor.process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertTrue(hook.value, "the hook must run inside the transaction")
+        XCTAssertEqual(entry.outcome, .failed, entry.detail)
+        XCTAssertEqual(entry.reason, .timedOut, "the transaction is rolled back, not restored from the backup")
+        XCTAssertNil(entry.recoveryBackupID, "a rolled-back change keeps no backup")
+        XCTAssertTrue(fixture.recoveryService.entries().isEmpty)
+        XCTAssertEqual(try fixture.tableState(), before)
+        XCTAssertEqual(try fixture.rows("PRAGMA quick_check"), ["ok"])
+    }
+
+    func testUnexpectedErrorKeepsTheBackupWithASummaryAndSaysTheResultIsUnknown() async throws {
+        struct UnplannedError: Error {}
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        let selected = try await fixture.selectedRecords(visitIDs: [12, 21])
+        let before = try fixture.tableState()
+        let processor = fixture.processor(inTransactionHook: { _ in throw UnplannedError() })
+
+        let report = await processor.process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .failed, entry.detail)
+        XCTAssertEqual(entry.reason, .unexpectedError)
+        let texts = BrowserPrivacyProcessingReason.unexpectedError.localizedTexts(browserName: "Google Chrome")
+        XCTAssertTrue(texts.chinese.contains("未预期"), texts.chinese)
+        XCTAssertFalse(texts.chinese.contains("没有删除任何记录"), "the result is not known")
+        XCTAssertFalse(texts.english.localizedCaseInsensitiveContains("nothing was deleted"))
+        let backupID = try XCTUnwrap(entry.recoveryBackupID, "the backup is kept while the result is unknown")
+        let kept = try XCTUnwrap(fixture.recoveryService.entries().first { $0.id == backupID })
+        XCTAssertEqual(kept.summary?.outcome, .unexpectedError)
+        XCTAssertEqual(kept.summary?.visitCount, 2)
+        XCTAssertEqual(try fixture.tableState(), before, "the transaction itself was rolled back")
+    }
+
+    func testRecordsWithoutLocatorDoNotHoldBackTheRestOfTheProfile() async throws {
+        let fixture = try BrowserPrivacyHistoryFixture(engine: .chromium)
+        let records = try await fixture.scannedRecords().sorted {
+            ($0.locator?.visitRowID ?? .min) < ($1.locator?.visitRowID ?? .min)
+        }
+        let deletable = try XCTUnwrap(records.first)
+        let unlocated = try XCTUnwrap(records.last).withLocator(nil)
+
+        let report = await fixture.processor().process(records: [deletable, unlocated])
+
+        XCTAssertEqual(report.selectedRecordCount, 2)
+        XCTAssertEqual(report.entries.count, 2)
+        XCTAssertEqual(Set(report.entries.map(\.id)).count, 2, "entries stay distinguishable in a list")
+        let deleted = try XCTUnwrap(report.entries.first { $0.outcome == .deleted })
+        let manual = try XCTUnwrap(report.entries.first { $0.outcome == .manual })
+        XCTAssertEqual(deleted.verifiedDeletedRecordIDs, [deletable.id])
+        XCTAssertEqual(deleted.recordCount, 1)
+        XCTAssertEqual(manual.recordCount, 1)
+        XCTAssertEqual(manual.reason, .manualOnly)
+        XCTAssertEqual(report.manualRecordCount, 1)
+        XCTAssertEqual(try fixture.remainingVisitRowIDs(), [12])
     }
 
     func testBackupFailurePreventsAnyHistoryMutation() async throws {
@@ -102,6 +271,41 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
         XCTAssertEqual(report.entries.first?.outcome, .failed)
         XCTAssertTrue(report.verifiedDeletedRecordIDs.isEmpty)
         XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
+    }
+
+    func testUnexpectedErrorBeforeAnyWriteSaysNothingWasChanged() async throws {
+        let fixture = try BrowserPrivacyHistoryFixture(engine: .chromium)
+        let records = try await fixture.scannedRecords()
+        let record = try XCTUnwrap(records.first)
+
+        let report = await fixture.processor(
+            backupService: FailingBrowserPrivacyBackupService(error: UnplannedBackupError())
+        ).process(records: [record])
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .failed)
+        XCTAssertEqual(entry.reason, .unexpectedErrorBeforeChanges)
+        XCTAssertNil(entry.recoveryBackupID)
+        XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
+    }
+
+    func testUnwritableRecoveryFolderSaysTheBackupFailed() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        let selected = try await fixture.selectedRecords(visitIDs: [21])
+        let before = try fixture.tableState()
+        // A file where the recovery folder should be.
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: fixture.recoveryRoot.path,
+            contents: Data("not a folder".utf8)
+        ))
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .failed, entry.detail)
+        XCTAssertEqual(entry.reason, .backupFailed, "the backup failed, not the browser's database")
+        XCTAssertNil(entry.recoveryBackupID)
+        XCTAssertEqual(try fixture.tableState(), before)
     }
 
     func testDatabasePathMismatchFailsClosedWithoutChangingHistory() async throws {
@@ -129,7 +333,10 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .failed)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("identity"))
+        XCTAssertTrue(
+            [.databaseUnavailable, .databaseChanged].contains(entry.reason),
+            "\(String(describing: entry.reason))"
+        )
         XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
     }
 
@@ -145,7 +352,10 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .failed)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("identity"))
+        XCTAssertTrue(
+            [.databaseUnavailable, .databaseChanged].contains(entry.reason),
+            "\(String(describing: entry.reason))"
+        )
         XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
     }
 
@@ -160,7 +370,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .failed)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("schema"))
+        XCTAssertEqual(entry.reason, .schemaUnsupported)
         XCTAssertEqual(try fixture.remainingVisitRowIDs(table: "visits_backup"), [11, 12])
     }
 
@@ -180,7 +390,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .indeterminate)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("committed"))
+        XCTAssertEqual(entry.reason, .committedButUnverified)
         XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
     }
 
@@ -212,7 +422,14 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
         XCTAssertEqual(entry.outcome, .manual)
         XCTAssertEqual(entry.capability, .manualBrowserGuidance)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("manually"))
+        XCTAssertEqual(entry.reason, .manualOnly)
+        XCTAssertEqual(
+            entry.detail,
+            BrowserPrivacyDirectDeletionBlocker.browserNotSupported.detail(
+                browserName: record.browser.displayName,
+                engine: .firefox
+            )
+        )
         XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
     }
 
@@ -245,7 +462,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .failed)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertTrue(entry.detail.localizedCaseInsensitiveContains("busy"))
+        XCTAssertEqual(entry.reason, .databaseBusy)
         XCTAssertEqual(try fixture.remainingVisitRowIDs(), [11, 12])
     }
 
@@ -322,21 +539,29 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
         )
     }
 
-    func testChromiumV70FixtureRejectsLastVisitWithoutChangingAnyTable() async throws {
+    func testChromiumV70FixtureDeletesLastVisitTogetherWithItsURLRow() async throws {
         let fixture = try ChromiumV70HistoryFixture()
         let records = try await fixture.scannedRecords()
         let selected = try XCTUnwrap(records.first {
             $0.locator?.visitRowID == ChromiumV70HistoryFixture.onlyVisitID
         })
-        let before = try fixture.tableState()
+        var expected = try fixture.tableState()
+        expected["urls"] = expected["urls"]?.filter { !$0.hasPrefix("2\u{1f}") }
+        expected["visits"] = expected["visits"]?.filter { !$0.hasPrefix("21\u{1f}") }
 
         let report = await fixture.processor().process(records: [selected])
         let entry = try XCTUnwrap(report.entries.first)
 
-        XCTAssertEqual(entry.outcome, .unsupported, entry.detail)
-        XCTAssertEqual(entry.capability, .unsupported)
-        XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
-        XCTAssertEqual(try fixture.tableState(), before)
+        XCTAssertEqual(entry.outcome, .deleted, entry.detail)
+        XCTAssertEqual(entry.capability, .verifiedVisitDeletion)
+        XCTAssertEqual(entry.verifiedDeletedRecordIDs, Set([selected.id]))
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM visits WHERE id = 21"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM urls WHERE id = 2"), 0)
+        XCTAssertEqual(
+            try fixture.tableState(),
+            expected,
+            "only the page's own visit and URL row may disappear"
+        )
     }
 
     func testChromiumV70FixtureRollsBackEveryTableWhenURLUpdateFails() async throws {
@@ -581,55 +806,535 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .manual, entry.detail)
         XCTAssertEqual(entry.capability, .manualBrowserGuidance)
+        XCTAssertEqual(entry.reason, .pendingWrites)
         XCTAssertEqual(try fixture.tableState(), before)
     }
 
-    func testChromeV70ProductionRejectsSelectedClusterReferencesWithoutWriting() async throws {
-        try await assertChromeV70ProductionRejectsWithoutMutation { fixture in
-            try fixture.execute(
-                """
-                INSERT INTO clusters_and_visits
-                    (cluster_id, visit_id, score, engagement_score, url_for_deduping,
-                     normalized_url, url_for_display, interaction_state)
-                    VALUES (1, 12, 0, 0, 'a', 'a', 'a', 0)
-                """
+    func testProductionDeletesNextToTheEmptyJournalAChromiumBrowserLeavesBehind() async throws {
+        // Chromium uses journal_mode=TRUNCATE: after a normal quit an empty
+        // "History-journal" stays beside "History". It holds no transaction.
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.createSidecar("-journal", contents: Data())
+        let selected = try await fixture.selectedRecords(
+            visitIDs: [ChromiumV70HistoryFixture.onlyVisitID]
+        )
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .deleted, entry.detail)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM urls WHERE id = 2"), 0)
+        XCTAssertEqual(try fixture.rows("PRAGMA quick_check"), ["ok"])
+        let reread = try await fixture.scanOutcome()
+        XCTAssertEqual(reread.records.count, 3)
+    }
+
+    func testProductionRefusesEveryOtherSidecarWithoutWriting() async throws {
+        // A journal with content, and any WAL or shared-memory file (even an
+        // empty one), mean writes that have not been merged.
+        let sidecars: [(suffix: String, contents: Data)] = [
+            ("-journal", Data("active".utf8)),
+            ("-journal", Data(repeating: 0, count: 1)),
+            ("-wal", Data()),
+            ("-wal", Data("active".utf8)),
+            ("-shm", Data()),
+        ]
+        for sidecar in sidecars {
+            let fixture = try ChromiumV70HistoryFixture(mode: .production)
+            let selected = try await fixture.selectedRecords(visitIDs: [12])
+            let before = try fixture.tableState()
+            try fixture.createSidecar(sidecar.suffix, contents: sidecar.contents)
+
+            let report = await fixture.processor().process(records: selected)
+            let entry = try XCTUnwrap(report.entries.first)
+
+            let name = "\(sidecar.suffix) (\(sidecar.contents.count) bytes)"
+            XCTAssertEqual(entry.outcome, .manual, name)
+            XCTAssertEqual(entry.reason, .pendingWrites, name)
+            XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty, name)
+            XCTAssertTrue(fixture.sidecarExists(sidecar.suffix), "the sidecar itself is left alone")
+            try FileManager.default.removeItem(
+                atPath: fixture.profile.historyDatabaseURL.path + sidecar.suffix
             )
+            XCTAssertEqual(try fixture.tableState(), before, name)
         }
-        try await assertChromeV70ProductionRejectsWithoutMutation { fixture in
-            try fixture.execute("INSERT INTO cluster_visit_duplicates VALUES (11, 12)")
-        }
+
+        // A journal that is not a regular file is never accepted as empty.
+        let linked = try ChromiumV70HistoryFixture(mode: .production)
+        let selected = try await linked.selectedRecords(visitIDs: [12])
+        let before = try linked.tableState()
+        let target = linked.root.appendingPathComponent("empty-target")
+        XCTAssertTrue(FileManager.default.createFile(atPath: target.path, contents: Data()))
+        try FileManager.default.createSymbolicLink(
+            atPath: linked.profile.historyDatabaseURL.path + "-journal",
+            withDestinationPath: target.path
+        )
+        let report = await linked.processor().process(records: selected)
+        XCTAssertEqual(report.entries.first?.reason, .pendingWrites)
+        try FileManager.default.removeItem(atPath: linked.profile.historyDatabaseURL.path + "-journal")
+        XCTAssertEqual(try linked.tableState(), before)
     }
 
-    func testChromeV70ProductionRejectsSelectedVisitedLinkWithoutWriting() async throws {
-        try await assertChromeV70ProductionRejectsWithoutMutation { fixture in
-            try fixture.execute("UPDATE visits SET visited_link_id = 1 WHERE id = 12")
-        }
+    func testChromeV70ProductionRemovesClusterReferencesAndEmptiedClusters() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute(ChromiumV70HistoryFixture.clusterRowsSQL)
+        let selected = try await fixture.selectedRecords(visitIDs: [12])
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .deleted, entry.detail)
+        XCTAssertEqual(
+            try fixture.rows(
+                "SELECT cluster_id, visit_id FROM clusters_and_visits ORDER BY cluster_id, visit_id"
+            ),
+            ["1\u{1f}11"],
+            "the deleted visit leaves every cluster; other members stay"
+        )
+        XCTAssertEqual(
+            try fixture.rows(
+                "SELECT visit_id, duplicate_visit_id FROM cluster_visit_duplicates ORDER BY visit_id, duplicate_visit_id"
+            ),
+            ["11\u{1f}21"],
+            "duplicate links are removed on either side of the deleted visit"
+        )
+        XCTAssertEqual(
+            try fixture.rows("SELECT cluster_id, label FROM clusters ORDER BY cluster_id"),
+            ["1\u{1f}kept"],
+            "a cluster left without visits is deleted like Chromium does"
+        )
+        XCTAssertEqual(
+            try fixture.rows("SELECT cluster_id, keyword FROM cluster_keywords ORDER BY cluster_id"),
+            ["1\u{1f}kept-keyword"],
+            "keywords of an emptied cluster must not outlive its visits"
+        )
     }
 
-    func testChromeV70ProductionRejectsSelectedSyncMetadataWithoutWriting() async throws {
-        try await assertChromeV70ProductionRejectsWithoutMutation { fixture in
-            try fixture.execute(
-                """
-                UPDATE visits
-                SET is_known_to_sync = 1, originator_cache_guid = 'sync',
-                    originator_visit_id = 9, originator_from_visit = 8,
-                    originator_opener_visit = 7
-                WHERE id = 12
-                """
+    func testChromeV70ProductionCleansClustersWithoutOptionalClusterTables() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute(ChromiumV70HistoryFixture.clusterRowsSQL)
+        try fixture.execute("DROP TABLE clusters; DROP TABLE cluster_keywords;")
+        let selected = try await fixture.selectedRecords(visitIDs: [12])
+
+        let report = await fixture.processor().process(records: selected)
+
+        XCTAssertEqual(report.entries.first?.outcome, .deleted, report.entries.first?.detail ?? "")
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM clusters_and_visits WHERE visit_id = 12"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM clusters_and_visits"), 1)
+    }
+
+    func testChromeV70ProductionUnknownClusterTableShapeMintsNoLocatorAndIsNeverWritten() async throws {
+        let reshapeKeywords = """
+        DROP TABLE cluster_keywords;
+        CREATE TABLE cluster_keywords (id INTEGER PRIMARY KEY, word TEXT);
+        """
+        let triggerOnClusters = """
+        CREATE TABLE cluster_audit (cluster_id INTEGER);
+        CREATE TRIGGER clusters_audit AFTER DELETE ON clusters
+            BEGIN INSERT INTO cluster_audit VALUES (old.cluster_id); END;
+        """
+
+        // Known at scan time: the profile is readable but offers no direct deletion.
+        for alteration in [reshapeKeywords, triggerOnClusters] {
+            let fixture = try ChromiumV70HistoryFixture(mode: .production)
+            try fixture.execute(ChromiumV70HistoryFixture.clusterRowsSQL)
+            try fixture.execute(alteration)
+            let outcome = try await fixture.scanOutcome()
+            XCTAssertEqual(outcome.records.count, 4)
+            XCTAssertTrue(outcome.records.allSatisfy { $0.locator == nil }, alteration)
+            let before = try fixture.tableState()
+
+            let report = await fixture.processor().process(
+                records: [try XCTUnwrap(outcome.records.first)]
             )
+
+            XCTAssertNotEqual(report.entries.first?.outcome, .deleted)
+            XCTAssertEqual(try fixture.tableState(), before)
+        }
+
+        // Changed between scan and confirmation: the write is refused.
+        for alteration in [reshapeKeywords, triggerOnClusters] {
+            let fixture = try ChromiumV70HistoryFixture(mode: .production)
+            try fixture.execute(ChromiumV70HistoryFixture.clusterRowsSQL)
+            let selected = try await fixture.selectedRecords(visitIDs: [12])
+            try fixture.execute(alteration)
+            let before = try fixture.tableState()
+
+            let report = await fixture.processor().process(records: selected)
+
+            XCTAssertNotEqual(report.entries.first?.outcome, .deleted, alteration)
+            XCTAssertTrue(report.verifiedDeletedRecordIDs.isEmpty)
+            XCTAssertEqual(try fixture.tableState(), before, alteration)
         }
     }
 
-    func testChromeV70ProductionRejectsOtherRowOpenerReferenceWithoutWriting() async throws {
-        try await assertChromeV70ProductionRejectsWithoutMutation { fixture in
-            try fixture.execute("UPDATE visits SET opener_visit = 12 WHERE id = 13")
-        }
+    func testChromeV70ProductionAdjustsVisitedLinkCountsLikeChromium() async throws {
+        let partial = try ChromiumV70HistoryFixture(mode: .production)
+        try partial.execute(ChromiumV70HistoryFixture.visitedLinkRowsSQL)
+        let one = try await partial.selectedRecords(visitIDs: [12])
+        let partialReport = await partial.processor().process(records: one)
+        XCTAssertEqual(partialReport.entries.first?.outcome, .deleted, partialReport.entries.first?.detail ?? "")
+        XCTAssertEqual(
+            try partial.rows("SELECT id, link_url_id, visit_count FROM visited_links ORDER BY id"),
+            ["1\u{1f}1\u{1f}1", "2\u{1f}2\u{1f}5"],
+            "one of two visits through the link is gone; the unrelated link is untouched"
+        )
+
+        let whole = try ChromiumV70HistoryFixture(mode: .production)
+        try whole.execute(ChromiumV70HistoryFixture.visitedLinkRowsSQL)
+        let both = try await whole.selectedRecords(visitIDs: [12, 13])
+        let wholeReport = await whole.processor().process(records: both)
+        XCTAssertEqual(wholeReport.entries.first?.outcome, .deleted, wholeReport.entries.first?.detail ?? "")
+        XCTAssertEqual(
+            try whole.rows("SELECT id, link_url_id, visit_count FROM visited_links ORDER BY id"),
+            ["2\u{1f}2\u{1f}5"],
+            "a visited link without remaining visits is deleted"
+        )
+
+        let dangling = try ChromiumV70HistoryFixture(mode: .production)
+        try dangling.execute("UPDATE visits SET visited_link_id = 99 WHERE id = 12")
+        let orphan = try await dangling.selectedRecords(visitIDs: [12])
+        let danglingReport = await dangling.processor().process(records: orphan)
+        XCTAssertEqual(
+            danglingReport.entries.first?.outcome,
+            .deleted,
+            "a visited-link id without a row is ignored, as Chromium does"
+        )
     }
 
-    func testChromeV70ProductionRejectsLastURLVisitWithoutWriting() async throws {
+    func testChromeV70ProductionRejectsVisitedLinkOwnedByAnotherURLWithoutWriting() async throws {
         try await assertChromeV70ProductionRejectsWithoutMutation(
-            selectedVisitID: ChromiumV70HistoryFixture.onlyVisitID
-        ) { _ in }
+            reason: .inconsistentData
+        ) { fixture in
+            try fixture.execute(ChromiumV70HistoryFixture.visitedLinkRowsSQL)
+            // Link 2 belongs to URL 2 while visit 12 belongs to URL 1.
+            try fixture.execute("UPDATE visits SET visited_link_id = 2 WHERE id = 12")
+        }
+    }
+
+    func testChromeV70ProductionLeavesSyncedVisitsToTheBrowserWithoutWriting() async throws {
+        // Deleting a synced visit only on this Mac would leave its copies in
+        // the account and on other devices. The scan already withholds the
+        // locator for such a visit; this is the write path's own check, for
+        // a visit that the browser synced between the scan and the deletion.
+        for marker in [
+            "is_known_to_sync = 1",
+            "originator_cache_guid = 'sync'",
+            "originator_visit_id = 9",
+            "originator_from_visit = 8",
+            "originator_opener_visit = 7",
+        ] {
+            let fixture = try ChromiumV70HistoryFixture(mode: .production)
+            let selected = try await fixture.selectedRecords(visitIDs: [12, 21])
+            try fixture.execute("UPDATE visits SET \(marker) WHERE id = 12")
+            let before = try fixture.tableState()
+
+            let report = await fixture.processor().process(records: selected)
+            let entry = try XCTUnwrap(report.entries.first)
+
+            XCTAssertEqual(entry.outcome, .manual, marker)
+            XCTAssertEqual(entry.capability, .manualBrowserGuidance, marker)
+            XCTAssertEqual(entry.reason, .syncedRecords, marker)
+            XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
+            XCTAssertEqual(try fixture.tableState(), before, marker)
+        }
+    }
+
+    func testChromeV70ProductionKeepsOpenerColumnOfOtherVisitsUntouched() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute("UPDATE visits SET opener_visit = 12 WHERE id = 13")
+        let selected = try await fixture.selectedRecords(visitIDs: [12])
+
+        let report = await fixture.processor().process(records: selected)
+
+        XCTAssertEqual(report.entries.first?.outcome, .deleted, report.entries.first?.detail ?? "")
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM visits WHERE id = 12"), 0)
+        XCTAssertEqual(
+            try fixture.scalar("SELECT opener_visit FROM visits WHERE id = 13"),
+            12,
+            "Chromium's own visit deletion repairs from_visit only; opener_visit is left as it is"
+        )
+        XCTAssertEqual(try fixture.scalar("SELECT from_visit FROM visits WHERE id = 13"), 0)
+    }
+
+    func testChromeV70ProductionDeletesTheOnlyVisitOfAPageAndItsURLRow() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute(
+            """
+            INSERT INTO keyword_search_terms VALUES (5, 2, 'only term', 'only term');
+            INSERT INTO keyword_search_terms VALUES (5, 1, 'kept term', 'kept term');
+            INSERT INTO segments VALUES (9, 'http://fixture.invalid/', 2);
+            INSERT INTO segment_usage VALUES (90, 9, 13324473600000000, 1);
+            """
+        )
+        let selected = try await fixture.selectedRecords(
+            visitIDs: [ChromiumV70HistoryFixture.onlyVisitID]
+        )
+        var expected = try fixture.tableState()
+        expected["urls"] = expected["urls"]?.filter { !$0.hasPrefix("2\u{1f}") }
+        expected["visits"] = expected["visits"]?.filter { !$0.hasPrefix("21\u{1f}") }
+        expected["production_visit_metadata"] = expected["production_visit_metadata"]?
+            .filter { !$0.hasPrefix("21\u{1f}") }
+        expected["segments"] = expected["segments"]?.filter { !$0.hasPrefix("9\u{1f}") }
+        expected["segment_usage"] = expected["segment_usage"]?.filter { !$0.hasPrefix("90\u{1f}") }
+        expected["keyword_search_terms"] = ["5\u{1f}1"]
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .deleted, entry.detail)
+        XCTAssertEqual(entry.capability, .verifiedVisitDeletion)
+        XCTAssertEqual(entry.verifiedDeletedRecordIDs, Set(selected.map(\.id)))
+        XCTAssertNotNil(entry.recoveryBackupID)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM visits WHERE url = 2"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM urls WHERE id = 2"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM keyword_search_terms WHERE url_id = 2"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM segments WHERE url_id = 2"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM segment_usage WHERE segment_id = 9"), 0)
+        XCTAssertEqual(
+            try fixture.tableState(),
+            expected,
+            "rows that do not belong to the deleted page must stay byte-for-byte the same"
+        )
+
+        let reread = try await fixture.scanOutcome()
+        XCTAssertEqual(reread.records.count, 3)
+        XCTAssertFalse(reread.records.contains { $0.url == "https://fixture.invalid/2" })
+    }
+
+    func testChromeV70ProductionDeletesEveryVisitOfAMultiVisitPage() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        let selected = try await fixture.selectedRecords(visitIDs: [11, 12, 13])
+        let urlTwoBefore = try fixture.rows(
+            "SELECT id, url, title, visit_count, typed_count, last_visit_time, hidden FROM urls WHERE id = 2"
+        )
+        let visitTwentyOneBefore = try fixture.rows("SELECT * FROM visits WHERE id = 21")
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .deleted, entry.detail)
+        XCTAssertEqual(entry.verifiedDeletedRecordIDs, Set(selected.map(\.id)))
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM visits WHERE url = 1"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM urls WHERE id = 1"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM visit_source"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM context_annotations"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM content_annotations"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM segments"), 0)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM segment_usage"), 0)
+        XCTAssertEqual(
+            try fixture.rows(
+                "SELECT id, url, title, visit_count, typed_count, last_visit_time, hidden FROM urls WHERE id = 2"
+            ),
+            urlTwoBefore
+        )
+        XCTAssertEqual(try fixture.rows("SELECT * FROM visits WHERE id = 21"), visitTwentyOneBefore)
+    }
+
+    func testChromeV70ProductionPartialDeleteKeepsURLRowWithChromiumCounters() async throws {
+        // Two of three visits, one of them typed: both counters follow Chromium.
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        let selected = try await fixture.selectedRecords(visitIDs: [12, 13])
+        let report = await fixture.processor().process(records: selected)
+        XCTAssertEqual(report.entries.first?.outcome, .deleted, report.entries.first?.detail ?? "")
+        XCTAssertEqual(
+            try fixture.rows("SELECT visit_count, typed_count, last_visit_time FROM urls WHERE id = 1"),
+            ["1\u{1f}0\u{1f}13324473601000000"],
+            "the URL row survives with the remaining visit's time"
+        )
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM visits WHERE url = 1"), 1)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM segments WHERE url_id = 1"), 1)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM segment_usage"), 1)
+
+        // A reload never incremented visit_count, so removing it must not decrement it.
+        let reload = try ChromiumV70HistoryFixture(mode: .production)
+        try reload.execute("UPDATE visits SET transition = 805306376 WHERE id = 13")
+        let reloadVisit = try await reload.selectedRecords(visitIDs: [13])
+        let reloadReport = await reload.processor().process(records: reloadVisit)
+        XCTAssertEqual(reloadReport.entries.first?.outcome, .deleted, reloadReport.entries.first?.detail ?? "")
+        XCTAssertEqual(
+            try reload.rows("SELECT visit_count, typed_count, last_visit_time FROM urls WHERE id = 1"),
+            ["3\u{1f}1\u{1f}13324473602000000"]
+        )
+
+        // Chromium clamps at zero when the stored counter is already lower than
+        // the visits being removed; the page must stay deletable.
+        let clamped = try ChromiumV70HistoryFixture(mode: .production)
+        try clamped.execute("UPDATE urls SET visit_count = 1, typed_count = 0 WHERE id = 1")
+        let clampedVisits = try await clamped.selectedRecords(visitIDs: [11, 12])
+        let clampedReport = await clamped.processor().process(records: clampedVisits)
+        XCTAssertEqual(clampedReport.entries.first?.outcome, .deleted, clampedReport.entries.first?.detail ?? "")
+        XCTAssertEqual(
+            try clamped.rows("SELECT visit_count, typed_count, last_visit_time FROM urls WHERE id = 1"),
+            ["0\u{1f}0\u{1f}13324473603000000"]
+        )
+    }
+
+    func testChromeV70ProductionRepairsReferrerChainsLikeChromium() async throws {
+        // 11 <- 12 <- 13 (URL 1) and 13 <- 21 (URL 2).
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute(
+            """
+            UPDATE visits SET from_visit = 11 WHERE id = 12;
+            UPDATE visits SET from_visit = 12 WHERE id = 13;
+            UPDATE visits SET from_visit = 13 WHERE id = 21;
+            """
+        )
+        let middle = try await fixture.selectedRecords(visitIDs: [12, 13])
+        let report = await fixture.processor().process(records: middle)
+        XCTAssertEqual(report.entries.first?.outcome, .deleted, report.entries.first?.detail ?? "")
+        XCTAssertEqual(
+            try fixture.scalar("SELECT from_visit FROM visits WHERE id = 21"),
+            11,
+            "a visit reached through two deleted visits inherits their referrer"
+        )
+
+        // A referrer that no longer exists is passed on unchanged, and a
+        // segment id without a segment row does not block the deletion.
+        let dangling = try ChromiumV70HistoryFixture(mode: .production)
+        try dangling.execute(
+            """
+            UPDATE visits SET from_visit = 999, segment_id = 55 WHERE id = 12;
+            """
+        )
+        let one = try await dangling.selectedRecords(visitIDs: [12])
+        let danglingReport = await dangling.processor().process(records: one)
+        XCTAssertEqual(danglingReport.entries.first?.outcome, .deleted, danglingReport.entries.first?.detail ?? "")
+        XCTAssertEqual(try dangling.scalar("SELECT from_visit FROM visits WHERE id = 13"), 999)
+    }
+
+    func testChromeV70ProductionRejectsReferrerCycleWithoutWriting() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute(
+            """
+            UPDATE visits SET from_visit = 13 WHERE id = 12;
+            UPDATE visits SET from_visit = 12 WHERE id = 13;
+            """
+        )
+        let selected = try await fixture.selectedRecords(visitIDs: [12, 13])
+        let before = try fixture.tableState()
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .unsupported, entry.detail)
+        XCTAssertEqual(entry.reason, .inconsistentData)
+        XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
+        XCTAssertEqual(try fixture.tableState(), before)
+    }
+
+    func testChromeV70ProductionReadBackCoversTheRemovedURLRow() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        let selected = try await fixture.selectedRecords(
+            visitIDs: [ChromiumV70HistoryFixture.onlyVisitID]
+        )
+        // Something recreates the URL row after COMMIT and before the
+        // read-only check: the page must not be reported as deleted.
+        let processor = fixture.processor(beforeReadBackHook: { [fixture] in
+            try? fixture.execute(
+                """
+                INSERT INTO urls (id, url, title, visit_count, typed_count, last_visit_time, hidden)
+                    VALUES (2, 'https://fixture.invalid/2', NULL, 1, 0, 13324473604000000, 0)
+                """
+            )
+        })
+
+        let report = await processor.process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .indeterminate, entry.detail)
+        XCTAssertEqual(entry.reason, .committedButUnverified)
+        XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
+        XCTAssertNotNil(entry.recoveryBackupID)
+    }
+
+    func testChromeV70ProductionDeletesALargeSelectionAcrossManyPages() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        // 900 extra pages with two visits each (ids 1000...).
+        var sql = "BEGIN;"
+        for index in 0 ..< 900 {
+            let urlID = 1_000 + index
+            let firstVisit = 10_000 + index * 2
+            let time = 13_324_480_000_000_000 + Int64(index) * 10
+            sql += """
+            INSERT INTO urls (id, url, title, visit_count, typed_count, last_visit_time, hidden)
+                VALUES (\(urlID), 'https://bulk.invalid/page/\(index)', 'Page \(index)', 2, 0, \(time + 1), 0);
+            INSERT INTO visits (id, url, visit_time, from_visit, transition, segment_id,
+                                incremented_omnibox_typed_score, visited_link_id)
+                VALUES (\(firstVisit), \(urlID), \(time), 0, 0, 0, 0, 0);
+            INSERT INTO visits (id, url, visit_time, from_visit, transition, segment_id,
+                                incremented_omnibox_typed_score, visited_link_id)
+                VALUES (\(firstVisit + 1), \(urlID), \(time + 1), \(firstVisit), 0, 0, 0, 0);
+            INSERT INTO keyword_search_terms VALUES (1, \(urlID), 'term \(index)', 'term \(index)');
+            """
+        }
+        sql += "COMMIT;"
+        try fixture.execute(sql)
+
+        let outcome = try await fixture.scanOutcome()
+        XCTAssertEqual(outcome.records.count, 4 + 1_800)
+        XCTAssertTrue(outcome.records.allSatisfy { $0.locator != nil })
+        // Whole pages 0..<500 (1000 visits) and the newer visit of pages 500..<800.
+        let selected = outcome.records.filter { record in
+            guard let locator = record.locator, locator.parentRowID >= 1_000 else { return false }
+            let page = Int(locator.parentRowID) - 1_000
+            if page < 500 { return true }
+            return page < 800 && locator.visitRowID % 2 == 1
+        }
+        XCTAssertEqual(selected.count, 1_300)
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertEqual(entry.outcome, .deleted, entry.detail)
+        XCTAssertEqual(entry.verifiedDeletedRecordIDs.count, 1_300)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM urls"), 2 + 400)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM visits"), 4 + 300 + 200)
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM keyword_search_terms"), 400)
+        XCTAssertEqual(
+            try fixture.scalar("SELECT COUNT(*) FROM visits WHERE url NOT IN (SELECT id FROM urls)"),
+            0,
+            "no visit may point at a removed URL"
+        )
+        XCTAssertEqual(
+            try fixture.scalar(
+                "SELECT COUNT(*) FROM urls WHERE id >= 1500 AND id < 1800 AND visit_count = 1 AND last_visit_time % 10 = 0"
+            ),
+            300,
+            "partially deleted pages keep the older visit's time and one count"
+        )
+        XCTAssertEqual(
+            try fixture.scalar("SELECT COUNT(*) FROM urls WHERE id >= 1800 AND visit_count = 2"),
+            100,
+            "untouched pages are unchanged"
+        )
+        XCTAssertEqual(
+            try fixture.rows("SELECT visit_count, typed_count, last_visit_time FROM urls WHERE id = 1"),
+            ["3\u{1f}1\u{1f}13324473603000000"]
+        )
+    }
+
+    func testChromeV70ProductionRollsBackPageDeletionWhenALaterURLUpdateFails() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production, failURLUpdate: true)
+        try fixture.execute(
+            """
+            INSERT INTO keyword_search_terms VALUES (5, 2, 'only term', 'only term');
+            INSERT INTO segments VALUES (9, 'http://fixture.invalid/', 2);
+            INSERT INTO segment_usage VALUES (90, 9, 13324473600000000, 1);
+            """
+        )
+        // Visit 21 removes URL 2 completely; visit 12 needs a counter update on
+        // URL 1, which the fixture's CHECK constraint refuses.
+        let selected = try await fixture.selectedRecords(visitIDs: [21, 12])
+        let before = try fixture.tableState()
+
+        let report = await fixture.processor().process(records: selected)
+        let entry = try XCTUnwrap(report.entries.first)
+
+        XCTAssertNotEqual(entry.outcome, .deleted)
+        XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
+        XCTAssertEqual(try fixture.tableState(), before, "every table must be rolled back together")
+        XCTAssertEqual(try fixture.scalar("SELECT COUNT(*) FROM urls"), 2)
     }
 
     func testChromeV70ProductionRejectsNonAliasedVisitIDWithoutWriting() async throws {
@@ -667,41 +1372,45 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
         )
     }
 
-    func testChromeV70ProductionAuthorizerKeepsTheSameFiniteWriteSet() {
-        XCTAssertEqual(
+    func testChromeV70ProductionAuthorizerAllowsOnlyThePageDeletionWriteSet() {
+        func result(_ action: Int32, _ table: String, _ column: String? = nil) -> Int32 {
             authorizationResult(
                 adapter: .chromeV70Production,
-                action: SQLITE_DELETE,
-                table: "visits"
-            ),
-            SQLITE_OK
-        )
-        XCTAssertEqual(
-            authorizationResult(
-                adapter: .chromeV70Production,
-                action: SQLITE_UPDATE,
-                table: "visits",
-                column: "from_visit"
-            ),
-            SQLITE_OK
-        )
-        XCTAssertEqual(
-            authorizationResult(
-                adapter: .chromeV70Production,
-                action: SQLITE_DELETE,
-                table: "visited_links"
-            ),
-            SQLITE_DENY
-        )
-        XCTAssertEqual(
-            authorizationResult(
-                adapter: .chromeV70Production,
-                action: SQLITE_UPDATE,
-                table: "urls",
-                column: "title"
-            ),
-            SQLITE_DENY
-        )
+                action: action,
+                table: table,
+                column: column
+            )
+        }
+
+        // Rows that belong to a deleted visit or to a URL without visits.
+        for table in [
+            "visits", "visit_source", "context_annotations", "content_annotations",
+            "clusters_and_visits", "cluster_visit_duplicates", "clusters", "cluster_keywords",
+            "visited_links", "urls", "keyword_search_terms", "segments", "segment_usage",
+        ] {
+            XCTAssertEqual(result(SQLITE_DELETE, table), SQLITE_OK, table)
+        }
+        XCTAssertEqual(result(SQLITE_UPDATE, "visits", "from_visit"), SQLITE_OK)
+        XCTAssertEqual(result(SQLITE_UPDATE, "urls", "visit_count"), SQLITE_OK)
+        XCTAssertEqual(result(SQLITE_UPDATE, "urls", "typed_count"), SQLITE_OK)
+        XCTAssertEqual(result(SQLITE_UPDATE, "urls", "last_visit_time"), SQLITE_OK)
+        XCTAssertEqual(result(SQLITE_UPDATE, "visited_links", "visit_count"), SQLITE_OK)
+
+        // Everything else stays denied.
+        for table in ["meta", "downloads", "downloads_url_chains", "cookies", "sqlite_sequence"] {
+            XCTAssertEqual(result(SQLITE_DELETE, table), SQLITE_DENY, table)
+        }
+        XCTAssertEqual(result(SQLITE_UPDATE, "urls", "title"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_UPDATE, "urls", "url"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_UPDATE, "visits", "opener_visit"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_UPDATE, "visits", "visit_time"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_UPDATE, "visited_links", "link_url_id"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_UPDATE, "meta", "value"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_INSERT, "visits"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_INSERT, "urls"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_CREATE_TABLE, "unexpected"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_DROP_TABLE, "urls"), SQLITE_DENY)
+        XCTAssertEqual(result(SQLITE_ATTACH, "other.sqlite"), SQLITE_DENY)
     }
 
     private func assertSuccessfulSelectedVisitDeletion(
@@ -731,6 +1440,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
     private func assertChromeV70ProductionRejectsWithoutMutation(
         selectedVisitID: Int64 = ChromiumV70HistoryFixture.selectedVisitID,
+        reason: BrowserPrivacyProcessingReason,
         prepare: (ChromiumV70HistoryFixture) throws -> Void
     ) async throws {
         let fixture = try ChromiumV70HistoryFixture(mode: .production)
@@ -746,6 +1456,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
         XCTAssertEqual(entry.outcome, .unsupported, entry.detail)
         XCTAssertEqual(entry.capability, .unsupported)
+        XCTAssertEqual(entry.reason, reason)
         XCTAssertTrue(entry.verifiedDeletedRecordIDs.isEmpty)
         XCTAssertEqual(try fixture.tableState(), before)
     }
@@ -818,6 +1529,24 @@ private extension BrowserPrivacyRecord {
     }
 }
 
+/// Set from a hook that runs on another thread.
+final class ProcessorTestFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func set() {
+        lock.lock()
+        stored = true
+        lock.unlock()
+    }
+}
+
 private struct FixedBrowserPrivacyRunningApplicationChecker:
     BrowserPrivacyRunningApplicationChecking {
     let runningBundleIdentifiers: Set<String>
@@ -829,7 +1558,11 @@ private struct FixedBrowserPrivacyRunningApplicationChecker:
     }
 }
 
+private struct UnplannedBackupError: Error {}
+
 private struct FailingBrowserPrivacyBackupService: BrowserPrivacyDatabaseBackingUp {
+    var error: any Error = SQLiteSnapshotFailure.unavailable
+
     func backup(
         source: SQLiteSnapshotSource,
         schema: SQLiteSchemaAllowlist,
@@ -837,7 +1570,7 @@ private struct FailingBrowserPrivacyBackupService: BrowserPrivacyDatabaseBacking
         profileID: String,
         deadlineNanoseconds: UInt64
     ) async throws -> BrowserPrivacyRecoveryBackup {
-        throw SQLiteSnapshotFailure.unavailable
+        throw error
     }
 }
 
@@ -1423,6 +2156,56 @@ final class ChromiumV70HistoryFixture {
         return outcome.records
     }
 
+    /// Scans the fixture and returns exactly the records for the given Visit IDs.
+    func selectedRecords(visitIDs: [Int64]) async throws -> [BrowserPrivacyRecord] {
+        let records = try await scannedRecords()
+        let selected = records.filter {
+            guard let rowID = $0.locator?.visitRowID else { return false }
+            return visitIDs.contains(rowID)
+        }
+        XCTAssertEqual(selected.count, visitIDs.count)
+        return selected
+    }
+
+    /// Visit 12 is the only member of cluster 2 and one of two members of
+    /// cluster 1; duplicate links touch it from both sides.
+    static let clusterRowsSQL = """
+    INSERT INTO clusters
+        (cluster_id, should_show_on_prominent_ui_surfaces, label, raw_label,
+         triggerability_calculated, originator_cache_guid, originator_cluster_id)
+        VALUES (1, 0, 'kept', 'kept', 0, '', 0);
+    INSERT INTO clusters
+        (cluster_id, should_show_on_prominent_ui_surfaces, label, raw_label,
+         triggerability_calculated, originator_cache_guid, originator_cluster_id)
+        VALUES (2, 0, 'private', 'private', 0, '', 0);
+    INSERT INTO cluster_keywords VALUES (1, 'kept-keyword', 0, 1, '');
+    INSERT INTO cluster_keywords VALUES (2, 'private-keyword', 0, 1, '');
+    INSERT INTO clusters_and_visits
+        (cluster_id, visit_id, score, engagement_score, url_for_deduping,
+         normalized_url, url_for_display, interaction_state)
+        VALUES (1, 11, 0, 0, 'a', 'a', 'a', 0);
+    INSERT INTO clusters_and_visits
+        (cluster_id, visit_id, score, engagement_score, url_for_deduping,
+         normalized_url, url_for_display, interaction_state)
+        VALUES (1, 12, 0, 0, 'a', 'a', 'a', 0);
+    INSERT INTO clusters_and_visits
+        (cluster_id, visit_id, score, engagement_score, url_for_deduping,
+         normalized_url, url_for_display, interaction_state)
+        VALUES (2, 12, 0, 0, 'a', 'a', 'a', 0);
+    INSERT INTO cluster_visit_duplicates VALUES (11, 12);
+    INSERT INTO cluster_visit_duplicates VALUES (12, 13);
+    INSERT INTO cluster_visit_duplicates VALUES (11, 21);
+    """
+
+    /// Visits 12 and 13 (URL 1) arrived through visited link 1; link 2 belongs to URL 2.
+    static let visitedLinkRowsSQL = """
+    INSERT INTO visited_links (id, link_url_id, top_level_url, frame_url, visit_count)
+        VALUES (1, 1, 'https://top.invalid/', 'https://frame.invalid/', 2);
+    INSERT INTO visited_links (id, link_url_id, top_level_url, frame_url, visit_count)
+        VALUES (2, 2, 'https://top.invalid/', 'https://frame.invalid/', 5);
+    UPDATE visits SET visited_link_id = 1 WHERE id IN (12, 13);
+    """
+
     func scanOutcome(
         adapter overrideAdapter: BrowserPrivacySQLiteWriteAdapter? = nil,
         installedApplications overrideApplications: [BrowserPrivacyInstalledApplication]? = nil
@@ -1441,7 +2224,12 @@ final class ChromiumV70HistoryFixture {
         ).scan()
     }
 
-    func processor() -> BrowserPrivacyHistoryProcessor {
+    func processor(
+        runningBundleIdentifiers: Set<String> = [],
+        backupService: (any BrowserPrivacyDatabaseBackingUp)? = nil,
+        beforeReadBackHook: (@Sendable () -> Void)? = nil,
+        inTransactionHook: (@Sendable (SQLiteExecutionControl) throws -> Void)? = nil
+    ) -> BrowserPrivacyHistoryProcessor {
         BrowserPrivacyHistoryProcessor(
             registry: registry(
                 adapter: mode == .production
@@ -1449,16 +2237,35 @@ final class ChromiumV70HistoryFixture {
                     : .chromiumV70Fixture
             ),
             runningApplicationChecker: FixedBrowserPrivacyRunningApplicationChecker(
-                runningBundleIdentifiers: []
+                runningBundleIdentifiers: runningBundleIdentifiers
             ),
-            backupService: BrowserPrivacyRecoveryBackupService(
-                rootURL: root.appendingPathComponent("Recovery", isDirectory: true),
-                snapshotService: SQLiteSnapshotService(temporaryRoot: snapshotRoot)
-            ),
+            backupService: backupService ?? recoveryService,
             homeDirectory: root,
             busyRetrySeconds: 0.2,
-            operationTimeoutSeconds: 2
+            operationTimeoutSeconds: 2,
+            beforeReadBackHook: beforeReadBackHook,
+            inTransactionHook: inTransactionHook
         )
+    }
+
+    /// The recovery backups of this fixture, in its own temporary directory.
+    var recoveryService: BrowserPrivacyRecoveryBackupService {
+        BrowserPrivacyRecoveryBackupService(
+            rootURL: recoveryRoot,
+            snapshotService: SQLiteSnapshotService(temporaryRoot: snapshotRoot)
+        )
+    }
+
+    func recoveryService(maximumBackups: Int) -> BrowserPrivacyRecoveryBackupService {
+        BrowserPrivacyRecoveryBackupService(
+            rootURL: recoveryRoot,
+            snapshotService: SQLiteSnapshotService(temporaryRoot: snapshotRoot),
+            maximumBackups: maximumBackups
+        )
+    }
+
+    var recoveryRoot: URL {
+        root.appendingPathComponent("Recovery", isDirectory: true)
     }
 
     private static func bundleIdentifier(for providerID: String) -> String {
@@ -1517,14 +2324,18 @@ final class ChromiumV70HistoryFixture {
         FileManager.default.fileExists(atPath: markerURL.path)
     }
 
-    func createSidecar(_ suffix: String) throws {
+    func createSidecar(_ suffix: String, contents: Data = Data("active".utf8)) throws {
         guard ["-wal", "-shm", "-journal"].contains(suffix),
               FileManager.default.createFile(
                   atPath: profile.historyDatabaseURL.path + suffix,
-                  contents: Data("active".utf8)
+                  contents: contents
               ) else {
             throw BrowserPrivacyHistoryFixtureError.sqlite
         }
+    }
+
+    func sidecarExists(_ suffix: String) -> Bool {
+        FileManager.default.fileExists(atPath: profile.historyDatabaseURL.path + suffix)
     }
 
     func execute(_ sql: String) throws {
@@ -1606,6 +2417,12 @@ final class ChromiumV70HistoryFixture {
             state["keyword_search_terms"] = try rows(
                 "SELECT keyword_id, url_id FROM keyword_search_terms ORDER BY keyword_id, url_id"
             )
+            for table in ["clusters", "cluster_keywords"]
+                where try scalar(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '\(table)'"
+                ) == 1 {
+                state[table] = try rows("SELECT * FROM \(table) ORDER BY 1, 2")
+            }
         }
         return state
     }
@@ -1796,6 +2613,22 @@ final class ChromiumV70HistoryFixture {
             duplicate_visit_id INTEGER NOT NULL,
             PRIMARY KEY(visit_id, duplicate_visit_id)
         ) WITHOUT ROWID;
+        CREATE TABLE clusters (
+            cluster_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            should_show_on_prominent_ui_surfaces BOOLEAN NOT NULL,
+            label VARCHAR NOT NULL,
+            raw_label VARCHAR NOT NULL,
+            triggerability_calculated BOOLEAN NOT NULL,
+            originator_cache_guid TEXT NOT NULL,
+            originator_cluster_id INTEGER NOT NULL
+        );
+        CREATE TABLE cluster_keywords (
+            cluster_id INTEGER NOT NULL,
+            keyword VARCHAR NOT NULL,
+            type INTEGER NOT NULL,
+            score NUMERIC NOT NULL,
+            collections VARCHAR NOT NULL
+        );
         CREATE TABLE visited_links (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             link_url_id INTEGER NOT NULL,

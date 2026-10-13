@@ -12,6 +12,7 @@ enum MiniWindowDemoData {
     static let menuBarPanelSnapshotPowerModeArgument = "--capture-menu-bar-panel-power-mode"
     static let menuBarPanelSnapshotSectionArgumentPrefix = "--capture-menu-bar-panel-section="
     static let batteryStateArgumentPrefix = "--debug-battery-state="
+    static let chargeLimitStateArgumentPrefix = "--debug-charge-limit-state="
     static let hardwareControlStateArgumentPrefix = "--debug-hardware-control-state="
     static let appearanceArgumentPrefix = "--debug-mini-window-appearance="
     static let memoryUsedPercentArgumentPrefix = "--debug-memory-used-percent="
@@ -80,14 +81,20 @@ enum MiniWindowDemoData {
         case memorySelectionMenu = "menu.memory.selectionMenu"
         case memoryQuitConfirmation = "menu.memory.quitConfirmation"
         case processorSecondary = "menu.processor.secondary"
+        case processorSecondaryNoFrequency = "menu.processor.secondary.noFrequency"
         case cpuHistory = "menu.cpu.history"
+        case cpuHistoryShortRecording = "menu.cpu.history.shortRecording"
         case cpuUsageInspector = "menu.cpu.usageInspector"
         case cpuUptimeInspector = "menu.cpu.uptimeInspector"
         case gpuActivityHistory = "menu.gpu.activityHistory"
         case diskSecondary = "menu.disk.secondary"
+#if DEBUG
+        case cleanupAfterSmartScan = "menu.cleanup.afterSmartScan"
+#endif
         case diskIOHistory = "menu.disk.ioHistory"
         case diskVolumeInspector = "menu.disk.volumeInspector"
         case networkSecondary = "menu.network.secondary"
+        case networkSecondaryUnavailable = "menu.network.secondary.unavailable"
         case networkHistory = "menu.network.history"
         case networkPhysicalInterface = "menu.network.physicalInterface"
         case networkVPNPPP = "menu.network.vpn.pppControllable"
@@ -96,6 +103,7 @@ enum MiniWindowDemoData {
         case networkVPNReadOnly = "menu.network.vpn.readOnly"
         case networkVPNDisconnectConfirmation = "menu.network.vpn.disconnectConfirmation"
         case sensorSecondary = "menu.sensor.secondary"
+        case sensorSecondaryNoHelper = "menu.sensor.secondary.noHelper"
         case sensorGPUTemperature = "menu.sensor.gpuTemperature"
         case sensorCPUTemperature = "menu.sensor.cpuTemperature"
         case sensorFanSpeedHistory = "menu.sensor.fanSpeedHistory"
@@ -103,8 +111,24 @@ enum MiniWindowDemoData {
         case fanControlFull = "menu.fan.control.full"
         case fanControlAutoCompact = "menu.fan.control.autoCompact"
         case powerSecondary = "menu.power.secondary"
+        case powerSecondaryNoHelper = "menu.power.secondary.noHelper"
         case powerLiveElectricalReadings = "menu.power.liveElectricalReadings"
         case powerModeAndChargeTarget = "menu.power.modeAndChargeTarget"
+        // D57: the new third levels.
+        case powerChipBreakdown = "menu.power.chipBreakdown"
+        case powerBacklightDetail = "menu.power.backlightDetail"
+        case powerBatteryDetail = "menu.power.batteryDetail"
+        case sensorCPURowDetail = "menu.sensor.cpuRowDetail"
+        case sensorPalmRestDetail = "menu.sensor.palmRestDetail"
+        case sensorHardwareProbes = "menu.sensor.hardwareProbes"
+        case sensorAmbientLightDetail = "menu.sensor.ambientLightDetail"
+        // r2-mini-sensors review: the battery row's third level, an Ultra's
+        // per-die channel names, an Energy Model without a CPU channel; the
+        // "整机" row's third level (incremental review P2-3).
+        case powerSystemDetail = "menu.power.systemDetail"
+        case powerBatteryRowDetail = "menu.power.batteryRowDetail"
+        case powerChipBreakdownUltra = "menu.power.chipBreakdownUltra"
+        case powerChipWithoutCPU = "menu.power.chipWithoutCPU"
 
         var route: MenuBarSnapshotRoute {
             switch self {
@@ -115,21 +139,25 @@ enum MiniWindowDemoData {
                  .memoryProcessesSelected, .memoryProcessesQuitResult,
                  .memorySelectionMenu, .memoryQuitConfirmation:
                 .secondary(.memory)
-            case .processorSecondary:
+            case .processorSecondary, .processorSecondaryNoFrequency:
                 .secondary(.processor)
             case .diskSecondary:
                 .secondary(.disk)
-            case .networkSecondary:
+#if DEBUG
+            case .cleanupAfterSmartScan:
+                .secondary(.cleanup)
+#endif
+            case .networkSecondary, .networkSecondaryUnavailable:
                 .secondary(.network)
-            case .sensorSecondary:
+            case .sensorSecondary, .sensorSecondaryNoHelper:
                 .secondary(.sensors)
-            case .powerSecondary:
+            case .powerSecondary, .powerSecondaryNoHelper:
                 .secondary(.power)
             case .memoryHistory:
                 .tertiary(.memory, .memory)
             case .memoryComposition:
                 .inline(.memory, debugRouteIdentifier)
-            case .cpuHistory:
+            case .cpuHistory, .cpuHistoryShortRecording:
                 .tertiary(.processor, .processor)
             case .diskIOHistory:
                 .tertiary(.disk, .disk)
@@ -155,8 +183,13 @@ enum MiniWindowDemoData {
                 .inline(.network, debugRouteIdentifier)
             case .fanControlFull, .fanControlAutoCompact:
                 .inline(.sensors, debugRouteIdentifier)
-            case .powerModeAndChargeTarget:
+            case .powerModeAndChargeTarget, .powerChipBreakdown, .powerBacklightDetail,
+                 .powerBatteryDetail, .powerBatteryRowDetail, .powerChipBreakdownUltra,
+                 .powerChipWithoutCPU, .powerSystemDetail:
                 .inline(.power, debugRouteIdentifier)
+            case .sensorCPURowDetail, .sensorPalmRestDetail, .sensorHardwareProbes,
+                 .sensorAmbientLightDetail:
+                .inline(.sensors, debugRouteIdentifier)
             }
         }
 
@@ -187,6 +220,20 @@ enum MiniWindowDemoData {
             guard debugRouteIdentifier.hasPrefix(prefix) else { return nil }
             self.init(rawValue: String(debugRouteIdentifier.dropFirst(prefix.count)))
         }
+    }
+
+    static var helperPowerMetricsState: HelperPowerMetricsState {
+        helperPowerMetricsState(for: capturedMenuBarPanelScenario(arguments: ProcessInfo.processInfo.arguments))
+    }
+
+    /// Snapshot-only data; never configures a monitor or invokes the helper.
+    static func helperPowerMetricsState(for scenario: MenuBarSnapshotScenario?) -> HelperPowerMetricsState {
+        if scenario == .sensorSecondaryNoHelper || scenario == .powerSecondaryNoHelper
+            || scenario == .processorSecondaryNoFrequency { return .needsHelper }
+        return .available(PowermetricsSample(cpuMilliwatts: 12_400, gpuMilliwatts: 6_400, aneMilliwatts: 0,
+            clusters: [.init(name: "P0", kind: .performance, megahertz: 3_600),
+                       .init(name: "E0", kind: .efficiency, megahertz: 1_800)],
+            gpuMegahertz: 340, durationSeconds: 1), sampledAt: referenceDate)
     }
 
     private struct DebugVPNServiceIDVerifier: VPNServiceIDVerifying {
@@ -270,20 +317,57 @@ enum MiniWindowDemoData {
         case missing
     }
 
+    enum ChargeLimitDemoState: String, CaseIterable, Sendable {
+        case manual80, optimized80, temporaryFullCharge, unsupported, manySegments
+    }
+
+    static func chargeLimitState(arguments: [String] = ProcessInfo.processInfo.arguments) -> BatteryChargeLimitState? {
+        let raw = arguments.first { $0.hasPrefix(chargeLimitStateArgumentPrefix) }
+            .map { String($0.dropFirst(chargeLimitStateArgumentPrefix.count)) }
+        return chargeLimitState(for: ChargeLimitDemoState(rawValue: raw ?? "") ?? .manual80)
+    }
+
+    /// Synthetic supported values are fixture-only; production uses the native readback.
+    static func chargeLimitState(for state: ChargeLimitDemoState) -> BatteryChargeLimitState? {
+        switch state {
+        case .manual80:
+            return BatteryChargeLimitState.resolve(manualLimitEnabled: true, manualLimit: 80,
+                availableLimits: [80, 85, 90, 95, 100], effectiveLimit: 80)
+        case .optimized80:
+            return BatteryChargeLimitState.resolve(manualLimitEnabled: false, manualLimit: 80,
+                availableLimits: [80, 85, 90, 95, 100], effectiveLimit: 80,
+                smartChargingRawValue: 1, maxLimited: true)
+        case .temporaryFullCharge:
+            return BatteryChargeLimitState.resolve(manualLimitEnabled: true, manualLimit: 80,
+                availableLimits: [80, 85, 90, 95, 100], effectiveLimit: 100,
+                smartChargingRawValue: 3, maxLimited: false)
+        case .unsupported:
+            return BatteryChargeLimitState(target: .full, availableTargets: [], source: .unknown)
+        case .manySegments:
+            return BatteryChargeLimitState.resolve(manualLimitEnabled: true, manualLimit: 85,
+                availableLimits: [70, 75, 80, 85, 90, 95, 100], effectiveLimit: 85)
+        }
+    }
+
     enum HardwareControlDemoState: String, CaseIterable, Sendable {
         case helperNotRegistered
         case awaitingSystemApproval
         case helperEnabled
         case fanAutomatic
         case fanManual65
+        case fanMaximum
         case fanReadOnly
         case fanChecking
         case fanless
         case dualFan
+        /// Review P2-2: manual control with two fans (shows "双风扇同步").
+        case dualFanManual
         case desktopMac
         case noHighPower
         case allPowerModes
         case connectionInterrupted
+        case helperUntrusted
+        case helperUnavailable
         case thermalSerious
         case thermalCritical
         case fanReadbackFailed
@@ -318,7 +402,10 @@ enum MiniWindowDemoData {
     }
 
     static var isEnabled: Bool {
-        ProcessInfo.processInfo.arguments.contains(launchArgument)
+#if DEBUG
+        if LightfieldComponentGallery.isRequested { return true }
+#endif
+        return ProcessInfo.processInfo.arguments.contains(launchArgument)
     }
 
     static var batteryState: BatteryDemoState {
@@ -329,7 +416,11 @@ enum MiniWindowDemoData {
     }
 
     static var hardwareControlState: HardwareControlDemoState {
-        let raw = ProcessInfo.processInfo.arguments.first {
+        hardwareControlState(arguments: ProcessInfo.processInfo.arguments)
+    }
+
+    static func hardwareControlState(arguments: [String]) -> HardwareControlDemoState {
+        let raw = arguments.first {
             $0.hasPrefix(hardwareControlStateArgumentPrefix)
         }?.dropFirst(hardwareControlStateArgumentPrefix.count)
         return HardwareControlDemoState(rawValue: String(raw ?? "")) ?? .fanAutomatic
@@ -408,6 +499,10 @@ enum MiniWindowDemoData {
                 maximumRPM: 4_000,
                 targetRPM: 3_020
             )]
+        case .fanMaximum:
+            observedMode = .maximum
+            fanReadings = [SystemFanReading(index: 0, identity: .cpu, actualRPM: 4_000,
+                minimumRPM: 1_200, maximumRPM: 4_000, targetRPM: 4_000)]
         case .fanReadOnly:
             observedMode = nil
             fanReadings = [SystemFanReading(
@@ -437,6 +532,27 @@ enum MiniWindowDemoData {
                     targetRPM: 1_780
                 ),
             ]
+        case .dualFanManual:
+            observedMode = .manual
+            manualPercentage = 65
+            fanReadings = [
+                SystemFanReading(
+                    index: 0,
+                    identity: .cpu,
+                    actualRPM: 3_020,
+                    minimumRPM: 1_200,
+                    maximumRPM: 4_000,
+                    targetRPM: 3_020
+                ),
+                SystemFanReading(
+                    index: 1,
+                    identity: .gpu,
+                    actualRPM: 3_380,
+                    minimumRPM: 1_300,
+                    maximumRPM: 4_500,
+                    targetRPM: 3_380
+                ),
+            ]
         case .desktopMac:
             hasInternalBattery = false
         case .noHighPower:
@@ -448,6 +564,12 @@ enum MiniWindowDemoData {
                 batterySetting: .lowPowerMode,
                 adapterSetting: .lowPowerMode
             )
+        case .helperUntrusted:
+            helperState = .signatureRejected
+            observedMode = nil
+        case .helperUnavailable:
+            helperState = .unavailable
+            observedMode = nil
         case .connectionInterrupted:
             helperState = .connectionInterrupted
             observedMode = nil
@@ -604,6 +726,13 @@ enum MiniWindowDemoData {
         store: ScanStore,
         for scenario: MenuBarSnapshotScenario
     ) {
+#if DEBUG
+        if scenario == .cleanupAfterSmartScan {
+            // Use the existing inert Store fixture, so both windows read the
+            // same session and existing guards still block every execution.
+            store.installDebugSmartScanSessionFixture(.results)
+        }
+#endif
         store.memorySnapshot = memorySnapshot
         store.memoryOptimizationResult = nil
         store.selectedMemoryProcessIDs = []
@@ -642,6 +771,21 @@ enum MiniWindowDemoData {
         return true
     }
 
+    static let liveAuditSectionsArgumentPrefix = "--capture-menu-bar-live-audit-sections="
+
+    /// The live audit's pages, all monitoring pages by default; a list
+    /// such as `sensors,power` keeps pages with private data (process
+    /// lists, addresses) out of a capture.
+    static func liveAuditSections(arguments: [String]) -> [PanelSection] {
+        let all: [PanelSection] = [.processor, .memory, .disk, .network, .sensors, .power]
+        guard let argument = arguments.first(where: { $0.hasPrefix(liveAuditSectionsArgumentPrefix) }) else {
+            return all
+        }
+        let requested = Set(argument.dropFirst(liveAuditSectionsArgumentPrefix.count)
+            .split(separator: ",").compactMap { PanelSection(rawValue: String($0)) })
+        return all.filter(requested.contains)
+    }
+
     static func capturedMenuBarPanelSection(arguments: [String]) -> PanelSection? {
         guard let argument = arguments.first(where: {
             $0.hasPrefix(menuBarPanelSnapshotSectionArgumentPrefix)
@@ -658,13 +802,24 @@ enum MiniWindowDemoData {
         let telemetry: [MenuBarTelemetryPoint]
     }
 
+    /// D71 freshness applies to live readings. A fixed screenshot's historical date
+    /// must not erase its temperatures/fans while the palette uses the same fixture.
+    static func presentationSnapshot(live: SystemMonitorSnapshot?, usesDemoData: Bool = isEnabled) -> SystemMonitorSnapshot? {
+        usesDemoData ? fixture.snapshot : live
+    }
+
     static let fixture = makeFixture(arguments: ProcessInfo.processInfo.arguments)
 
     static func makeFixture(arguments: [String]) -> Fixture {
         let validation = validationOptions(arguments: arguments)
         let memory = makeMemorySnapshot(arguments: arguments)
-        let telemetry = telemetryPoints(memorySnapshot: memory, validation: validation)
-        let hardware = hardwareControlProfile
+        let hardwareState = hardwareControlState(arguments: arguments)
+        let fullTelemetry = telemetryPoints(memorySnapshot: memory, validation: validation, hardwareState: hardwareState)
+        let scenario = capturedMenuBarPanelScenario(arguments: arguments)
+        let telemetry = scenario == .cpuHistoryShortRecording
+            ? shortRecordingPoints(from: fullTelemetry) : fullTelemetry
+        let hardware = hardwareControlProfile(for: hardwareState)
+        let fan = fanTelemetry(for: hardwareState)
         let hasMemoryOverride = validation?.memoryUsedPercent != nil || validation?.memoryPressure != nil
         let cpuTotal = telemetry.last?.cpuTotal ?? 34
         let cpuUser = telemetry.last?.cpuUser ?? 22
@@ -701,9 +856,9 @@ enum MiniWindowDemoData {
                     ),
                     SystemMonitorMetric(
                         kind: .fanSpeed,
-                        value: "1,620 rpm",
-                        detail: L10n.text("1 个风扇", "1 fan"),
-                        isAvailable: true
+                        value: fan.actualRPM.map(SystemFanSpeedFormat.string) ?? "—",
+                        detail: L10n.text("\(fan.fanCount) 个风扇", "\(fan.fanCount) fans"),
+                        isAvailable: fan.telemetryAvailable
                     ),
                     SystemMonitorMetric(
                         kind: .networkSpeed,
@@ -732,22 +887,153 @@ enum MiniWindowDemoData {
                     fifteenMinutes: 2.4
                 ),
                 systemUptimeSeconds: 734_400,
+                systemBootAt: referenceDate.addingTimeInterval(-734_400),
                 thermalState: hardware.thermalState,
                 fanSpeedsRPM: hardware.fanReadings.map(\.actualRPM),
-                fanCount: hardwareControlState == .fanless ? 0 : nil,
+                fanCount: hardwareState == .fanless ? 0 : nil,
                 fanReadings: hardware.fanReadings,
                 temperatureReadings: [
                     SystemTemperatureReading(zone: .chip, celsius: 53),
                     SystemTemperatureReading(zone: .gpu, celsius: 49),
-                    SystemTemperatureReading(zone: .performanceCores, celsius: 55),
+                    SystemTemperatureReading(zone: .performanceCores, celsius: 53),
                     SystemTemperatureReading(zone: .efficiencyCores, celsius: 48),
-                ],
+                ] + demoRegionalTemperatures,
+                temperatureDetails: demoTemperatureDetails,
                 gpuMemoryUsedBytes: 8 * 1_024 * 1_024 * 1_024,
                 sensorAvailability: hardware.sensorAvailability,
-                fanAvailability: hardware.sensorAvailability
+                fanAvailability: hardware.sensorAvailability,
+                inferredTemperatureZones: [.palmRest, .thunderboltLeft, .thunderboltRight],
+                ambientLight: .value(161)
             ),
             telemetry: telemetry
         )
+    }
+
+    /// D57 demo zones at Mac17,9's measured magnitudes (research §4.1):
+    /// SSD `TH0x`, battery `TB0T`, charging circuit `TCHP`, airflow, palm
+    /// rest `Ts0P/Ts1P`, Thunderbolt `TaLT/TaRT`, Wi-Fi `TW0P`.
+    static let demoRegionalTemperatures: [SystemTemperatureReading] = [
+        SystemTemperatureReading(zone: .storage, celsius: 46.3),
+        SystemTemperatureReading(zone: .battery, celsius: 31.8),
+        SystemTemperatureReading(zone: .chargingCircuit, celsius: 57.1),
+        SystemTemperatureReading(zone: .ambient, celsius: 59.8),
+        SystemTemperatureReading(zone: .palmRest, celsius: 33.0),
+        SystemTemperatureReading(zone: .thunderboltLeft, celsius: 45.7),
+        SystemTemperatureReading(zone: .thunderboltRight, celsius: 38.1),
+        SystemTemperatureReading(zone: .wifi, celsius: 65.0),
+    ]
+
+    /// Hardware probes: CPU cores, GPU regions and the power-management IC.
+    static let demoTemperatureDetails: [SystemTemperatureDetailReading] = [
+        SystemTemperatureDetailReading(id: "demo.p1", name: L10n.text("性能核心 1", "Performance Core 1"), zone: .performanceCores, celsius: 53),
+        SystemTemperatureDetailReading(id: "demo.p2", name: L10n.text("性能核心 2", "Performance Core 2"), zone: .performanceCores, celsius: 51),
+        SystemTemperatureDetailReading(id: "demo.p3", name: L10n.text("性能核心 3", "Performance Core 3"), zone: .performanceCores, celsius: 50),
+        SystemTemperatureDetailReading(id: "demo.p4", name: L10n.text("性能核心 4", "Performance Core 4"), zone: .performanceCores, celsius: 52),
+        SystemTemperatureDetailReading(id: "demo.e1", name: L10n.text("能效核心 1", "Efficiency Core 1"), zone: .efficiencyCores, celsius: 48),
+        SystemTemperatureDetailReading(id: "demo.e2", name: L10n.text("能效核心 2", "Efficiency Core 2"), zone: .efficiencyCores, celsius: 47),
+        SystemTemperatureDetailReading(id: "demo.gpu1", name: L10n.text("GPU 区域 1 均值", "GPU Region 1 Average"), zone: .gpu, celsius: 49),
+        SystemTemperatureDetailReading(id: "demo.gpu2", name: L10n.text("GPU 区域 2 均值", "GPU Region 2 Average"), zone: .gpu, celsius: 50),
+        SystemTemperatureDetailReading.powerManagement(celsius: 66.3),
+    ]
+
+    /// D57 power card demo at Mac17,9's measured magnitudes (research §4.1,
+    /// §4.2 "空闲 2" phase), split into the demo processor's clusters.
+    static let powerChannelWatts: [String: Double] = [
+        "CPU Energy": 13.33, "PCPU": 11.42, "ECPU": 1.91,
+        "GPU Energy": 0.44, "ANE0": 0, "DRAM0": 1.35,
+        "AMCC0": 1.01, "DCS0": 1.30, "DISP0": 0.32, "DISPEXT0": 0.12,
+        "ISP0": 0.02, "AVE0": 0.02, "MSR0": 0.02, "FAB0": 0.74, "AFR0": 0.13,
+    ]
+
+    /// Review P1 scenario: an M2 Ultra names every channel per die
+    /// ("DIE_0_CPU Energy", "DIE_1_PCPU0"…; macmon). Same magnitudes as the
+    /// demo above, split over the two dies.
+    static let ultraPowerChannelWatts: [String: Double] = [
+        "DIE_0_CPU Energy": 7.12, "DIE_1_CPU Energy": 6.21,
+        "DIE_0_PCPU0": 3.05, "DIE_0_PCPU1": 2.96, "DIE_0_ECPU": 1.11,
+        "DIE_1_PCPU0": 2.71, "DIE_1_PCPU1": 2.64, "DIE_1_ECPU": 0.86,
+        "GPU Energy": 0.88, "DIE_0_ANE0": 0, "DIE_0_DRAM0": 1.35, "DIE_1_DRAM0": 1.21,
+        "DIE_0_AMCC0": 1.01, "DIE_1_AMCC0": 0.94, "DIE_0_DISP0": 0.32, "DIE_0_AVE0": 0.02,
+        "DIE_0_FAB0": 0.74, "DIE_1_FAB0": 0.69,
+    ]
+
+    /// Review P1 scenario: an Energy Model without any CPU channel.
+    static var powerChannelWattsWithoutCPU: [String: Double] {
+        powerChannelWatts.filter { !["CPU Energy", "PCPU", "ECPU"].contains($0.key) }
+    }
+
+    /// PPBR (only the battery row's third-level reference) as read on
+    /// Mac17,9 (5 s means, 43 windows, incremental review): while charging
+    /// about 1.4 W whatever the charging power (0.6-2.8 W); while the battery
+    /// supplies power about 1.6 × |B0AP| (1.0-2.8 ×).
+    static func batteryRailWatts(batteryWatts: Double) -> Double {
+        batteryWatts > 0 ? 1.43 : abs(batteryWatts) * 1.59
+    }
+
+    static func socPowerReading(channelWatts: [String: Double]) -> SoCPowerReading {
+        SoCPowerReading.make(
+            channelPowers: channelWatts.mapValues { SoCChannelPower(watts: $0, isUpdating: false) },
+            performanceLevelNames: ["Performance", "Efficiency"]
+        )
+    }
+
+    static var powerTelemetry: MenuBarPowerTelemetry {
+        let batteryWatts = batteryElectricalSnapshot.powerWatts ?? 0
+        let systemWatts = 38.3
+        let soc = socPowerReading(channelWatts: powerChannelWatts)
+        let isExternal = [.charging, .charged, .connected, .batteryToExternal].contains(batteryState)
+        return MenuBarPowerTelemetry(
+            smc: SMCPowerTelemetry(
+                systemPowerWatts: .value(systemWatts),
+                inputPowerWatts: isExternal ? .value(systemWatts + max(0, batteryWatts) + 0.3) : .value(0),
+                inputVoltageVolts: isExternal ? .value(19.6) : .value(0),
+                inputCurrentAmps: isExternal ? .value((systemWatts + max(0, batteryWatts) + 0.3) / 19.6) : .value(0),
+                batteryPowerWatts: .value(batteryRailWatts(batteryWatts: batteryWatts)),
+                chipPowerReferenceWatts: .value(18.8),
+                backlight: BacklightPowerReading(
+                    sourceKey: "PDBR",
+                    reportedWatts: .value(4.67),
+                    currentAmps: .value(0.3816),
+                    railVoltageVolts: .value(12.247)
+                ),
+                battery: SMCBatteryTelemetry(
+                    currentAmps: .value(batteryWatts / 12.1),
+                    voltageVolts: .value(12.1),
+                    powerWatts: .value(batteryWatts),
+                    temperatureCelsius: .value(31.8),
+                    temperatureSourceKey: "TB0T",
+                    cellVoltages: [.value(4.032), .value(4.035), .value(4.033)]
+                )
+            ),
+            backlightBrightnessNits: .value(381.8),
+            soc: soc,
+            generatedAt: referenceDate
+        )
+    }
+
+    static func processorTelemetry(for scenario: MenuBarSnapshotScenario?) -> CPUPerformanceStateService.Snapshot? {
+        scenario == .processorSecondaryNoFrequency ? nil : processorTelemetry
+    }
+
+    /// An actual short recording, rather than a one-hour fixture relabelled
+    /// as ninety seconds. No history store or live sampler is invoked.
+    static func shortRecordingPoints(from points: [MenuBarTelemetryPoint]) -> [MenuBarTelemetryPoint] {
+        let recent = Array(points.suffix(90))
+        return recent.enumerated().map { index, point in
+            let date = referenceDate.addingTimeInterval(-Double(recent.count - 1 - index))
+            return MenuBarTelemetryPoint(date: date,
+                cpuTotal: point.cpuTotal, cpuUser: point.cpuUser, cpuSystem: point.cpuSystem,
+                gpu: point.gpu, memory: point.memory, memoryPressure: point.memoryPressure,
+                memoryPressureLevelCode: point.memoryPressureLevelCode,
+                memoryAppOrOtherBytes: point.memoryAppOrOtherBytes, memoryWiredBytes: point.memoryWiredBytes,
+                memoryPhysicalBytes: point.memoryPhysicalBytes, compressedMemoryBytes: point.compressedMemoryBytes,
+                swapUsedBytes: point.swapUsedBytes, chipTemperature: point.chipTemperature,
+                gpuTemperature: point.gpuTemperature, temperatureReadings: point.temperatureReadings,
+                fanRPM: point.fanRPM, fanTargetRPM: point.fanTargetRPM, fanReadings: point.fanReadings,
+                downBytesPerSecond: point.downBytesPerSecond, upBytesPerSecond: point.upBytesPerSecond,
+                sensorSampledAt: point.sensorSampledAt.map { _ in date },
+                gpuSampledAt: point.gpuSampledAt.map { _ in date })
+        }
     }
 
     static let processorTelemetry = CPUPerformanceStateService.Snapshot(
@@ -783,8 +1069,21 @@ enum MiniWindowDemoData {
                 frequencyMHz: 2_400,
                 voltageVolts: 0.74
             ),
-        ]
+        ],
+        gpu: CPUPerformanceStateService.GPUReading(
+            frequencyMHz: 338,
+            activeRatio: 0.6,
+            maximumFrequencyMHz: 1_620
+        )
     )
+
+    static var preparedProcesses: MenuBarPreparedProcesses {
+        MenuBarPreparedProcesses(snapshot: .init(generatedAt: Date(), scanSeconds: 0, sampleSeconds: 1,
+            uptimeSeconds: 7_200, apps: energyApps, processCount: energyApps.count,
+            measuredProcessCount: energyApps.count, unmeasuredProcessCount: 0,
+            measuredTotalEnergyWh: 0.32, estimatedSupplementEnergyWh: 0,
+            calibrationWattsPerCore: 1, usesLocalCalibration: false))
+    }
 
     static let energyApps: [EnergyImpactApp] = [
         EnergyImpactApp(
@@ -981,8 +1280,8 @@ enum MiniWindowDemoData {
             ),
         ],
         swapTotalBytes: 4 * 1_024 * 1_024 * 1_024,
-        pageInsCount: 117_800_000,
-        pageOutsCount: 55_100,
+        swappedInBytes: Int64(5.7 * 1_024 * 1_024 * 1_024),
+        swappedOutBytes: Int64(9.4 * 1_024 * 1_024 * 1_024),
         measurements: MemoryMeasurements(
             pressure: .available(.elevated),
             physicalBytes: .available(48 * 1_024 * 1_024 * 1_024),
@@ -1012,8 +1311,8 @@ enum MiniWindowDemoData {
         pressureSummary: "Normal",
         topProcesses: memorySnapshot.topProcesses.filter { [203, 205].contains($0.id) },
         swapTotalBytes: 4 * 1_024 * 1_024 * 1_024,
-        pageInsCount: 117_800_000,
-        pageOutsCount: 55_100,
+        swappedInBytes: Int64(5.7 * 1_024 * 1_024 * 1_024),
+        swappedOutBytes: Int64(9.4 * 1_024 * 1_024 * 1_024),
         measurements: MemoryMeasurements(
             pressure: .available(.normal),
             physicalBytes: .available(48 * 1_024 * 1_024 * 1_024),
@@ -1129,6 +1428,10 @@ enum MiniWindowDemoData {
         ipv6CountryCode: "AU"
     )
 
+    static func publicNetworkAddressSnapshot(for scenario: MenuBarSnapshotScenario?) -> PublicNetworkAddressSnapshot? {
+        scenario == .networkSecondaryUnavailable ? nil : publicNetworkAddressSnapshot
+    }
+
     static let nativeDiskIOCounters = NativeDiskIOCounters(
         date: referenceDate,
         readBytes: 9_500_000_000,
@@ -1242,7 +1545,19 @@ enum MiniWindowDemoData {
             currentCapacityMAh: 3_876,
             maximumCapacityMAh: 4_760,
             cycleCount: 108,
-            condition: .normal
+            condition: .normal,
+            systemLoadWatts: [.charging, .charged, .connected].contains(batteryState) ? 18.4 : nil,
+            electricalSource: .smc,
+            currentReading: .value(power / 12.1),
+            voltageReading: .value(12.1),
+            temperatureReading: .value(31.8),
+            temperatureSource: "TB0T",
+            cellVoltages: [.value(4.032), .value(4.035), .value(4.033)],
+            usbPowerOut: .value([
+                USBPowerOutPort(portIndex: 2, watts: 1.26),
+                USBPowerOutPort(portIndex: 3, watts: 0.03),
+            ]),
+            powerBasis: .smcPowerKey
         )
     }
 
@@ -1262,7 +1577,8 @@ enum MiniWindowDemoData {
 
     private static func telemetryPoints(
         memorySnapshot: MemorySnapshot,
-        validation: ValidationOptions?
+        validation: ValidationOptions?,
+        hardwareState: HardwareControlDemoState
     ) -> [MenuBarTelemetryPoint] {
         let user: [Double] = [22, 18, 25, 29, 24, 31, 27, 20, 23, 28, 26, 19]
         let system: [Double] = [12, 10, 11, 13, 12, 15, 13, 11, 12, 14, 11, 10]
@@ -1271,8 +1587,9 @@ enum MiniWindowDemoData {
         let memoryPercent = memorySnapshot.measuredUsedRatio.map { $0 * 100 }
         let temperature: [Double] = [53, 51, 54, 56, 53, 58, 55, 52, 54, 57, 55, 51]
         let fan: [Double] = [1_620, 1_540, 1_680, 1_760, 1_640, 1_880, 1_720, 1_580, 1_660, 1_820, 1_700, 1_560]
-        let showsCurveTarget = hardwareControlState == .curveActive
-            || hardwareControlState == .curveDraftChanges
+        let currentFan = fanTelemetry(for: hardwareState)
+        let showsCurveTarget = hardwareState == .curveActive
+            || hardwareState == .curveDraftChanges
         let download: [Int64] = [3_800_000, 2_900_000, 4_400_000, 5_100_000, 3_600_000, 6_200_000, 4_800_000, 3_200_000, 4_000_000, 5_600_000, 4_600_000, 3_100_000]
         let upload: [Int64] = [420_000, 320_000, 510_000, 620_000, 390_000, 740_000, 560_000, 350_000, 460_000, 680_000, 530_000, 310_000]
         let cpuPattern = validation?.cpuPattern
@@ -1300,6 +1617,7 @@ enum MiniWindowDemoData {
                 gpu: gpu[valueIndex],
                 memory: memoryPercent.map { $0 + (hasMemoryOverride ? 0 : memoryOffsets[valueIndex]) },
                 memoryPressure: memorySnapshot.pressureEstimatePercent.map(Double.init),
+                memoryPressureLevelCode: memorySnapshot.measurements.pressure.value?.systemCode,
                 memoryAppOrOtherBytes: memorySnapshot.ringComposition?.appOrOtherBytes,
                 memoryWiredBytes: memorySnapshot.ringComposition?.wiredBytes,
                 memoryPhysicalBytes: memorySnapshot.ringComposition?.physicalBytes,
@@ -1315,9 +1633,19 @@ enum MiniWindowDemoData {
                     SystemTemperatureReading(zone: .gpu, celsius: temperature[valueIndex] - 4),
                     SystemTemperatureReading(zone: .storage, celsius: 42 + Double(valueIndex % 3)),
                     SystemTemperatureReading(zone: .battery, celsius: 34 + Double(valueIndex % 2)),
+                    // D57 zones, so their third-level histories draw.
+                    SystemTemperatureReading(zone: .chargingCircuit, celsius: 56 + Double(valueIndex % 3) * 0.5),
+                    SystemTemperatureReading(zone: .ambient, celsius: 59 + Double(valueIndex % 2)),
+                    SystemTemperatureReading(zone: .palmRest, celsius: 32.5 + Double(valueIndex % 2) * 0.5),
+                    SystemTemperatureReading(zone: .thunderboltLeft, celsius: 45.5 + Double(valueIndex % 2) * 0.5),
+                    SystemTemperatureReading(zone: .thunderboltRight, celsius: 38),
+                    SystemTemperatureReading(zone: .wifi, celsius: 64 + Double(valueIndex % 3) * 0.5),
                 ],
-                fanRPM: fan[valueIndex],
-                fanTargetRPM: showsCurveTarget ? 2_180 : nil,
+                fanRPM: currentFan.actualRPM.map { rpm in
+                    min(Double(currentFan.maxRPM ?? Int.max), max(Double(currentFan.minRPM ?? 0),
+                        Double(rpm) + fan[valueIndex] - fan[0]))
+                },
+                fanTargetRPM: showsCurveTarget ? currentFan.targetRPM.map(Double.init) : nil,
                 fanReadings: nil,
                 downBytesPerSecond: download[valueIndex],
                 upBytesPerSecond: upload[valueIndex]

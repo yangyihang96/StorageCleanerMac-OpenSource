@@ -4,6 +4,29 @@ import XCTest
 
 final class AppUpdatePresentationIntegrationTests: XCTestCase {
     @MainActor
+    func testAccountUnavailableIsSkippedInStoreReportAndNeverCountedAsFailure() async throws {
+        var app = AppUpdateTestFixtures.application(id: "account-skip", availableVersion: "2.0", provider: .macAppStore,
+            status: .automaticallyUpdatable, canAutomaticallyUpdate: true, requiresUserInteraction: false,
+            requiresAdministratorAuthorization: true)
+        app.updateCapability = .automatic
+        app.appStoreProductURL = URL(string: "https://apps.apple.com/app/id123")
+        let store = try ScanStore.makeForTests(for: self,
+            applicationInventoryScanner: ImmediateApplicationInventoryScanner(applications: [app]),
+            applicationUpdateCoordinator: ApplicationUpdateCoordinator(repository: InMemoryApplicationUpdateQueueRepository(), executor: AccountSkippedBatchExecutor()))
+        store.appUpdates = [app]
+        store.requestOneClickAppUpdates()
+        store.confirmOneClickAppUpdates()
+        await waitUntil("account skipped report") { store.appUpdatePresentationState.phase == .completed && !store.isRunningOneClickUpdate }
+        guard case let .completed(report) = store.appUpdatePresentationState else { return XCTFail("Expected completed report") }
+        XCTAssertEqual(report.skippedCount, 1)
+        XCTAssertEqual(report.failedCount, 0)
+        XCTAssertEqual(report.items.first?.state, .skipped)
+        XCTAssertTrue(report.items.first?.detail?.contains("未登录 App Store") == true)
+        XCTAssertEqual(store.oneClickUpdateResult?.appStore.status, .skipped)
+        XCTAssertEqual(store.oneClickUpdateResult?.automatic.status, .skipped)
+        XCTAssertTrue(store.oneClickUpdateResult?.appStore.detail.contains("1 个跳过") == true || store.oneClickUpdateResult?.appStore.detail.contains("1 skipped") == true)
+    }
+    @MainActor
     func testScanLifecyclePublishesRealTotalsThenPreservesSummaryAcrossManagerNavigation() async throws {
         let applications = [
             AppUpdateTestFixtures.strictHomebrewApplication(id: "automatic"),
@@ -14,7 +37,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             ),
         ]
         let scanner = PhasedApplicationInventoryScanner(applications: applications)
-        let store = makeStore(scanner: scanner)
+        let store = try makeStore(scanner: scanner)
 
         XCTAssertEqual(store.appUpdatePresentationState.phase, .idle)
         store.refreshAppUpdates()
@@ -42,18 +65,13 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
         XCTAssertEqual(resolving.totalUnitCount, applications.count)
 
         await scanner.advance()
-        await waitUntil("scan summary") {
+        await waitUntil("actionable update list") {
             !store.isLoadingAppUpdates
-                && store.appUpdatePresentationState.phase == .scanSummary
+                && store.appUpdatePresentationState.phase == .managing
         }
 
-        guard case let .scanSummary(summary) = store.appUpdatePresentationState else {
-            return XCTFail("Expected scan summary")
-        }
-        XCTAssertEqual(summary.applications.map(\.id), applications.map(\.id))
-        let sessionID = summary.sessionID
-
-        store.showAppUpdateManager()
+        let sessionID = try XCTUnwrap(store.appUpdatePresentationState.sessionID)
+        XCTAssertEqual(store.appUpdates.map(\.id), applications.map(\.id))
         guard case let .managing(catalog) = store.appUpdatePresentationState else {
             return XCTFail("Expected catalog manager")
         }
@@ -97,7 +115,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             status: .systemManaged,
             isSystem: true
         )
-        let store = makeStore(scanner: ImmediateApplicationInventoryScanner(applications: []))
+        let store = try makeStore(scanner: ImmediateApplicationInventoryScanner(applications: []))
         store.appUpdates = [automatic, appStore, manual, system]
 
         store.requestOneClickAppUpdates()
@@ -153,8 +171,8 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             status: .updateAvailable
         )
         let applications = [automatic, authorization, appStore, sparkle, manual]
-        let executor = ImmediateSuccessfulApplicationUpdateExecutor()
-        let store = ScanStore(
+        let executor = ImmediateSuccessfulBatchApplicationUpdateExecutor()
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: ImmediateApplicationInventoryScanner(
                 applications: applications
             ),
@@ -167,8 +185,8 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
 
         store.requestOneClickAppUpdates()
         let pending = try XCTUnwrap(store.pendingOneClickUpdatePlan)
-        XCTAssertEqual(pending.automaticApps.map(\.id), [automatic.id])
-        XCTAssertEqual(pending.authorizationApps.map(\.id), [authorization.id])
+        XCTAssertEqual(pending.automaticApps.map(\.id), [automatic.id, authorization.id])
+        XCTAssertTrue(pending.authorizationApps.isEmpty)
         XCTAssertEqual(pending.appStoreApps.map(\.id), [appStore.id])
         XCTAssertEqual(pending.sparkleApps.map(\.id), [sparkle.id])
         XCTAssertEqual(pending.manualApps.map(\.id), [manual.id])
@@ -186,16 +204,17 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             uniqueKeysWithValues: report.items.map { ($0.applicationID, $0) }
         )
         XCTAssertEqual(reportItems[automatic.id]?.state, .completed)
-        for application in [authorization, appStore, sparkle, manual] {
+        XCTAssertEqual(reportItems[authorization.id]?.state, .completed)
+        for application in [appStore, sparkle, manual] {
             XCTAssertEqual(reportItems[application.id]?.state, .skipped)
             XCTAssertEqual(reportItems[application.id]?.detail, application.updateHandlingDetail)
         }
         let executionCount = await executor.count()
-        XCTAssertEqual(executionCount, 1)
+        XCTAssertEqual(executionCount, 2)
     }
 
     @MainActor
-    func testSelectedRunningAutomaticSurvivesStoreGateWhileAuthorizationIsRejected() throws {
+    func testSelectedRunningAndAuthorizationSurviveStoreGate() throws {
         let running = AppUpdateTestFixtures.strictHomebrewApplication(
             id: "running",
             token: "running",
@@ -208,21 +227,21 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             path: "/Applications/Authorization.app",
             requiresAuthorization: true
         )
-        let store = makeStore(scanner: ImmediateApplicationInventoryScanner(applications: []))
+        let store = try makeStore(scanner: ImmediateApplicationInventoryScanner(applications: []))
         store.appUpdates = [running, authorization]
 
         store.requestSelectedAppUpdates(applicationIDs: [running.id, authorization.id])
 
         let pending = try XCTUnwrap(store.pendingOneClickUpdatePlan)
-        XCTAssertEqual(pending.automaticApps.map(\.id), [running.id])
+        XCTAssertEqual(pending.automaticApps.map(\.id), [running.id, authorization.id])
         let frozen = FrozenUpdatePlan(applications: pending.automaticApps)
         XCTAssertTrue(frozen.plan.automaticApplicationIDs.isEmpty)
         XCTAssertEqual(frozen.plan.requiresQuitApplicationIDs, [running.id])
-        XCTAssertTrue(frozen.plan.requiresAuthorizationApplicationIDs.isEmpty)
+        XCTAssertEqual(frozen.plan.requiresAuthorizationApplicationIDs, [authorization.id])
 
         store.cancelOneClickAppUpdates()
         store.requestSelectedAppUpdates(applicationIDs: [authorization.id])
-        XCTAssertNil(store.pendingOneClickUpdatePlan)
+        XCTAssertEqual(try XCTUnwrap(store.pendingOneClickUpdatePlan).automaticApps.map(\.id), [authorization.id])
         XCTAssertFalse(store.isRunningOneClickUpdate)
 
         store.requestAppUpdate(running)
@@ -232,11 +251,11 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
         )
         store.cancelOneClickAppUpdates()
         store.requestAppUpdate(authorization)
-        XCTAssertNil(store.pendingOneClickUpdatePlan)
+        XCTAssertEqual(try XCTUnwrap(store.pendingOneClickUpdatePlan).automaticApps.map(\.id), [authorization.id])
     }
 
     @MainActor
-    func testRestoredActiveQueueMapsToUpdatingPresentation() async {
+    func testRestoredActiveQueueMapsToUpdatingPresentation() async throws {
         let application = AppUpdateTestFixtures.strictHomebrewApplication(
             id: "waiting-for-quit",
             isRunning: true
@@ -269,7 +288,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             repository: repository,
             executor: UnsupportedApplicationUpdateExecutor()
         )
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: ImmediateApplicationInventoryScanner(
                 applications: [application]
             ),
@@ -291,7 +310,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testFastAutoResumedQueueDrainIsBufferedBeforeRestoreMonitorStarts() async {
+    func testFastAutoResumedQueueDrainIsBufferedBeforeRestoreMonitorStarts() async throws {
         let application = AppUpdateTestFixtures.strictHomebrewApplication(id: "fast-restore")
         let sessionID = UUID()
         let plan = ApplicationUpdatePlan(
@@ -322,7 +341,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             repository: InMemoryApplicationUpdateQueueRepository(snapshot: queue),
             executor: ImmediateSuccessfulApplicationUpdateExecutor()
         )
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: scanner,
             applicationUpdateCoordinator: coordinator
         )
@@ -390,8 +409,19 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             ),
             encoding: .utf8
         )
+        let preview = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift"
+            ),
+            encoding: .utf8
+        )
 
-        XCTAssertTrue(view.contains("一键更新全部 · \\(summary.batchEligibleApps.count) 个"))
+        // D69/D70: the result list and primary title count confirmed updates;
+        // the existing plan still gates whether review can be opened.
+        XCTAssertTrue(view.contains("actionTitle: AppUpdateBatchPresentation(applications: summary.applications).title"))
+        XCTAssertTrue(view.contains("actionEnabled: canManage && AppUpdateBatchPresentation(applications: summary.applications).count > 0"))
+        XCTAssertTrue(view.contains("store.confirmOneClickAppUpdates()"))
+        XCTAssertTrue(preview.contains("开始安全更新与官网引导"))
         XCTAssertFalse(view.contains("安全更新 · \\(summary.batchEligibleApps.count) 个"))
         XCTAssertTrue(view.contains("advancedHomebrewDetails"))
         XCTAssertTrue(view.contains("高级详情与备用命令"))
@@ -401,7 +431,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testTerminalRestoredQueueDoesNotDoubleFinalizeNextForegroundBatch() async {
+    func testTerminalRestoredQueueDoesNotDoubleFinalizeNextForegroundBatch() async throws {
         let application = AppUpdateTestFixtures.strictHomebrewApplication(id: "automatic")
         let oldSessionID = UUID()
         let oldPlan = ApplicationUpdatePlan(
@@ -433,7 +463,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             repository: InMemoryApplicationUpdateQueueRepository(snapshot: oldQueue),
             executor: executor
         )
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: scanner,
             applicationUpdateCoordinator: coordinator
         )
@@ -463,7 +493,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testAllFailedBatchEntersFailedAndRetryKeepsSameSession() async throws {
+    func testAllFailedBatchEntersFailedAndRetryUsesNewSession() async throws {
         let application = AppUpdateTestFixtures.strictHomebrewApplication(id: "retryable")
         let scanner = CountingApplicationInventoryScanner(applications: [application])
         let executor = FailThenSucceedApplicationUpdateExecutor()
@@ -471,7 +501,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
             repository: InMemoryApplicationUpdateQueueRepository(),
             executor: executor
         )
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: scanner,
             applicationUpdateCoordinator: coordinator
         )
@@ -499,7 +529,7 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
         let sessionID = firstReport.sessionID
 
         store.retryAppUpdates(applicationIDs: [application.id])
-        await waitUntil("same-session retry completion") {
+        await waitUntil("new-session retry completion") {
             let scanCount = await scanner.count()
             return store.appUpdatePresentationState.phase == .completed
                 && !store.isLoadingAppUpdates
@@ -509,17 +539,17 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
         guard case let .completed(retriedReport) = store.appUpdatePresentationState else {
             return XCTFail("Successful retry must produce a completed report")
         }
-        XCTAssertEqual(retriedReport.sessionID, sessionID)
+        XCTAssertNotEqual(retriedReport.sessionID, sessionID)
         XCTAssertEqual(retriedReport.items.first?.attemptCount, 2)
         let executionCount = await executor.count()
         XCTAssertEqual(executionCount, 2)
     }
 
     @MainActor
-    func testCancellationRequestIsVisibleBeforeQueueStops() async {
+    func testCancellationRequestIsVisibleBeforeQueueStops() async throws {
         let application = AppUpdateTestFixtures.strictHomebrewApplication(id: "cancellable")
         let executor = BlockingApplicationUpdateExecutor()
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: ImmediateApplicationInventoryScanner(
                 applications: [application]
             ),
@@ -552,10 +582,10 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testDismissingConfirmedPreviewDoesNotCancelRunningBatch() async {
+    func testDismissingConfirmedPreviewDoesNotCancelRunningBatch() async throws {
         let application = AppUpdateTestFixtures.strictHomebrewApplication(id: "preview-dismiss")
         let executor = BlockingApplicationUpdateExecutor()
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: ImmediateApplicationInventoryScanner(
                 applications: [application]
             ),
@@ -617,8 +647,8 @@ final class AppUpdatePresentationIntegrationTests: XCTestCase {
     @MainActor
     private func makeStore(
         scanner: some ApplicationInventoryScanning
-    ) -> ScanStore {
-        ScanStore(
+    ) throws -> ScanStore {
+        try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: scanner,
             applicationUpdateCoordinator: ApplicationUpdateCoordinator(
                 repository: InMemoryApplicationUpdateQueueRepository(),
@@ -866,4 +896,43 @@ private actor BlockingApplicationUpdateExecutor: ApplicationUpdateExecuting {
     ) async throws -> ApplicationUpdateInstallResult {
         throw CancellationError()
     }
+}
+
+// Batch behavior is explicit for the mixed-source integration scenario. This
+// wrapper never invokes native authorization, process, network or replacement.
+private struct ImmediateSuccessfulBatchApplicationUpdateExecutor: ApplicationUpdateBatchExecuting {
+    let underlying = ImmediateSuccessfulApplicationUpdateExecutor()
+    func beginBatch(applications: [InstalledApplication], sessionID: UUID) async {}
+    func endBatch(sessionID: UUID) async {}
+    func executeHomebrewBatch(applications: [InstalledApplication], tasks: [ApplicationUpdateTask],
+        progress: @Sendable @escaping (ApplicationUpdateProgressEvent) async -> Void) async -> [ApplicationUpdateInstallResult] {
+        var results = [ApplicationUpdateInstallResult]()
+        for app in applications {
+            guard let task = tasks.first(where: { $0.applicationID == app.id }) else { continue }
+            do { results.append(try await underlying.execute(application: app, task: task, progress: progress)) }
+            catch { results.append(.init(applicationID: app.id, state: .failed, observedVersion: nil, detail: error.localizedDescription)) }
+        }
+        return results
+    }
+    func execute(application: InstalledApplication, task: ApplicationUpdateTask,
+        progress: @Sendable @escaping (ApplicationUpdateProgressEvent) async -> Void) async throws -> ApplicationUpdateInstallResult {
+        try await underlying.execute(application: application, task: task, progress: progress)
+    }
+    func cancel(applicationID: String) async { await underlying.cancel(applicationID: applicationID) }
+    func reconcile(task: ApplicationUpdateTask, application: InstalledApplication?) async throws -> ApplicationUpdateInstallResult {
+        try await underlying.reconcile(task: task, application: application)
+    }
+    func count() async -> Int { await underlying.count() }
+}
+private struct AccountSkippedBatchExecutor: ApplicationUpdateBatchExecuting {
+    func beginBatch(applications: [InstalledApplication], sessionID: UUID) async {}
+    func endBatch(sessionID: UUID) async {}
+    func executeHomebrewBatch(applications: [InstalledApplication], tasks: [ApplicationUpdateTask],
+        progress: @Sendable @escaping (ApplicationUpdateProgressEvent) async -> Void) async -> [ApplicationUpdateInstallResult] { [] }
+    func execute(application: InstalledApplication, task: ApplicationUpdateTask,
+        progress: @Sendable @escaping (ApplicationUpdateProgressEvent) async -> Void) async throws -> ApplicationUpdateInstallResult {
+        .init(applicationID: application.id, state: .skipped, observedVersion: nil, detail: "未登录 App Store，请打开 App Store 更新")
+    }
+    func cancel(applicationID: String) async {}
+    func reconcile(task: ApplicationUpdateTask, application: InstalledApplication?) async throws -> ApplicationUpdateInstallResult { throw ApplicationUpdateExecutionError.unsupportedProvider(.macAppStore) }
 }

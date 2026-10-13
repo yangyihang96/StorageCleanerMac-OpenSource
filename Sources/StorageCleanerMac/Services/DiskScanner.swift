@@ -214,10 +214,26 @@ struct DiskScanner {
     private final class TreeSizeBox: @unchecked Sendable {
         private let lock = NSLock()
         private var accumulatedBytes: Int64 = 0
+        private var walkedEverything = false
+        private var hadReadError = false
 
         func update(_ bytes: Int64) {
             lock.lock()
             accumulatedBytes = bytes
+            lock.unlock()
+        }
+
+        /// D84：整棵树都走完了（没有超时、没有中途停下）。
+        func markWalkedEverything() {
+            lock.lock()
+            walkedEverything = true
+            lock.unlock()
+        }
+
+        /// D84：有子项目读不出来（例如权限不足），总数只是下限。
+        func markReadError() {
+            lock.lock()
+            hadReadError = true
             lock.unlock()
         }
 
@@ -226,6 +242,29 @@ struct DiskScanner {
             defer { lock.unlock() }
             return accumulatedBytes
         }
+
+        var isComplete: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return walkedEverything && !hadReadError
+        }
+    }
+
+    /// D84：一棵树测到的本地占用，以及它是否完整（否则只是本轮量到的下限）。
+    struct TreeSizeMeasurement: Equatable, Sendable {
+        let bytes: Int64
+        let isComplete: Bool
+    }
+
+    /// D84/D85：读一个位置的直接子项目时顺带记下的截断情况。
+    struct ChildScanReport: Sendable {
+        var entries: [DirectoryEntry] = []
+        /// 子项目超过单个文件夹的测量上限，或结果超过本位置的条数上限。
+        var reachedFolderLimit = false
+        /// 时间上限已到，或读目录超时。
+        var reachedTimeLimit = false
+        /// 测量超时或有读不出的子项目、大小只是下限的项目（已规范化）。
+        var lowerBoundPaths = Set<String>()
     }
 
     private enum DirectoryReadError: Error {
@@ -260,22 +299,28 @@ struct DiskScanner {
         let contentProfile: StorageMapContentProfile
     }
 
-    private struct StorageMapMutableDirectory {
+    private struct StorageMapMutableDirectory: Sendable {
         let path: String
-        let parentID: Int?
+        var parentID: Int?
         var directBytes: Int64 = 0
         var immediateChildCount = 0
         var descendantItemCount = 0
         var isComplete = true
         var contentProfile = StorageMapContentProfile()
         var categoryOverride: StorageMapContentCategory? = nil
+        /// File Provider reported the folder as ubiquitous, so its files are
+        /// asked about their cloud state too (N21).
+        var isUbiquitous = false
     }
 
-    private struct StorageMapHardLinkOccurrence {
+    private struct StorageMapHardLinkOccurrence: Sendable {
         let path: String
-        let parentID: Int
+        var parentID: Int
         let measuredBytes: Int64
         let contentCategory: StorageMapContentCategory
+        /// Position in a one-thread walk, so a parallel walk picks the same
+        /// canonical path when two paths compare equal (N21).
+        let order: [Int]
     }
 
     private let fileManager = FileManager.default
@@ -286,17 +331,20 @@ struct DiskScanner {
     private let scanMode: ScanMode
     private let progressHandler: DiskScanProgressHandler?
     private let largeFileRootOverrides: [String]?
+    private let largeFileThreshold: LargeFileThreshold
 
     init(
         excludedPaths: [String] = ScanExclusionService.excludedPaths(),
         scanMode: ScanMode = .fallback,
         progressHandler: DiskScanProgressHandler? = nil,
-        largeFileRoots: [String]? = nil
+        largeFileRoots: [String]? = nil,
+        largeFileThreshold: LargeFileThreshold = .standard
     ) {
         self.excludedPaths = excludedPaths
         self.scanMode = scanMode
         self.progressHandler = progressHandler
         largeFileRootOverrides = largeFileRoots
+        self.largeFileThreshold = largeFileThreshold
     }
 
     static func itemsForDuplicateEntries(_ entries: [DirectoryEntry]) -> [StorageItem] {
@@ -346,6 +394,7 @@ struct DiskScanner {
                 trashPaths: item.trashPaths,
                 openPath: item.openPath,
                 isDirectory: item.isDirectory,
+                modifiedAt: item.modifiedAt,
                 duplicateGroupID: metadata?.0,
                 duplicateMatchKind: metadata?.1,
                 duplicateRelationship: metadata?.2,
@@ -474,6 +523,22 @@ struct DiskScanner {
         rootPath: String,
         pathsByLevel: inout [String]
     ) -> String {
+        storageMapEnumeratedPathAndParent(
+            itemName: itemName,
+            level: level,
+            rootPath: rootPath,
+            pathsByLevel: &pathsByLevel
+        ).path
+    }
+
+    /// The enumerated path and the parent it was composed from, which is
+    /// what `storageMapParentPath(path)` would compute again (N21).
+    static func storageMapEnumeratedPathAndParent(
+        itemName: String,
+        level: Int,
+        rootPath: String,
+        pathsByLevel: inout [String]
+    ) -> (path: String, parent: String) {
         let boundedLevel = max(1, level)
         let parentLevel = boundedLevel - 1
         let parentPath = parentLevel < pathsByLevel.count
@@ -495,7 +560,7 @@ struct DiskScanner {
             }
             pathsByLevel.append(path)
         }
-        return path
+        return (path, parentPath)
     }
 
     static func storageMapPreferredSize(
@@ -503,11 +568,115 @@ struct DiskScanner {
         allocatedSize: Int?,
         path: String
     ) -> Int? {
+        switch storageMapSizeBasis(path: path) {
+        case .logical:
+            logicalSize ?? allocatedSize
+        default:
+            allocatedSize ?? logicalSize
+        }
+    }
+
+    /// D84（只加说明，不改算法）：空间分析对 /Applications 中应用包里的内容
+    /// 优先取逻辑大小，其他位置优先取本地占用（分配大小）。
+    static func storageMapSizeBasis(path: String) -> StorageCapacityBasis {
         let isApplicationBundleContent = path.hasPrefix("/Applications/")
             && path.range(of: ".app/", options: .caseInsensitive) != nil
-        return isApplicationBundleContent
-            ? logicalSize ?? allocatedSize
-            : allocatedSize ?? logicalSize
+        return isApplicationBundleContent ? .logical : .allocated
+    }
+
+    /// D46: a 32-bit fingerprint of which item this is and, for a file, its
+    /// last change: device, inode, type and birth time, plus size and
+    /// modification time for files. The analysis records it with each item,
+    /// so moving an item to the Trash later can tell the item is still the
+    /// one the analysis saw. A folder's own modification time is left out:
+    /// Finder changes it whenever it saves `.DS_Store` (for example after
+    /// "Show in Finder"); what is inside a folder is compared entry by entry
+    /// instead. Never 0, which means "not recorded". It fits in the padding
+    /// of `StorageMapIndexedEntry`, so the index does not grow.
+    static func storageMapChangeStamp(_ status: stat) -> UInt32 {
+        // Word-wise mixing (the SplitMix64 finalizer): a handful of
+        // multiplications per item, cheap enough for every item of a walk.
+        let type = status.st_mode & S_IFMT
+        var hash = storageMapStampMix(0x9E37_79B9_7F4A_7C15, UInt64(bitPattern: Int64(status.st_dev)))
+        hash = storageMapStampMix(hash, UInt64(status.st_ino) ^ UInt64(type) << 56)
+        hash = storageMapStampMix(hash, UInt64(bitPattern: Int64(status.st_birthtimespec.tv_sec)))
+        hash = storageMapStampMix(hash, UInt64(bitPattern: Int64(status.st_birthtimespec.tv_nsec)))
+        if type != S_IFDIR {
+            hash = storageMapStampMix(hash, UInt64(bitPattern: Int64(status.st_size)))
+            hash = storageMapStampMix(hash, UInt64(bitPattern: Int64(status.st_mtimespec.tv_sec)))
+            hash = storageMapStampMix(hash, UInt64(bitPattern: Int64(status.st_mtimespec.tv_nsec)))
+        }
+        let folded = UInt32(truncatingIfNeeded: hash ^ (hash >> 32))
+        return folded == 0 ? 1 : folded
+    }
+
+    @inline(__always)
+    private static func storageMapStampMix(_ hash: UInt64, _ value: UInt64) -> UInt64 {
+        var mixed = (hash ^ value) &* 0xBF58_476D_1CE4_E5B9
+        mixed = (mixed ^ (mixed >> 27)) &* 0x94D0_49BB_1331_11EB
+        return mixed ^ (mixed >> 31)
+    }
+
+    /// The change stamp of the item at `path` now, without following a
+    /// symbolic link; nil when it cannot be read.
+    static func storageMapChangeStamp(atPath path: String) -> UInt32? {
+        var status = stat()
+        guard Darwin.lstat(path, &status) == 0 else { return nil }
+        return storageMapChangeStamp(status)
+    }
+
+    /// What the walk needs to know about an item's cloud state.
+    struct StorageMapCloudState: Equatable, Sendable {
+        var isUbiquitous: Bool
+        /// The downloading status is `.current`.
+        var isCurrent: Bool
+    }
+
+    /// How the storage-map walk uses the machine. No setting changes the
+    /// index the walk builds (N21).
+    struct StorageMapAnalysisOptions: Sendable {
+        enum UbiquityLookup: Sendable {
+            /// Ask File Provider about every item, as the walk always did.
+            case everyItem
+            /// Ask only where a cloud item can be: folders, dataless files,
+            /// files in a folder File Provider reports as ubiquitous, and
+            /// files in the iCloud Drive, CloudStorage, Desktop and Documents
+            /// locations. Elsewhere the answer is "not ubiquitous" without
+            /// the per-item File Provider lookup that dominated local walks.
+            case whereNeeded
+        }
+
+        /// Where an item's cloud state comes from.
+        enum CloudStateSource: Sendable {
+            /// File Provider, through URL resource values (the app).
+            case fileProvider
+            /// A stand-in asked wherever the walk would ask File Provider, so
+            /// tests can put cloud folders anywhere (review P2-1).
+            case custom(@Sendable (URL) throws -> StorageMapCloudState)
+        }
+
+        /// Worker threads that walk sub-folders at the same time; 1 walks
+        /// everything on the calling thread.
+        var concurrency: Int
+        var ubiquityLookup: UbiquityLookup
+        var cloudState: CloudStateSource = .fileProvider
+        /// 共用的应用探测器；夹具可记录实际探测了哪些包。
+        var applicationBundleProbe: @Sendable (String) -> Bool = {
+            FileAnalysisApplicationBundleProbe.isApplication(atPath: $0)
+        }
+        /// Starts one worker thread. The app hands workers to a global queue;
+        /// tests can hold them back, since nothing guarantees that a worker
+        /// ever runs (review P2-8).
+        var startWorker: @Sendable (@escaping @Sendable () -> Void) -> Void = { work in
+            DispatchQueue.global(qos: .utility).async(execute: work)
+        }
+
+        static let standard = StorageMapAnalysisOptions(
+            concurrency: max(1, min(4, ProcessInfo.processInfo.activeProcessorCount / 2)),
+            ubiquityLookup: .whereNeeded
+        )
+        /// The walk before N21: one thread, File Provider asked for every item.
+        static let reference = StorageMapAnalysisOptions(concurrency: 1, ubiquityLookup: .everyItem)
     }
 
     /// Builds one immutable directory index for the selected volume or folder.
@@ -516,6 +685,14 @@ struct DiskScanner {
     /// main actor, does not follow symbolic links, and de-duplicates hard links.
     func storageMapAnalysis(
         target: StorageMapScanTarget,
+        progressHandler: (@Sendable (StorageMapScanProgress) -> Void)? = nil
+    ) throws -> StorageMapAnalysisResult {
+        try storageMapAnalysis(target: target, options: .standard, progressHandler: progressHandler)
+    }
+
+    func storageMapAnalysis(
+        target: StorageMapScanTarget,
+        options: StorageMapAnalysisOptions,
         progressHandler: (@Sendable (StorageMapScanProgress) -> Void)? = nil
     ) throws -> StorageMapAnalysisResult {
         let startedAt = Date()
@@ -550,73 +727,125 @@ struct DiskScanner {
         }
         let rootVolumeIdentifier = rootValues.volumeIdentifier.map { String(describing: $0) }
 
-        let resourceKeys: Set<URLResourceKey> = [
-            .isDirectoryKey,
-            .isRegularFileKey,
-            .isSymbolicLinkKey,
-            .isPackageKey,
-            .fileSizeKey,
-            .fileAllocatedSizeKey,
-            .totalFileAllocatedSizeKey,
-            .volumeIdentifierKey,
-            .isUbiquitousItemKey,
-            .ubiquitousItemDownloadingStatusKey,
-        ]
-        let lexicalExclusionRoots = excludedPaths.map(PathSafety.lexicalPath)
-        let isStorageMapExcluded: (String) -> Bool = { path in
-            lexicalExclusionRoots.contains { excluded in
-                path == excluded || path.hasPrefix(excluded + "/")
+        let concurrency = max(1, options.concurrency)
+        let queue = concurrency > 1 ? StorageMapJobQueue(workerCount: concurrency) : nil
+        let context = StorageMapWalkContext(
+            rootPath: rootPath,
+            rootVolumeIdentifier: rootVolumeIdentifier,
+            targetKind: target.kind,
+            exclusionRoots: excludedPaths.map(PathSafety.lexicalPath),
+            ubiquityLookup: options.ubiquityLookup,
+            cloudStateSource: options.cloudState,
+            applicationBundleProbe: options.applicationBundleProbe,
+            homePath: home,
+            cancellation: StorageMapCancellation(),
+            progress: progressHandler.map(StorageMapProgressRelay.init(handler:)),
+            jobs: queue
+        )
+
+        let rootIsUbiquitous = options.ubiquityLookup == .whereNeeded
+            && (try? context.cloudState(of: rootURL, prefetched: nil))?.isUbiquitous == true
+
+        // Workers start right away and take sub-folders as the calling thread
+        // hands them out; the calling thread walks the root level itself.
+        // The queue counts the workers that do start, so nothing below waits
+        // for one that never runs (review P2-8).
+        if let queue {
+            for _ in 0..<concurrency {
+                options.startWorker { queue.runWorker(context: context) }
             }
         }
+        let main = StorageMapWalker(
+            context: context,
+            rootPath: rootPath,
+            rootIsUbiquitous: rootIsUbiquitous,
+            anchor: [],
+            isSubtree: false
+        )
+        do {
+            try main.walk(rootURL: rootURL, cancelledByTask: { Task.isCancelled })
+        } catch {
+            context.cancellation.cancel()
+            queue?.finishProducing()
+            queue?.close()
+            throw error
+        }
+        queue?.finishProducing()
 
-        var directories = [
-            StorageMapMutableDirectory(path: rootPath, parentID: nil)
-        ]
-        var directoryIDByPath = [rootPath: 0]
-        var childrenByDirectory = [rootPath: [StorageMapIndexedEntry]()]
-        var blockedDirectoryPaths = Set<String>()
+        // Moved out of the walker, so changing them does not copy the
+        // whole walk on write.
+        var (
+            directories, directoryIDByPath, childrenByDirectory, blockedDirectoryPaths,
+            hardLinkOccurrences, enumeratorErrorPaths, omittedItemCount, inspectedItemCount
+        ) = main.takeState()
         var duplicateFilePaths = Set<String>()
-        var hardLinkOccurrences = [FileIdentity: [StorageMapHardLinkOccurrence]]()
-        var enumeratorErrorPaths = [String]()
-        var omittedItemCount = 0
-        var inspectedItemCount = 0
-        var runningMeasuredBytes: Int64 = 0
-        var lastProgressDate = Date.distantPast
-        var enumeratedPathsByLevel = [rootPath]
 
-        func appendEntry(
-            _ entry: StorageMapIndexedEntry,
-            parentPath: String,
-            parentID: Int
-        ) {
-            childrenByDirectory[parentPath, default: []].append(entry)
-            directories[parentID].immediateChildCount += 1
-        }
-
-        func createDirectory(
-            path: String,
-            parentID: Int,
-            isComplete: Bool,
-            categoryOverride: StorageMapContentCategory? = nil
-        ) -> Int {
-            if let existing = directoryIDByPath[path] {
-                if !isComplete { directories[existing].isComplete = false }
-                if let categoryOverride {
-                    directories[existing].categoryOverride = categoryOverride
+        if let queue {
+            // Merge each sub-folder walk in the order the walks were handed out:
+            // a folder's own entry always comes from an earlier walk.
+            var nextJob = 0
+            while true {
+                if Task.isCancelled {
+                    context.cancellation.cancel()
+                    queue.close()
+                    throw CancellationError()
                 }
-                return existing
+                switch queue.result(for: nextJob, waitingUpTo: 0.05) {
+                case .pending:
+                    continue
+                case .notStarted(let number, let job):
+                    queue.walk(number, job, context: context, cancelledByTask: { Task.isCancelled })
+                    continue
+                case .finished:
+                    break
+                case .failed(let error):
+                    context.cancellation.cancel()
+                    queue.close()
+                    throw error
+                case .ready(let job, let result):
+                    guard let rootID = directoryIDByPath[job.path] else {
+                        context.cancellation.cancel()
+                        queue.close()
+                        throw StorageMapAnalysisError.unreadable
+                    }
+                    let base = directories.count - 1
+                    func globalID(_ local: Int) -> Int { local == 0 ? rootID : base + local }
+                    let walkedRoot = result.directories[0]
+                    directories[rootID].directBytes += walkedRoot.directBytes
+                    directories[rootID].immediateChildCount += walkedRoot.immediateChildCount
+                    directories[rootID].descendantItemCount += walkedRoot.descendantItemCount
+                    if !walkedRoot.isComplete { directories[rootID].isComplete = false }
+                    directories[rootID].contentProfile.merge(walkedRoot.contentProfile)
+                    for var directory in result.directories.dropFirst() {
+                        directory.parentID = directory.parentID.map(globalID)
+                        directories.append(directory)
+                    }
+                    for (path, id) in result.directoryIDByPath where id != 0 {
+                        directoryIDByPath[path] = globalID(id)
+                    }
+                    for (path, entries) in result.childrenByDirectory {
+                        childrenByDirectory[path] = entries
+                    }
+                    blockedDirectoryPaths.formUnion(result.blockedDirectoryPaths)
+                    for (identity, occurrences) in result.hardLinkOccurrences {
+                        hardLinkOccurrences[identity, default: []] += occurrences.map {
+                            var occurrence = $0
+                            occurrence.parentID = globalID(occurrence.parentID)
+                            return occurrence
+                        }
+                    }
+                    enumeratorErrorPaths += result.enumeratorErrorPaths
+                    omittedItemCount += result.omittedItemCount
+                    inspectedItemCount += result.inspectedItemCount
+                    if result.marksRootIncomplete { directories[0].isComplete = false }
+                    nextJob += 1
+                    continue
+                }
+                break
             }
-            let id = directories.count
-            directoryIDByPath[path] = id
-            directories.append(StorageMapMutableDirectory(
-                path: path,
-                parentID: parentID,
-                isComplete: isComplete,
-                categoryOverride: categoryOverride
-            ))
-            childrenByDirectory[path] = []
-            return id
+            queue.close()
         }
+        if Task.isCancelled || context.cancellation.isCancelled { throw CancellationError() }
 
         func markIncomplete(path: String) {
             if let id = directoryIDByPath[path] {
@@ -631,265 +860,6 @@ struct DiskScanner {
             }
         }
 
-        func hardLinkIdentity(at url: URL) -> (identity: FileIdentity?, succeeded: Bool) {
-            var metadata = stat()
-            let status = url.withUnsafeFileSystemRepresentation { path in
-                guard let path else { return Int32(-1) }
-                return Darwin.lstat(path, &metadata)
-            }
-            guard status == 0, (metadata.st_mode & S_IFMT) == S_IFREG else {
-                return (nil, false)
-            }
-            guard metadata.st_nlink > 1 else { return (nil, true) }
-            return (
-                FileIdentity(
-                    deviceID: UInt64(bitPattern: Int64(metadata.st_dev)),
-                    inode: UInt64(metadata.st_ino),
-                    entryKind: .regularFile,
-                    creationTimeNanoseconds: nil
-                ),
-                true
-            )
-        }
-
-        guard let enumerator = fileManager.enumerator(
-            at: rootURL,
-            includingPropertiesForKeys: Array(resourceKeys),
-            options: [],
-            errorHandler: { url, _ in
-                enumeratorErrorPaths.append(PathSafety.lexicalPath(url.path))
-                return true
-            }
-        ) else {
-            throw StorageMapAnalysisError.unreadable
-        }
-
-        while let itemURL = autoreleasepool(invoking: {
-            enumerator.nextObject() as? URL
-        }) {
-            try autoreleasepool {
-            if Task.isCancelled { throw CancellationError() }
-            inspectedItemCount += 1
-
-            let itemPath = Self.storageMapEnumeratedPath(
-                itemName: itemURL.lastPathComponent,
-                level: enumerator.level,
-                rootPath: rootPath,
-                pathsByLevel: &enumeratedPathsByLevel
-            )
-            guard Self.storageMapPath(itemPath, isWithinRoot: rootPath) else {
-                omittedItemCount += 1
-                return
-            }
-            let parentPath = Self.storageMapParentPath(itemPath)
-            guard let parentID = directoryIDByPath[parentPath] else {
-                omittedItemCount += 1
-                markIncomplete(path: parentPath)
-                return
-            }
-
-            let values: URLResourceValues
-            do {
-                values = try itemURL.resourceValues(forKeys: resourceKeys)
-            } catch {
-                appendEntry(
-                    StorageMapIndexedEntry(
-                        name: itemURL.lastPathComponent,
-                        kind: "unavailable",
-                        sizeBytes: nil,
-                        isDirectory: false,
-                        canDescend: false,
-                        isEstimated: true
-                    ),
-                    parentPath: parentPath,
-                    parentID: parentID
-                )
-                directories[parentID].descendantItemCount += 1
-                directories[parentID].isComplete = false
-                omittedItemCount += 1
-                return
-            }
-
-            let physicalDirectory = values.isDirectory == true
-            let symbolicLink = values.isSymbolicLink == true
-            let package = physicalDirectory && values.isPackage == true
-            let cloudPlaceholder = values.isUbiquitousItem == true
-                && values.ubiquitousItemDownloadingStatus != .current
-
-            if Self.shouldSkipLogicalDataMirror(
-                path: itemPath,
-                rootPath: rootPath,
-                targetKind: target.kind
-            ) {
-                if physicalDirectory { enumerator.skipDescendants() }
-                return
-            }
-
-            if let rootVolumeIdentifier,
-               let itemVolumeIdentifier = values.volumeIdentifier.map({ String(describing: $0) }),
-               itemVolumeIdentifier != rootVolumeIdentifier {
-                if physicalDirectory { enumerator.skipDescendants() }
-                return
-            }
-
-            if symbolicLink {
-                let bytes = Int64(max(
-                    0,
-                    values.fileAllocatedSize ?? 0
-                ))
-                let contentCategory = StorageMapContentCategory.system
-                appendEntry(
-                    StorageMapIndexedEntry(
-                        name: itemURL.lastPathComponent,
-                        kind: "alias",
-                        sizeBytes: bytes,
-                        isDirectory: false,
-                        canDescend: false,
-                        isEstimated: false
-                    ),
-                    parentPath: parentPath,
-                    parentID: parentID
-                )
-                directories[parentID].directBytes += bytes
-                directories[parentID].contentProfile.add(
-                    bytes: bytes,
-                    to: contentCategory
-                )
-                directories[parentID].descendantItemCount += 1
-                runningMeasuredBytes += bytes
-                if physicalDirectory { enumerator.skipDescendants() }
-            } else if isStorageMapExcluded(itemPath) {
-                appendEntry(
-                    StorageMapIndexedEntry(
-                        name: itemURL.lastPathComponent,
-                        kind: physicalDirectory ? "folder" : "excluded",
-                        sizeBytes: nil,
-                        isDirectory: physicalDirectory,
-                        canDescend: false,
-                        isEstimated: true
-                    ),
-                    parentPath: parentPath,
-                    parentID: parentID
-                )
-                if physicalDirectory {
-                    _ = createDirectory(
-                        path: itemPath,
-                        parentID: parentID,
-                        isComplete: false
-                    )
-                    blockedDirectoryPaths.insert(itemPath)
-                    enumerator.skipDescendants()
-                } else {
-                    directories[parentID].descendantItemCount += 1
-                    directories[parentID].isComplete = false
-                }
-                omittedItemCount += 1
-            } else if physicalDirectory {
-                let canDescend = !package && !cloudPlaceholder
-                let packageCategory = package
-                    ? StorageMapContentCategory.classify(
-                        name: itemURL.lastPathComponent,
-                        kind: "package",
-                        isDirectory: true
-                    )
-                    : nil
-                appendEntry(
-                    StorageMapIndexedEntry(
-                        name: itemURL.lastPathComponent,
-                        kind: package ? "package" : "folder",
-                        sizeBytes: nil,
-                        isDirectory: true,
-                        canDescend: canDescend,
-                        isEstimated: cloudPlaceholder
-                    ),
-                    parentPath: parentPath,
-                    parentID: parentID
-                )
-                _ = createDirectory(
-                    path: itemPath,
-                    parentID: parentID,
-                    isComplete: !cloudPlaceholder,
-                    categoryOverride: packageCategory
-                )
-                if package {
-                    blockedDirectoryPaths.insert(itemPath)
-                }
-                if cloudPlaceholder {
-                    blockedDirectoryPaths.insert(itemPath)
-                    omittedItemCount += 1
-                    enumerator.skipDescendants()
-                }
-            } else {
-                let measuredSize = Self.storageMapPreferredSize(
-                    logicalSize: values.fileSize,
-                    allocatedSize: values.totalFileAllocatedSize
-                        ?? values.fileAllocatedSize,
-                    path: itemPath
-                )
-                let bytes = Int64(max(0, measuredSize ?? 0))
-                let kind = itemURL.pathExtension.lowercased().nonEmpty ?? "file"
-                let contentCategory = StorageMapContentCategory.classify(
-                    name: itemURL.lastPathComponent,
-                    kind: kind,
-                    isDirectory: false
-                )
-                appendEntry(
-                    StorageMapIndexedEntry(
-                        name: itemURL.lastPathComponent,
-                        kind: kind,
-                        sizeBytes: measuredSize.map { Int64(max(0, $0)) },
-                        isDirectory: false,
-                        canDescend: false,
-                        isEstimated: measuredSize == nil || cloudPlaceholder
-                    ),
-                    parentPath: parentPath,
-                    parentID: parentID
-                )
-                directories[parentID].descendantItemCount += 1
-                if measuredSize == nil {
-                    directories[parentID].isComplete = false
-                    omittedItemCount += 1
-                }
-
-                let hardLink = hardLinkIdentity(at: itemURL)
-                if !hardLink.succeeded {
-                    directories[parentID].isComplete = false
-                }
-                if let identity = hardLink.identity {
-                    let isFirstOccurrence = hardLinkOccurrences[identity]?.isEmpty ?? true
-                    hardLinkOccurrences[identity, default: []].append(
-                        StorageMapHardLinkOccurrence(
-                            path: itemPath,
-                            parentID: parentID,
-                            measuredBytes: bytes,
-                            contentCategory: contentCategory
-                        )
-                    )
-                    if isFirstOccurrence { runningMeasuredBytes += bytes }
-                } else {
-                    directories[parentID].directBytes += bytes
-                    directories[parentID].contentProfile.add(
-                        bytes: bytes,
-                        to: contentCategory
-                    )
-                    runningMeasuredBytes += bytes
-                }
-            }
-
-            let now = Date()
-            if inspectedItemCount == 1
-                || inspectedItemCount.isMultiple(of: 512)
-                || now.timeIntervalSince(lastProgressDate) >= 0.12 {
-                lastProgressDate = now
-                progressHandler?(StorageMapScanProgress(
-                    currentPath: itemPath,
-                    inspectedItemCount: inspectedItemCount,
-                    measuredBytes: runningMeasuredBytes
-                ))
-            }
-            }
-        }
-
         for errorPath in enumeratorErrorPaths {
             omittedItemCount += 1
             let normalizedErrorPath = PathSafety.lexicalPath(errorPath)
@@ -900,7 +870,8 @@ struct DiskScanner {
         }
         if Task.isCancelled { throw CancellationError() }
 
-        for occurrences in hardLinkOccurrences.values {
+        for unordered in hardLinkOccurrences.values {
+            let occurrences = unordered.sorted { Self.storageMapWalkOrderPrecedes($0.order, $1.order) }
             guard let canonical = occurrences.min(by: {
                 $0.path.localizedStandardCompare($1.path) == .orderedAscending
             }) else { continue }
@@ -981,6 +952,916 @@ struct DiskScanner {
         )
     }
 
+    // MARK: - Storage-map walk (N21)
+
+    /// Whether the walk asks File Provider about an item's cloud state in
+    /// `.whereNeeded` mode. Links never use it; folders always do, since a
+    /// cloud-only folder is not walked into. A file can only be in the cloud
+    /// when it is dataless, its folder is ubiquitous, or it sits where File
+    /// Provider keeps items: iCloud Drive or a CloudStorage provider in any
+    /// user's Library, or this user's Desktop and Documents in iCloud.
+    static func storageMapNeedsCloudState(
+        isDirectory: Bool,
+        isSymbolicLink: Bool,
+        parentIsUbiquitous: Bool,
+        isDataless: Bool,
+        path: String,
+        homePath: String
+    ) -> Bool {
+        storageMapNeedsCloudState(
+            isDirectory: isDirectory,
+            isSymbolicLink: isSymbolicLink,
+            parentIsUbiquitous: parentIsUbiquitous,
+            isDataless: isDataless,
+            path: path,
+            cloudHomePrefixes: storageMapCloudHomePrefixes(homePath: homePath)
+        )
+    }
+
+    /// This user's Desktop and Documents, which iCloud can keep. Built once
+    /// per analysis rather than per item.
+    static func storageMapCloudHomePrefixes(homePath: String) -> [String] {
+        [homePath + "/Desktop/", homePath + "/Documents/"]
+    }
+
+    static func storageMapNeedsCloudState(
+        isDirectory: Bool,
+        isSymbolicLink: Bool,
+        parentIsUbiquitous: Bool,
+        isDataless: Bool,
+        path: String,
+        cloudHomePrefixes: [String]
+    ) -> Bool {
+        if isSymbolicLink { return false }
+        if isDirectory { return true }
+        return parentIsUbiquitous
+            || isDataless
+            || storageMapPathContains(path, "/Library/Mobile Documents/")
+            || storageMapPathContains(path, "/Library/CloudStorage/")
+            || cloudHomePrefixes.contains { path.hasPrefix($0) }
+    }
+
+    /// Byte search in the path's UTF-8. For an ASCII pattern it finds every
+    /// match a character search finds and can only find more, so it never
+    /// skips a lookup; a character search here cost a fifth of a walk (N21).
+    static func storageMapPathContains(_ path: String, _ pattern: StaticString) -> Bool {
+        var path = path
+        return path.withUTF8 { haystack in
+            pattern.withUTF8Buffer { needle in
+                guard let haystackBase = haystack.baseAddress,
+                      let needleBase = needle.baseAddress,
+                      needle.count <= haystack.count else { return false }
+                return memmem(haystackBase, haystack.count, needleBase, needle.count) != nil
+            }
+        }
+    }
+
+    /// Order of two positions in a one-thread walk: element by element, and a
+    /// folder's position before the positions inside it.
+    static func storageMapWalkOrderPrecedes(_ lhs: [Int], _ rhs: [Int]) -> Bool {
+        for (left, right) in zip(lhs, rhs) where left != right {
+            return left < right
+        }
+        return lhs.count < rhs.count
+    }
+
+    /// Read-only facts every walker of one analysis shares.
+    private struct StorageMapWalkContext: @unchecked Sendable {
+        static let baseKeys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .isPackageKey,
+            .fileSizeKey,
+            .fileAllocatedSizeKey,
+            .totalFileAllocatedSizeKey,
+            .volumeIdentifierKey,
+        ]
+        static let ubiquityKeys: Set<URLResourceKey> = [
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey,
+        ]
+
+        let rootPath: String
+        let rootVolumeIdentifier: String?
+        let targetKind: StorageMapScanTarget.Kind
+        let exclusionRoots: [String]
+        let ubiquityLookup: StorageMapAnalysisOptions.UbiquityLookup
+        let cloudStateSource: StorageMapAnalysisOptions.CloudStateSource
+        let applicationBundleProbe: @Sendable (String) -> Bool
+        let cloudHomePrefixes: [String]
+        let cancellation: StorageMapCancellation
+        let progress: StorageMapProgressRelay?
+        let countedHardLinks = StorageMapCountedHardLinks()
+        let jobs: StorageMapJobQueue?
+        /// Keys fetched with each item; the original walk fetched cloud state
+        /// in the same request.
+        let itemKeys: Set<URLResourceKey>
+
+        init(
+            rootPath: String,
+            rootVolumeIdentifier: String?,
+            targetKind: StorageMapScanTarget.Kind,
+            exclusionRoots: [String],
+            ubiquityLookup: StorageMapAnalysisOptions.UbiquityLookup,
+            cloudStateSource: StorageMapAnalysisOptions.CloudStateSource,
+            applicationBundleProbe: @escaping @Sendable (String) -> Bool,
+            homePath: String,
+            cancellation: StorageMapCancellation,
+            progress: StorageMapProgressRelay?,
+            jobs: StorageMapJobQueue?
+        ) {
+            self.rootPath = rootPath
+            self.rootVolumeIdentifier = rootVolumeIdentifier
+            self.targetKind = targetKind
+            self.exclusionRoots = exclusionRoots
+            self.ubiquityLookup = ubiquityLookup
+            self.cloudStateSource = cloudStateSource
+            self.applicationBundleProbe = applicationBundleProbe
+            cloudHomePrefixes = DiskScanner.storageMapCloudHomePrefixes(homePath: homePath)
+            self.cancellation = cancellation
+            self.progress = progress
+            self.jobs = jobs
+            itemKeys = ubiquityLookup == .everyItem
+                ? Self.baseKeys.union(Self.ubiquityKeys)
+                : Self.baseKeys
+        }
+
+        /// The item's cloud state. With File Provider, `prefetched` values
+        /// that already hold the cloud keys (the every-item walk fetches them
+        /// with the other keys) answer without another lookup.
+        func cloudState(of url: URL, prefetched: URLResourceValues?) throws -> StorageMapCloudState {
+            switch cloudStateSource {
+            case .fileProvider:
+                let values = try prefetched ?? url.resourceValues(forKeys: Self.ubiquityKeys)
+                return StorageMapCloudState(
+                    isUbiquitous: values.isUbiquitousItem == true,
+                    isCurrent: values.ubiquitousItemDownloadingStatus == .current
+                )
+            case .custom(let lookup):
+                return try lookup(url)
+            }
+        }
+
+        func isExcluded(_ path: String) -> Bool {
+            exclusionRoots.contains { excluded in
+                path == excluded || path.hasPrefix(excluded + "/")
+            }
+        }
+    }
+
+    /// One walk of a folder tree with its own state. The calling thread walks
+    /// the root; with workers, each sub-folder it hands out is walked by a
+    /// walker whose folder 0 stands for that sub-folder.
+    private final class StorageMapWalker {
+        let context: StorageMapWalkContext
+        let isSubtree: Bool
+        /// Position of this walk's root in the one-thread order.
+        let anchor: [Int]
+        private let walkRootPath: String
+        private var sequence = 0
+        /// 外层应用已经整体汇总，内部目录继承此状态，无需再读嵌套包的 plist。
+        private var applicationContentsDirectoryIDs = Set<Int>()
+        private var reportedInspected = 0
+        private var reportedBytes: Int64 = 0
+        private var lastProgressDate = Date.distantPast
+        /// The last volume identifier and its description. Items of one
+        /// volume carry equal identifiers (new data objects with the same
+        /// bytes), and describing each one cost a tenth of a walk (N21).
+        private var lastVolumeIdentifier: (any NSCopying & NSSecureCoding & NSObjectProtocol)?
+        private var lastVolumeDescription = ""
+
+        var directories: [StorageMapMutableDirectory]
+        var directoryIDByPath: [String: Int]
+        var childrenByDirectory: [String: [StorageMapIndexedEntry]]
+        var blockedDirectoryPaths = Set<String>()
+        var hardLinkOccurrences = [FileIdentity: [StorageMapHardLinkOccurrence]]()
+        var enumeratorErrorPaths = [String]()
+        var omittedItemCount = 0
+        var inspectedItemCount = 0
+        var runningMeasuredBytes: Int64 = 0
+        /// A sub-folder walk found no known folder for an item, which the
+        /// one-thread walk records on the analysis root.
+        var marksRootIncomplete = false
+
+        init(
+            context: StorageMapWalkContext,
+            rootPath: String,
+            rootIsUbiquitous: Bool,
+            anchor: [Int],
+            isSubtree: Bool,
+            isInsideApplicationBundle: Bool = false
+        ) {
+            self.context = context
+            self.walkRootPath = rootPath
+            self.anchor = anchor
+            self.isSubtree = isSubtree
+            var root = StorageMapMutableDirectory(path: rootPath, parentID: nil)
+            root.isUbiquitous = rootIsUbiquitous
+            directories = [root]
+            directoryIDByPath = [rootPath: 0]
+            childrenByDirectory = [rootPath: []]
+            if isInsideApplicationBundle { applicationContentsDirectoryIDs.insert(0) }
+        }
+
+        func walk(rootURL: URL, cancelledByTask: () -> Bool) throws {
+            let enumerator = FileManager.default.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: Array(context.itemKeys),
+                options: [],
+                errorHandler: { [unowned self] url, _ in
+                    enumeratorErrorPaths.append(PathSafety.lexicalPath(url.path))
+                    return true
+                }
+            )
+            guard let enumerator else {
+                guard isSubtree else { throw StorageMapAnalysisError.unreadable }
+                // The same folder the one-thread walk could not read.
+                enumeratorErrorPaths.append(walkRootPath)
+                return
+            }
+            var pathsByLevel = [walkRootPath]
+            while let itemURL = autoreleasepool(invoking: {
+                enumerator.nextObject() as? URL
+            }) {
+                try autoreleasepool {
+                    if cancelledByTask() { context.cancellation.cancel() }
+                    if context.cancellation.isCancelled { throw CancellationError() }
+                    visit(itemURL, level: enumerator.level, pathsByLevel: &pathsByLevel, enumerator: enumerator)
+                }
+            }
+            reportProgress(path: walkRootPath, force: true)
+        }
+
+        /// `String(describing:)` of the identifier, as the walk compared
+        /// before; equal identifiers describe the same.
+        private func describeVolume(_ identifier: any NSCopying & NSSecureCoding & NSObjectProtocol) -> String {
+            if let last = lastVolumeIdentifier, last.isEqual(identifier) {
+                return lastVolumeDescription
+            }
+            let description = String(describing: identifier)
+            lastVolumeIdentifier = identifier
+            lastVolumeDescription = description
+            return description
+        }
+
+        private func appendEntry(_ entry: StorageMapIndexedEntry, parentPath: String, parentID: Int) {
+            childrenByDirectory[parentPath, default: []].append(entry)
+            directories[parentID].immediateChildCount += 1
+        }
+
+        private func createDirectory(
+            path: String,
+            parentID: Int,
+            isComplete: Bool,
+            categoryOverride: StorageMapContentCategory? = nil,
+            isUbiquitous: Bool
+        ) -> Int {
+            if let existing = directoryIDByPath[path] {
+                if !isComplete { directories[existing].isComplete = false }
+                if let categoryOverride {
+                    directories[existing].categoryOverride = categoryOverride
+                }
+                return existing
+            }
+            let id = directories.count
+            directoryIDByPath[path] = id
+            var directory = StorageMapMutableDirectory(
+                path: path,
+                parentID: parentID,
+                isComplete: isComplete,
+                categoryOverride: categoryOverride
+            )
+            directory.isUbiquitous = isUbiquitous
+            directories.append(directory)
+            if applicationContentsDirectoryIDs.contains(parentID) {
+                applicationContentsDirectoryIDs.insert(id)
+            }
+            childrenByDirectory[path] = []
+            return id
+        }
+
+        private func markIncomplete(path: String) {
+            if let id = directoryIDByPath[path] {
+                directories[id].isComplete = false
+                return
+            }
+            let parentPath = DiskScanner.storageMapParentPath(path)
+            if let parentID = directoryIDByPath[parentPath] {
+                directories[parentID].isComplete = false
+            } else if isSubtree {
+                marksRootIncomplete = true
+            } else {
+                directories[0].isComplete = false
+            }
+        }
+
+        private static func fileStatus(at url: URL) -> stat? {
+            var metadata = stat()
+            let status = url.withUnsafeFileSystemRepresentation { path in
+                guard let path else { return Int32(-1) }
+                return Darwin.lstat(path, &metadata)
+            }
+            return status == 0 ? metadata : nil
+        }
+
+        private static func hardLinkIdentity(from status: stat?) -> (identity: FileIdentity?, succeeded: Bool) {
+            guard let metadata = status, (metadata.st_mode & S_IFMT) == S_IFREG else {
+                return (nil, false)
+            }
+            guard metadata.st_nlink > 1 else { return (nil, true) }
+            return (
+                FileIdentity(
+                    deviceID: UInt64(bitPattern: Int64(metadata.st_dev)),
+                    inode: UInt64(metadata.st_ino),
+                    entryKind: .regularFile,
+                    creationTimeNanoseconds: nil
+                ),
+                true
+            )
+        }
+
+        private func reportProgress(path: String, force: Bool = false) {
+            guard let relay = context.progress else { return }
+            let now = Date()
+            guard force
+                    || inspectedItemCount == 1
+                    || inspectedItemCount.isMultiple(of: 512)
+                    || now.timeIntervalSince(lastProgressDate) >= 0.12 else { return }
+            lastProgressDate = now
+            relay.add(
+                inspected: inspectedItemCount - reportedInspected,
+                measuredBytes: runningMeasuredBytes - reportedBytes,
+                currentPath: path
+            )
+            reportedInspected = inspectedItemCount
+            reportedBytes = runningMeasuredBytes
+        }
+
+        private func visit(
+            _ itemURL: URL,
+            level: Int,
+            pathsByLevel: inout [String],
+            enumerator: FileManager.DirectoryEnumerator
+        ) {
+            sequence += 1
+            inspectedItemCount += 1
+
+            let enumerated = DiskScanner.storageMapEnumeratedPathAndParent(
+                itemName: itemURL.lastPathComponent,
+                level: level,
+                rootPath: walkRootPath,
+                pathsByLevel: &pathsByLevel
+            )
+            let itemPath = enumerated.path
+            guard DiskScanner.storageMapPath(itemPath, isWithinRoot: context.rootPath) else {
+                omittedItemCount += 1
+                return
+            }
+            // The enumerator already composed the parent; computing it again
+            // from the path cost about a seventh of the walk (N21).
+            let parentPath = enumerated.parent
+            assert(parentPath == DiskScanner.storageMapParentPath(itemPath))
+            guard let parentID = directoryIDByPath[parentPath] else {
+                omittedItemCount += 1
+                markIncomplete(path: parentPath)
+                return
+            }
+
+            let values: URLResourceValues
+            var cloudState: StorageMapCloudState?
+            var regularFileStatus: stat?
+            do {
+                values = try itemURL.resourceValues(forKeys: context.itemKeys)
+                switch context.ubiquityLookup {
+                case .everyItem:
+                    cloudState = try context.cloudState(of: itemURL, prefetched: values)
+                case .whereNeeded:
+                    let isDirectory = values.isDirectory == true
+                    let isSymbolicLink = values.isSymbolicLink == true
+                    if !isDirectory && !isSymbolicLink {
+                        regularFileStatus = Self.fileStatus(at: itemURL)
+                    }
+                    if DiskScanner.storageMapNeedsCloudState(
+                        isDirectory: isDirectory,
+                        isSymbolicLink: isSymbolicLink,
+                        parentIsUbiquitous: directories[parentID].isUbiquitous,
+                        isDataless: regularFileStatus.map { $0.st_flags & UInt32(SF_DATALESS) != 0 } ?? false,
+                        path: itemPath,
+                        cloudHomePrefixes: context.cloudHomePrefixes
+                    ) {
+                        cloudState = try context.cloudState(of: itemURL, prefetched: nil)
+                    }
+                }
+            } catch {
+                appendEntry(
+                    StorageMapIndexedEntry(
+                        name: itemURL.lastPathComponent,
+                        kind: "unavailable",
+                        sizeBytes: nil,
+                        isDirectory: false,
+                        canDescend: false,
+                        isEstimated: true
+                    ),
+                    parentPath: parentPath,
+                    parentID: parentID
+                )
+                directories[parentID].descendantItemCount += 1
+                directories[parentID].isComplete = false
+                omittedItemCount += 1
+                return
+            }
+
+            let physicalDirectory = values.isDirectory == true
+            let symbolicLink = values.isSymbolicLink == true
+            let package = physicalDirectory && values.isPackage == true
+            let isUbiquitous = cloudState?.isUbiquitous == true
+            let cloudPlaceholder = isUbiquitous && cloudState?.isCurrent != true
+
+            if DiskScanner.shouldSkipLogicalDataMirror(
+                path: itemPath,
+                rootPath: context.rootPath,
+                targetKind: context.targetKind
+            ) {
+                if physicalDirectory { enumerator.skipDescendants() }
+                return
+            }
+
+            if let rootVolumeIdentifier = context.rootVolumeIdentifier,
+               let itemVolumeIdentifier = values.volumeIdentifier.map({ describeVolume($0) }),
+               itemVolumeIdentifier != rootVolumeIdentifier {
+                if physicalDirectory { enumerator.skipDescendants() }
+                return
+            }
+
+            if symbolicLink {
+                let bytes = Int64(max(
+                    0,
+                    values.fileAllocatedSize ?? 0
+                ))
+                let contentCategory = StorageMapContentCategory.system
+                appendEntry(
+                    StorageMapIndexedEntry(
+                        name: itemURL.lastPathComponent,
+                        kind: "alias",
+                        sizeBytes: bytes,
+                        isDirectory: false,
+                        canDescend: false,
+                        isEstimated: false
+                    ),
+                    parentPath: parentPath,
+                    parentID: parentID
+                )
+                directories[parentID].directBytes += bytes
+                directories[parentID].contentProfile.add(
+                    bytes: bytes,
+                    to: contentCategory
+                )
+                directories[parentID].descendantItemCount += 1
+                runningMeasuredBytes += bytes
+                if physicalDirectory { enumerator.skipDescendants() }
+            } else if context.isExcluded(itemPath) {
+                appendEntry(
+                    StorageMapIndexedEntry(
+                        name: itemURL.lastPathComponent,
+                        kind: physicalDirectory ? "folder" : "excluded",
+                        sizeBytes: nil,
+                        isDirectory: physicalDirectory,
+                        canDescend: false,
+                        isEstimated: true
+                    ),
+                    parentPath: parentPath,
+                    parentID: parentID
+                )
+                if physicalDirectory {
+                    _ = createDirectory(
+                        path: itemPath,
+                        parentID: parentID,
+                        isComplete: false,
+                        isUbiquitous: isUbiquitous
+                    )
+                    blockedDirectoryPaths.insert(itemPath)
+                    enumerator.skipDescendants()
+                } else {
+                    directories[parentID].descendantItemCount += 1
+                    directories[parentID].isComplete = false
+                }
+                omittedItemCount += 1
+            } else if physicalDirectory {
+                let canDescend = !package && !cloudPlaceholder
+                // D46: which folder this is, so a later move can tell it is
+                // still the folder the analysis saw. An lstat never downloads.
+                let directoryStamp = Self.fileStatus(at: itemURL)
+                    .map(DiskScanner.storageMapChangeStamp) ?? 0
+                // 第 4 轮：没有可执行文件的 .app 按内容分类；外层已是应用
+                // 时内部整体汇总，不再探测嵌套的 .app。云端占位不读取。
+                let labelledByContents = package && !cloudPlaceholder
+                    && !applicationContentsDirectoryIDs.contains(parentID)
+                    && itemURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame
+                    && !context.applicationBundleProbe(itemPath)
+                let packageCategory = package && !labelledByContents
+                    ? StorageMapContentCategory.classify(
+                        name: itemURL.lastPathComponent,
+                        kind: "package",
+                        isDirectory: true
+                    )
+                    : nil
+                appendEntry(
+                    StorageMapIndexedEntry(
+                        name: itemURL.lastPathComponent,
+                        kind: package ? "package" : "folder",
+                        sizeBytes: nil,
+                        isDirectory: true,
+                        canDescend: canDescend,
+                        isEstimated: cloudPlaceholder,
+                        changeStamp: directoryStamp
+                    ),
+                    parentPath: parentPath,
+                    parentID: parentID
+                )
+                let directoryID = createDirectory(
+                    path: itemPath,
+                    parentID: parentID,
+                    isComplete: !cloudPlaceholder,
+                    categoryOverride: packageCategory,
+                    isUbiquitous: isUbiquitous
+                )
+                if packageCategory == .application { applicationContentsDirectoryIDs.insert(directoryID) }
+                if package {
+                    blockedDirectoryPaths.insert(itemPath)
+                }
+                if cloudPlaceholder {
+                    blockedDirectoryPaths.insert(itemPath)
+                    omittedItemCount += 1
+                    enumerator.skipDescendants()
+                } else if let jobs = context.jobs,
+                          level == 1,
+                          !isSubtree || jobs.wantsMoreWork {
+                    // A worker walks this folder; merging its walk in order
+                    // gives the same index as walking it here.
+                    enumerator.skipDescendants()
+                    jobs.enqueue(StorageMapJob(
+                        path: itemPath,
+                        url: itemURL,
+                        isUbiquitous: isUbiquitous,
+                        isInsideApplicationBundle: applicationContentsDirectoryIDs.contains(directoryID),
+                        anchor: anchor + [sequence]
+                    ))
+                }
+            } else {
+                let measuredSize = DiskScanner.storageMapPreferredSize(
+                    logicalSize: values.fileSize,
+                    allocatedSize: values.totalFileAllocatedSize
+                        ?? values.fileAllocatedSize,
+                    path: itemPath
+                )
+                let bytes = Int64(max(0, measuredSize ?? 0))
+                let kind = itemURL.pathExtension.lowercased().nonEmpty ?? "file"
+                let contentCategory = StorageMapContentCategory.classify(
+                    name: itemURL.lastPathComponent,
+                    kind: kind,
+                    isDirectory: false
+                )
+                let fileStatus = context.ubiquityLookup == .whereNeeded
+                    ? regularFileStatus
+                    : Self.fileStatus(at: itemURL)
+                appendEntry(
+                    StorageMapIndexedEntry(
+                        name: itemURL.lastPathComponent,
+                        kind: kind,
+                        sizeBytes: measuredSize.map { Int64(max(0, $0)) },
+                        isDirectory: false,
+                        canDescend: false,
+                        isEstimated: measuredSize == nil || cloudPlaceholder,
+                        changeStamp: fileStatus.map(DiskScanner.storageMapChangeStamp) ?? 0
+                    ),
+                    parentPath: parentPath,
+                    parentID: parentID
+                )
+                directories[parentID].descendantItemCount += 1
+                if measuredSize == nil {
+                    directories[parentID].isComplete = false
+                    omittedItemCount += 1
+                }
+
+                let hardLink = Self.hardLinkIdentity(from: fileStatus)
+                if !hardLink.succeeded {
+                    directories[parentID].isComplete = false
+                }
+                if let identity = hardLink.identity {
+                    // Shared by all walkers: a file linked from two sub-folder
+                    // walks adds to the running total once, as in one walk.
+                    let isFirstOccurrence = context.countedHardLinks.insert(identity)
+                    hardLinkOccurrences[identity, default: []].append(
+                        StorageMapHardLinkOccurrence(
+                            path: itemPath,
+                            parentID: parentID,
+                            measuredBytes: bytes,
+                            contentCategory: contentCategory,
+                            order: anchor + [sequence]
+                        )
+                    )
+                    if isFirstOccurrence { runningMeasuredBytes += bytes }
+                } else {
+                    directories[parentID].directBytes += bytes
+                    directories[parentID].contentProfile.add(
+                        bytes: bytes,
+                        to: contentCategory
+                    )
+                    runningMeasuredBytes += bytes
+                }
+            }
+
+            reportProgress(path: itemPath)
+        }
+
+        /// The walk's state, moved out so the caller holds the only copy.
+        func takeState() -> (
+            directories: [StorageMapMutableDirectory],
+            directoryIDByPath: [String: Int],
+            childrenByDirectory: [String: [StorageMapIndexedEntry]],
+            blockedDirectoryPaths: Set<String>,
+            hardLinkOccurrences: [FileIdentity: [StorageMapHardLinkOccurrence]],
+            enumeratorErrorPaths: [String],
+            omittedItemCount: Int,
+            inspectedItemCount: Int
+        ) {
+            defer {
+                directories = []
+                directoryIDByPath = [:]
+                childrenByDirectory = [:]
+                blockedDirectoryPaths = []
+                hardLinkOccurrences = [:]
+                enumeratorErrorPaths = []
+            }
+            return (
+                directories, directoryIDByPath, childrenByDirectory, blockedDirectoryPaths,
+                hardLinkOccurrences, enumeratorErrorPaths, omittedItemCount, inspectedItemCount
+            )
+        }
+
+        var result: StorageMapWalkResult {
+            StorageMapWalkResult(
+                directories: directories,
+                directoryIDByPath: directoryIDByPath,
+                childrenByDirectory: childrenByDirectory,
+                blockedDirectoryPaths: blockedDirectoryPaths,
+                hardLinkOccurrences: hardLinkOccurrences,
+                enumeratorErrorPaths: enumeratorErrorPaths,
+                omittedItemCount: omittedItemCount,
+                inspectedItemCount: inspectedItemCount,
+                marksRootIncomplete: marksRootIncomplete
+            )
+        }
+    }
+
+    private struct StorageMapJob: Sendable {
+        let path: String
+        let url: URL
+        let isUbiquitous: Bool
+        let isInsideApplicationBundle: Bool
+        let anchor: [Int]
+    }
+
+    private struct StorageMapWalkResult: Sendable {
+        let directories: [StorageMapMutableDirectory]
+        let directoryIDByPath: [String: Int]
+        let childrenByDirectory: [String: [StorageMapIndexedEntry]]
+        let blockedDirectoryPaths: Set<String>
+        let hardLinkOccurrences: [FileIdentity: [StorageMapHardLinkOccurrence]]
+        let enumeratorErrorPaths: [String]
+        let omittedItemCount: Int
+        let inspectedItemCount: Int
+        let marksRootIncomplete: Bool
+    }
+
+    private final class StorageMapCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
+
+    /// Hard-linked files already in the running progress total.
+    private final class StorageMapCountedHardLinks: @unchecked Sendable {
+        private let lock = NSLock()
+        private var identities = Set<FileIdentity>()
+
+        /// True the first time any walker meets this file.
+        func insert(_ identity: FileIdentity) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return identities.insert(identity).inserted
+        }
+    }
+
+    /// Progress from every walker as one running total. The handler is
+    /// called under the lock, so as with one walker it never runs twice at
+    /// once and its counts never go back.
+    private final class StorageMapProgressRelay: @unchecked Sendable {
+        private let lock = NSLock()
+        private let handler: @Sendable (StorageMapScanProgress) -> Void
+        private var inspected = 0
+        private var measuredBytes: Int64 = 0
+
+        init(handler: @escaping @Sendable (StorageMapScanProgress) -> Void) {
+            self.handler = handler
+        }
+
+        func add(inspected newlyInspected: Int, measuredBytes newlyMeasured: Int64, currentPath: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            inspected += newlyInspected
+            measuredBytes += newlyMeasured
+            handler(StorageMapScanProgress(
+                currentPath: currentPath,
+                inspectedItemCount: inspected,
+                measuredBytes: measuredBytes
+            ))
+        }
+    }
+
+    /// Sub-folder walks handed out by walkers and taken by worker threads.
+    /// Results are kept by hand-out number so they can be merged in order.
+    private final class StorageMapJobQueue: @unchecked Sendable {
+        enum Outcome {
+            case pending
+            /// No worker has started walk `number`; the merging thread walks it.
+            case notStarted(Int, StorageMapJob)
+            case ready(StorageMapJob, StorageMapWalkResult)
+            case failed(Error)
+            case finished
+        }
+
+        private let condition = NSCondition()
+        private let workerCount: Int
+        private var jobs: [StorageMapJob] = []
+        private var nextToStart = 0
+        private var results: [Int: StorageMapWalkResult] = [:]
+        private var running = 0
+        private var producing = true
+        private var failure: Error?
+        /// Workers inside `runWorker`.
+        private var activeWorkers = 0
+        private var closed = false
+
+        init(workerCount: Int) {
+            self.workerCount = workerCount
+        }
+
+        /// Hand out another sub-folder only while some worker could start it.
+        var wantsMoreWork: Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            return jobs.count - nextToStart < workerCount
+        }
+
+        func enqueue(_ job: StorageMapJob) {
+            condition.lock()
+            jobs.append(job)
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        /// The calling thread has finished the root level.
+        func finishProducing() {
+            condition.lock()
+            producing = false
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        func runWorker(context: StorageMapWalkContext) {
+            guard enterWorker() else { return }
+            defer { leaveWorker() }
+            while let (number, job) = take() {
+                walk(number, job, context: context, cancelledByTask: { false })
+            }
+        }
+
+        /// Walks sub-folder `number` and keeps its result for the merge; a
+        /// failure stops every walk.
+        func walk(
+            _ number: Int,
+            _ job: StorageMapJob,
+            context: StorageMapWalkContext,
+            cancelledByTask: () -> Bool
+        ) {
+            let walker = StorageMapWalker(
+                context: context,
+                rootPath: job.path,
+                rootIsUbiquitous: job.isUbiquitous,
+                anchor: job.anchor,
+                isSubtree: true,
+                isInsideApplicationBundle: job.isInsideApplicationBundle
+            )
+            do {
+                try walker.walk(rootURL: job.url, cancelledByTask: cancelledByTask)
+                complete(number, result: walker.result)
+            } catch {
+                context.cancellation.cancel()
+                fail(error)
+            }
+        }
+
+        /// No walk starts after this. Returns once the workers that started
+        /// have returned; a worker that starts later returns at once, so one
+        /// that never runs holds nothing up.
+        func close() {
+            condition.lock()
+            closed = true
+            condition.broadcast()
+            while activeWorkers > 0 { condition.wait() }
+            condition.unlock()
+        }
+
+        private func enterWorker() -> Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            guard !closed else { return false }
+            activeWorkers += 1
+            return true
+        }
+
+        private func leaveWorker() {
+            condition.lock()
+            activeWorkers -= 1
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        private func take() -> (Int, StorageMapJob)? {
+            condition.lock()
+            defer { condition.unlock() }
+            while true {
+                if failure != nil || closed { return nil }
+                if nextToStart < jobs.count {
+                    let number = nextToStart
+                    nextToStart += 1
+                    running += 1
+                    return (number, jobs[number])
+                }
+                // More work can only come from a running walk or the root.
+                if running == 0 && !producing { return nil }
+                condition.wait()
+            }
+        }
+
+        private func complete(_ number: Int, result: StorageMapWalkResult) {
+            condition.lock()
+            results[number] = result
+            running -= 1
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        private func fail(_ error: Error) {
+            condition.lock()
+            if failure == nil { failure = error }
+            running -= 1
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        /// The result of sub-folder walk `number`, removed from the queue so
+        /// its memory goes as soon as it is merged. A walk no worker started
+        /// within `seconds` is handed to the caller instead (`.notStarted`).
+        func result(for number: Int, waitingUpTo seconds: TimeInterval) -> Outcome {
+            condition.lock()
+            defer { condition.unlock() }
+            let deadline = Date().addingTimeInterval(seconds)
+            while true {
+                if let failure { return .failed(failure) }
+                if let result = results.removeValue(forKey: number) {
+                    return .ready(jobs[number], result)
+                }
+                if number >= jobs.count && running == 0 && !producing {
+                    return .finished
+                }
+                if !condition.wait(until: deadline) {
+                    // Walks start in hand-out order and every earlier walk is
+                    // merged, so this one is still waiting only when no worker
+                    // is taking work, and nothing guarantees that one ever
+                    // will: the merging thread walks it itself.
+                    guard number == nextToStart, number < jobs.count else { return .pending }
+                    nextToStart += 1
+                    running += 1
+                    return .notStarted(number, jobs[number])
+                }
+            }
+        }
+    }
+
     /// Resolves a level entirely from the captured index. No file-system read,
     /// size query, or recursive walk occurs while the user navigates.
     func storageMapSnapshot(
@@ -1049,7 +1930,8 @@ struct DiskScanner {
                         name: indexed.name,
                         kind: indexed.kind,
                         isDirectory: false
-                    )
+                    ),
+                isCloudOnly: indexed.isCloudOnly
             )
         }
         entries.sort { lhs, rhs in
@@ -1506,13 +2388,19 @@ struct DiskScanner {
             codexArtifactScan.installerEntries
         }
 
+        var largeFileSummary: LargeFileListingSummary?
         appendSupplementaryGroupIfModeAllows(
             &groups,
             id: "large_files",
             title: L10n.text("大型文件", "Large Files"),
             deadline: deadline
         ) {
-            scanLargeFiles(deadline: deadline)
+            let listing = largeFileListing(deadline: deadline)
+            largeFileSummary = listing.summary
+            return listing.entries
+        }
+        if largeFileSummary == nil, scanMode.includesSupplementaryGroup("large_files") {
+            largeFileSummary = .notStarted(threshold: largeFileThreshold, resultLimit: scanMode.largeFileResultLimit)
         }
 
         appendSupplementaryGroupIfModeAllows(
@@ -1547,7 +2435,7 @@ struct DiskScanner {
         let items = StorageClassifier.classify(groups: groups)
         let finishedAt = Date()
 
-        return ScanResult(
+        var result = ScanResult(
             generatedAt: finishedAt,
             scanSeconds: finishedAt.timeIntervalSince(started),
             scanMode: scanMode,
@@ -1557,6 +2445,8 @@ struct DiskScanner {
             items: items,
             deniedPaths: denied
         )
+        result.largeFileListing = largeFileSummary
+        return result
     }
 
     private func appendSupplementaryGroupIfModeAllows(
@@ -1673,7 +2563,7 @@ struct DiskScanner {
     }
 
     static var knownAgentLogPaths: [KnownDeveloperArtifactPath] {
-        knownAgentPaths(policy: .reviewOnly) + [
+        knownAgentPaths(policy: .disposableLogs) + [
             KnownDeveloperArtifactPath(
                 name: L10n.text("OpenClaw 系统临时日志", "OpenClaw System Temporary Logs"),
                 path: "/tmp/openclaw",
@@ -1922,22 +2812,45 @@ struct DiskScanner {
         return Array(entries.sorted { $0.sizeBytes > $1.sizeBytes }.prefix(limit))
     }
 
-    private func scanLargeFiles(deadline: Date) -> [DirectoryEntry] {
-        var entries = [DirectoryEntry]()
+    /// D85：独立大文件清单。门槛来自 `largeFileThreshold`（默认 200 MiB），
+    /// 结果按本地占用降序、最多 `largeFileResultLimit` 条，并记下是否因条数、
+    /// 时间或单个文件夹的测量上限而被截断（D84：测量超时的项目只是下限）。
+    /// `minimumBytes`、`resultLimit` 只给测试用较小的数值。
+    func largeFileListing(
+        deadline: Date,
+        minimumBytes: Int64? = nil,
+        resultLimit: Int? = nil
+    ) -> (entries: [DirectoryEntry], summary: LargeFileListingSummary) {
+        var candidates = [DirectoryEntry]()
+        var reachedTimeLimit = false
+        var reachedFolderLimit = false
+        var lowerBoundPaths = Set<String>()
         for root in largeFileRoots {
-            guard Date() < deadline else { break }
+            guard Date() < deadline else {
+                reachedTimeLimit = true
+                break
+            }
             guard !isExcluded(root) else { continue }
-            entries.append(
-                contentsOf: scanChildren(
-                    at: root,
-                    minimumBytes: scanMode.largeFileMinimumBytes,
-                    limit: modeAdjustedLimit(40),
-                    deadline: deadline
-                )
+            let report = scanChildrenReport(
+                at: root,
+                minimumBytes: minimumBytes ?? largeFileThreshold.bytes,
+                limit: modeAdjustedLimit(40),
+                deadline: deadline
             )
+            candidates.append(contentsOf: report.entries)
+            reachedTimeLimit = reachedTimeLimit || report.reachedTimeLimit
+            reachedFolderLimit = reachedFolderLimit || report.reachedFolderLimit
+            lowerBoundPaths.formUnion(report.lowerBoundPaths)
         }
 
-        return Array(entries.sorted { $0.sizeBytes > $1.sizeBytes }.prefix(scanMode.largeFileResultLimit))
+        return LargeFileListingSummary.make(
+            candidates: candidates,
+            threshold: largeFileThreshold,
+            resultLimit: resultLimit ?? scanMode.largeFileResultLimit,
+            reachedTimeLimit: reachedTimeLimit,
+            reachedFolderLimit: reachedFolderLimit,
+            lowerBoundPaths: lowerBoundPaths
+        )
     }
 
     private var largeFileRoots: [String] {
@@ -1954,14 +2867,23 @@ struct DiskScanner {
         []
     }
 
-    private func scanChildren(at path: String, minimumBytes: Int64, limit: Int, deadline: Date) -> [DirectoryEntry] {
-        guard Date() < deadline else { return [] }
-        guard fileManager.fileExists(atPath: path), !isExcluded(path) else { return [] }
+    func scanChildren(at path: String, minimumBytes: Int64, limit: Int, deadline: Date) -> [DirectoryEntry] {
+        scanChildrenReport(at: path, minimumBytes: minimumBytes, limit: limit, deadline: deadline).entries
+    }
+
+    /// 与 `scanChildren` 相同的读取与测量；另外记下截断与下限（D84/D85）。
+    func scanChildrenReport(at path: String, minimumBytes: Int64, limit: Int, deadline: Date) -> ChildScanReport {
+        var report = ChildScanReport()
+        guard Date() < deadline else {
+            report.reachedTimeLimit = true
+            return report
+        }
+        guard fileManager.fileExists(atPath: path), !isExcluded(path) else { return report }
 
         do {
             let urls = try directoryContents(
                 at: URL(fileURLWithPath: path),
-                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey],
                 options: [.skipsPackageDescendants],
                 timeout: directoryReadTimeout
             )
@@ -1969,40 +2891,55 @@ struct DiskScanner {
             var entries = [DirectoryEntry]()
             var measuredCount = 0
             for url in urls {
-                guard Date() < deadline else { break }
+                guard Date() < deadline else {
+                    report.reachedTimeLimit = true
+                    break
+                }
                 if shouldSkipChild(url, parentPath: path) || isExcluded(url.path) {
                     continue
                 }
 
                 if measuredCount >= scanMode.maxChildrenPerDirectory {
+                    report.reachedFolderLimit = true
                     break
                 }
 
-                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey])
                 if values?.isSymbolicLink == true {
                     continue
                 }
 
                 measuredCount += 1
-                guard let bytes = treeSizeBytes(url.path), bytes >= minimumBytes else {
+                guard let measurement = treeSizeMeasurement(url.path), measurement.bytes >= minimumBytes else {
                     continue
                 }
 
+                if !measurement.isComplete {
+                    report.lowerBoundPaths.insert(PathSafety.normalizedPath(url.path))
+                }
                 entries.append(
                     DirectoryEntry(
                         name: url.lastPathComponent,
                         path: url.path,
-                        sizeBytes: bytes,
-                        isDirectory: values?.isDirectory == true
+                        sizeBytes: measurement.bytes,
+                        isDirectory: values?.isDirectory == true,
+                        modifiedAt: values?.contentModificationDate
                     )
                 )
             }
 
-            return Array(entries.sorted { $0.sizeBytes > $1.sizeBytes }.prefix(limit))
+            if entries.count > limit {
+                report.reachedFolderLimit = true
+            }
+            report.entries = Array(entries.sorted { $0.sizeBytes > $1.sizeBytes }.prefix(limit))
+            let kept = Set(report.entries.map { PathSafety.normalizedPath($0.path) })
+            report.lowerBoundPaths.formIntersection(kept)
+            return report
         } catch DirectoryReadError.timedOut {
-            return []
+            report.reachedTimeLimit = true
+            return report
         } catch {
-            return [
+            report.entries = [
                 DirectoryEntry(
                     name: L10n.text("(permission denied)", "(permission denied)"),
                     path: path,
@@ -2010,6 +2947,7 @@ struct DiskScanner {
                     denied: true
                 )
             ]
+            return report
         }
     }
 
@@ -2160,10 +3098,17 @@ struct DiskScanner {
     /// bound when a very large tree exceeds the measuring budget — the old
     /// `du` timeout dropped exactly the largest items from the results.
     private func treeSizeBytes(_ path: String) -> Int64? {
+        treeSizeMeasurement(path)?.bytes
+    }
+
+    /// 与原 `treeSizeBytes` 相同的测量（本地占用，超时返回已累计的部分），
+    /// 另外说明结果是否完整（D84：不完整时只是本轮量到的下限）。
+    func treeSizeMeasurement(_ path: String) -> TreeSizeMeasurement? {
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory) else { return nil }
         guard isDirectory.boolValue else {
             return allocatedFileSizeBytes(URL(fileURLWithPath: path))
+                .map { TreeSizeMeasurement(bytes: $0, isComplete: true) }
         }
 
         let box = TreeSizeBox()
@@ -2178,29 +3123,37 @@ struct DiskScanner {
             let deadline = Date().addingTimeInterval(budget)
             var total: Int64 = 0
             var itemCount = 0
+            var stoppedEarly = false
             if let enumerator = FileManager.default.enumerator(
                 at: URL(fileURLWithPath: rootPath),
                 includingPropertiesForKeys: Array(keys),
                 options: [],
-                errorHandler: { _, _ in true }
+                errorHandler: { _, _ in
+                    box.markReadError()
+                    return true
+                }
             ) {
                 for case let itemURL as URL in enumerator {
                     itemCount += 1
                     if itemCount % 512 == 0 {
                         box.update(total)
-                        if Date() >= deadline { break }
+                        if Date() >= deadline {
+                            stoppedEarly = true
+                            break
+                        }
                     }
                     guard let values = try? itemURL.resourceValues(forKeys: keys),
                           values.isRegularFile == true else { continue }
                     total += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
                 }
+                if !stoppedEarly { box.markWalkedEverything() }
             }
             box.update(total)
             finished.signal()
         }
 
-        _ = finished.wait(timeout: .now() + budget + 0.3)
-        return box.currentBytes
+        let completedInTime = finished.wait(timeout: .now() + budget + 0.3) == .success
+        return TreeSizeMeasurement(bytes: box.currentBytes, isComplete: completedInTime && box.isComplete)
     }
 
     private func allocatedFileSizeBytes(_ url: URL) -> Int64? {
@@ -2384,6 +3337,7 @@ enum StorageClassifier {
             trashPaths: decision.trashPaths ? [entry.path] : [],
             openPath: entry.path,
             isDirectory: entry.isDirectory,
+            modifiedAt: entry.modifiedAt,
             status: .available
         )
     }

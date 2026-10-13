@@ -282,6 +282,9 @@ struct BenchmarkV7PreflightReport: Equatable, Codable, Sendable {
     let displayDescription: String?
     let checks: [BenchmarkV7PreflightCheck]
     let blockedCategories: [BenchmarkV7Category]
+    /// BOARD N22: the busy share of all CPU time over the preflight's
+    /// one-second window (nil in records made before it was measured).
+    var backgroundCPUBusyRatio: Double? = nil
 
     var hasBlockingIssue: Bool {
         checks.contains { $0.severity == .blocked }
@@ -440,6 +443,7 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     /// prior result. New records always carry a distinct persistent identity.
     let recordID: UUID?
     let mSeries: MSeriesResult?
+    let mSeriesV11: MSeriesV11Result?
     let session: BenchmarkV7Session
     let preflight: BenchmarkV7PreflightReport
     /// The non-sensitive system snapshot that accompanied this session. New
@@ -473,6 +477,7 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     init(
         recordID: UUID? = UUID(),
         mSeries: MSeriesResult? = nil,
+        mSeriesV11: MSeriesV11Result? = nil,
         session: BenchmarkV7Session,
         preflight: BenchmarkV7PreflightReport,
         environment: BenchmarkEnvironmentMetadata? = nil,
@@ -492,6 +497,7 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     ) {
         self.recordID = recordID
         self.mSeries = mSeries
+        self.mSeriesV11 = mSeriesV11
         self.session = session
         self.preflight = preflight
         self.environment = environment
@@ -527,6 +533,12 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     }
 
     var isComplete: Bool {
+        if let v11 = mSeriesV11 {
+            return failure == nil && completedAt != nil && isPersistable
+                && v11.state == "completed" && v11.failure == nil
+                && (v11.mode == "pressure10m" || mSeries?.isCompleteCore == true)
+                && v11.hasCompletedRequiredMeasurements
+        }
         if let mSeries { return failure == nil && isPersistable && mSeries.isCompleteCore }
         return failure == nil
             && completedAt != nil
@@ -561,6 +573,26 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
     }
 
     var isPersistable: Bool {
+        if let v11 = mSeriesV11 {
+            guard v11.mode == "pressure10m" || mSeries != nil else { return false }
+            return v11.schema == "mseries-result-v11"
+                && ["mseries-core-v11", "mseries-pressure-v11"].contains(v11.plan)
+                && v11.plan == (v11.mode == "pressure10m" ? "mseries-pressure-v11" : "mseries-core-v11")
+                && ["standard", "pressure10m"].contains(v11.mode)
+                && versions.schemaVersion == v11.schema && session.plan.planVersion == v11.plan
+                && session.isValid && (mSeries.map { session.id == $0.sessionID && $0.isValid } ?? true) && session.id == v11.sessionID
+                && v11.coreContractHash == (mSeries?.contractHash ?? MSeriesProtocol.contractHash)
+                && v11.scoringContractHash == MSeriesScoringV11.scoringContractHash
+                && MSeriesV11Digest.isSHA256(v11.extensionContractHash)
+                && MSeriesV11Digest.isSHA256(v11.rawPayloadSHA256)
+                && MSeriesV11RawPayload.validates(core: mSeries, envelope: v11)
+                && (v11.metadataWrittenBytes ?? UInt64.max) <= 2 * 1024 * 1024
+                && (v11.writtenBytes ?? UInt64.max) <= MSeriesProtocol.maximumWrittenBytes
+                && (try? JSONEncoder().encode(self).count).map({ $0 <= 1_048_576 }) == true
+                && v11.telemetry.count <= 1024
+                && (v11.sustainedCPU?.windows.count ?? 0) + (v11.sustainedGPU?.windows.count ?? 0) <= 120
+                && metrics.isEmpty && coreScore == nil && experienceScore == nil && sustainedResult == nil
+        }
         if let mSeries {
             return session.isValid && session.id == mSeries.sessionID
                 && session.plan == MSeriesProtocol.officialPlan && versions == MSeriesProtocol.versions
@@ -575,6 +607,35 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
             && (workloadExecutions?.allSatisfy(\.isValid) ?? true)
     }
 
+    enum CodingKeys: String, CodingKey {
+        case recordID, mSeries, mSeriesV11, session, preflight, environment, hardwareProfile, versions
+        case metrics, coreScore, experienceScore, sustainedResult, confidence, runtimeWarnings
+        case completionStatus, workloadFailure, workloadExecutions, completedAt, failure
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        recordID = try c.decodeIfPresent(UUID.self, forKey: .recordID)
+        mSeries = try c.decodeIfPresent(MSeriesResult.self, forKey: .mSeries)
+        mSeriesV11 = try c.decodeIfPresent(MSeriesV11Result.self, forKey: .mSeriesV11)
+        session = try c.decode(BenchmarkV7Session.self, forKey: .session)
+        preflight = try c.decode(BenchmarkV7PreflightReport.self, forKey: .preflight)
+        environment = try c.decodeIfPresent(BenchmarkEnvironmentMetadata.self, forKey: .environment)
+        hardwareProfile = try c.decodeIfPresent(BenchmarkV7HardwareProfile.self, forKey: .hardwareProfile)
+        versions = try c.decode(BenchmarkV7VersionManifest.self, forKey: .versions)
+        metrics = try c.decode([BenchmarkV7MetricResult].self, forKey: .metrics)
+        coreScore = try c.decodeIfPresent(BenchmarkV7CoreScore.self, forKey: .coreScore)
+        experienceScore = try c.decodeIfPresent(BenchmarkV7ExperienceScore.self, forKey: .experienceScore)
+        sustainedResult = try c.decodeIfPresent(MacSustainedBenchmarkResult.self, forKey: .sustainedResult)
+        confidence = try c.decodeIfPresent(BenchmarkV7Confidence.self, forKey: .confidence)
+        runtimeWarnings = try c.decodeIfPresent([String].self, forKey: .runtimeWarnings) ?? []
+        completionStatus = try c.decodeIfPresent(BenchmarkV7CompletionStatus.self, forKey: .completionStatus)
+        workloadFailure = try c.decodeIfPresent(BenchmarkV7WorkloadFailureRecord.self, forKey: .workloadFailure)
+        workloadExecutions = try c.decodeIfPresent([BenchmarkV7WorkloadExecutionRecord].self, forKey: .workloadExecutions)
+        completedAt = try c.decodeIfPresent(Date.self, forKey: .completedAt)
+        failure = try c.decodeIfPresent(BenchmarkV7Failure.self, forKey: .failure)
+    }
+
     private static func inferredCompletionStatus(
         metrics: [BenchmarkV7MetricResult],
         completedAt: Date?,
@@ -584,5 +645,15 @@ struct BenchmarkV7Result: Equatable, Codable, Sendable {
         if failure != nil { return metrics.isEmpty ? .failed : .partiallyCompleted }
         if completedAt != nil { return .completed }
         return nil
+    }
+}
+
+extension BenchmarkV7Result {
+    func replacingV11Envelope(_ envelope: MSeriesV11Result) -> Self {
+        .init(recordID: recordID, mSeries: mSeries, mSeriesV11: envelope, session: session,
+            preflight: preflight, environment: environment, hardwareProfile: hardwareProfile, versions: versions,
+            metrics: metrics, coreScore: coreScore, experienceScore: experienceScore, sustainedResult: sustainedResult,
+            confidence: confidence, runtimeWarnings: runtimeWarnings, completionStatus: completionStatus,
+            workloadFailure: workloadFailure, workloadExecutions: workloadExecutions, completedAt: completedAt, failure: failure)
     }
 }

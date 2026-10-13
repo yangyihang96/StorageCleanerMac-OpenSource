@@ -74,13 +74,43 @@ actor SystemMemoryProbe: MemoryProbing {
         let launchDate: Date?
         let activationPolicy: MemoryRunningApplicationActivationPolicy
         let isActive: Bool
+        var processStartTime: UInt64? = nil
+    }
+
+    struct ProcessUsage: Sendable {
+        let footprintBytes: UInt64
+        let birth: UInt64
+    }
+
+    struct ProcessIdentity: Sendable {
+        let startTime: UInt64
+        let userIdentifier: UInt32
+
+        var launchDate: Date { Date(timeIntervalSince1970: Double(startTime) / 1_000_000) }
     }
 
     private let history: MemoryHistoryStore
     private let clock = ContinuousClock()
+    private let systemPressureLevelCode: @Sendable () -> Int32?
+    private let processCache: ProcessSamplingCache
 
-    init(history: MemoryHistoryStore = MemoryHistoryStore()) {
+    init(
+        history: MemoryHistoryStore = MemoryHistoryStore(),
+        systemPressureLevelCode: @escaping @Sendable () -> Int32? = SystemMemoryProbe.readSystemPressureLevelCode,
+        processCache: ProcessSamplingCache = .shared
+    ) {
         self.history = history
+        self.systemPressureLevelCode = systemPressureLevelCode
+        self.processCache = processCache
+    }
+
+    /// The kernel's memory pressure condition: 1 normal, 2 warning, 4 critical.
+    static let readSystemPressureLevelCode: @Sendable () -> Int32? = {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_vm_pressure_level", &value, &size, nil, 0) == 0,
+              size == MemoryLayout<Int32>.size else { return nil }
+        return value
     }
 
     func snapshot(includeProcesses: Bool) async -> MemorySnapshot {
@@ -104,10 +134,10 @@ actor SystemMemoryProbe: MemoryProbing {
             : (
                 summary: L10n.text("轻量后台采样", "Lightweight background sample"),
                 freePercentage: nil,
-                reason: "memory_pressure was skipped for a lightweight status sample."
+                reason: "The free percentage was skipped for a lightweight status sample."
             )
         let processResult = includeProcesses
-            ? await Self.processes(physicalBytes: physicalBytes, capturedAt: capturedAt)
+            ? await processes(physicalBytes: physicalBytes, capturedAt: capturedAt)
             : (processes: [], warnings: [])
         var warnings = processResult.warnings
 
@@ -168,24 +198,12 @@ actor SystemMemoryProbe: MemoryProbing {
             warningName: "availableBytes",
             warnings: &warnings
         ).map { min(physicalBytes, $0) }
-        let pressure: MemoryPressureLevel?
-        if let availableEstimate {
-            pressure = MemoryPressurePolicy.classify(
-                physicalBytes: physical,
-                availableBytes: Int64(clamping: availableEstimate),
-                compressedBytes: Int64(clamping: compressed ?? 0),
-                swapUsedBytes: swapReadings.map { Int64(clamping: $0.used) },
-                pressureFreePercentage: pressureReading.freePercentage
-            )
-        } else {
-            pressure = pressureReading.freePercentage.map(
-                MemoryPressurePolicy.classify(pressureFreePercentage:)
-            )
-        }
+        // The level is the system's own level. It is not derived from the
+        // free percentage, the available estimate, swap or compression.
+        let pressure = Self.pressureMeasurement(systemLevelCode: systemPressureLevelCode())
 
         let measurements = MemoryMeasurements(
-            pressure: pressure.map(MemoryMeasurement.available)
-                ?? .unavailable(.temporarilyInvalid, reason: pressureReading.reason),
+            pressure: pressure,
             physicalBytes: .available(physicalBytes),
             availableBytes: availableEstimate.map(MemoryMeasurement.available)
                 ?? .unavailable(.temporarilyInvalid, reason: "VM statistics could not provide an available-memory estimate."),
@@ -211,6 +229,9 @@ actor SystemMemoryProbe: MemoryProbing {
         }
         if includePressureReading, pressureReading.freePercentage == nil {
             warnings.append(.metricUnavailable(name: "Pressure headroom", reason: pressureReading.reason))
+        }
+        if let reason = pressure.reason, pressure.value == nil {
+            warnings.append(.metricUnavailable(name: "Pressure level", reason: reason))
         }
 
         let requiredUnavailable = [
@@ -242,12 +263,44 @@ actor SystemMemoryProbe: MemoryProbing {
             pressureSummary: pressureReading.summary,
             topProcesses: processResult.processes,
             swapTotalBytes: Int64(clamping: swapReadings?.total ?? 0),
-            pageInsCount: Int64(clamping: pageReadings?.values["Pageins"] ?? 0),
-            pageOutsCount: Int64(clamping: pageReadings?.values["Pageouts"] ?? 0),
+            swappedInBytes: Self.swapActivityBytes(pages: pageReadings?.values["Swapins"], pageSize: pageReadings?.pageSize),
+            swappedOutBytes: Self.swapActivityBytes(pages: pageReadings?.values["Swapouts"], pageSize: pageReadings?.pageSize),
             measurements: measurements,
             quality: quality,
             warnings: warnings
         )
+    }
+
+    /// The system's level, or unavailable. A level the system did not report
+    /// is never replaced with one of our own.
+    nonisolated static func pressureMeasurement(
+        systemLevelCode: Int32?
+    ) -> MemoryMeasurement<MemoryPressureLevel> {
+        guard let systemLevelCode else {
+            return .unavailable(
+                .unsupported,
+                reason: "kern.memorystatus_vm_pressure_level could not be read."
+            )
+        }
+        guard let level = MemoryPressureLevel(systemCode: Int(systemLevelCode)) else {
+            return .unavailable(
+                .invalidSample,
+                reason: "kern.memorystatus_vm_pressure_level reported an unknown level \(systemLevelCode)."
+            )
+        }
+        return .available(level)
+    }
+
+    /// Swap activity in bytes. vm_stat's Swapins / Swapouts are "the amount
+    /// of compressed data read back in from / written out to swap files, in
+    /// units of pages" (vm_stat(1)), so bytes = pages x page size. They are
+    /// not Pageins / Pageouts, which count requests to any pager (mostly
+    /// file-backed reads) and file-backed pages written back. Unknown inputs
+    /// stay unknown; an overflow clamps.
+    nonisolated static func swapActivityBytes(pages: UInt64?, pageSize: UInt64?) -> Int64? {
+        guard let pages, let pageSize else { return nil }
+        let bytes = pages.multipliedReportingOverflow(by: pageSize)
+        return bytes.overflow ? .max : Int64(clamping: bytes.partialValue)
     }
 
     private static func measurement(
@@ -305,8 +358,6 @@ actor SystemMemoryProbe: MemoryProbing {
                 "Pages purgeable": UInt64(stats.purgeable_count),
                 "Pages wired down": UInt64(stats.wire_count),
                 "Pages occupied by compressor": UInt64(stats.compressor_page_count),
-                "Pageins": UInt64(stats.pageins),
-                "Pageouts": UInt64(stats.pageouts),
                 "Swapins": UInt64(stats.swapins),
                 "Swapouts": UInt64(stats.swapouts),
             ]
@@ -320,22 +371,27 @@ actor SystemMemoryProbe: MemoryProbing {
         return SwapReadings(used: usage.xsu_used, total: usage.xsu_total)
     }
 
+    /// The system-wide memory free percentage, the value `memory_pressure -Q`
+    /// prints as "System-wide memory free percentage". Read directly: the
+    /// status sample no longer starts that tool on every refresh.
+    static let readSystemMemoryFreePercentage: @Sendable () -> Int32? = {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_level", &value, &size, nil, 0) == 0,
+              size == MemoryLayout<Int32>.size else { return nil }
+        return value
+    }
+
     private static func pressureReading() -> (summary: String, freePercentage: Int?, reason: String) {
-        do {
-            let output = try Shell.capture(
-                "/usr/bin/memory_pressure",
-                ["-Q"],
-                timeout: 2
-            )
-            let parsed = MemoryOptimizerService.pressureSummary(from: output)
-            return (parsed.summary, parsed.freePercentage, "memory_pressure did not expose headroom.")
-        } catch {
+        guard let freePercentage = readSystemMemoryFreePercentage() else {
             return (
                 L10n.text("压力数据不可用", "Pressure unavailable"),
                 nil,
-                "memory_pressure could not be read."
+                "kern.memorystatus_level could not be read."
             )
         }
+        let reading = MemoryOptimizerService.pressureSummary(freePercentage: Int(freePercentage))
+        return (reading.summary, reading.freePercentage, "kern.memorystatus_level did not expose headroom.")
     }
 
     /// Launch Services can transiently report duplicate or terminated PIDs.
@@ -353,64 +409,80 @@ actor SystemMemoryProbe: MemoryProbing {
         })
     }
 
-    private static func processes(
+    private func processes(
         physicalBytes: UInt64,
         capturedAt: Date
     ) async -> (processes: [MemoryProcess], warnings: [MeasurementWarning]) {
         let runningApps = await MainActor.run {
-            indexRunningApplications(NSWorkspace.shared.runningApplications.map { app in
-                let policy: MemoryRunningApplicationActivationPolicy
-                switch app.activationPolicy {
-                case .regular: policy = .regular
-                case .accessory: policy = .accessory
-                case .prohibited: policy = .prohibited
-                @unknown default: policy = .prohibited
-                }
-                return (
-                    app.processIdentifier,
-                    RunningAppIdentity(
-                        name: app.localizedName,
-                        bundleIdentifier: app.bundleIdentifier,
-                        bundlePath: app.bundleURL?.path,
-                        executablePath: app.executableURL?.path,
-                        launchDate: app.launchDate,
-                        activationPolicy: policy,
-                        isActive: app.isActive
+            MenuBarPresentationTrace.measure("memory.processes.main") {
+                let workspace = NSWorkspace.shared
+                return Self.indexRunningApplications(
+                    RunningApplicationIdentityCache.identities(
+                        of: workspace.runningApplications,
+                        userFrontmostProcessIdentifier: UserFrontmostApplicationTracker.shared
+                            .userFrontmostProcessIdentifier(
+                                frontmost: workspace.frontmostApplication?.processIdentifier
+                            )
                     )
                 )
-            })
+            }
         }
 
-        var rawPIDs = [pid_t](repeating: 0, count: 16_384)
-        let bytesWritten = rawPIDs.withUnsafeMutableBytes { buffer in
-            proc_listpids(UInt32(PROC_ALL_PIDS), 0, buffer.baseAddress, Int32(buffer.count))
+        return await Self.processesAwaitingDiscovery(physicalBytes: physicalBytes, capturedAt: capturedAt,
+                                                    runningApps: runningApps, processCache: processCache)
+    }
+
+    nonisolated static func processesAwaitingDiscovery(
+        physicalBytes: UInt64,
+        capturedAt: Date,
+        runningApps: [pid_t: RunningAppIdentity],
+        processCache: ProcessSamplingCache,
+        discoveryTimeout: Duration = .milliseconds(250),
+        readUsage: (Int32) -> ProcessUsage? = readProcessUsage,
+        readIdentity: (Int32) -> ProcessIdentity? = readProcessIdentity,
+        currentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
+        currentUser: UInt32 = UInt32(getuid())
+    ) async -> (processes: [MemoryProcess], warnings: [MeasurementWarning]) {
+        guard let pids = await processCache.memoryProcessIDsAwaitingEnergyDiscovery(timeout: discoveryTimeout) else {
+            return Task.isCancelled ? ([], [])
+                : ([], [.metricUnavailable(name: "Processes", reason: "proc_listpids failed.")])
         }
-        guard bytesWritten > 0 else {
+        return processes(physicalBytes: physicalBytes, capturedAt: capturedAt, runningApps: runningApps,
+                         processCache: processCache, readUsage: readUsage, readIdentity: readIdentity,
+                         currentPID: currentPID, currentUser: currentUser, discoveredPIDs: pids)
+    }
+
+    /// The injectable providers keep tests off the actual process table.
+    /// Each PID still gets fresh rusage and BSD identity reads; only its
+    /// validated static path/name can be shared with the CPU/disk frame.
+    nonisolated static func processes(
+        physicalBytes: UInt64,
+        capturedAt: Date,
+        runningApps: [pid_t: RunningAppIdentity],
+        processCache: ProcessSamplingCache,
+        readUsage: (Int32) -> ProcessUsage? = readProcessUsage,
+        readIdentity: (Int32) -> ProcessIdentity? = readProcessIdentity,
+        currentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
+        currentUser: UInt32 = UInt32(getuid()),
+        discoveredPIDs: [Int32]? = nil
+    ) -> (processes: [MemoryProcess], warnings: [MeasurementWarning]) {
+        guard !Task.isCancelled else { return ([], []) }
+        guard let pids = discoveredPIDs ?? processCache.memoryProcessIDs() else {
             return ([], [.metricUnavailable(name: "Processes", reason: "proc_listpids failed.")])
         }
 
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-        let currentUser = getuid()
         var warnings: [MeasurementWarning] = []
-        let count = min(rawPIDs.count, Int(bytesWritten) / MemoryLayout<pid_t>.stride)
         var samples: [MemoryProcess] = []
-        samples.reserveCapacity(min(count, 512))
+        samples.reserveCapacity(min(pids.count, 512))
 
-        for pid in rawPIDs.prefix(count) where pid > 0 {
-            var usage = rusage_info_v4()
-            let usageResult = withUnsafeMutablePointer(to: &usage) { pointer -> Int32 in
-                let buffer = UnsafeMutableRawPointer(pointer)
-                    .assumingMemoryBound(to: rusage_info_t?.self)
-                return proc_pid_rusage(pid, RUSAGE_INFO_V4, buffer)
+        for pid in pids {
+            guard !Task.isCancelled else { return ([], warnings) }
+            guard let usage = readUsage(pid) else {
+                processCache.invalidate(pid: pid)
+                continue
             }
-            guard usageResult == 0 else { continue }
-
-            var bsd = proc_bsdinfo()
-            let bsdSize = Int32(MemoryLayout<proc_bsdinfo>.size)
-            let bsdResult = withUnsafeMutablePointer(to: &bsd) { pointer in
-                proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, pointer, bsdSize)
-            }
-            guard bsdResult == bsdSize else {
+            guard let bsd = readIdentity(pid) else {
+                processCache.invalidate(pid: pid)
                 if warnings.count < 20 {
                     warnings.append(.invalidProcessSample(
                         processIdentifier: pid,
@@ -420,29 +492,23 @@ actor SystemMemoryProbe: MemoryProbing {
                 continue
             }
 
-            var pathBuffer = [CChar](repeating: 0, count: 4_096)
-            let pathLength = pathBuffer.withUnsafeMutableBytes { buffer in
-                proc_pidpath(pid, buffer.baseAddress, UInt32(buffer.count))
+            guard let metadata = processCache.metadata(pid: pid, birth: usage.birth) else { continue }
+            let app = runningApps[pid].flatMap { app -> RunningAppIdentity? in
+                // The main-thread application list predates this dynamic
+                // read. Never attach an old app identity to a reused PID.
+                if let startTime = app.processStartTime { return startTime == bsd.startTime ? app : nil }
+                guard let launchDate = app.launchDate,
+                      abs(launchDate.timeIntervalSince(bsd.launchDate)) < 0.01 else { return nil }
+                return app
             }
-            guard pathLength > 0 else { continue }
-
-            let pathBytes = pathBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
-            let rawExecutablePath = String(decoding: pathBytes, as: UTF8.self)
-            let app = runningApps[pid]
-            let executablePath = app?.executablePath ?? rawExecutablePath
+            let executablePath = app?.executablePath ?? metadata.path
             let bundlePath = app?.bundlePath ?? Self.appBundlePath(containing: executablePath)
-            let name = app?.name
-                ?? URL(fileURLWithPath: bundlePath ?? executablePath)
-                    .deletingPathExtension()
-                    .lastPathComponent
-            let residentBytes = Int64(clamping: usage.ri_phys_footprint)
+            let name = app?.name ?? metadata.fallbackName
+            let residentBytes = Int64(clamping: usage.footprintBytes)
             guard residentBytes > 0 else { continue }
 
-            let launchDate = app?.launchDate ?? Date(
-                timeIntervalSince1970: TimeInterval(bsd.pbi_start_tvsec)
-                    + TimeInterval(bsd.pbi_start_tvusec) / 1_000_000
-            )
-            let userIdentifier = UInt32(bsd.pbi_uid)
+            let launchDate = app?.launchDate ?? bsd.launchDate
+            let userIdentifier = bsd.userIdentifier
             let isUserAppBundle = bundlePath.map { path in
                 path.hasSuffix(".app")
                     && (path.hasPrefix("/Applications/")
@@ -453,7 +519,7 @@ actor SystemMemoryProbe: MemoryProbing {
                 && isUserAppBundle
                 && app?.activationPolicy == .regular
             let percent = physicalBytes > 0
-                ? min(100, Double(usage.ri_phys_footprint) / Double(physicalBytes) * 100)
+                ? min(100, Double(usage.footprintBytes) / Double(physicalBytes) * 100)
                 : 0
 
             samples.append(MemoryProcess(
@@ -481,8 +547,167 @@ actor SystemMemoryProbe: MemoryProbing {
         )
     }
 
+    /// The shared ps inventory is only a one-round hint. Missing, stale or
+    /// incomplete hints use this full native discovery through the cache's
+    /// default provider; a full buffer is grown instead of being truncated.
+    nonisolated static func discoverAllProcessIDs() -> [Int32]? {
+        var capacity = 16_384
+        while capacity <= 1_048_576 {
+            var pids = [Int32](repeating: 0, count: capacity)
+            let bytes = pids.withUnsafeMutableBytes {
+                proc_listpids(UInt32(PROC_ALL_PIDS), 0, $0.baseAddress, Int32($0.count))
+            }
+            guard bytes > 0 else { return nil }
+            let count = Int(bytes) / MemoryLayout<Int32>.stride
+            guard count < capacity else { capacity *= 2; continue }
+            return Array(pids.prefix(count))
+        }
+        return nil
+    }
+
+    nonisolated static func readProcessUsage(_ pid: Int32) -> ProcessUsage? {
+        var usage = rusage_info_v4()
+        let result = withUnsafeMutablePointer(to: &usage) { pointer -> Int32 in
+            let buffer = UnsafeMutableRawPointer(pointer).assumingMemoryBound(to: rusage_info_t?.self)
+            return proc_pid_rusage(pid, RUSAGE_INFO_V4, buffer)
+        }
+        guard result == 0 else { return nil }
+        return ProcessUsage(footprintBytes: usage.ri_phys_footprint, birth: usage.ri_proc_start_abstime)
+    }
+
+    nonisolated static func readProcessIdentity(_ pid: Int32) -> ProcessIdentity? {
+        var bsd = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd, size) == size else { return nil }
+        return ProcessIdentity(startTime: bsd.pbi_start_tvsec &* 1_000_000 &+ bsd.pbi_start_tvusec,
+                               userIdentifier: UInt32(bsd.pbi_uid))
+    }
+
     private static func appBundlePath(containing executablePath: String) -> String? {
         guard let appRange = executablePath.range(of: ".app/") else { return nil }
         return String(executablePath[..<appRange.upperBound].dropLast())
+    }
+}
+
+/// What the memory probe reads from a running application
+/// (`NSRunningApplication`; tests supply their own).
+protocol RunningApplicationIdentitySource: AnyObject {
+    var processIdentifier: pid_t { get }
+    var localizedName: String? { get }
+    var bundleIdentifier: String? { get }
+    var bundleURL: URL? { get }
+    var executableURL: URL? { get }
+    var launchDate: Date? { get }
+    var activationPolicy: NSApplication.ActivationPolicy { get }
+    var isActive: Bool { get }
+}
+
+extension NSRunningApplication: RunningApplicationIdentitySource {}
+
+/// Running applications as the memory probe identifies them. Bundle
+/// identifier, bundle and executable paths and launch date never change for
+/// one process, so they are read once per process: reading them for every
+/// running application on each process-list refresh took most of the
+/// refresh's main-thread time (phase 2 audit, `memory.processes.main`;
+/// offline with 165 applications, 24.9 ms per refresh with them, 10.2 ms
+/// reading only the name, policy, active state and start time).
+///
+/// A process is identified by its process identifier and start time: the
+/// identifier alone can be reused, and the `NSRunningApplication` objects
+/// cannot be compared, because `NSWorkspace.runningApplications` returns new
+/// ones on each run-loop turn (review of phase 2). An application whose start
+/// time cannot be read is read every time and not stored. The
+/// activation policy and active state are read every time. Successful names
+/// are static metadata too; incomplete metadata is retried on the next read.
+@MainActor
+enum RunningApplicationIdentityCache {
+    private struct Entry {
+        let startTime: UInt64
+        let name: String?
+        let bundleIdentifier: String?
+        let bundlePath: String?
+        let executablePath: String?
+        let launchDate: Date?
+    }
+
+    private static var entries: [pid_t: Entry] = [:]
+#if DEBUG
+    /// Tests: applications whose stored entry was used / that were read, in
+    /// the last call.
+    private(set) static var reusedCount = 0
+    private(set) static var readCount = 0
+#endif
+
+    /// The process's start time (microseconds since 1970), or nil when it
+    /// cannot be read, for example because the process has ended.
+    nonisolated static func processStartTime(_ pid: pid_t) -> UInt64? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec
+    }
+
+    /// `userFrontmostProcessIdentifier` is the application the user is
+    /// working in (`UserFrontmostApplicationTracker`); it counts as active.
+    static func identities<Application: RunningApplicationIdentitySource>(
+        of applications: [Application],
+        startTime: (pid_t) -> UInt64? = processStartTime,
+        userFrontmostProcessIdentifier: pid_t? = nil
+    ) -> [(pid_t, SystemMemoryProbe.RunningAppIdentity)] {
+        var current: [pid_t: Entry] = [:]
+#if DEBUG
+        reusedCount = 0
+        readCount = 0
+#endif
+        let identities = applications.map { app -> (pid_t, SystemMemoryProbe.RunningAppIdentity) in
+            let pid = app.processIdentifier
+            let started = startTime(pid).flatMap { $0 > 0 ? $0 : nil }
+            let entry: Entry
+            if let started, let stored = entries[pid], stored.startTime == started {
+                // A nil from Launch Services can be transient. Reuse each
+                // successful field, but retry missing fields after recovery.
+                entry = Entry(startTime: started,
+                              name: stored.name ?? app.localizedName,
+                              bundleIdentifier: stored.bundleIdentifier ?? app.bundleIdentifier,
+                              bundlePath: stored.bundlePath ?? app.bundleURL?.path,
+                              executablePath: stored.executablePath ?? app.executableURL?.path,
+                              launchDate: stored.launchDate ?? app.launchDate)
+#if DEBUG
+                reusedCount += 1
+#endif
+            } else {
+                entry = Entry(startTime: started ?? 0,
+                              name: app.localizedName,
+                              bundleIdentifier: app.bundleIdentifier,
+                              bundlePath: app.bundleURL?.path,
+                              executablePath: app.executableURL?.path,
+                              launchDate: app.launchDate)
+#if DEBUG
+                readCount += 1
+#endif
+            }
+            if started != nil {
+                current[pid] = entry
+            }
+            let policy: MemoryRunningApplicationActivationPolicy
+            switch app.activationPolicy {
+            case .regular: policy = .regular
+            case .accessory: policy = .accessory
+            case .prohibited: policy = .prohibited
+            @unknown default: policy = .prohibited
+            }
+            return (pid, SystemMemoryProbe.RunningAppIdentity(
+                name: entry.name,
+                bundleIdentifier: entry.bundleIdentifier,
+                bundlePath: entry.bundlePath,
+                executablePath: entry.executablePath,
+                launchDate: entry.launchDate,
+                activationPolicy: policy,
+                isActive: app.isActive || pid == userFrontmostProcessIdentifier,
+                processStartTime: started
+            ))
+        }
+        entries = current
+        return identities
     }
 }

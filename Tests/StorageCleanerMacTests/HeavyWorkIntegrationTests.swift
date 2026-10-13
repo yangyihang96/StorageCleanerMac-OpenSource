@@ -37,7 +37,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let mutationCount = InvocationCounter()
         let service = ScanHeavyWorkService(
             coordinator: coordinator,
-            operations: .init(moveToTrash: { _, _ in
+            operations: TestOperationFactory(for: self).scanOperations(moveToTrash: { _, _ in
                 await mutationCount.increment()
                 return []
             })
@@ -67,11 +67,15 @@ final class HeavyWorkIntegrationTests: XCTestCase {
     func testMainScanOwnsLeaseOnlyDuringPhysicalScanAndReleasesBeforeBrowsing() async throws {
         let coordinator = HeavyWorkCoordinator()
         let gate = AsyncValueGate(value: makeScanResult())
-        let store = ScanStore(
+        // r2-live-fixes-2 review P2-1: the completed full-disk scan's
+        // history stays private to the test.
+        let historyDefaults = ScanHistoryTestDefaults.make(for: self)
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
-            scanHeavyWorkOperations: .init(scan: { _, _ in
+            scanHeavyWorkOperations: TestOperationFactory(for: self).scanOperations(scan: { _, _ in
                 await gate.wait()
             }),
+            scanHistoryDefaults: historyDefaults,
             cleanupFeatureConfiguration: .legacy
         )
 
@@ -95,7 +99,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
     func testApplicationInventoryRefreshCannotOverlapOtherHeavyWork() async throws {
         let coordinator = HeavyWorkCoordinator()
         let inventoryScanner = CountingApplicationInventoryScanner(applications: [])
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
             applicationInventoryScanner: inventoryScanner
         )
@@ -120,13 +124,17 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let coordinator = HeavyWorkCoordinator()
         let gate = AsyncValueGate(value: [TrashMoveRecord]())
         let item = makeStorageItem()
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
-            scanHeavyWorkOperations: .init(moveToTrash: { _, _ in
+            scanHeavyWorkOperations: TestOperationFactory(for: self).scanOperations(moveToTrash: { _, _ in
                 await gate.wait()
             }),
             cleanupFeatureConfiguration: .legacy
         )
+        addTeardownBlock { @MainActor [weak store] in
+            await gate.open()
+            await store?.waitForOperationReportTasksForTesting(cancelPending: true)
+        }
         store.result = makeScanResult(items: [item])
 
         store.requestTrash(item)
@@ -155,9 +163,9 @@ final class HeavyWorkIntegrationTests: XCTestCase {
     func testBusyBenchmarkBlocksMemoryOptimizationWithoutInvokingService() async throws {
         let coordinator = HeavyWorkCoordinator()
         let optimizationCount = InvocationCounter()
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
-            scanHeavyWorkOperations: .init(optimizeMemory: {
+            scanHeavyWorkOperations: TestOperationFactory(for: self).scanOperations(optimizeMemory: {
                 await optimizationCount.increment()
                 return makeMemoryOptimizationResult()
             })
@@ -197,10 +205,11 @@ final class HeavyWorkIntegrationTests: XCTestCase {
                 gate: updateGate
             )
         )
-        let store = ScanStore(
+        let isolatedJournal = TestFileSystem.uniqueOperationRoot("StorageCleanerHeavyWorkJournal")
+        TestFileSystem.registerCleanup(of: isolatedJournal, for: self)
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
-            scanHeavyWorkOperations: .init(
-                duplicateScan: { await duplicateGate.wait() },
+            scanHeavyWorkOperations: TestOperationFactory(for: self).scanOperations(
                 emptyTrash: { await emptyTrashGate.wait() },
                 restoreFromTrash: { _ in await restoreGate.wait() }
             ),
@@ -222,8 +231,18 @@ final class HeavyWorkIntegrationTests: XCTestCase {
             },
             applicationInventoryScanner: inventoryScanner,
             applicationUpdateCoordinator: applicationUpdateCoordinator,
-            cleanupFeatureConfiguration: .legacy
+            cleanupFeatureConfiguration: .legacy,
+            // The legacy restore consults the receipt journal; never the user's real one.
+            operationJournal: CleanupReportJournal(directory: isolatedJournal)
         )
+
+        addTeardownBlock { @MainActor [weak store] in
+            await duplicateGate.open()
+            await emptyTrashGate.open()
+            await restoreGate.open()
+            await updateGate.open()
+            await store?.waitForOperationReportTasksForTesting(cancelPending: true)
+        }
 
         store.scanDuplicateFiles()
         await duplicateGate.waitUntilStarted()
@@ -267,6 +286,8 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         XCTAssertEqual(restoreOwner, .restore)
         await restoreGate.open()
         await waitUntil { !store.isRestoringCleanup }
+        await store.waitForOperationReportTasksForTesting()
+        XCTAssertFalse(store.isLoadingOperationReports)
         let ownerAfterRestore = await coordinator.activeOwner
         XCTAssertNil(ownerAfterRestore)
 
@@ -292,7 +313,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testStaleAutomaticAppStoreFlagsStillRequireSystemConfirmation() async throws {
+    func testVerifiedAutomaticAppStoreJoinsUnifiedBatch() async throws {
         var app = AppUpdateTestFixtures.application(
             id: "app-store-automatic",
             name: "App Store Automatic",
@@ -313,12 +334,12 @@ final class HeavyWorkIntegrationTests: XCTestCase {
             requiresUserInteraction: false
         )
         app.appStoreProductURL = URL(string: "https://apps.apple.com/app/id123456789")
-        XCTAssertEqual(ApplicationUpdatePlanBuilder.destination(for: app), .appStore)
-        XCTAssertFalse(ApplicationUpdatePlanBuilder.isEligibleForAutomaticUpdate(app))
+        XCTAssertEqual(ApplicationUpdatePlanBuilder.destination(for: app), .automatic)
+        XCTAssertTrue(ApplicationUpdatePlanBuilder.isEligibleForAutomaticUpdate(app))
 
         let plan = ApplicationUpdatePlanBuilder().build(applications: [app])
-        XCTAssertTrue(plan.automaticApplicationIDs.isEmpty)
-        XCTAssertEqual(plan.appStoreApplicationIDs, [app.id])
+        XCTAssertEqual(plan.automaticApplicationIDs, [app.id])
+        XCTAssertTrue(plan.appStoreApplicationIDs.isEmpty)
     }
 
     @MainActor
@@ -348,7 +369,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
             executor: executor
         )
         let inventoryScanner = CountingApplicationInventoryScanner(applications: [success, failure])
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: inventoryScanner,
             applicationUpdateCoordinator: applicationUpdateCoordinator
         )
@@ -381,11 +402,10 @@ final class HeavyWorkIntegrationTests: XCTestCase {
 
     @MainActor
     func testExecutionTimeQuitResumesExactBatchItemAndScansInventoryOnceAfterCompletion() async throws {
-        var preferences = ApplicationUpdatePreferences.snapshot()
-        let originalPreferences = preferences
+        let defaults = TestPreferenceDomain.make(for: self)
+        var preferences = ApplicationUpdatePreferences.snapshot(defaults: defaults)
         preferences.updatesAfterApplicationQuits = true
-        ApplicationUpdatePreferences.set(preferences)
-        defer { ApplicationUpdatePreferences.set(originalPreferences) }
+        ApplicationUpdatePreferences.set(preferences, defaults: defaults)
 
         let application = AppUpdateTestFixtures.strictHomebrewApplication(
             id: "/tmp/ExecutionTimeRunning.app",
@@ -398,7 +418,8 @@ final class HeavyWorkIntegrationTests: XCTestCase {
             executor: executor
         )
         let inventoryScanner = CountingApplicationInventoryScanner(applications: [application])
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
+            preferences: defaults,
             applicationInventoryScanner: inventoryScanner,
             applicationUpdateCoordinator: coordinator
         )
@@ -443,13 +464,17 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let gate = AsyncValueGate(value: [TrashMoveRecord]())
         let item = makeStorageItem(id: "bulk-selected")
         let excludedItem = makeStorageItem(id: "bulk-excluded")
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
-            scanHeavyWorkOperations: .init(moveToTrash: { _, _ in
+            scanHeavyWorkOperations: TestOperationFactory(for: self).scanOperations(moveToTrash: { _, _ in
                 await gate.wait()
             }),
             cleanupFeatureConfiguration: .legacy
         )
+        addTeardownBlock { @MainActor [weak store] in
+            await gate.open()
+            await store?.waitForOperationReportTasksForTesting(cancelPending: true)
+        }
         store.result = makeScanResult(items: [item, excludedItem])
         store.requestTrashAllGreen()
 
@@ -500,7 +525,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
                 gate: updateGate
             )
         )
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
             applicationInventoryScanner: inventoryScanner,
             applicationUpdateCoordinator: applicationUpdateCoordinator
@@ -543,7 +568,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let executor = RecordingApplicationUpdateExecutor()
         let coordinator = ApplicationUpdateCoordinator(repository: repository, executor: executor)
         let inventoryScanner = CountingApplicationInventoryScanner(applications: [application])
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: inventoryScanner,
             applicationUpdateCoordinator: coordinator
         )
@@ -573,7 +598,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let executor = CancellableApplicationUpdateExecutor()
         let coordinator = ApplicationUpdateCoordinator(repository: repository, executor: executor)
         let inventoryScanner = CountingApplicationInventoryScanner(applications: [application])
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             applicationInventoryScanner: inventoryScanner,
             applicationUpdateCoordinator: coordinator
         )
@@ -611,7 +636,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
 
         let service = ScanHeavyWorkService(
             coordinator: coordinator,
-            operations: .init(
+            operations: TestOperationFactory(for: self).scanOperations(
                 runHomebrewUpgrade: { _ in
                     throw ScanHeavyWorkCleanupPendingError(reaper: reaper)
                 }

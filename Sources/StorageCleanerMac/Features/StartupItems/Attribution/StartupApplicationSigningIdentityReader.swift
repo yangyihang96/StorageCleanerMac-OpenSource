@@ -70,10 +70,21 @@ actor StartupApplicationSigningIdentityReader: StartupApplicationSigningIdentity
 
         let identity: StartupApplicationSigningIdentity?
         do {
+            // Identity of an installed app (startup attribution, browser
+            // privacy), never approval to install code (D42, confirmed
+            // 2026-10-07). codesign's default verification still checks the
+            // signature, every sealed file, nested code seals and the main
+            // executable's structure, and the explicit requirement admits
+            // only Apple-issued certificate chains, so a self-made
+            // certificate cannot claim a Team ID.
+            // `--strict` is not used: its sideband check rejects Finder
+            // information that updaters leave on intact, signed bundles
+            // (Google Chrome, live test 2026-10-06), and its symlink check
+            // rejects some of Apple's own apps.
             let verification = try await runner.run(
                 executableURL: Self.codesignURL,
                 arguments: [
-                    "--verify", "--strict", "--verbose=1", key.bundlePath,
+                    "--verify", "--verbose=1", "-R", "=anchor apple generic", key.bundlePath,
                 ],
                 timeout: timeout
             )

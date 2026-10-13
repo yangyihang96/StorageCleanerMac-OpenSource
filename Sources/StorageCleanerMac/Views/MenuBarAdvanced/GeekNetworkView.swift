@@ -28,10 +28,11 @@ extension MenuBarAdvancedStatusView {
             geekNetworkTrendCard
         } detail: {
             GeekNetworkHistoryHoverDetail(
-                points: geekChartHistory,
-                duration: geekChartDuration,
+                points: networkChartHistory,
+                duration: networkChartRange.duration,
                 uploadValue: networkUpText,
-                downloadValue: networkDownText
+                downloadValue: networkDownText,
+                isUpdating: networkDisplayedHistory.isUpdating
             )
         }
     }
@@ -40,12 +41,12 @@ extension MenuBarAdvancedStatusView {
         GeekCombinedCard(height: 150) {
             VStack(spacing: 3) {
                 HStack(spacing: 12) {
-                    GeekLiveNetworkValue(
+                    GeekSecondaryTransferValue(
                         title: L10n.text("上传", "Upload"),
                         value: networkUpText,
                         tint: resolvedUploadTint
                     )
-                    GeekLiveNetworkValue(
+                    GeekSecondaryTransferValue(
                         title: L10n.text("下载", "Download"),
                         value: networkDownText,
                         tint: resolvedDownloadTint
@@ -53,19 +54,19 @@ extension MenuBarAdvancedStatusView {
                 }
 
                 GeekPrecisionNetworkChart(
-                    points: geekChartHistory,
+                    points: networkChartHistory,
                     accessibilityLabel: L10n.text(
-                        "最近 \(geekChartRangeTitle) 的网络上传与下载趋势",
-                        "Network upload and download trends over the last \(geekChartRangeTitle)"
+                        "最近 \(networkChartRange.title) 的网络上传与下载趋势",
+                        "Network upload and download trends over the last \(networkChartRange.title)"
                     ),
-                    duration: geekChartDuration,
+                    duration: networkChartRange.duration,
                     showsLegend: false,
                     showsTimelineLabels: false,
                     horizontalInset: 0
                 )
                 .frame(height: 72)
 
-                HStack(spacing: 10) {
+                HStack(spacing: MiniWindowStyleTokens.columnSpacing) {
                     GeekNetworkPeakAndTotalValue(
                         direction: "↑",
                         peak: rateText(geekNetworkUpPeak),
@@ -92,14 +93,9 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekNetworkPublicAddress: some View {
-        GeekNetworkAddressCard(
-            title: L10n.text("公共 IP 地址", "Public IP Addresses"),
-            ipv4Address: publicNetworkAddressSnapshot?.ipv4Address,
-            ipv6Address: publicNetworkAddressSnapshot?.ipv6Address,
-            ipv4CountryCode: publicNetworkAddressSnapshot?.ipv4CountryCode,
-            ipv6CountryCode: publicNetworkAddressSnapshot?.ipv6CountryCode,
-            isLoading: !store.isMenuBarRefreshPaused && isRefreshingPublicNetworkAddress,
-            unavailableText: L10n.text("暂不可用", "Unavailable")
+        GeekPublicNetworkAddressCard(
+            snapshot: publicNetworkAddressSnapshot,
+            isLoading: !store.isMenuBarRefreshPaused && isRefreshingPublicNetworkAddress
         )
         .accessibilityHint(L10n.text(
             "极客概览显示网络模块时预取公网地址，成功结果缓存 15 分钟。",
@@ -149,8 +145,8 @@ extension MenuBarAdvancedStatusView {
 
     private var geekNetworkProcessCard: some View {
         GeekCombinedCard(height: geekNetworkProcessCardHeight) {
-            VStack(spacing: 1) {
-                GeekNetworkProcessHeader()
+            VStack(spacing: GeekSecondaryTransferLayout.processSpacing) {
+                GeekNetworkProcessHeader(status: geekNetworkProcessSampleTimeText)
                 geekNetworkProcessRows
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -159,8 +155,7 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekNetworkProcessCardHeight: CGFloat {
-        guard !displayedNetworkProcesses.isEmpty else { return 43 }
-        return showsExtendedGeekDetails ? 92 : 60
+        GeekSecondaryTransferLayout.processCardHeight(rowCount: displayedNetworkProcesses.count)
     }
 
     @ViewBuilder
@@ -170,7 +165,7 @@ extension MenuBarAdvancedStatusView {
                 GeekNetworkProcessRow(process: process)
             }
         } else {
-            HStack(spacing: 5) {
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                 if !store.isMenuBarRefreshPaused && (networkProcessSamplingState == .sampling
                     || networkProcessSamplingState == .idle) {
                     ProgressView()
@@ -190,6 +185,14 @@ extension MenuBarAdvancedStatusView {
         guard let snapshot = networkProcessSnapshot else { return [] }
         let limit = showsExtendedGeekDetails ? 4 : 2
         return Array(snapshot.processes.prefix(limit))
+    }
+
+    /// BOARD N16-2: the shown processes' sample time, as on the CPU page. A
+    /// measurement kept from before the panel was hidden is shown at once
+    /// with its time until the next one replaces it.
+    private var geekNetworkProcessSampleTimeText: String? {
+        guard let snapshot = networkProcessSnapshot else { return nil }
+        return GeekOnDemandSnapshotFreshness.statusText(generatedAt: snapshot.generatedAt)
     }
 
     private var geekNetworkProcessStatusText: String {
@@ -307,36 +310,32 @@ extension MenuBarAdvancedStatusView {
 }
 
 private struct GeekNetworkProcessHeader: View {
+    @Environment(\.panelMetricColors) private var metricColors
+    var status: String? = nil
     var body: some View {
-        HStack(spacing: 4) {
-            Text(L10n.text("进程", "Processes"))
-                .foregroundStyle(.secondary)
-
-            Spacer(minLength: 4)
-
-            Text("↑")
-                .foregroundStyle(MenuBarNetworkPalette.upload)
-                .frame(width: 48, alignment: .trailing)
-                .accessibilityLabel(L10n.text("上传速率", "Upload rate"))
-
-            Text("↓")
-                .foregroundStyle(MenuBarNetworkPalette.download)
-                .frame(width: 48, alignment: .trailing)
-                .accessibilityLabel(L10n.text("下载速率", "Download rate"))
-        }
-        .font(AdvancedPanelTypography.captionStrong)
-        .frame(height: 14)
+        GeekProcessListHeader(
+            title: L10n.text("进程", "PROCESSES"),
+            status: status,
+            columns: [
+                // The same words as the page's legends (上传 / 下载, Upload / Download).
+                GeekProcessListColumn(id: "upload", title: L10n.text("上传", "Upload"),
+                                      tint: metricColors.networkUpload,
+                                      accessibilityLabel: L10n.text("上传速率", "Upload rate")),
+                GeekProcessListColumn(id: "download", title: L10n.text("下载", "Download"),
+                                      tint: metricColors.networkDownload,
+                                      accessibilityLabel: L10n.text("下载速率", "Download rate")),
+            ]
+        )
+        .frame(height: GeekSecondaryTransferLayout.processRowHeight)
     }
 }
 
-private struct GeekNetworkProcessRow: View {
+struct GeekNetworkProcessRow: View {
     let process: NativeNetworkProcessTransfer
 
     var body: some View {
-        HStack(spacing: 5) {
-            AdvancedAppIcon(path: process.iconPath, fallback: "app.fill")
-                .scaleEffect(0.67)
-                .frame(width: 16, height: 16)
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+            GeekSecondaryProcessIcon(path: process.iconPath, fallback: AppSymbols.Monitor.network)
 
             Text(process.name)
                 .font(AdvancedPanelTypography.body)
@@ -344,15 +343,25 @@ private struct GeekNetworkProcessRow: View {
 
             Spacer(minLength: 3)
 
-            Text(ByteFormat.string(process.uploadBytesPerSecond))
-                .frame(width: 48, alignment: .trailing)
+            GeekSecondaryTransferReadout(
+                value: GeekSecondaryTransferLayout.processByteString(process.uploadBytesPerSecond),
+                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
+                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
+                minimumScale: GeekSecondaryTransferLayout.processMinimumScale
+            )
+            .frame(width: GeekSecondaryTransferLayout.processValueColumnWidth, alignment: .trailing)
 
-            Text(ByteFormat.string(process.downloadBytesPerSecond))
-                .frame(width: 48, alignment: .trailing)
+            GeekSecondaryTransferReadout(
+                value: GeekSecondaryTransferLayout.processByteString(process.downloadBytesPerSecond),
+                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
+                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
+                minimumScale: GeekSecondaryTransferLayout.processMinimumScale
+            )
+            .frame(width: GeekSecondaryTransferLayout.processValueColumnWidth, alignment: .trailing)
         }
         .font(AdvancedPanelTypography.body)
         .monospacedDigit()
-        .frame(height: 16)
+        .frame(height: GeekSecondaryTransferLayout.processRowHeight)
         .help(L10n.text(
             "\(process.name)：上传 \(ByteFormat.string(process.uploadBytesPerSecond))/s，下载 \(ByteFormat.string(process.downloadBytesPerSecond))/s",
             "\(process.name): upload \(ByteFormat.string(process.uploadBytesPerSecond))/s, download \(ByteFormat.string(process.downloadBytesPerSecond))/s"
@@ -377,10 +386,16 @@ private struct GeekNetworkPeakAndTotalValue: View {
         HStack(spacing: 3) {
             Text(direction)
                 .foregroundStyle(color)
-            Text(peak)
+            GeekSecondaryTransferReadout(value: peak,
+                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
+                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
+                minimumScale: GeekSecondaryTransferLayout.processMinimumScale)
             Text("·")
                 .foregroundStyle(.tertiary)
-            Text(total)
+            GeekSecondaryTransferReadout(value: total,
+                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
+                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
+                minimumScale: GeekSecondaryTransferLayout.processMinimumScale)
         }
         .font(AdvancedPanelTypography.body)
         .monospacedDigit()
@@ -388,6 +403,28 @@ private struct GeekNetworkPeakAndTotalValue: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+/// Missing preferences use the shared default; an explicitly saved false
+/// remains switched off rather than being presented as a failed request.
+private struct GeekPublicNetworkAddressCard: View {
+    @AppStorage(PublicNetworkConsent.addressKey) private var isLookupAllowed = PublicNetworkConsent.defaultAllowsAddress
+    let snapshot: PublicNetworkAddressSnapshot?
+    let isLoading: Bool
+
+    var body: some View {
+        GeekNetworkAddressCard(
+            title: L10n.text("公共 IP 地址", "Public IP Addresses"),
+            ipv4Address: snapshot?.ipv4Address,
+            ipv6Address: snapshot?.ipv6Address,
+            ipv4CountryCode: snapshot?.ipv4CountryCode,
+            ipv6CountryCode: snapshot?.ipv6CountryCode,
+            isLoading: isLookupAllowed && isLoading,
+            unavailableText: isLookupAllowed
+                ? L10n.text("暂不可用", "Unavailable")
+                : L10n.text("未开启 · 设置 › 权限", "Off · Settings › Access")
+        )
     }
 }
 
@@ -407,10 +444,7 @@ private struct GeekNetworkAddressCard: View {
     var body: some View {
         GeekCombinedCard(height: showsIPv6 ? 59 : 41) {
             VStack(alignment: .leading, spacing: 0) {
-                Text(title)
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .foregroundStyle(Color.accentColor)
-                    .lineLimit(1)
+                GeekSectionTitle(title: title)
 
                 GeekNetworkAddressLine(
                     version: "IPv4",
@@ -468,11 +502,7 @@ private struct GeekNetworkTopologyRow: View {
     var body: some View {
         GeekCombinedCard(height: 39) {
             HStack(spacing: 6) {
-                Image(systemName: symbol)
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .foregroundStyle(tint)
-                    .frame(width: 15)
-                    .accessibilityHidden(true)
+                GeekModuleIcon(systemImage: symbol, tint: tint)
 
                 Text(title)
                     .font(AdvancedPanelTypography.captionStrong)
@@ -487,10 +517,7 @@ private struct GeekNetworkTopologyRow: View {
                     .truncationMode(.middle)
 
                 if showsDisclosure {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityHidden(true)
+                    GeekDisclosureIcon()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -565,7 +592,7 @@ struct GeekVPNHoverDetail: View {
     static func preferredSize(for tunnel: VPNTunnelSnapshot) -> CGSize {
         let detailRows = tunnelDetailRowCount(for: tunnel)
         let tunnelCardHeight = max(56, CGFloat(detailRows + 1) * 15 + 12)
-        let managementCardHeight: CGFloat = 64
+        let managementCardHeight = managementCardHeight(for: tunnel)
         let contentHeight = 46 + tunnelCardHeight + managementCardHeight
         let spacing = GeekPanelLayout.detailSpacing * 2
         let padding = GeekPanelLayout.contentPadding * 2
@@ -606,12 +633,7 @@ struct GeekVPNHoverDetail: View {
 
     private var statusCard: some View {
         GeekCombinedCard(height: 46) {
-            HStack(spacing: 7) {
-                Image(systemName: "lock.shield")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(vpnStatusTint(tunnel.status))
-                    .accessibilityHidden(true)
-
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(tunnel.displayName)
                         .font(AdvancedPanelTypography.captionStrong)
@@ -712,51 +734,68 @@ struct GeekVPNHoverDetail: View {
             .filter { !$0.isEmpty }
     }
 
+    /// U1 085: room for two lines of description and the 30 pt action button
+    /// when the tunnel may offer an action. Reads the tunnel only, so sizing
+    /// the row's popover never runs the SystemConfiguration preflight.
+    static func managementCardHeight(for tunnel: VPNTunnelSnapshot) -> CGFloat {
+        reservesActionButton(for: tunnel) ? 76 : 64
+    }
+
+    /// Every capability with an action needs a service identity or a provider
+    /// app (`VPNControlCapabilityResolver`); a tunnel with neither is read-only.
+    static func reservesActionButton(for tunnel: VPNTunnelSnapshot) -> Bool {
+        guard tunnel.status != .invalid else { return false }
+        let serviceID = tunnel.serviceID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !serviceID.isEmpty || tunnel.providerApplicationURL != nil
+    }
+
     private var managementCard: some View {
-        GeekCombinedCard(height: 64) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(managementDescription)
+        GeekCombinedCard(height: Self.managementCardHeight(for: tunnel)) {
+            VStack(alignment: .leading, spacing: 6) {
+                // After a request its result replaces the description, so the
+                // card keeps its height.
+                Text(actionMessage ?? managementDescription)
                     .font(AdvancedPanelTypography.body)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+#if DEBUG
+                    .layoutProbe("vpn.management.description")
+#endif
 
-                if let actionTitle = actionTitle {
-                    HStack(spacing: 6) {
-                        Button(actionTitle) {
-                            requestAction()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(isPerformingAction || !preflight.canExecute)
-
-                        if isPerformingAction {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .accessibilityLabel(L10n.text("正在请求 VPN 操作", "Requesting VPN action"))
-                        }
-                    }
-                }
-
-                if let actionMessage {
-                    Text(actionMessage)
-                        .font(AdvancedPanelTypography.body)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                if let action = Self.actionPresentation(for: preflight) {
+                    GeekVPNManagementActionButton(
+                        title: action.title,
+                        isDestructive: action.isDestructive,
+                        isBusy: isPerformingAction,
+                        action: requestAction
+                    )
+                    .disabled(isPerformingAction || !preflight.canExecute)
+#if DEBUG
+                    .layoutProbe("vpn.management.action")
+#endif
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // Review P2-5: centred vertically, so a one-line description leaves
+            // the same space above the text as below the button.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
+#if DEBUG
+        .layoutProbe("vpn.management.card")
+#endif
     }
 
-    private var actionTitle: String? {
+    /// The management action, if any. Only the macOS disconnect request is
+    /// destructive (U1 085); opening the provider app or System Settings is not.
+    static func actionPresentation(for preflight: VPNControlPreflight) -> GeekVPNManagementAction? {
         guard preflight.canExecute else { return nil }
         switch preflight.capability {
         case .systemConfigurationConnection:
-            return L10n.text("断开连接", "Disconnect")
+            return GeekVPNManagementAction(title: L10n.text("断开连接", "Disconnect"), isDestructive: true)
         case .openProviderApplication:
-            return L10n.text("打开 VPN 应用", "Open VPN App")
+            return GeekVPNManagementAction(title: L10n.text("打开 VPN 应用", "Open VPN App"), isDestructive: false)
         case .openSystemSettingsOnly:
-            return L10n.text("打开系统设置", "Open System Settings")
+            return GeekVPNManagementAction(title: L10n.text("打开系统设置", "Open System Settings"), isDestructive: false)
         case .ownedNEVPNConnection, .readOnly, .unsupported:
             return nil
         }
@@ -843,6 +882,58 @@ struct GeekVPNHoverDetail: View {
     }
 }
 
+struct GeekVPNManagementAction: Equatable {
+    let title: String
+    let isDestructive: Bool
+}
+
+/// U1 085 (concept 085): the VPN detail's management action is a full-width,
+/// 30 pt tall button instead of a small bordered text button. The macOS
+/// disconnect request uses the destructive red outline; it still asks for
+/// confirmation first (`GeekVPNHoverDetail.requestAction`).
+struct GeekVPNManagementActionButton: View {
+    static let height: CGFloat = 30
+
+    let title: String
+    let isDestructive: Bool
+    let isBusy: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(role: isDestructive ? .destructive : nil, action: action) {
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityLabel(L10n.text("正在请求 VPN 操作", "Requesting VPN action"))
+                }
+                Text(title)
+                    .font(AdvancedPanelTypography.captionStrong)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(tint)
+            .frame(maxWidth: .infinity, minHeight: Self.height)
+            .background(
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
+                    .fill(tint.opacity(isHovered ? 0.16 : 0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
+                    .strokeBorder(tint.opacity(0.85), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous))
+        }
+        .buttonStyle(ResponsivePlainButtonStyle())
+        .onHover { isHovered = $0 }
+        .accessibilityLabel(Text(title))
+    }
+
+    private var tint: Color {
+        isDestructive ? AppDesignTokens.Palette.destructive : AppDesignTokens.Palette.information
+    }
+}
+
 private func vpnStatusText(_ status: VPNStatus) -> String {
     switch status {
     case .connecting:
@@ -874,6 +965,7 @@ private func vpnStatusTint(_ status: VPNStatus) -> Color {
 }
 
 struct GeekNetworkTertiaryView: View {
+    @Environment(\.miniWindowPageProvidesInset) private var pageProvidesInset
     static let referenceSize = CGSize(width: 255, height: 419)
 
     let snapshot: NativeNetworkInterfaceSnapshot?
@@ -911,9 +1003,9 @@ struct GeekNetworkTertiaryView: View {
                 ipv4Card
                 ipv6Card
             }
-            .padding(contentPadding)
+            .padding(pageProvidesInset ? 0 : contentPadding)
         }
-        .frame(width: Self.referenceSize.width, alignment: .top)
+        .frame(width: pageProvidesInset ? nil : Self.referenceSize.width, alignment: .top)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .contain)
         .onAppear {
@@ -955,7 +1047,7 @@ struct GeekNetworkTertiaryView: View {
     }
 
     private var hardwareAddressLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
+        HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
             Text(L10n.text("MAC 地址", "MAC Address"))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -1264,12 +1356,8 @@ private struct GeekNetworkTertiaryHeader: View {
     let title: String
 
     var body: some View {
-        Text(title)
-            .font(AdvancedPanelTypography.captionStrong)
-            .foregroundStyle(Color.accentColor)
-            .lineLimit(1)
+        GeekSectionTitle(title: title)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityAddTraits(.isHeader)
     }
 }
 

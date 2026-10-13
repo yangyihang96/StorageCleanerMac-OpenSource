@@ -6,6 +6,8 @@ actor MenuBarProcessSampler {
     private var previous: Frame?
     private var isReading = false
     private var generation = 0
+    /// A read gave nothing since the last baseline (reader unavailable).
+    private var missedRead = false
 
     init(read: @escaping @Sendable () async -> Frame? = { await EnergyImpactService.menuBarCounterFrame() }) {
         self.read = read
@@ -16,17 +18,46 @@ actor MenuBarProcessSampler {
         isReading = true
         let capturedGeneration = generation
         defer { isReading = false }
-        guard let current = await read(), !Task.isCancelled,
-              generation == capturedGeneration else { return nil }
+        let read = read
+        guard let current = await MenuBarPresentationTrace.measureAsyncSample("process.ps-libproc", operation: read) else {
+            if !Task.isCancelled, generation == capturedGeneration { missedRead = true }
+            return nil
+        }
+        guard !Task.isCancelled, generation == capturedGeneration else { return nil }
+        guard Self.fitsCache(current) else { missedRead = true; return nil }
         let before = previous
         previous = current
-        guard let before else { return nil }
+        guard let before else {
+            // D71④ reads every 10 s; after a reader that gave nothing
+            // recovers, take its first delta after the short N16-2 interval
+            // instead of waiting a second full cadence with nothing shown.
+            guard missedRead else { return nil }
+            missedRead = false
+            try? await Task.sleep(for: .seconds(MenuBarPerformancePolicy.firstProcessSampleInterval))
+            guard !Task.isCancelled, generation == capturedGeneration,
+                  let next = await MenuBarPresentationTrace.measureAsyncSample("process.ps-libproc", operation: read),
+                  !Task.isCancelled, generation == capturedGeneration,
+                  Self.fitsCache(next) else { return nil }
+            previous = next
+            return EnergyImpactService.menuBarSnapshot(previous: current, current: next)
+        }
+        missedRead = false
         return EnergyImpactService.menuBarSnapshot(previous: before, current: current)
+    }
+
+    static func fitsCache(_ frame: Frame) -> Bool {
+        guard frame.rows.count <= MenuBarPerformancePolicy.processCacheRowLimit,
+              frame.counters.count <= MenuBarPerformancePolicy.processCacheRowLimit else { return false }
+        let bytes = frame.rows.reduce(frame.counters.count * 256) { bytes, row in
+            bytes + 512 + 2 * (row.path.utf8.count)
+        }
+        return MenuBarProcessCacheBudget.fits(rowCount: frame.rows.count, estimatedBytes: bytes)
     }
 
     func reset() {
         generation &+= 1
         previous = nil
+        missedRead = false
     }
 }
 
@@ -36,22 +67,42 @@ struct MenuBarPreparedProcesses: Sendable {
     let cpu: [EnergyImpactApp]
     let disk: [EnergyImpactApp]
 
-    init(snapshot: EnergyImpactSnapshot) {
+    static func fitsCache(_ snapshot: EnergyImpactSnapshot) -> Bool {
+        guard snapshot.apps.count <= MenuBarPerformancePolicy.processCacheRowLimit else { return false }
+        let bytes = snapshot.apps.reduce(0) { bytes, app in
+            bytes + 1_024 + 2 * (app.id.utf8.count + app.name.utf8.count + app.path.utf8.count
+                + app.iconPath.utf8.count + (app.bundlePath?.utf8.count ?? 0)
+                + (app.bundleIdentifier?.utf8.count ?? 0)) + app.processIDs.count * 8
+        }
+        return MenuBarProcessCacheBudget.fits(rowCount: snapshot.apps.count, estimatedBytes: bytes)
+    }
+
+    /// D79: one sampled inventory, independent candidate sets; no provider reads.
+    init(snapshot: EnergyImpactSnapshot, limit: Int = 5) {
         self.snapshot = snapshot
-        energy = Array(snapshot.apps.filter { $0.isApplication && $0.isSignificantCurrentEnergy }
-            .sorted {
-                if $0.currentPowerWatts != $1.currentPowerWatts { return $0.currentPowerWatts > $1.currentPowerWatts }
-                return $0.cpuPercent > $1.cpuPercent
-            }.prefix(5))
-        cpu = energy.sorted {
-            if $0.cpuPercent != $1.cpuPercent { return $0.cpuPercent > $1.cpuPercent }
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
-        disk = energy.sorted {
-            let lhs = Double($0.diskReadBytesPerSecond) + Double($0.diskWriteBytesPerSecond)
-            let rhs = Double($1.diskReadBytesPerSecond) + Double($1.diskWriteBytesPerSecond)
+        let apps = snapshot.apps.filter(\.isApplication)
+        let count = max(0, limit)
+        energy = Self.top(apps.filter { $0.isSignificantCurrentEnergy && $0.currentPowerWatts.isFinite },
+                          count: count, metric: { $0.currentPowerWatts })
+        cpu = Self.top(apps.filter { $0.cpuPercent.isFinite && $0.cpuPercent > 0 },
+                       count: count, metric: { $0.cpuPercent })
+        disk = Self.top(apps.filter { Self.diskRate($0) > 0 }, count: count, metric: Self.diskRate)
+    }
+
+    private static func diskRate(_ app: EnergyImpactApp) -> Double {
+        Double(max(0, app.diskReadBytesPerSecond)) + Double(max(0, app.diskWriteBytesPerSecond))
+    }
+
+    private static func top(_ apps: [EnergyImpactApp], count: Int,
+                            metric: (EnergyImpactApp) -> Double) -> [EnergyImpactApp] {
+        Array(apps.sorted {
+            let lhs = metric($0), rhs = metric($1)
             if lhs != rhs { return lhs > rhs }
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
+            if $0.name != $1.name { return $0.name.compare($1.name, options: .literal) == .orderedAscending }
+            let lhsPID = $0.processIDs.min() ?? Int32.max
+            let rhsPID = $1.processIDs.min() ?? Int32.max
+            if lhsPID != rhsPID { return lhsPID < rhsPID }
+            return $0.id < $1.id
+        }.prefix(count))
     }
 }

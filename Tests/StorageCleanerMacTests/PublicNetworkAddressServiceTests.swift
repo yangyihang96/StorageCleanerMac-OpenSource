@@ -5,7 +5,7 @@ import XCTest
 final class PublicNetworkAddressServiceTests: XCTestCase {
     @MainActor
     func testDefaultsNotificationFromBackgroundDoesNotAssertMainActorIsolation() async {
-        let state = MenuBarAuxiliaryMonitorState(publicNetworkConsentProvider: { false })
+        let state = MenuBarAuxiliaryMonitorState(publicNetworkConsentProvider: { false }, powerHistoryURL: nil)
         await Task.detached {
             NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: nil)
         }.value
@@ -106,6 +106,106 @@ final class PublicNetworkAddressServiceTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertTrue(condition())
+    }
+
+    @MainActor
+    func testSuccessUsesFifteenMinuteCacheAndFailureRetriesAfterSixtySeconds() {
+        let at = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        func shouldRefresh(_ seconds: TimeInterval, hasAddress: Bool) -> Bool {
+            MenuBarAuxiliaryMonitorState.shouldRefreshPublicNetworkAddress(force: false,
+                networkSignature: "same", previousNetworkSignature: "same", lastAttemptAt: at,
+                hasPublicAddress: hasAddress, now: at.addingTimeInterval(seconds))
+        }
+        XCTAssertFalse(shouldRefresh(899.99, hasAddress: true))
+        XCTAssertTrue(shouldRefresh(900, hasAddress: true))
+        XCTAssertFalse(shouldRefresh(59.99, hasAddress: false))
+        XCTAssertTrue(shouldRefresh(60, hasAddress: false))
+        XCTAssertTrue(MenuBarAuxiliaryMonitorState.shouldRefreshPublicNetworkAddress(force: false,
+            networkSignature: "new", previousNetworkSignature: "old", lastAttemptAt: at,
+            hasPublicAddress: true, now: at))
+    }
+
+    @MainActor
+    func testDefaultEnabledResidentTicksRequestOnlyForVisibleNetworkPanelAndKeepCacheOnReopen() async {
+        let fixture = TestPreferenceDomain.make(file: #filePath)
+        let suite = fixture.suiteName
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+        let at = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let provider = PublicAddressProviderProbe()
+        let context = MenuBarSamplingContext()
+        func configure(visible: Bool) {
+            context.configure(statusMode: .cpu, statusVisible: true, panelVisible: visible,
+                customFanControlActive: false, paused: false)
+        }
+        configure(visible: false)
+        let state = MenuBarAuxiliaryMonitorState(collectionClock: { at },
+            statusWiFiProvider: { .init(sampledAt: $0, state: .unknown) },
+            batteryAvailabilityProvider: { .absent }, diskCounterProvider: { nil },
+            storageVolumeProvider: { .empty }, batterySnapshotProvider: { (nil, nil) },
+            publicNetworkAddressProvider: { await provider.snapshot() },
+            publicNetworkConsentProvider: {
+                PublicNetworkConsent.allowsAddress(in: TestPreferenceDomain.open(suiteName: suite)!)
+            }, networkProcessProvider: { nil }, processorTelemetryProvider: { nil },
+            powerTelemetryProvider: { .unsupported(at: at) }, powerTelemetryPause: {}, powerHistoryURL: nil,
+            chargeLimitReader: { nil })
+        state.attachSamplingContext(context)
+        state.setPresentationVisible(false)
+        let consumer = UUID()
+        let demand = MenuBarAuxiliaryMonitorDemand(needsProcessorTelemetry: false, needsDiskIOSampling: false,
+            needsNetworkInterface: false, needsPublicNetworkAddress: true, needsNetworkProcesses: false,
+            needsStorageCapacity: false, needsBattery: false)
+        state.registerConsumer(consumer, demand: demand, paused: false)
+        defer { state.setPaused(true); state.unregisterConsumer(consumer) }
+        state.refreshResidentSamples()
+        await waitUntil { !state.isLocalDataRefreshActive && !state.isDiskIOSamplingActive
+            && !state.isPowerTelemetryRefreshActive && !state.isNetworkProcessRefreshActive }
+        var count = await provider.callCount
+        XCTAssertEqual(count, 0, "Default enabled must not turn resident hidden ticks into public requests")
+
+        configure(visible: true)
+        state.setPresentationVisible(true)
+        await waitUntil { state.publicNetworkAddressSnapshot != nil }
+        count = await provider.callCount
+        XCTAssertEqual(count, 1)
+        state.setPresentationVisible(false)
+        configure(visible: false)
+        state.refreshResidentSamples()
+        await waitUntil { !state.isLocalDataRefreshActive && !state.isDiskIOSamplingActive
+            && !state.isPowerTelemetryRefreshActive && !state.isNetworkProcessRefreshActive }
+        configure(visible: true)
+        state.setPresentationVisible(true)
+        for _ in 0..<4 { await Task.yield() }
+        count = await provider.callCount
+        XCTAssertEqual(count, 1, "Reopening uses the same fifteen-minute cache")
+        state.unregisterConsumer(consumer)
+        state.refreshResidentSamples()
+        for _ in 0..<4 { await Task.yield() }
+        count = await provider.callCount
+        XCTAssertEqual(count, 1, "A visible overview without network demand does not query")
+    }
+
+    @MainActor
+    func testExplicitOptOutNeverCallsInjectedAddressProvider() async {
+        let fixture = TestPreferenceDomain.make(file: #filePath)
+        let suite = fixture.suiteName
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+        fixture.defaults.set(false, forKey: PublicNetworkConsent.addressKey)
+        let provider = PublicAddressProviderProbe()
+        let state = MenuBarAuxiliaryMonitorState(batteryAvailabilityProvider: { .absent },
+            diskCounterProvider: { nil }, storageVolumeProvider: { .empty },
+            publicNetworkAddressProvider: { await provider.snapshot() },
+            publicNetworkConsentProvider: {
+                PublicNetworkConsent.allowsAddress(in: TestPreferenceDomain.open(suiteName: suite)!)
+            }, powerHistoryURL: nil)
+        let consumer = UUID()
+        state.registerConsumer(consumer, demand: MenuBarAuxiliaryMonitorDemand(needsProcessorTelemetry: false,
+            needsDiskIOSampling: false, needsNetworkInterface: false, needsPublicNetworkAddress: true,
+            needsNetworkProcesses: false, needsStorageCapacity: false, needsBattery: false), paused: false)
+        defer { state.setPaused(true); state.unregisterConsumer(consumer) }
+        for _ in 0..<4 { state.refreshFromPrimaryMonitorUpdate(); await Task.yield() }
+        let count = await provider.callCount
+        XCTAssertEqual(count, 0)
+        XCTAssertNil(state.publicNetworkAddressSnapshot)
     }
 }
 

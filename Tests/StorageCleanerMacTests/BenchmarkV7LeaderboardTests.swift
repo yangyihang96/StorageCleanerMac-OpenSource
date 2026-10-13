@@ -105,9 +105,9 @@ final class BenchmarkV7LeaderboardTests: XCTestCase {
     }
 
     func testIdentityProviderPersistsRandomIDAndStableAnonymousName() throws {
-        let suiteName = "BenchmarkV7LeaderboardTests.\(UUID())"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let first = DefaultBenchmarkV7LeaderboardIdentityProvider(defaults: defaults)
 
         let id = first.installationID()

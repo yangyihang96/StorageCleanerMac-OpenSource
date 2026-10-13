@@ -67,6 +67,26 @@ struct ExternalMigrationResult: Sendable {
     let destinationURL: URL
     let trashURL: URL?
     let didMoveSourceToTrash: Bool
+    /// N18: the Operation History receipt for moving the original.
+    var report: CleanReport? = nil
+    /// The original's identity when it was moved, so a later look at its
+    /// place can tell whether Operation History put the same file back.
+    var originalIdentity: FileIdentity? = nil
+    var contentVerification: MigrationContentVerification? = nil
+    var publicationWarning: String? = nil
+    /// Capability/fidelity notes do not invalidate a content proof.
+    var information: [String] = []
+
+    func noticeMessage(fallback message: String) -> String {
+        ([publicationWarning ?? message] + information).joined(separator: "\n")
+    }
+
+    /// The move has a durable, identity-verified receipt, so Operation
+    /// History can put the original back.
+    var canRestoreFromHistory: Bool {
+        guard let report, report.persistenceFailure == nil else { return false }
+        return !report.restorableReceipts.isEmpty
+    }
 }
 
 enum ExternalDriveMigrationError: LocalizedError, Equatable {
@@ -81,6 +101,7 @@ enum ExternalDriveMigrationError: LocalizedError, Equatable {
     case copyVerificationFailed
     case originalRemovalFailed
     case applicationRemovalRequiresContentVerification
+    case receiptUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -106,11 +127,16 @@ enum ExternalDriveMigrationError: LocalizedError, Equatable {
             L10n.text("无法把原件移到废纸篓；已验证的副本和原件均保持不变。", "The original could not be moved to Trash. The verified copy and original were both left unchanged.")
         case .applicationRemovalRequiresContentVerification:
             L10n.text("应用迁移目前仅保留副本，不自动移走原件；签名身份一致不代表副本内容完全相同。", "App migration is currently copy-only. The original is kept because matching signing identities do not prove identical contents.")
+        case .receiptUnavailable:
+            L10n.text("无法写入操作记录；为了能从“操作记录”恢复，原件没有移动。", "The operation record could not be written. So that the move stays restorable from Operation History, the original was not moved.")
         }
     }
 }
 
 enum ExternalDriveMigrationService {
+    /// N18: receipt rule for moving a verified file's original to the Trash.
+    static let originalRuleID = "migration.original.v1"
+
     static func availableVolumes() -> [ExternalStorageVolume] {
         DirectoryApplicationScanner()
             .externalVolumeDirectories(maximumDepth: 1)
@@ -122,9 +148,17 @@ enum ExternalDriveMigrationService {
         _ item: ExternalMigrationItem,
         to requestedVolume: ExternalStorageVolume,
         fileManager: FileManager = .default,
-        trustedVolumes: [ExternalStorageVolume]? = nil
+        trustedVolumes: [ExternalStorageVolume]? = nil,
+        contentReader: GuardedFileContentReader = GuardedFileContentReader(priority: .userInitiated),
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        durability: MigrationDurability = MigrationDurability(),
+        creationTime: MigrationCreationTime = MigrationCreationTime(),
+        // Inject only the leaf syscall; publication and failure handling remain
+        // the same when a destination refuses or cannot express file flags.
+        publicationFlagOperation: @Sendable (UnsafePointer<CChar>, UInt32) -> Int32 = { Darwin.lchflags($0, $1) }
     ) throws -> ExternalMigrationResult {
         try Task.checkCancellation()
+        try contentReader.checkAvailability(item.sourceURL, isDirectory: item.kind == .application)
         let volumes = trustedVolumes ?? availableVolumes()
         guard let volume = volumes.first(where: { $0.id == requestedVolume.id }),
               fileManager.fileExists(atPath: volume.url.path) else {
@@ -138,26 +172,13 @@ enum ExternalDriveMigrationService {
         }
 
         let source = item.sourceURL.standardizedFileURL
-        guard fileManager.fileExists(atPath: source.path) else {
-            throw ExternalDriveMigrationError.sourceMissing
-        }
-        guard isAllowedSource(item),
-              !PathSafety.containsSymbolicLinkComponent(in: source.path, fileManager: fileManager) else {
-            throw ExternalDriveMigrationError.unsafeSource
-        }
-        guard let sourceIdentity = TrashItemIdentity.capture(at: source) else {
-            throw ExternalDriveMigrationError.unsafeSource
-        }
+        let inspected = try inspectSource(item, contentReader: contentReader, homeDirectory: homeDirectory)
+        let sourceIdentity = inspected.identity
+        let sourceValues = inspected.values
         if item.kind == .application, isApplicationRunning(item.bundleIdentifier) {
             throw ExternalDriveMigrationError.applicationRunning
         }
 
-        let sourceValues = try source.resourceValues(forKeys: [
-            .isRegularFileKey,
-            .isDirectoryKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-        ])
         switch item.kind {
         case .file:
             guard sourceValues.isRegularFile == true else {
@@ -203,7 +224,7 @@ enum ExternalDriveMigrationService {
             throw ExternalDriveMigrationError.destinationExists
         }
 
-        // Own the staging directory before copyItem can create partial data.
+        // Own the staging directory before the first copy can create partial data.
         // This also preserves the .app extension during bundle verification.
         let staging = try MigrationStagingDirectory(
             parentURL: destinationRoot,
@@ -218,40 +239,113 @@ enum ExternalDriveMigrationService {
             try? staging.remove()
             throw error
         }
-        defer {
+        let cleanup: @Sendable () -> Void = {
             if let stagingReceipt { stagingReceipt.cleanup(staging) }
             else { try? staging.remove() }
         }
+        var workerOwnsCleanup = false
+        var publicationCommitted = false
+        defer {
+            if !workerOwnsCleanup {
+                if publicationCommitted { cleanup() }
+                else { DispatchQueue.global(qos: .userInitiated).async(execute: cleanup) }
+            }
+        }
         let temporary = staging.url.appendingPathComponent(source.lastPathComponent)
 
-        let sourceSignature = try applicationSignatureIfNeeded(item, at: source)
-        try fileManager.copyItem(at: source, to: temporary)
+        let sourceSignature = try applicationSignatureIfNeeded(item, at: source, contentReader: contentReader)
+        // D61: while copyfile is in flight, its worker owns staging cleanup.
+        // A cancelled/timed-out caller must not remove an active worker's tree.
+        workerOwnsCleanup = true
+        let copier = GuardedFileCopy(reader: contentReader, durability: durability, creationTime: creationTime)
+        let capability = try copier.probeDurability(at: staging.url, onFailure: cleanup)
+        workerOwnsCleanup = false
         try Task.checkCancellation()
-        try verifyCopy(
+        workerOwnsCleanup = true
+        var copied = try copier.copy(source, to: temporary,
+            deferRootFlags: true, onFailure: cleanup)
+        copied.durabilityCapability = capability
+        workerOwnsCleanup = false
+        try Task.checkCancellation()
+        let verification = try verifyCopy(
             item,
             source: source,
             copy: temporary,
             originalIdentity: sourceIdentity,
             originalFileSize: sourceValues.fileSize,
             originalModificationDate: sourceValues.contentModificationDate,
-            sourceSignature: sourceSignature
+            sourceSignature: sourceSignature,
+            contentReader: contentReader
         )
         try Task.checkCancellation()
-        try fileManager.moveItem(at: temporary, to: destination)
-
-        guard sourceIsUnchanged(
-            source,
-            identity: sourceIdentity,
-            fileSize: sourceValues.fileSize,
-            modificationDate: sourceValues.contentModificationDate
-        ) else {
+        try contentReader.checkAvailability(source, isDirectory: item.kind == .application)
+        guard try sourceIsUnchanged(source, identity: sourceIdentity,
+                                fileSize: sourceValues.fileSize,
+                                modificationDate: sourceValues.contentModificationDate, contentReader: contentReader) else {
             throw ExternalDriveMigrationError.sourceChanged
         }
+        try Task.checkCancellation()
+        var beforeMetadataRestoration: GuardedFileContentReader.Snapshot?
+        if verification != nil { beforeMetadataRestoration = try contentReader.open(temporary).snapshot }
+        else { beforeMetadataRestoration = nil }
+        workerOwnsCleanup = true
+        copied = try copier.restoreTimes(copied, at: temporary, onFailure: cleanup)
+        workerOwnsCleanup = false
+        let afterMetadataRestoration: GuardedFileContentReader.Snapshot?
+        if verification != nil { afterMetadataRestoration = try contentReader.open(temporary).snapshot }
+        else { afterMetadataRestoration = nil }
+        workerOwnsCleanup = true
+        var information = capability.information
+        information += try copier.makeDurable(copied, at: temporary, onFailure: cleanup)
+        workerOwnsCleanup = false
+        if verification != nil {
+            let beforePublication = try contentReader.open(temporary).snapshot
+            if beforePublication != afterMetadataRestoration {
+                // F_FULLFSYNC may take seconds. It cannot explain a changed
+                // ctime: do not widen the metadata-rebinding exception across
+                // that wait. This mismatched predecessor forces rehashing.
+                beforeMetadataRestoration = beforePublication
+            }
+        }
+        try Task.checkCancellation()
+        try fileManager.moveItem(at: temporary, to: destination)
+        publicationCommitted = true
+        // Rename is committed. Do not turn a late cancellation or a metadata
+        // restoration error into a claim that the copy was never published.
+        information += copied.metadataWarnings
+        var warnings: [String] = []
+        // Restore permissions before immutable/append flags block chmod.
+        do { try copied.restorePublishedPermissions(at: destination) }
+        catch {
+            warnings.append(L10n.text("副本已生成，但未能恢复原权限。原件保留，请检查副本。",
+                                      "The copy was created, but its permissions could not be restored. The original was kept. Check the copy."))
+        }
+        do { try copied.restorePublishedFlags(at: destination, setFlags: publicationFlagOperation) }
+        catch {
+            warnings.append(L10n.text(
+                "副本已生成，但未能恢复隐藏或锁定标志。原件保留，请检查副本。",
+                "The copy was created, but its hidden or locked flags could not be restored. The original was kept. Check the copy."))
+        }
+        do {
+            information += try copier.makeDurable(copied, at: destination, volumeRoot: volume.url,
+                                   committed: true, contents: false)
+        } catch {
+            warnings.append(L10n.text("副本已生成，原件保留，但尚未确认副本已安全写入磁盘。请检查外接磁盘，再从列表处理原件；不要重新复制到同一位置。",
+                                      "The copy exists and the original was kept, but durable storage is not confirmed. Check the external drive, then handle the original from the list. Do not copy again to the same location."))
+        }
+        let publicationWarning = warnings.isEmpty ? nil : Array(Set(warnings)).sorted().joined(separator: "\n")
 
+        // Publication is the commit point. After it succeeds, return the
+        // verified copy even if cancellation arrives concurrently; never label
+        // an already completed filesystem write as an unfinished copy.
         return ExternalMigrationResult(
             destinationURL: destination,
             trashURL: nil,
-            didMoveSourceToTrash: false
+            didMoveSourceToTrash: false,
+            contentVerification: publicationWarning == nil ? verification?.afterPublication(at: destination,
+                reader: contentReader, beforeMetadataRestoration: beforeMetadataRestoration) : nil,
+            publicationWarning: publicationWarning,
+            information: Array(Set(information)).sorted()
         )
     }
 
@@ -261,7 +355,14 @@ enum ExternalDriveMigrationService {
         on requestedVolume: ExternalStorageVolume,
         fileManager: FileManager = .default,
         trustedVolumes: [ExternalStorageVolume]? = nil,
-        trashOperation: ((URL) throws -> URL?)? = nil
+        trashOperation: ((URL) throws -> URL?)? = nil,
+        persist: RecordedTrashOperation.Persistence? = nil,
+        journal: CleanupReportJournal? = nil,
+        contentVerification: MigrationContentVerification? = nil,
+        contentReader: GuardedFileContentReader = GuardedFileContentReader(priority: .userInitiated),
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        durability: MigrationDurability = MigrationDurability(),
+        metadata: any ReadOnlyFileSystem = FoundationReadOnlyFileSystem()
     ) throws -> ExternalMigrationResult {
         try Task.checkCancellation()
         // Matching publisher signatures do not establish identical bundle
@@ -270,6 +371,8 @@ enum ExternalDriveMigrationService {
         guard item.kind != .application else {
             throw ExternalDriveMigrationError.applicationRemovalRequiresContentVerification
         }
+        try contentReader.checkAvailability(item.sourceURL)
+        try contentReader.checkAvailability(destinationURL)
         let volumes = trustedVolumes ?? availableVolumes()
         guard let volume = volumes.first(where: { $0.id == requestedVolume.id }),
               fileManager.fileExists(atPath: volume.url.path) else {
@@ -292,27 +395,15 @@ enum ExternalDriveMigrationService {
               fileManager.fileExists(atPath: destination.path) else {
             throw ExternalDriveMigrationError.copyVerificationFailed
         }
-        guard fileManager.fileExists(atPath: source.path) else {
-            throw ExternalDriveMigrationError.sourceMissing
-        }
-        guard isAllowedSource(item),
-              !PathSafety.containsSymbolicLinkComponent(in: source.path, fileManager: fileManager),
-              !PathSafety.containsSymbolicLinkComponent(in: destination.path, fileManager: fileManager) else {
+        guard !PathSafety.containsSymbolicLinkComponent(in: destination.path, fileManager: fileManager) else {
             throw ExternalDriveMigrationError.unsafeSource
         }
-        if item.kind == .application, isApplicationRunning(item.bundleIdentifier) {
-            throw ExternalDriveMigrationError.applicationRunning
+        let inspected = try inspectSource(item, contentReader: contentReader, homeDirectory: homeDirectory)
+        let sourceIdentity = inspected.identity
+        let sourceValues = inspected.values
+        let recordedIdentity = try contentReader.pool.read(at: source, timeout: contentReader.timeout, priority: contentReader.priority) { _ in
+            try metadata.snapshot(at: source).identity
         }
-
-        guard let sourceIdentity = TrashItemIdentity.capture(at: source) else {
-            throw ExternalDriveMigrationError.unsafeSource
-        }
-        let sourceValues = try source.resourceValues(forKeys: [
-            .isRegularFileKey,
-            .isDirectoryKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-        ])
         switch item.kind {
         case .file:
             guard sourceValues.isRegularFile == true,
@@ -327,46 +418,134 @@ enum ExternalDriveMigrationService {
             }
         }
 
-        let sourceSignature = try applicationSignatureIfNeeded(item, at: source)
-        try verifyCopy(
-            item,
-            source: source,
-            copy: destination,
-            originalIdentity: sourceIdentity,
-            originalFileSize: sourceValues.fileSize,
-            originalModificationDate: sourceValues.contentModificationDate,
-            sourceSignature: sourceSignature
-        )
+        var verification = try MigrationContentVerification.verify(source, destination,
+            reader: contentReader, reusing: contentVerification)
+        let durableCopier = GuardedFileCopy(reader: contentReader, durability: durability)
+        let durableFile = GuardedFileCopy.PreparedCopy(entries: [], deferredFlags: 0)
+        var information = try durableCopier.makeDurable(durableFile, at: destination, volumeRoot: volume.url, bytes: item.sizeBytes)
+        guard try contentReader.open(destination).snapshot == verification.destinationSnapshot else {
+            throw FileContentReadError.changed
+        }
+        var durableSnapshot = verification.destinationSnapshot
         try Task.checkCancellation()
-        guard sourceIsUnchanged(
+        guard try sourceIsUnchanged(
             source,
             identity: sourceIdentity,
             fileSize: sourceValues.fileSize,
-            modificationDate: sourceValues.contentModificationDate
+            modificationDate: sourceValues.contentModificationDate,
+            contentReader: contentReader
         ) else {
             throw ExternalDriveMigrationError.sourceChanged
         }
 
-        do {
-            let trashURL: URL?
-            if let trashOperation {
-                trashURL = try trashOperation(source)
-            } else {
-                var resultingURL: NSURL?
-                try fileManager.trashItem(at: source, resultingItemURL: &resultingURL)
-                trashURL = resultingURL as URL?
-            }
-            guard !fileManager.fileExists(atPath: source.path) else {
-                throw ExternalDriveMigrationError.originalRemovalFailed
-            }
+        // N18: the move goes through the shared receipt journal, the same
+        // operation history as cleanup and uninstall, so Operation History
+        // can put the original back (the verified copy stays on the drive).
+        // The intent is durable before the move; without it nothing moves.
+        // Production names no journal and writes the live one. Injected
+        // volumes are fixture-only, and such a call must name its journal or
+        // persistence: a test never writes the live journal by leaving it
+        // out, and no original moves without a receipt (review P2-2).
+        if trustedVolumes != nil, persist == nil, journal == nil {
+            throw ExternalDriveMigrationError.receiptUnavailable
+        }
+        let receiptJournal = journal ?? .live
+        let persistence: RecordedTrashOperation.Persistence = persist ?? { report, identities in
+            try receiptJournal.checkpoint(report, expectedIdentities: identities)
+        }
+        var refusal: Error?
+        let report = RecordedTrashOperation.run(
+            items: [.init(
+                path: source.path,
+                bytes: item.sizeBytes,
+                identity: recordedIdentity,
+                allowedRestoreRoot: source.deletingLastPathComponent()
+            )],
+            ruleID: originalRuleID,
+            validate: { _ in
+                do {
+                    try Task.checkCancellation()
+                    try contentReader.checkAvailability(source)
+                    try contentReader.checkAvailability(destination)
+                    // Check both complete snapshots before and after the
+                    // durable intent. Rehash only when that bound proof changed.
+                    verification = try MigrationContentVerification.verify(source, destination,
+                        reader: contentReader, reusing: verification)
+                    if verification.destinationSnapshot != durableSnapshot {
+                        information += try durableCopier.makeDurable(durableFile, at: destination, volumeRoot: volume.url, bytes: item.sizeBytes)
+                        guard try contentReader.open(destination).snapshot == verification.destinationSnapshot else {
+                            throw FileContentReadError.changed
+                        }
+                        durableSnapshot = verification.destinationSnapshot
+                    }
+                    guard fileManager.fileExists(atPath: destination.path) else {
+                        throw ExternalDriveMigrationError.copyVerificationFailed
+                    }
+                    guard (try? metadata.snapshot(at: source).identity) == recordedIdentity else {
+                        throw ExternalDriveMigrationError.sourceChanged
+                    }
+                    guard try sourceIsUnchanged(
+                        source,
+                        identity: sourceIdentity,
+                        fileSize: sourceValues.fileSize,
+                        modificationDate: sourceValues.contentModificationDate,
+                        contentReader: contentReader
+                    ) else {
+                        throw ExternalDriveMigrationError.sourceChanged
+                    }
+                } catch {
+                    refusal = error
+                    throw error
+                }
+            },
+            move: { url in
+                // RecordedTrashOperation has crossed invokedMove; cancellation
+                // must no longer invent an unknown move outcome (review P2-6).
+                let target: URL?
+                if let trashOperation {
+                    target = try trashOperation(url)
+                } else {
+                    var resultingURL: NSURL?
+                    try fileManager.trashItem(at: url, resultingItemURL: &resultingURL)
+                    target = resultingURL as URL?
+                }
+                guard let target else { throw CleanupMoveError.invalidResult }
+                return target
+            },
+            metadata: metadata,
+            persist: persistence
+        )
+
+        switch report.items.first?.outcome {
+        case .moved(let receipt)?:
             return ExternalMigrationResult(
                 destinationURL: destination,
-                trashURL: trashURL,
-                didMoveSourceToTrash: true
+                trashURL: receipt.resultingItemURL,
+                didMoveSourceToTrash: true,
+                report: report,
+                originalIdentity: recordedIdentity,
+                information: Array(Set(information)).sorted()
             )
-        } catch let error as ExternalDriveMigrationError {
-            throw error
-        } catch {
+        case .notProcessed?:
+            if report.outcome == .cancelled { throw CancellationError() }
+            throw ExternalDriveMigrationError.receiptUnavailable
+        case .failed(let failure)?:
+            if let refusal { throw refusal }
+            if failure.code == .moveOutcomeUnknown, !fileManager.fileExists(atPath: source.path) {
+                // Gone from its place but not confirmed in the Trash: the
+                // receipt says "needs verification" and the next Operation
+                // History refresh looks for it in the Trash by identity.
+                return ExternalMigrationResult(
+                    destinationURL: destination,
+                    trashURL: nil,
+                    didMoveSourceToTrash: true,
+                    report: report,
+                    originalIdentity: recordedIdentity,
+                    information: Array(Set(information)).sorted()
+                )
+            }
+            throw ExternalDriveMigrationError.originalRemovalFailed
+        case .skipped?, .deleted?, nil:
             throw ExternalDriveMigrationError.originalRemovalFailed
         }
     }
@@ -423,14 +602,14 @@ enum ExternalDriveMigrationService {
         )
     }
 
-    private static func isAllowedSource(_ item: ExternalMigrationItem) -> Bool {
+    private static func isAllowedSource(_ item: ExternalMigrationItem, homeDirectory: URL) -> Bool {
         switch item.kind {
         case .file:
-            PathSafety.isLexicallyInsideHome(item.sourceURL.path)
-                && PathSafety.isInsideHome(item.sourceURL.path)
+            PathSafety.isLexicallyInsideHome(item.sourceURL.path, homeDirectory: homeDirectory)
+                && PathSafety.isInsideHome(item.sourceURL.path, homeDirectory: homeDirectory)
         case .application:
             PathSafety.isInsideApplications(item.sourceURL.path)
-                || PathSafety.isInsideHome(item.sourceURL.path)
+                || PathSafety.isInsideHome(item.sourceURL.path, homeDirectory: homeDirectory)
         }
     }
 
@@ -441,18 +620,31 @@ enum ExternalDriveMigrationService {
 
     private static func applicationSignatureIfNeeded(
         _ item: ExternalMigrationItem,
-        at url: URL
+        at url: URL,
+        contentReader: GuardedFileContentReader
     ) throws -> CodeSignatureVerificationResult? {
         guard item.kind == .application else { return nil }
-        let bundle = Bundle(url: url)
-        guard bundle?.bundleIdentifier == item.bundleIdentifier else {
-            throw ExternalDriveMigrationError.copyVerificationFailed
+        let timeout = applicationSignatureTimeout(sizeBytes: item.sizeBytes, readTimeout: contentReader.timeout)
+        return try contentReader.pool.read(at: url, timeout: timeout, priority: contentReader.priority) { control in
+            try contentReader.guardPolicy.checkTree(url, control: control)
+            try control.check()
+            let bundle = Bundle(url: url)
+            guard bundle?.bundleIdentifier == item.bundleIdentifier else {
+                throw ExternalDriveMigrationError.copyVerificationFailed
+            }
+            let signature = try CodeSignatureVerifier().verifyCode(at: url)
+            guard signature.isValid else {
+                throw ExternalDriveMigrationError.copyVerificationFailed
+            }
+            return signature
         }
-        let signature = try CodeSignatureVerifier().verifyCode(at: url)
-        guard signature.isValid else {
-            throw ExternalDriveMigrationError.copyVerificationFailed
-        }
-        return signature
+    }
+
+    // Security.framework exposes no progress callback. Budget for a cold slow
+    // disk at 2 MiB/s plus setup, with a finite 30 minute ceiling; pool waits
+    // remain cancellable every 10 ms and isolated from other volumes.
+    static func applicationSignatureTimeout(sizeBytes: Int64, readTimeout: TimeInterval) -> TimeInterval {
+        min(1800, max(readTimeout, max(60, 30 + Double(max(0, sizeBytes)) / (2 * 1_048_576))))
     }
 
     private static func verifyCopy(
@@ -462,13 +654,15 @@ enum ExternalDriveMigrationService {
         originalIdentity: TrashItemIdentity,
         originalFileSize: Int?,
         originalModificationDate: Date?,
-        sourceSignature: CodeSignatureVerificationResult?
-    ) throws {
-        guard sourceIsUnchanged(
+        sourceSignature: CodeSignatureVerificationResult?,
+        contentReader: GuardedFileContentReader
+    ) throws -> MigrationContentVerification? {
+        guard try sourceIsUnchanged(
             source,
             identity: originalIdentity,
             fileSize: originalFileSize,
-            modificationDate: originalModificationDate
+            modificationDate: originalModificationDate,
+            contentReader: contentReader
         ) else {
             throw ExternalDriveMigrationError.copyVerificationFailed
         }
@@ -478,38 +672,34 @@ enum ExternalDriveMigrationService {
             let sourceSize = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize
             let copiedSize = try copy.resourceValues(forKeys: [.fileSizeKey]).fileSize
             guard sourceSize == originalFileSize,
-                  copiedSize == originalFileSize,
-                  try filesHaveSameSHA256(source, copy) else {
+                  copiedSize == originalFileSize else {
                 throw ExternalDriveMigrationError.copyVerificationFailed
             }
+            return try MigrationContentVerification.verify(source, copy, reader: contentReader)
         case .application:
-            guard Bundle(url: copy)?.bundleIdentifier == item.bundleIdentifier,
-                  let sourceSignature else {
+            guard let sourceSignature else {
                 throw ExternalDriveMigrationError.copyVerificationFailed
             }
-            let copiedSignature = try CodeSignatureVerifier().verifyCode(at: copy)
-            guard copiedSignature.isValid,
+            guard let copiedSignature = try applicationSignatureIfNeeded(item, at: copy, contentReader: contentReader),
+                  copiedSignature.isValid,
                   copiedSignature.codeSigningIdentifier == sourceSignature.codeSigningIdentifier,
                   copiedSignature.teamIdentifier == sourceSignature.teamIdentifier,
                   copiedSignature.designatedRequirement == sourceSignature.designatedRequirement else {
                 throw ExternalDriveMigrationError.copyVerificationFailed
             }
+            return nil
         }
     }
 
-    static func filesHaveSameSHA256(_ first: URL, _ second: URL) throws -> Bool {
-        try sha256(of: first) == sha256(of: second)
-    }
-
-    private static func sha256(of url: URL) throws -> SHA256.Digest {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-
-        var hasher = SHA256()
-        while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
-            hasher.update(data: data)
-        }
-        return hasher.finalize()
+    static func filesHaveSameSHA256(
+        _ first: URL, _ second: URL,
+        contentReader: GuardedFileContentReader = GuardedFileContentReader(priority: .userInitiated)
+    ) throws -> Bool {
+        // Check both first, so a cloud-only retained copy does not needlessly
+        // cause the source's contents to be read.
+        try contentReader.checkAvailability(first)
+        try contentReader.checkAvailability(second)
+        return try contentReader.sha256(first) == contentReader.sha256(second)
     }
 
     private static func isURL(_ candidate: URL, inside root: URL) -> Bool {
@@ -518,19 +708,54 @@ enum ExternalDriveMigrationService {
         return candidatePath.hasPrefix(rootPath + "/")
     }
 
+    private struct SourceValues: Sendable {
+        let isRegularFile: Bool?
+        let isDirectory: Bool?
+        let fileSize: Int?
+        let contentModificationDate: Date?
+        init(_ values: URLResourceValues) {
+            isRegularFile = values.isRegularFile
+            isDirectory = values.isDirectory
+            fileSize = values.fileSize
+            contentModificationDate = values.contentModificationDate
+        }
+    }
+
+    private static func inspectSource(
+        _ item: ExternalMigrationItem, contentReader: GuardedFileContentReader, homeDirectory: URL
+    ) throws -> (identity: TrashItemIdentity, values: SourceValues) {
+        try contentReader.pool.read(at: item.sourceURL, timeout: contentReader.timeout, priority: contentReader.priority) { control in
+            // Keep the caller's FileManager on its own thread; only Sendable
+            // item/reader values cross into this read worker.
+            let fileManager = FileManager.default
+            let source = item.sourceURL.standardizedFileURL
+            try contentReader.guardPolicy.check(source, isDirectory: item.kind == .application)
+            guard fileManager.fileExists(atPath: source.path) else { throw ExternalDriveMigrationError.sourceMissing }
+            guard isAllowedSource(item, homeDirectory: homeDirectory),
+                  !PathSafety.containsSymbolicLinkComponent(in: source.path, fileManager: fileManager),
+                  let identity = TrashItemIdentity.capture(at: source) else {
+                throw ExternalDriveMigrationError.unsafeSource
+            }
+            try control.check()
+            let values = try source.resourceValues(forKeys: [
+                .isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey
+            ])
+            return (identity, SourceValues(values))
+        }
+    }
+
     private static func sourceIsUnchanged(
         _ source: URL,
         identity: TrashItemIdentity?,
         fileSize: Int?,
-        modificationDate: Date?
-    ) -> Bool {
-        guard let identity,
-              TrashItemIdentity.capture(at: source) == identity,
-              let current = try? source.resourceValues(forKeys: [
-                .fileSizeKey,
-                .contentModificationDateKey,
-              ]) else { return false }
-        return current.fileSize == fileSize
-            && current.contentModificationDate == modificationDate
+        modificationDate: Date?,
+        contentReader: GuardedFileContentReader
+    ) throws -> Bool {
+        try contentReader.pool.read(at: source, timeout: contentReader.timeout, priority: contentReader.priority) { _ in
+            guard let identity,
+                  TrashItemIdentity.capture(at: source) == identity,
+                  let current = try? source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return false }
+            return current.fileSize == fileSize && current.contentModificationDate == modificationDate
+        }
     }
 }

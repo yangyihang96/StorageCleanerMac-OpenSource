@@ -7,18 +7,7 @@ enum AppDataDirectories {
     }
 
     static func applicationSupportRoot(fileManager: FileManager) -> URL {
-        // Explicit isolated local QA bundle only; installed Debug/Release/Beta
-        // applications never accept this override.
-        if Bundle.main.bundleIdentifier == "com.local.StorageCleanerMac.integration",
-           let raw = ProcessInfo.processInfo.environment["STORAGE_CLEANER_INTEGRATION_ROOT"] {
-            let url = URL(fileURLWithPath: raw, isDirectory: true)
-            let cacheRoot = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches").path
-            if raw == url.standardizedFileURL.path,
-               url.deletingLastPathComponent().path == cacheRoot,
-               url.lastPathComponent.hasPrefix("StorageCleanerIntegration-") {
-                return url
-            }
-        }
+        if let url = integrationRoot(fileManager: fileManager) { return url }
         let base = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -28,6 +17,28 @@ enum AppDataDirectories {
             StorageCleanerBuildIdentity.applicationSupportDirectoryName,
             isDirectory: true
         )
+    }
+
+    /// True only while the isolated local QA bundle's override is in effect.
+    static var isUsingIntegrationRoot: Bool {
+        integrationRoot(fileManager: .default) != nil
+    }
+
+    // Explicit isolated local QA bundle only; installed Debug/Release/Beta
+    // applications never accept this override.
+    static func integrationRoot(
+        fileManager: FileManager,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL? {
+        guard bundleIdentifier == "com.local.StorageCleanerMac.integration",
+              let raw = environment["STORAGE_CLEANER_INTEGRATION_ROOT"] else { return nil }
+        let url = URL(fileURLWithPath: raw, isDirectory: true)
+        let cacheRoot = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches").path
+        guard raw == url.standardizedFileURL.path,
+              url.deletingLastPathComponent().path == cacheRoot,
+              url.lastPathComponent.hasPrefix("StorageCleanerIntegration-") else { return nil }
+        return url
     }
 
     static func applicationSupportDirectoryName(isBeta: Bool) -> String {

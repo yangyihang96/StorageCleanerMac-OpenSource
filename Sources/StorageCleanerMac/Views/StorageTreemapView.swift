@@ -4,6 +4,7 @@ import SwiftUI
 
 struct LargeFileStorageMap: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.moduleTheme) private var theme
 
     @ObservedObject var workspace: LargeFilesStore
     let displayMode: StorageAnalysisDisplayMode
@@ -85,19 +86,39 @@ struct LargeFileStorageMap: View {
                     columnBrowser
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 240, maxHeight: .infinity)
+            // D46: while the Trash bar shows, the browser gives up height so
+            // a short window still shows the bar.
+            .frame(maxWidth: .infinity, minHeight: showsTrashBar ? 160 : 240, maxHeight: .infinity)
 
             Divider()
-            statusBar
-                .padding(.horizontal, AppDesignTokens.Spacing.medium)
-                .padding(.vertical, AppDesignTokens.Spacing.small)
-                .background(Color.primary.opacity(0.025))
+            if showsTrashBar {
+                // What is checked, and after a move what moved, in place of
+                // the index status line.
+                FileAnalysisTrashBar(workspace: workspace)
+                    .transition(AppMotionTokens.listTransition(reduceMotion: reduceMotion))
+            } else {
+                statusBar
+                    .padding(.horizontal, AppDesignTokens.Spacing.medium)
+                    .padding(.vertical, AppDesignTokens.Spacing.small)
+                    .background(Color.primary.opacity(0.025))
+            }
 
             if case let .failed(_, _, _, _, message) = workspace.storageMapBrowsePhase {
                 browseFailure(message)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: trashReviewBinding) {
+            if let review = workspace.trashReview {
+                FileAnalysisTrashReviewSheet(workspace: workspace, review: review)
+                    .environment(\.locale, L10n.locale)
+                    .environment(\.moduleTheme, theme)
+            }
+        }
+        .animation(
+            AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
+            value: showsTrashBar
+        )
         .onChange(of: workspace.storageMapNavigation.map(\.path)) { _, _ in
             selectedEntryID = nil
             selectedMapEntry = nil
@@ -105,11 +126,41 @@ struct LargeFileStorageMap: View {
             searchQuery = ""
             entryFilter = .all
         }
+        .onChange(of: workspace.trashOutcome?.movedPaths ?? []) { _, moved in
+            // Review P2-9: the highlight, the path bar and Quick Look stop
+            // pointing at an item that just moved to the Trash.
+            if StorageTreemapPresentation.isGone(selectedEntryID, after: moved)
+                || StorageTreemapPresentation.isGone(selectedMapEntry?.path, after: moved) {
+                selectedEntryID = nil
+                selectedMapEntry = nil
+            }
+            if StorageTreemapPresentation.isGone(hoveredMapEntry?.path, after: moved) { hoveredMapEntry = nil }
+            if StorageTreemapPresentation.isGone(quickLookURL?.path, after: moved) { quickLookURL = nil }
+        }
         .animation(
             AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
             value: workspace.storageMapNavigation.map(\.path)
         )
         .quickLookPreview($quickLookURL)
+    }
+
+    private var showsTrashBar: Bool {
+        !workspace.trashSelections.isEmpty
+            || workspace.trashOutcome != nil
+            || workspace.trashPutBackCount > 0
+            || workspace.trashNotice != nil
+    }
+
+    private var isTrashBusy: Bool {
+        workspace.trashPhase != .idle
+    }
+
+    private var trashReviewBinding: Binding<Bool> {
+        Binding(
+            get: { workspace.trashReview != nil
+                && (workspace.trashPhase == .reviewing || workspace.trashPhase == .moving) },
+            set: { if !$0 { workspace.cancelTrashReview() } }
+        )
     }
 
     private var navigationBar: some View {
@@ -197,9 +248,6 @@ struct LargeFileStorageMap: View {
 
     private var currentLocationIdentity: some View {
         HStack(spacing: 7) {
-            Image(systemName: selectedEntry == nil ? "folder" : "checkmark.circle")
-                .foregroundStyle(AppDesignTokens.Palette.storage)
-                .accessibilityHidden(true)
             selectedPathView(selectedEntry?.path ?? currentSnapshot?.path ?? "")
             if let selectedEntry {
                 Text(StorageTreemapPresentation.displaySize(for: selectedEntry))
@@ -275,7 +323,7 @@ struct LargeFileStorageMap: View {
                 }
             }
         } label: {
-            Label(entryFilter.title, systemImage: "line.3.horizontal.decrease")
+            Text(entryFilter.title)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -290,7 +338,7 @@ struct LargeFileStorageMap: View {
                 }
             }
         } label: {
-            Label(entrySort.title, systemImage: "arrow.up.arrow.down")
+            Text(entrySort.title)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -324,24 +372,18 @@ struct LargeFileStorageMap: View {
             }
 
             if let selectedEntry {
-                Label(
-                    StorageTreemapPresentation.displaySize(for: selectedEntry),
-                    systemImage: selectedEntry.isDirectory ? "folder" : selectedEntry.contentCategory.systemImage
-                )
+                Text(StorageTreemapPresentation.displaySize(for: selectedEntry))
                 .monospacedDigit()
 
                 if let childCount = selectedEntry.childCount {
-                    Label(L10n.items(childCount), systemImage: "doc.on.doc")
+                    Text(L10n.items(childCount))
                 } else {
-                    Label(
-                        selectedEntry.contentCategory.title,
-                        systemImage: selectedEntry.contentCategory.systemImage
-                    )
+                    Text(selectedEntry.contentCategory.title)
                 }
             } else if let snapshot = currentSnapshot {
-                Label(StorageTreemapPresentation.displaySize(for: summaryEntry(snapshot)), systemImage: "internaldrive")
+                Text(StorageTreemapPresentation.displaySize(for: summaryEntry(snapshot)))
                     .monospacedDigit()
-                Label(L10n.items(snapshot.entries.count), systemImage: "doc.on.doc")
+                Text(L10n.items(snapshot.entries.count))
             }
         }
         .font(AppDesignTokens.Typography.compactLabel)
@@ -366,10 +408,7 @@ struct LargeFileStorageMap: View {
                         Button {
                             workspace.showStorageMapSnapshot(at: index)
                         } label: {
-                            Label(
-                                snapshot.title,
-                                systemImage: index == 0 ? "internaldrive.fill" : "folder.fill"
-                            )
+                            Text(snapshot.title)
                             .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 5)
@@ -449,8 +488,7 @@ struct LargeFileStorageMap: View {
                     storageMapEmptyState(
                         title: entries.isEmpty
                             ? L10n.text("这一层没有项目", "This Folder Is Empty")
-                            : L10n.text("没有匹配的项目", "No Matching Items"),
-                        systemImage: entries.isEmpty ? "folder" : "magnifyingglass"
+                            : L10n.text("没有匹配的项目", "No Matching Items")
                     )
                     if hasListFilter {
                         clearListFilterButton
@@ -466,6 +504,9 @@ struct LargeFileStorageMap: View {
                                     entry: entry,
                                     referenceBytes: currentSnapshot?.referenceBytes ?? 0,
                                     isSelected: selectedEntryID == entry.id,
+                                    trashState: workspace.trashSelectionState(for: entry),
+                                    isTrashBusy: isTrashBusy,
+                                    onToggleTrash: { workspace.toggleTrashSelection(entry) },
                                     onSelect: { select(entry) },
                                     onActivate: {
                                         activate(entry, fromLevel: currentLevelIndex)
@@ -487,7 +528,7 @@ struct LargeFileStorageMap: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, minHeight: showsTrashBar ? 110 : 180, maxHeight: .infinity)
         .background(Color.primary.opacity(0.016))
     }
 
@@ -524,9 +565,6 @@ struct LargeFileStorageMap: View {
 
     private var mapHeaderIdentity: some View {
         HStack(alignment: .top, spacing: AppDesignTokens.Spacing.small) {
-            Image(systemName: mapHeaderIcon)
-                .foregroundStyle(mapHeaderTint)
-                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(currentSnapshot?.title
@@ -548,10 +586,7 @@ struct LargeFileStorageMap: View {
     @ViewBuilder
     private var mapHeaderSize: some View {
         if let snapshot = currentSnapshot {
-            Label(
-                StorageTreemapPresentation.displaySize(for: summaryEntry(snapshot)),
-                systemImage: "internaldrive"
-            )
+            Text(StorageTreemapPresentation.displaySize(for: summaryEntry(snapshot)))
             .font(AppDesignTokens.Typography.compactLabel)
             .monospacedDigit()
             .foregroundStyle(.secondary)
@@ -559,13 +594,7 @@ struct LargeFileStorageMap: View {
         }
     }
 
-    private var mapHeaderIcon: String {
-        "folder.fill"
-    }
 
-    private var mapHeaderTint: Color {
-        AppDesignTokens.Palette.storage
-    }
 
     private var mapHeaderDetail: String {
         return L10n.text(
@@ -609,6 +638,9 @@ struct LargeFileStorageMap: View {
                         measuredShare: Double(entry.sizeBytes) / referenceBytes,
                         isSelected: selectedEntryID == entry.id,
                         isHovered: hoveredMapEntry?.id == entry.id,
+                        trashState: entry.role == .content ? workspace.trashSelectionState(for: entry) : nil,
+                        isTrashBusy: isTrashBusy,
+                        onToggleTrash: { workspace.toggleTrashSelection(entry) },
                         onSelect: { select(entry) },
                         onActivate: { activate(entry, fromLevel: currentLevelIndex) },
                         onPreview: { quickLookURL = URL(fileURLWithPath: entry.path) },
@@ -623,8 +655,7 @@ struct LargeFileStorageMap: View {
                 }
                 if plottedEntries.isEmpty, !workspace.storageMapBrowsePhase.isLoading {
                     storageMapEmptyState(
-                        title: L10n.text("没有可绘制的容量；仍可浏览列表", "No Measurable Usage; Browse the List"),
-                        systemImage: "square.grid.2x2"
+                        title: L10n.text("没有可绘制的容量；仍可浏览列表", "No Measurable Usage; Browse the List")
                     )
                 }
             }
@@ -637,7 +668,7 @@ struct LargeFileStorageMap: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, minHeight: showsTrashBar ? 110 : 180, maxHeight: .infinity)
         .overlay(alignment: .bottomLeading) {
             if let hoveredMapEntry {
                 Text("\(hoveredMapEntry.title) · \(StorageTreemapPresentation.displaySize(for: hoveredMapEntry))")
@@ -672,6 +703,9 @@ struct LargeFileStorageMap: View {
                                 ? filteredEntries
                                 : StorageTreemapPresentation.visibleEntries(from: snapshot),
                             selectedPath: selectedPath(inColumnAt: index),
+                            trashState: workspace.trashSelectionState(for:),
+                            isTrashBusy: isTrashBusy,
+                            onToggleTrash: workspace.toggleTrashSelection,
                             onSelect: select,
                             onActivate: { entry in
                                 activate(entry, fromLevel: index)
@@ -808,11 +842,8 @@ struct LargeFileStorageMap: View {
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.95))
     }
 
-    private func storageMapEmptyState(title: String, systemImage: String) -> some View {
+    private func storageMapEmptyState(title: String) -> some View {
         VStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.title2)
-                .foregroundStyle(.tertiary)
             Text(title)
                 .font(AppDesignTokens.Typography.secondary)
                 .foregroundStyle(.secondary)
@@ -956,6 +987,9 @@ private struct StorageMapColumn: View {
     let snapshot: StorageMapDirectorySnapshot
     let entries: [StorageTreemapEntry]
     let selectedPath: String?
+    let trashState: (StorageTreemapEntry) -> FileAnalysisTrashSelectionState
+    let isTrashBusy: Bool
+    let onToggleTrash: (StorageTreemapEntry) -> Void
     let onSelect: (StorageTreemapEntry) -> Void
     let onActivate: (StorageTreemapEntry) -> Void
     let onReveal: (String) -> Void
@@ -965,19 +999,14 @@ private struct StorageMapColumn: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: AppDesignTokens.Spacing.small) {
-                Label {
-                    VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.tight) {
-                        Text(snapshot.title)
-                            .font(AppDesignTokens.Typography.compactLabel.weight(.semibold))
-                            .lineLimit(1)
-                            .help(snapshot.path)
-                        Text(L10n.items(snapshot.entries.count))
-                            .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
-                    }
-                } icon: {
-                    Image(systemName: "folder.fill")
-                        .foregroundStyle(AppDesignTokens.Palette.storage)
+                VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.tight) {
+                    Text(snapshot.title)
+                        .font(AppDesignTokens.Typography.compactLabel.weight(.semibold))
+                        .lineLimit(1)
+                        .help(snapshot.path)
+                    Text(L10n.items(snapshot.entries.count))
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(.secondary)
                 }
                 .layoutPriority(1)
 
@@ -1012,6 +1041,9 @@ private struct StorageMapColumn: View {
                             referenceBytes: snapshot.referenceBytes,
                             isSelected: selectedPath.map(PathSafety.normalizedPath)
                                 == PathSafety.normalizedPath(entry.path),
+                            trashState: trashState(entry),
+                            isTrashBusy: isTrashBusy,
+                            onToggleTrash: { onToggleTrash(entry) },
                             onSelect: { onSelect(entry) },
                             onActivate: { onActivate(entry) },
                             onReveal: { onReveal(entry.path) },
@@ -1034,6 +1066,10 @@ private struct StorageTreemapTile: View {
     let measuredShare: Double
     let isSelected: Bool
     let isHovered: Bool
+    /// D46; nil for the summary regions.
+    let trashState: FileAnalysisTrashSelectionState?
+    let isTrashBusy: Bool
+    let onToggleTrash: () -> Void
     let onSelect: () -> Void
     let onActivate: () -> Void
     let onPreview: () -> Void
@@ -1063,6 +1099,34 @@ private struct StorageTreemapTile: View {
         frame.width >= 58 && frame.height >= 36
     }
 
+    private var isChecked: Bool {
+        switch trashState {
+        case .selected?, .includedInSelection?: true
+        default: false
+        }
+    }
+
+    /// A checked block always shows its checkbox; one that can be checked
+    /// shows it on hover. A block that cannot move says why on hover.
+    private var showsTrashCheckbox: Bool {
+        guard frame.width >= 44, frame.height >= 34, let trashState else { return false }
+        switch trashState {
+        case .selected, .includedInSelection: return true
+        case .available: return isHovered
+        case .blocked, .checking: return false
+        }
+    }
+
+    private var trashHelp: String {
+        guard let trashState else { return "" }
+        switch trashState {
+        case .blocked, .includedInSelection, .checking:
+            return "\n" + FileAnalysisTrashPresentation.checkboxHelp(state: trashState)
+        case .available, .selected:
+            return ""
+        }
+    }
+
     private var tileSurface: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -1074,6 +1138,13 @@ private struct StorageTreemapTile: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .stroke(isSelected ? tint : Color.primary.opacity(isHovered ? 0.28 : 0.12), lineWidth: isSelected ? 2 : 1)
+                }
+                .overlay {
+                    if isChecked {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(AppDesignTokens.Palette.storage.opacity(0.10))
+                            .allowsHitTesting(false)
+                    }
                 }
 
             if showsTileTitle {
@@ -1155,10 +1226,17 @@ private struct StorageTreemapTile: View {
             }
         }
         .frame(width: frame.width, height: frame.height)
+        .overlay(alignment: .topLeading) {
+            if showsTrashCheckbox, let trashState {
+                FileAnalysisTrashCheckbox(state: trashState, title: entry.title,
+                                          isBusy: isTrashBusy, onToggle: onToggleTrash)
+                    .padding(4)
+            }
+        }
         .position(x: frame.midX, y: frame.midY)
         .onHover(perform: onHover)
         .help(entry.role == .content
-            ? "\(entry.path)\n\(StorageTreemapPresentation.displaySize(for: entry)) · \(shareText) · " + L10n.text("占本层已记录容量；受限目录容量为下限", "of recorded folder bytes; restricted totals are lower bounds")
+            ? "\(entry.path)\n\(StorageTreemapPresentation.displaySize(for: entry)) · \(shareText) · " + L10n.text("占本层已记录容量；受限目录容量为下限", "of recorded folder bytes; restricted totals are lower bounds") + trashHelp
             : "\(entry.title) · \(StorageTreemapPresentation.displaySize(for: entry))\n" + L10n.text("汇总区域，不能直接打开；具体已测项目可在完整列表中查看", "Summary region; cannot be opened. Browse individual measured items in the complete list"))
         .accessibilityLabel("\(entry.title)，\(entry.contentCategory.title)，\(StorageTreemapPresentation.displaySize(for: entry))，\(shareText)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -1176,6 +1254,10 @@ private struct StorageMapEntryRow: View {
     let entry: StorageTreemapEntry
     let referenceBytes: Int64
     let isSelected: Bool
+    /// D46: the checkbox for moving the item to the Trash.
+    let trashState: FileAnalysisTrashSelectionState
+    let isTrashBusy: Bool
+    let onToggleTrash: () -> Void
     let onSelect: () -> Void
     let onActivate: () -> Void
     let onReveal: () -> Void
@@ -1194,6 +1276,38 @@ private struct StorageMapEntryRow: View {
     }
 
     var body: some View {
+        HStack(spacing: 0) {
+            FileAnalysisTrashCheckbox(state: trashState, title: entry.title,
+                                      isBusy: isTrashBusy, onToggle: onToggleTrash)
+                .padding(.leading, 6)
+            entryButton
+        }
+        .background {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(isSelected
+                    ? AppDesignTokens.Palette.storage.opacity(0.16)
+                    : Color.clear)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(
+                    isSelected
+                        ? AppDesignTokens.Palette.storage.opacity(0.52)
+                        : Color.clear,
+                    lineWidth: 1
+                )
+        }
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Capsule()
+                    .fill(AppDesignTokens.Palette.storage)
+                    .frame(width: 3, height: 24)
+                    .padding(.leading, 2)
+            }
+        }
+    }
+
+    private var entryButton: some View {
         Button(action: onSelect) {
             HStack(alignment: .center, spacing: 8) {
                 Image(systemName: entry.kind == "package"
@@ -1208,10 +1322,8 @@ private struct StorageMapEntryRow: View {
                         .font(AppDesignTokens.Typography.compactLabel.weight(.semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    Text(entrySecondaryMetadata)
+                    secondaryLines
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
                 }
                 .layoutPriority(1)
 
@@ -1239,6 +1351,7 @@ private struct StorageMapEntryRow: View {
                                 .font(AppDesignTokens.Typography.metadata)
                                 .foregroundStyle(.tertiary)
                                 .monospacedDigit()
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                     }
                     if entry.canDescend {
@@ -1250,31 +1363,9 @@ private struct StorageMapEntryRow: View {
                 }
             }
             .contentShape(Rectangle())
-            .frame(height: 48, alignment: .leading)
-            .padding(.horizontal, 9)
-            .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(isSelected
-                        ? AppDesignTokens.Palette.storage.opacity(0.16)
-                        : Color.clear)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .strokeBorder(
-                        isSelected
-                            ? AppDesignTokens.Palette.storage.opacity(0.52)
-                            : Color.clear,
-                        lineWidth: 1
-                    )
-            }
-            .overlay(alignment: .leading) {
-                if isSelected {
-                    Capsule()
-                        .fill(AppDesignTokens.Palette.storage)
-                        .frame(width: 3, height: 24)
-                        .padding(.leading, 2)
-                }
-            }
+            .frame(minHeight: 48, alignment: .leading)
+            .padding(.leading, 5)
+            .padding(.trailing, 9)
         }
         .buttonStyle(ResponsivePlainButtonStyle())
         .simultaneousGesture(TapGesture(count: 2).onEnded(onActivate))
@@ -1299,7 +1390,7 @@ private struct StorageMapEntryRow: View {
                 Button(L10n.text("快速预览", "Quick Look"), action: onPreview)
             }
             Button(action: onReveal) {
-                Label(L10n.text("在访达中显示", "Show in Finder"), systemImage: "folder")
+                Text(L10n.text("在访达中显示", "Show in Finder"))
             }
             Button(L10n.text("复制路径", "Copy Path"), action: onCopyPath)
         }
@@ -1308,6 +1399,45 @@ private struct StorageMapEntryRow: View {
             "of this folder’s recorded bytes; restricted totals are lower bounds, not a share of the complete disk"
         ))
         .accessibilityValue("\(entry.path) · \(StorageTreemapPresentation.displaySize(for: entry)) · \(shareText)")
+    }
+
+    /// Kind and item count; an item that cannot move, or moves with a
+    /// checked folder, says so after them (D46). Review P2-11: when the
+    /// note does not fit after them it takes its own line. Protection reasons
+    /// remain short phrases; full explanations are on hover and in review.
+    @ViewBuilder
+    private var secondaryLines: some View {
+        let metadata = Text(entrySecondaryMetadata).foregroundStyle(.secondary)
+        if let note = FileAnalysisTrashPresentation.rowNote(state: trashState) {
+            ViewThatFits(in: .horizontal) {
+                (metadata + Text(" · ").foregroundStyle(.secondary) + noteText(note))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                VStack(alignment: .leading, spacing: 1) {
+                    metadata
+                        .lineLimit(1)
+                    noteText(note)
+                        .lineLimit(FileAnalysisTrashPresentation.rowNoteLineLimit(state: trashState))
+                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .help(FileAnalysisTrashPresentation.checkboxHelp(state: trashState))
+        } else {
+            metadata
+                .lineLimit(1)
+        }
+    }
+
+    private func noteText(_ note: String) -> Text {
+        switch trashState {
+        case .blocked:
+            Text(Image(systemName: "lock.fill")).foregroundStyle(.tertiary) + Text(" " + note).foregroundStyle(.tertiary)
+        case .checking:
+            Text(Image(systemName: "clock")).foregroundStyle(.tertiary) + Text(" " + note).foregroundStyle(.tertiary)
+        default:
+            Text(note).foregroundStyle(AppDesignTokens.Palette.storage)
+        }
     }
 
     private var entrySecondaryMetadata: String {

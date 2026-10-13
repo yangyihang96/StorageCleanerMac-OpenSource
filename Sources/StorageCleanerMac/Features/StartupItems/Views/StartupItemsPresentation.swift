@@ -551,6 +551,18 @@ extension StartupItemsDomain.Item {
         }
     }
 
+    /// D64: the pill keeps only symbols that carry state. The short status text
+    /// shows the process state, so administrator, configuration, settings-only,
+    /// read-only and failure must be told apart by this symbol.
+    var metadataPillStatus: MetadataPillStatus {
+        if requiresAdministrator { return .locked }
+        if hasConfigurationIssue { return .warning }
+        if isSystemSettingsOnly { return .systemSettingsOnly }
+        if isReadOnly { return .readOnly }
+        if case .failed = state.process { return .failure }
+        return .none
+    }
+
     var isSystemSettingsOnly: Bool {
         !isDirectlyManageable && manageability == .manageableThroughSystemSettings
     }
@@ -738,35 +750,35 @@ extension StartupItemsDomain.Item {
     var managementExplanation: String {
         if requiresAdministrator {
             return L10n.text(
-                "此项目需要管理员权限；本应用不会在未经确认和验证时更改它。",
-                "This item requires administrator permission; the app will not change it without confirmation and verification."
+                "需要管理员授权与确认",
+                "Requires administrator approval and confirmation"
             )
         }
         switch manageability {
         case .directlyManageable:
             return L10n.text(
-                "可由本应用管理；操作完成后会重新读取系统状态。",
-                "Manageable in this app; system state is read back after each operation."
+                "本应用管理 · 操作后核验状态",
+                "Managed here · state verified after changes"
             )
         case .manageableThroughSystemSettings:
             return L10n.text(
-                "由 macOS 系统设置管理，本应用只会打开对应设置页。",
-                "Managed by macOS System Settings; this app only opens the relevant settings page."
+                "由系统设置管理 · 本应用只打开设置页",
+                "Managed in System Settings · This app opens Settings only"
             )
         case .protectedSystemItem:
             return L10n.text(
-                "这是受系统或组织保护的只读项目，本应用不会修改它。",
-                "This is a read-only system- or organization-protected item; the app will not modify it."
+                "系统或组织保护 · 只读",
+                "System or organization protected · read-only"
             )
         case .informationOnly:
             return L10n.text(
-                "当前没有经过验证的安全管理方式，仅显示扫描信息。",
-                "No verified safe management path is available; scan information is shown only."
+                "安全管理方式未验证 · 只读",
+                "No verified safe management path · read-only"
             )
         case .unknown:
             return L10n.text(
-                "所属应用或管理方式尚未可靠确认，仅显示扫描信息。",
-                "The owning app or management path is not reliably identified; scan information is shown only."
+                "归属或管理方式未确认 · 只读",
+                "Owner or management unconfirmed · read-only"
             )
         }
     }

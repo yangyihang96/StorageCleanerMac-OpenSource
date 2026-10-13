@@ -5,7 +5,7 @@ import os
 /// A missing external volume never silently erases the pending cleanup record.
 typealias MigrationStagingReceipt = TemporaryResourceReceipt
 
-struct TemporaryResourceReceipt {
+struct TemporaryResourceReceipt: Sendable {
     private let reportID = UUID()
     private let planID = CleanPlanID()
     private let sessionID = ScanSessionID()

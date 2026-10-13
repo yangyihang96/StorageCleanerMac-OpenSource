@@ -134,6 +134,7 @@ actor InMemoryWebsiteUpdateQueueStore: WebsiteUpdateQueuePersisting {
 
 enum WebsiteUpdateQueueError: Error, Equatable, LocalizedError, Sendable {
     case queueEmpty
+    case automaticUpdateAvailable(String)
     case noOfficialSource(String)
     case sourceNotConfirmed(String)
     case missingWebsite(String)
@@ -146,6 +147,8 @@ enum WebsiteUpdateQueueError: Error, Equatable, LocalizedError, Sendable {
         switch self {
         case .queueEmpty:
             return L10n.text("官网更新队列为空。", "The website update queue is empty.")
+        case let .automaticUpdateAvailable(name):
+            return OfficialUpdateLocalization.format("%@ 已支持自动更新，请使用全部更新。", "%@ supports automatic updates; use Update All.", name)
         case let .noOfficialSource(name):
             return OfficialUpdateLocalization.format("%@ 没有官方更新来源。", "%@ has no official update source.", name)
         case let .sourceNotConfirmed(name):
@@ -178,16 +181,24 @@ actor WebsiteUpdateQueue {
     }
 
     @discardableResult
-    func start(applications: [InstalledApplication], now: Date = Date()) async throws -> WebsiteUpdateQueueSnapshot {
-        let sessionID = UUID()
-        var seenApplicationIDs: Set<String> = []
-        var items: [WebsiteUpdateQueueItem] = []
+    func start(applications: [InstalledApplication], now: Date = Date(), preservingPending: Bool = false) async throws -> WebsiteUpdateQueueSnapshot {
+        let prior = preservingPending && snapshot?.items.contains(where: { !$0.state.isTerminal }) == true ? snapshot : nil
+        let sessionID = prior?.sessionID ?? UUID()
+        var items = prior?.items ?? []
+        // "Later" promised to keep an app for next time: asking for it again
+        // re-enters it as a fresh, revalidated item instead of leaving it deferred.
+        let requested = Set(applications.map(\.id))
+        items.removeAll { $0.state == .deferred && requested.contains($0.applicationID) }
+        var seenApplicationIDs = Set(items.map(\.applicationID))
 
         for application in applications where seenApplicationIDs.insert(application.id).inserted {
+            guard !application.canJoinAutomaticUpdateBatch else { throw WebsiteUpdateQueueError.automaticUpdateAvailable(application.displayName) }
             guard let source = application.officialSource else {
                 throw WebsiteUpdateQueueError.noOfficialSource(application.displayName)
             }
-            guard source.trustLevel >= .userConfirmed else {
+            guard source.trustLevel >= .userConfirmed,
+                  source.applicationIdentity == application.identity,
+                  source.capability != .sourceConfirmation else {
                 throw WebsiteUpdateQueueError.sourceNotConfirmed(application.displayName)
             }
             guard let actionURL = source.updatePageURL ?? source.homepageURL else {
@@ -211,8 +222,9 @@ actor WebsiteUpdateQueue {
 
         guard !items.isEmpty else { throw WebsiteUpdateQueueError.queueEmpty }
         let created = WebsiteUpdateQueueSnapshot(sessionID: sessionID, items: items, updatedAt: now)
+        // Do not publish selections that failed to reach durable storage.
+        try await store?.save(created)
         snapshot = created
-        try await persist()
         return created
     }
 
@@ -222,6 +234,11 @@ actor WebsiteUpdateQueue {
         var normalized = restored
         let applicationsByID = Dictionary(uniqueKeysWithValues: applications.map { ($0.id, $0) })
         for index in normalized.items.indices {
+            if let application = applicationsByID[normalized.items[index].applicationID], application.canJoinAutomaticUpdateBatch {
+                normalized.items[index].state = .deferred
+                normalized.items[index].detail = L10n.text("此项目现已支持自动更新，请使用全部更新", "This item now supports automatic updates; use Update All")
+                continue
+            }
             guard let application = applicationsByID[normalized.items[index].applicationID],
                   application.bundleURL.standardizedFileURL == normalized.items[index].bundleURL.standardizedFileURL,
                   let currentSource = application.officialSource,

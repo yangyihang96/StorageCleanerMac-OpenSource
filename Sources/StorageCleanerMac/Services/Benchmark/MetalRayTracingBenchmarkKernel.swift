@@ -106,6 +106,12 @@ struct MetalRayTracingBenchmarkKernel: Sendable {
     }
 
     func run() async throws -> RunResult {
+        try await runV11(warmUp: true)
+    }
+
+    /// v11 paired collection uses one warmup across three independent samples.
+    /// The frozen suite keeps run() and therefore its original warmup semantics.
+    func runV11(warmUp: Bool) async throws -> RunResult {
         try Task.checkCancellation()
         try Self.validate(configuration.limits)
         let limits = configuration.limits
@@ -115,7 +121,8 @@ struct MetalRayTracingBenchmarkKernel: Sendable {
             try await Self.runDetached(
                 limits: limits,
                 clock: clock,
-                driverFactory: factory
+                driverFactory: factory,
+                warmUp: warmUp
             )
         }
         return try await withTaskCancellationHandler {
@@ -165,7 +172,8 @@ private extension MetalRayTracingBenchmarkKernel {
     static func runDetached(
         limits: Limits,
         clock: any BenchmarkKernelClock,
-        driverFactory: @Sendable () -> any MetalRayTracingBenchmarkDriving
+        driverFactory: @Sendable () -> any MetalRayTracingBenchmarkDriving,
+        warmUp: Bool = true
     ) async throws -> RunResult {
         let safetyStartedAt = clock.nowNanoseconds()
         let driver = driverFactory()
@@ -184,7 +192,7 @@ private extension MetalRayTracingBenchmarkKernel {
                 startedAt: safetyStartedAt,
                 maximumElapsedSeconds: limits.maximumElapsedSeconds
             )
-            try await driver.warmUp()
+            if warmUp { try await driver.warmUp() }
             try checkSafetyBoundary(
                 clock: clock,
                 startedAt: safetyStartedAt,
@@ -512,7 +520,7 @@ private extension SystemMetalRayTracingBenchmarkDriver {
     ) -> MetalRayTracingHardwareFamily? {
         guard device.supportsRaytracing else { return nil }
 #if compiler(>=6.2)
-        if device.supportsFamily(.apple10) { return .apple10 }
+        if #available(macOS 26.0, *), device.supportsFamily(.apple10) { return .apple10 }
 #endif
         if device.supportsFamily(.apple9) { return .apple9 }
         return nil

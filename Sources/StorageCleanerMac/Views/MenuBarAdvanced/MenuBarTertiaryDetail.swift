@@ -89,6 +89,14 @@ extension MenuBarAdvancedStatusView {
                     .accessibilityHidden(true)
             }
         }
+        .menuBarTraceRegion("tertiary")
+        .menuBarPresentationProbe(
+            "tertiary",
+            revision: MenuBarPresentationProbe.revision(
+                activeInlineTertiaryRequest.map { $0.id.uuidString } ?? activeTertiaryDetail?.rawValue ?? ""
+            ),
+            when: activeInlineTertiaryRequest != nil || activeTertiaryDetail != nil
+        )
         .onPreferenceChange(GeekTertiaryContentSizeKey.self) { measurement in
             Task { @MainActor in
                 guard let measurement else { return }
@@ -102,52 +110,34 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    func tertiaryDetailButton(
-        _ detail: MenuBarTertiaryDetail,
-        compact: Bool = false
-    ) -> some View {
-        Button {
-            guard panelSettingsState.tertiaryPresentationMode == .column else { return }
-            presentTertiaryDetail(detail, pinned: true)
-        } label: {
-            if compact {
-                Image(systemName: AppSymbols.Action.info)
-                    .frame(width: 28, height: 28)
-            } else {
-                Label(L10n.text("查看三级详情", "More Details"), systemImage: AppSymbols.Action.info)
-            }
-        }
-        .controlSize(compact ? .mini : .small)
-        .disabled(panelSettingsState.tertiaryPresentationMode == .unavailable)
-        .help(
-            panelSettingsState.tertiaryPresentationMode == .unavailable
-                ? L10n.text("当前屏幕空间不足，无法并排显示三级详情", "Not enough screen space for a third column")
-                : L10n.text("打开只读的模块深层信息", "Open read-only deep module details")
-        )
-        .accessibilityLabel(L10n.text("查看三级详情", "More Details"))
-        .onContinuousHover { phase in
-            switch phase {
-            case .active:
-                tertiaryButtonHoverChanged(detail, hovering: true)
-            case .ended:
-                tertiaryButtonHoverChanged(detail, hovering: false)
-            }
-        }
-    }
-
     private func tertiaryDetailSurface(
         _ detail: MenuBarTertiaryDetail
     ) -> some View {
         tertiaryDetailChrome(detail: detail, density: presentation) {
-            if detail == .network {
-                GeekNetworkTertiaryView(
-                    snapshot: networkInterfaceSnapshot,
-                    topology: networkTopologySnapshot,
-                    refresh: refreshPanelData,
-                    contentPadding: 0
-                )
-            } else {
-                tertiaryDetailBody(detail)
+            // The page reads the monitor's prepared windows and live readings,
+            // which do not redraw this root view. Without its own card it was
+            // redrawn only by an unrelated root update (often a level-two
+            // height change), so a newly selected range stayed dimmed for
+            // seconds and the history did not advance with new samples.
+            liveCard(.levelThree) {
+                Group {
+                    if detail == .network {
+                        GeekNetworkTertiaryView(
+                            snapshot: networkInterfaceSnapshot,
+                            topology: networkTopologySnapshot,
+                            refresh: refreshPanelData,
+                            contentPadding: 0
+                        )
+                    } else {
+                        tertiaryDetailBody(detail)
+                    }
+                }
+                // The card redraws the page for any reading it follows; a
+                // history frame is prepared again only for a new window, as
+                // before the page had a card. With the card's revision in the
+                // key, every reading restarted the preparation and could drop
+                // a frame that was about to be delivered.
+                .environment(\.menuBarChartContext, rootChartContext)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -166,13 +156,11 @@ extension MenuBarAdvancedStatusView {
     func scheduleTertiaryDetailDismissal(_ detail: MenuBarTertiaryDetail) {
         guard !panelCoordinator.isHistoryPinned,
               !geekPanelHoverActivityState.keepsPanelExpanded,
-              hoveredTertiaryButton != detail,
               !isTertiaryDetailSurfaceHovered else { return }
         cancelTertiaryHoverIntent()
         tertiaryHoverIntent = panelCoordinator.scheduleHoverDismissal(
             condition: {
                 !geekPanelHoverActivityState.keepsPanelExpanded
-                    && hoveredTertiaryButton != detail
                     && !isTertiaryDetailSurfaceHovered
                     && !panelCoordinator.isPointerWithinHoverEnvelope
                     && activeTertiaryDetail == detail
@@ -180,39 +168,6 @@ extension MenuBarAdvancedStatusView {
             action: {
                 activeTertiaryDetail = nil
                 panelCoordinator.dismissUnpinnedHierarchy()
-                tertiaryHoverIntent = nil
-            }
-        )
-    }
-
-    private func tertiaryButtonHoverChanged(
-        _ detail: MenuBarTertiaryDetail,
-        hovering: Bool
-    ) {
-#if DEBUG || STORAGE_CLEANER_BETA
-        guard !MiniWindowDemoData.isCapturingMenuBarPanelSnapshots else { return }
-#endif
-        let nextButton = hovering ? detail : nil
-        guard hoveredTertiaryButton != nextButton else { return }
-        hoveredTertiaryButton = nextButton
-        cancelTertiaryHoverIntent()
-
-        guard hovering else {
-            panelCoordinator.tertiaryHoverExited()
-            if activeTertiaryDetail == detail {
-                scheduleTertiaryDetailDismissal(detail)
-            }
-            return
-        }
-        guard panelSettingsState.tertiaryPresentationMode == .column else { return }
-        tertiaryHoverIntent = panelCoordinator.scheduleTertiaryPreview(
-            identifier: detail.rawValue,
-            condition: {
-                hoveredTertiaryButton == detail
-                    && panelSettingsState.tertiaryPresentationMode == .column
-            },
-            action: {
-                presentTertiaryDetail(detail, pinned: false)
                 tertiaryHoverIntent = nil
             }
         )
@@ -230,31 +185,12 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    private func presentTertiaryDetail(
-        _ detail: MenuBarTertiaryDetail,
-        pinned: Bool
-    ) {
-        guard panelCoordinator.presentHistory(
-            .builtIn(detail.rawValue),
-            pinned: pinned
-        ) else { return }
-        activeInlineTertiaryRequest = nil
-        isTertiaryDetailSurfaceHovered = false
-        activeTertiaryDetail = detail
-    }
-
-    func presentFanCurveEditor() {
-        guard panelSettingsState.tertiaryPresentationMode == .column else { return }
-        presentTertiaryDetail(.fanCurve, pinned: true)
-    }
-
     private func tertiaryRequestSurface(
         _ request: GeekInlineTertiaryRequest
     ) -> some View {
         tertiaryDetailChrome(
             requestID: request.id,
-            density: presentation,
-            contentPadding: 0
+            density: presentation
         ) {
             GeekInlineTertiaryLiveContent(store: request.contentStore)
         }
@@ -282,6 +218,7 @@ extension MenuBarAdvancedStatusView {
             content()
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .fixedSize(horizontal: false, vertical: true)
+                .environment(\.miniWindowPageProvidesInset, true)
                 .padding(contentPadding)
                 .background {
                     GeometryReader { proxy in
@@ -326,20 +263,26 @@ extension MenuBarAdvancedStatusView {
     private var tertiaryProcessorDetail: some View {
         GeekProcessorActivityHoverDetail(
             points: history,
-            duration: geekChartDuration,
+            duration: geekTelemetryChartDuration,
             userValue: "",
             systemValue: "",
-            samplingInterval: store.menuBarRefreshInterval.seconds
+            samplingInterval: store.menuBarRefreshInterval.seconds,
+            isUpdating: geekTelemetryChartIsUpdating
         )
     }
 
     private var tertiaryMemoryDetail: some View {
-        GeekMemoryHistoryHoverDetail(
-            points: memoryHistory,
-            duration: geekChartDuration,
+        // Opened by route, not inline: no memory-metric request is active,
+        // so the picker shows and changes the page's range. The points and
+        // their window come from that same range.
+        let memoryHistory = routedMemoryDisplayedHistory
+        return GeekMemoryHistoryHoverDetail(
+            points: memoryHistory.points,
+            duration: memoryHistory.range.duration,
             currentValue: memoryRingUsedPercentText,
             pressure: memoryPressureDisplayText,
-            snapshot: memorySnapshot
+            snapshot: memorySnapshot,
+            isUpdating: memoryHistory.isUpdating
         )
     }
 
@@ -361,20 +304,25 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var tertiarySensorsDetail: some View {
-        let temperatureSeries = tertiaryTemperatureSeries
+        // Prepared with the window, off the main thread (P2-1): this page
+        // used to walk the whole window on every redraw.
+        let summary = historySummary
+        let temperatureSeries = tertiaryTemperatureSeries(summary)
         let hasGPUTemperatureHistory = temperatureSeries.contains {
             $0.channel == .gpuTemperature
         }
         let hasChipTemperature = metricAvailable(.chipTemperature)
             || temperatureSeries.contains { $0.channel == .chipTemperature }
+        // The fan rings' color exit, also under a chart theme.
+        let fanTint = panelMetricColors.sensorGraph(chartAccent: panelChartAccentColor)
         let fanSeries = [
             MenuBarTelemetrySeries(
                 id: "fan-tertiary",
                 title: L10n.text("实际转速", "Actual RPM"),
                 channel: .fanRPM,
-                color: AppDesignTokens.Palette.tertiary
+                color: fanTint
             ),
-        ] + (history.contains { $0.fanTargetRPM?.isFinite == true } ? [
+        ] + (summary.hasFanTarget ? [
             MenuBarTelemetrySeries(
                 id: "fan-target-tertiary",
                 title: L10n.text("目标转速", "Target RPM"),
@@ -384,16 +332,14 @@ extension MenuBarAdvancedStatusView {
             ),
         ] : [])
 
-        return VStack(spacing: 6) {
+        return VStack(spacing: MiniWindowStyleTokens.cardSpacing) {
             if hasChipTemperature || hasGPUTemperatureHistory {
                 AdvancedPanelCard(
                     title: hasChipTemperature && hasGPUTemperatureHistory
-                        ? L10n.text("芯片与 GPU 温度 · 最近 \(geekChartRangeTitle)", "Chip & GPU Temperature · Last \(geekChartRangeTitle)")
+                        ? L10n.text("芯片与 GPU 温度 · 最近 \(geekTelemetryChartRangeTitle)", "Chip & GPU Temperature · Last \(geekTelemetryChartRangeTitle)")
                         : hasGPUTemperatureHistory
-                            ? L10n.text("GPU 温度 · 最近 \(geekChartRangeTitle)", "GPU Temperature · Last \(geekChartRangeTitle)")
-                            : L10n.text("芯片温度 · 最近 \(geekChartRangeTitle)", "Chip Temperature · Last \(geekChartRangeTitle)"),
-                    systemImage: AppSymbols.Panel.temperature,
-                    tint: hasChipTemperature ? temperatureTint : resolvedGPUTint
+                            ? L10n.text("GPU 温度 · 最近 \(geekTelemetryChartRangeTitle)", "GPU Temperature · Last \(geekTelemetryChartRangeTitle)")
+                            : L10n.text("芯片温度 · 最近 \(geekTelemetryChartRangeTitle)", "Chip Temperature · Last \(geekTelemetryChartRangeTitle)")
                 ) {
                     GeekPrecisionLineChart(
                         points: history,
@@ -401,11 +347,11 @@ extension MenuBarAdvancedStatusView {
                         valueRange: 20...110,
                         unit: .temperature,
                         accessibilityLabel: hasChipTemperature && hasGPUTemperatureHistory
-                            ? L10n.text("可悬停的最近 \(geekChartRangeTitle) 芯片与 GPU 温度", "Hoverable chip and GPU temperatures over the last \(geekChartRangeTitle)")
+                            ? L10n.text("可悬停的最近 \(geekTelemetryChartRangeTitle) 芯片与 GPU 温度", "Hoverable chip and GPU temperatures over the last \(geekTelemetryChartRangeTitle)")
                             : hasGPUTemperatureHistory
-                                ? L10n.text("可悬停的最近 \(geekChartRangeTitle) GPU 温度", "Hoverable GPU temperature over the last \(geekChartRangeTitle)")
-                                : L10n.text("可悬停的最近 \(geekChartRangeTitle) 芯片温度", "Hoverable chip temperature over the last \(geekChartRangeTitle)"),
-                        duration: geekChartDuration,
+                                ? L10n.text("可悬停的最近 \(geekTelemetryChartRangeTitle) GPU 温度", "Hoverable GPU temperature over the last \(geekTelemetryChartRangeTitle)")
+                                : L10n.text("可悬停的最近 \(geekTelemetryChartRangeTitle) 芯片温度", "Hoverable chip temperature over the last \(geekTelemetryChartRangeTitle)"),
+                        duration: geekTelemetryChartDuration,
                         showsTimelineLabels: false,
                         showsTooltip: true,
                         horizontalInset: 8,
@@ -414,7 +360,7 @@ extension MenuBarAdvancedStatusView {
                     .frame(height: PanelLayoutMetrics.primaryChartHeight)
 
                     if hasGPUTemperatureHistory,
-                       let statistics = GeekSeriesStatistics(values: history.compactMap(\.gpuTemperature)) {
+                       let statistics = summary.gpuTemperatureStatistics {
                         AdvancedValueRow(
                             title: L10n.text("GPU 最低 / 平均 / 最高", "GPU Minimum / Average / Maximum"),
                             value: String(format: "%.1f / %.1f / %.1f°C", statistics.minimum, statistics.average, statistics.maximum),
@@ -426,17 +372,15 @@ extension MenuBarAdvancedStatusView {
 
             if metricAvailable(.fanSpeed) {
                 AdvancedPanelCard(
-                    title: L10n.text("风扇转速 · 最近 \(geekChartRangeTitle)", "Fan Speed · Last \(geekChartRangeTitle)"),
-                    systemImage: AppSymbols.Monitor.sensors,
-                    tint: AppDesignTokens.Palette.tertiary
+                    title: L10n.text("风扇转速 · 最近 \(geekTelemetryChartRangeTitle)", "Fan Speed · Last \(geekTelemetryChartRangeTitle)")
                 ) {
                     GeekPrecisionLineChart(
                         points: history,
                         series: fanSeries,
-                        valueRange: 0...fanTrendMaximum,
+                        valueRange: 0...summary.fanTrendMaximum,
                         unit: .fanRPM,
-                        accessibilityLabel: L10n.text("可悬停的最近 \(geekChartRangeTitle) 风扇转速", "Hoverable fan speed over the last \(geekChartRangeTitle)"),
-                        duration: geekChartDuration,
+                        accessibilityLabel: L10n.text("可悬停的最近 \(geekTelemetryChartRangeTitle) 风扇转速", "Hoverable fan speed over the last \(geekTelemetryChartRangeTitle)"),
+                        duration: geekTelemetryChartDuration,
                         showsTimelineLabels: false,
                         showsTooltip: true,
                         horizontalInset: 8,
@@ -444,7 +388,7 @@ extension MenuBarAdvancedStatusView {
                     )
                     .frame(height: PanelLayoutMetrics.primaryChartHeight)
                     ForEach(fanTelemetryRows) { row in
-                        AdvancedValueRow(title: row.title, value: row.value, tint: AppDesignTokens.Palette.tertiary)
+                        AdvancedValueRow(title: row.title, value: row.value, tint: fanTint)
                     }
                 }
             }
@@ -452,9 +396,7 @@ extension MenuBarAdvancedStatusView {
             if let gpuTemperature = geekGPUTemperature,
                !hasGPUTemperatureHistory {
                 AdvancedPanelCard(
-                    title: L10n.text("GPU 温度", "GPU Temperature"),
-                    systemImage: AppSymbols.Panel.temperature,
-                    tint: resolvedThermalTint
+                    title: L10n.text("GPU 温度", "GPU Temperature")
                 ) {
                     AdvancedValueRow(
                         title: L10n.text("当前", "Current"),
@@ -474,7 +416,7 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    private var tertiaryTemperatureSeries: [MenuBarTelemetrySeries] {
+    private func tertiaryTemperatureSeries(_ summary: MenuBarTelemetryWindowSummary) -> [MenuBarTelemetrySeries] {
         [
             MenuBarTelemetrySeries(
                 id: "chip-temperature-tertiary",
@@ -488,38 +430,41 @@ extension MenuBarAdvancedStatusView {
                 channel: .gpuTemperature,
                 color: resolvedGPUTint
             )
-        ].filter { item in
-            PanelChartSampling.hasRenderableTrend(
-                history.map {
-                    MenuBarChartSample(
-                        date: $0.date,
-                        value: item.channel.value(in: $0)
-                    )
-                }
-            )
-        }
+        ].filter { summary.renderableTemperatureChannels.contains($0.channel) }
     }
 
     private var tertiaryPowerDetail: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: MiniWindowStyleTokens.cardSpacing) {
             AdvancedPanelCard(
-                title: L10n.text("当前电气读数", "Current Electrical Readings"),
-                systemImage: AppSymbols.Monitor.power,
-                tint: batteryTint
+                title: L10n.text("当前电气读数", "Current Electrical Readings")
             ) {
                 if let electrical = batteryElectricalSnapshot {
                     if batterySnapshot?.powerSource != .batteryPower {
                         if let adapterName = electrical.adapterName {
                             AdvancedValueRow(title: L10n.text("电源适配器", "Power Adapter"), value: adapterName, tint: AppDesignTokens.Palette.success)
                         }
+                        // D57: the measured input (SMC PDTR/VD0R/ID0R) when read;
+                        // the adapter's negotiated rating is labelled as such.
+                        let input = powerTelemetry?.smc
+                        if let watts = input?.inputPowerWatts.value {
+                            AdvancedValueRow(title: L10n.text("输入功率", "Input Power"), value: HardwareReadingText.watts(watts), tint: AppDesignTokens.Palette.success)
+                        }
+                        if let volts = input?.inputVoltageVolts.value {
+                            AdvancedValueRow(title: L10n.text("输入电压", "Input Voltage"), value: HardwareReadingText.volts(volts), tint: AppDesignTokens.Palette.information)
+                        }
+                        if let amps = input?.inputCurrentAmps.value {
+                            AdvancedValueRow(title: L10n.text("输入电流", "Input Current"), value: HardwareReadingText.amps(amps), tint: AppDesignTokens.Palette.warning)
+                        }
                         if let adapterPower = electrical.adapterPowerWatts {
-                            AdvancedValueRow(title: L10n.text("输入功率", "Input Power"), value: String(format: "%.0f W", adapterPower), tint: AppDesignTokens.Palette.success)
+                            AdvancedValueRow(title: L10n.text("协商功率", "Negotiated Power"), value: String(format: "%.0f W", adapterPower), tint: AppDesignTokens.Palette.success)
                         }
-                        if let adapterVoltage = electrical.adapterVoltageVolts {
-                            AdvancedValueRow(title: L10n.text("输入电压", "Input Voltage"), value: String(format: "%.1f V", adapterVoltage), tint: AppDesignTokens.Palette.information)
-                        }
-                        if let adapterAmperage = electrical.adapterAmperageAmps {
-                            AdvancedValueRow(title: L10n.text("输入电流", "Input Current"), value: String(format: "%.2f A", adapterAmperage), tint: AppDesignTokens.Palette.warning)
+                        if input?.inputPowerWatts.value == nil {
+                            if let adapterVoltage = electrical.adapterVoltageVolts {
+                                AdvancedValueRow(title: L10n.text("协商电压", "Negotiated Voltage"), value: String(format: "%.1f V", adapterVoltage), tint: AppDesignTokens.Palette.information)
+                            }
+                            if let adapterAmperage = electrical.adapterAmperageAmps {
+                                AdvancedValueRow(title: L10n.text("协商电流", "Negotiated Current"), value: String(format: "%.2f A", adapterAmperage), tint: AppDesignTokens.Palette.warning)
+                            }
                         }
                     }
                     if hasInternalBattery {
@@ -527,10 +472,10 @@ extension MenuBarAdvancedStatusView {
                             AdvancedValueRow(title: L10n.text("电池电压", "Battery Voltage"), value: String(format: "%.3f V", voltage), tint: AppDesignTokens.Palette.information)
                         }
                         if let current = electrical.amperageAmps {
-                            AdvancedValueRow(title: L10n.text("电池电流", "Battery Current"), value: String(format: "%+.3f A", current), tint: batteryTint)
+                            AdvancedValueRow(title: L10n.text("电池电流", "Battery Current"), value: HardwareReadingText.signed(current, decimals: 3, unit: "A"), tint: batteryTint)
                         }
                         if let power = electrical.powerWatts {
-                            AdvancedValueRow(title: L10n.text("电池功率", "Battery Power"), value: String(format: "%+.2f W", power), tint: AppDesignTokens.Palette.warning)
+                            AdvancedValueRow(title: L10n.text("电池功率", "Battery Power"), value: HardwareReadingText.signedWatts(power), tint: AppDesignTokens.Palette.warning)
                         }
                         if let temperature = electrical.temperatureCelsius {
                             AdvancedValueRow(title: L10n.text("电池温度", "Battery Temperature"), value: String(format: "%.1f°C", temperature), tint: temperature >= 40 ? AppDesignTokens.Palette.warning : AppDesignTokens.Palette.success)
@@ -543,9 +488,7 @@ extension MenuBarAdvancedStatusView {
 
             if hasInternalBattery {
                 AdvancedPanelCard(
-                    title: L10n.text("电池功率 · 最近 \(geekChartRangeTitle)", "Battery Power · Last \(geekChartRangeTitle)"),
-                    systemImage: AppSymbols.Monitor.power,
-                    tint: resolvedEnergyTint
+                    title: L10n.text("电池功率 · 最近 \(geekChartRangeTitle)", "Battery Power · Last \(geekChartRangeTitle)")
                 ) {
                     GeekPowerHistoryChart(
                         points: powerHistory,
@@ -561,9 +504,7 @@ extension MenuBarAdvancedStatusView {
 
                 if let batterySnapshot, hasUsableBatteryData(batterySnapshot) {
                     AdvancedPanelCard(
-                        title: L10n.text("电池会话状态", "Battery Session State"),
-                        systemImage: batterySystemImage,
-                        tint: batteryTint
+                        title: L10n.text("电池会话状态", "Battery Session State")
                     ) {
                         AdvancedValueRow(title: L10n.text("供电来源", "Power Source"), value: batteryPowerSourceTitle, tint: batteryTint)
                         if let charge = batterySnapshot.chargePercent {

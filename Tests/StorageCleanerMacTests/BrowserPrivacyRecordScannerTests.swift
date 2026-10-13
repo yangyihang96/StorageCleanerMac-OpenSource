@@ -12,12 +12,35 @@ final class BrowserPrivacyRecordScannerTests: XCTestCase {
         store.startScan()
         await store.waitUntilIdle()
 
-        XCTAssertEqual(store.records.count, 4)
-        XCTAssertEqual(store.filteredDisplayItems.count, 3)
         XCTAssertTrue(store.selectedRecordIDs.isEmpty)
+        // Anonymous: reserved example domains or browser-internal pages only.
         XCTAssertTrue(store.records.allSatisfy {
-            $0.url?.contains(".example") == true || $0.url?.hasPrefix("chrome://") == true
+            guard let url = $0.url, let components = URLComponents(string: url) else { return false }
+            if components.scheme == "http" || components.scheme == "https" {
+                return components.host?.hasSuffix(".example") == true
+            }
+            return components.scheme == "chrome"
         })
+
+        // D20: the preview must demonstrate that every page is identifiable.
+        let items = store.filteredDisplayItems
+        XCTAssertGreaterThanOrEqual(items.count, 6)
+        XCTAssertLessThan(items.count, store.records.count, "one page aggregates several visits")
+        let titled = store.records.filter { $0.title?.isEmpty == false }
+        XCTAssertGreaterThanOrEqual(titled.count, 5, "most preview pages carry a title")
+        XCTAssertTrue(store.records.contains { $0.title == nil }, "one page has no title")
+        let pagesPerDomain = Dictionary(grouping: items, by: { $0.domain ?? "" })
+        XCTAssertTrue(
+            pagesPerDomain.contains { !$0.key.isEmpty && $0.value.count >= 2 },
+            "one site lists several distinct pages"
+        )
+        XCTAssertTrue(store.records.contains {
+            guard let url = $0.url else { return false }
+            return URLComponents(string: url)?.queryItems?.isEmpty == false
+        }, "one page carries query parameters")
+        XCTAssertTrue(store.records.contains { $0.url?.hasPrefix("chrome://") == true })
+        XCTAssertTrue(store.records.contains { $0.browser.engine == .safari })
+        XCTAssertTrue(store.records.contains { $0.searchKeyword != nil })
     }
 #endif
 
@@ -129,6 +152,52 @@ final class BrowserPrivacyRecordScannerTests: XCTestCase {
         XCTAssertNil(missingTitleRecord.sizeBytes)
         XCTAssertEqual(try fixture.historyRowCount(), 2, "read-only snapshots must not modify source history")
         XCTAssertTrue(try fixture.snapshotResidues().isEmpty)
+    }
+
+    func testSafariRealSchemaReadsEachVisitTitleFromHistoryVisits() async throws {
+        let fixture = try SafariHistoryFixtureDatabase(schema: .real)
+        let older = Date(timeIntervalSince1970: 1_750_000_000)
+        let newer = older.addingTimeInterval(120)
+        let article = try fixture.insertItem(url: "https://www.example.com/articles/42?ref=home")
+        try fixture.insertVisit(item: article, title: "Article 42 – Example", visitedAt: older)
+        try fixture.insertVisit(item: article, title: "Article 42 (updated) – Example", visitedAt: newer)
+        let guide = try fixture.insertItem(url: "https://docs.example.org/guide")
+        try fixture.insertVisit(item: guide, title: nil, visitedAt: older.addingTimeInterval(-60))
+
+        let outcome = try await fixture.scanner().scan()
+
+        XCTAssertEqual(outcome.state, .completed)
+        XCTAssertEqual(outcome.records.count, 3)
+        let articleRecords = outcome.records
+            .filter { $0.url == "https://www.example.com/articles/42?ref=home" }
+            .sorted { ($0.visitedAt ?? .distantPast) < ($1.visitedAt ?? .distantPast) }
+        XCTAssertEqual(
+            articleRecords.map(\.title),
+            ["Article 42 – Example", "Article 42 (updated) – Example"],
+            "Safari keeps the page title on each history_visits row"
+        )
+        XCTAssertEqual(articleRecords.map(\.domain), ["www.example.com", "www.example.com"])
+        let guideRecord = try XCTUnwrap(outcome.records.first {
+            $0.url == "https://docs.example.org/guide"
+        })
+        XCTAssertNil(guideRecord.title, "a visit without a recorded title stays unknown")
+        XCTAssertTrue(outcome.records.allSatisfy { $0.locator == nil })
+        XCTAssertEqual(try fixture.visitRowCount(), 3, "the scan must not modify Safari history")
+    }
+
+    func testSafariTitleFallsBackToHistoryItemsOnlyWhenVisitsHaveNoTitleColumn() async throws {
+        let legacy = try SafariHistoryFixtureDatabase(schema: .itemTitleOnly)
+        let item = try legacy.insertItem(url: "https://legacy.example/page", itemTitle: "Legacy Item Title")
+        try legacy.insertVisit(item: item, title: nil, visitedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        let legacyOutcome = try await legacy.scanner().scan()
+        XCTAssertEqual(legacyOutcome.records.map(\.title), ["Legacy Item Title"])
+
+        let untitled = try SafariHistoryFixtureDatabase(schema: .noTitleColumns)
+        let bare = try untitled.insertItem(url: "https://bare.example/page")
+        try untitled.insertVisit(item: bare, title: nil, visitedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        let untitledOutcome = try await untitled.scanner().scan()
+        XCTAssertEqual(untitledOutcome.records.count, 1)
+        XCTAssertNil(untitledOutcome.records.first?.title)
     }
 
     func testImmutableFallbackRejectsWALAndHotJournal() throws {
@@ -265,19 +334,225 @@ final class BrowserPrivacyRecordScannerTests: XCTestCase {
         XCTAssertEqual(adult.selectionEligibility, .browserActionOnly)
         store.setSelected(true, recordID: adult.id)
         XCTAssertEqual(store.selectedRecordIDs, [adult.id])
+        // Search precision is checked after explicit sensitive disclosure.
+        for record in [adult, finance] { store.setSensitiveSiteRevealed(true, siteID: BrowserPrivacyDisclosurePolicy.siteID(record)) }
         store.filters.domain = "bank"
+        await store.waitForFilteredResults()
         XCTAssertEqual(store.filteredRecords.map(\.id), [finance.id])
         store.filters.domain = ""
+        await store.waitForFilteredResults()
         store.filters.keyword = "account balance"
+        await store.waitForFilteredResults()
         XCTAssertEqual(store.filteredRecords.map(\.id), [finance.id])
         store.filters.keyword = "private phrase"
+        await store.waitForFilteredResults()
         XCTAssertEqual(store.filteredRecords.map(\.id), [adult.id])
         store.filters.keyword = ""
+        await store.waitForFilteredResults()
         store.filters.query = "Quarterly Budget Review"
+        await store.waitForFilteredResults()
         XCTAssertEqual(store.filteredRecords.map(\.id), [finance.id])
         store.filters.query = ""
+        await store.waitForFilteredResults()
         store.filters.startDate = Date(timeIntervalSince1970: 1_745_000_000)
+        await store.waitForFilteredResults()
         XCTAssertEqual(store.filteredRecords.map(\.id), [adult.id])
+    }
+
+
+    func testSearchMatchesAddressTitleBrowserProfileNameAndCategoryNamesInBothLanguages() async {
+        let date = Date(timeIntervalSince1970: 1_750_000_000)
+        let shop = BrowserPrivacyTestFactory.record(
+            browserID: "chrome",
+            browserName: "Google Chrome",
+            profileID: "chrome:Profile 2",
+            profileDisplayName: "工作",
+            domain: "shop.example",
+            url: "https://shop.example/orders/2026-0042/receipt?invoice=INV-7731&lang=zh#summary",
+            title: "订单详情",
+            searchKeyword: nil,
+            category: .shopping,
+            confidence: .medium,
+            date: date
+        )
+        let search = BrowserPrivacyTestFactory.record(
+            browserID: "safari",
+            browserName: "Safari",
+            profileID: "safari:Safari",
+            profileDisplayName: "Safari",
+            domain: "find.example",
+            url: "https://find.example/results?q=%E7%BB%BF%E8%8C%B6+green",
+            title: "Results",
+            searchKeyword: "绿茶 green",
+            category: .search,
+            confidence: .medium,
+            date: date.addingTimeInterval(-60)
+        )
+        let store = BrowserPrivacyStore(scanner: BrowserPrivacyStaticScanner(
+            outcome: .init(state: .completed, records: [shop, search], coverage: [])
+        ))
+        store.startScan()
+        await store.waitUntilIdle()
+
+        func matches(_ query: String) async -> [UUID] {
+            store.filters.query = query
+            await store.waitForFilteredResults()
+            return store.filteredRecords.map(\.id)
+        }
+
+        let result1613 = await matches("shop.example")
+        XCTAssertEqual(result1613, [shop.id], "domain")
+        let result1682 = await matches("/orders/2026-0042")
+        XCTAssertEqual(result1682, [shop.id], "path")
+        let result1754 = await matches("INV-7731")
+        XCTAssertEqual(result1754, [shop.id], "query parameter")
+        let result1828 = await matches("订单详情")
+        XCTAssertEqual(result1828, [shop.id], "title")
+        let result1888 = await matches("google chrome")
+        XCTAssertEqual(result1888, [shop.id], "browser name")
+        let result1964 = await matches("工作")
+        XCTAssertEqual(result1964, [shop.id], "profile display name")
+        let result2037 = await matches("购物")
+        XCTAssertEqual(result2037, [shop.id], "Chinese category name")
+        let result2111 = await matches("Shopping")
+        XCTAssertEqual(result2111, [shop.id], "English category name")
+        let result2191 = await matches("搜索")
+        XCTAssertEqual(result2191, [search.id], "Chinese category name")
+        let result2267 = await matches("绿茶")
+        XCTAssertEqual(result2267, [search.id], "decoded query parameter and search keyword")
+        let result2364 = await matches("no-such-page")
+        XCTAssertEqual(result2364, [])
+    }
+
+    func testResultSortReordersTheDisplayedPages() async {
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        let chromeNewest = BrowserPrivacyTestFactory.record(
+            browserID: "chrome", browserName: "Google Chrome", profileID: "chrome:Default",
+            domain: "newest.example", searchKeyword: nil, category: .other,
+            confidence: .low, date: base
+        )
+        let arcOlderA = BrowserPrivacyTestFactory.record(
+            browserID: "arc", browserName: "Arc", profileID: "arc:Default",
+            domain: "popular.example", searchKeyword: nil, category: .other,
+            confidence: .low, date: base.addingTimeInterval(-3_600)
+        )
+        let arcOlderB = BrowserPrivacyTestFactory.record(
+            browserID: "arc", browserName: "Arc", profileID: "arc:Default",
+            domain: "popular.example", searchKeyword: nil, category: .other,
+            confidence: .low, date: base.addingTimeInterval(-7_200)
+        )
+        let store = BrowserPrivacyStore(scanner: BrowserPrivacyStaticScanner(
+            outcome: .init(
+                state: .completed,
+                records: [chromeNewest, arcOlderA, arcOlderB],
+                coverage: []
+            )
+        ))
+        store.startScan()
+        await store.waitUntilIdle()
+
+        store.resultSort = .newestFirst
+        XCTAssertEqual(
+            store.filteredDisplayItems.map(\.domain),
+            ["newest.example", "popular.example"]
+        )
+        store.resultSort = .browser
+        await store.waitForFilteredResults()
+        XCTAssertEqual(
+            store.filteredDisplayItems.map(\.browser.displayName),
+            ["Arc", "Google Chrome"],
+            "the sort menu must change the visible page order"
+        )
+        store.resultSort = .mostVisited
+        await store.waitForFilteredResults()
+        XCTAssertEqual(
+            store.filteredDisplayItems.map(\.visitCount),
+            [2, 1],
+            "the page with more visits comes first"
+        )
+        XCTAssertEqual(
+            Set(BrowserPrivacyResultSort.allCases),
+            [.newestFirst, .mostVisited, .browser],
+            "no size order: a history row has no size of its own"
+        )
+    }
+
+    func testExpandingAPageNeverSelectsAndVisitsCanBeSelectedOneByOne() async throws {
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        let newer = BrowserPrivacyTestFactory.record(
+            domain: "page.example", url: "https://page.example/article#top",
+            searchKeyword: nil, category: .other, confidence: .low, date: base
+        )
+        let older = BrowserPrivacyTestFactory.record(
+            domain: "page.example", url: "https://page.example/article",
+            searchKeyword: nil, category: .other, confidence: .low, date: base.addingTimeInterval(-300)
+        )
+        let other = BrowserPrivacyTestFactory.record(
+            domain: "page.example", url: "https://page.example/other",
+            searchKeyword: nil, category: .other, confidence: .low, date: base.addingTimeInterval(-600)
+        )
+        let store = BrowserPrivacyStore(scanner: BrowserPrivacyStaticScanner(
+            outcome: .init(state: .completed, records: [newer, older, other], coverage: [])
+        ))
+        store.startScan()
+        await store.waitUntilIdle()
+        XCTAssertEqual(store.filteredDisplayItems.count, 2)
+        let page = try XCTUnwrap(store.filteredDisplayItems.first { $0.visitCount == 2 })
+
+        store.setExpanded(true, itemID: page.id)
+        XCTAssertEqual(store.expandedItemIDs, [page.id])
+        XCTAssertTrue(store.selectedRecordIDs.isEmpty, "looking at a page does not select it")
+
+        // One visit of the expanded page.
+        store.toggleSelection(older)
+        XCTAssertEqual(store.selectedRecordIDs, [older.id])
+        XCTAssertEqual(store.selectionState(for: page), .mixed)
+
+        // The row checkbox still means every visit of the page.
+        store.setSelected(true, displayItem: page)
+        XCTAssertEqual(store.selectedRecordIDs, [newer.id, older.id])
+        XCTAssertEqual(store.selectionState(for: page), .checked)
+        store.setSelected(false, displayItem: page)
+        XCTAssertTrue(store.selectedRecordIDs.isEmpty)
+
+        store.setExpanded(false, itemID: page.id)
+        XCTAssertTrue(store.expandedItemIDs.isEmpty)
+        store.setExpanded(true, itemID: page.id)
+        store.clearSession()
+        XCTAssertTrue(store.expandedItemIDs.isEmpty, "the session keeps nothing after it is cleared")
+    }
+
+    func testSelectionFromIncompletelyReadProfilesIsFlagged() async {
+        let complete = BrowserPrivacyTestFactory.record(
+            browserID: "chrome", browserName: "Google Chrome", profileID: "chrome:Default",
+            domain: "complete.example", searchKeyword: nil, category: .other,
+            confidence: .low, date: .now
+        )
+        let limited = BrowserPrivacyTestFactory.record(
+            browserID: "chrome", browserName: "Google Chrome", profileID: "chrome:Profile 2",
+            domain: "limited.example", searchKeyword: nil, category: .other,
+            confidence: .low, date: .now
+        )
+        // Profile 2 reached the per-profile read limit, so it is not fully scanned.
+        let coverage = BrowserPrivacyTestFactory.coverage(
+            browser: complete.browser,
+            availability: .partial,
+            profileCount: 2,
+            recordCount: 2,
+            fullyScannedProfileIDs: ["chrome:Default"]
+        )
+        let store = BrowserPrivacyStore(scanner: BrowserPrivacyStaticScanner(
+            outcome: .init(state: .partial, records: [complete, limited], coverage: [coverage])
+        ))
+        store.startScan()
+        await store.waitUntilIdle()
+
+        store.setSelected(true, recordID: complete.id)
+        XCTAssertFalse(store.selectionIncludesIncompletelyReadProfiles)
+        store.setSelected(true, recordID: limited.id)
+        XCTAssertTrue(store.selectionIncludesIncompletelyReadProfiles)
+        store.setSelected(false, recordID: limited.id)
+        XCTAssertFalse(store.selectionIncludesIncompletelyReadProfiles)
     }
 
     func testMixedSelectionSeparatesVerifiedCandidatesFromManualGuidance() async {
@@ -346,11 +621,13 @@ final class BrowserPrivacyRecordScannerTests: XCTestCase {
         XCTAssertEqual(store.selectedRecordIDs, [adult.id, finance.id])
 
         store.filters.category = .adult
+        await store.waitForFilteredResults()
         store.setFilteredSelection(false)
         XCTAssertEqual(store.filteredSelectionState, .unchecked)
         XCTAssertEqual(store.selectedRecordIDs, [finance.id])
 
         store.filters.category = nil
+        await store.waitForFilteredResults()
         XCTAssertEqual(store.filteredSelectionState, .mixed)
     }
 
@@ -823,21 +1100,107 @@ final class BrowserPrivacyRecordScannerTests: XCTestCase {
         XCTAssertTrue(providers.filter { $0.descriptor.engine != .chromium }
             .allSatisfy { $0.historyWriteAdapter == nil })
 
-        let reasons = Set(
-            BrowserPrivacyProviderRegistry.defaultProviders.map {
-                BrowserPrivacySQLiteWriteAdapter.manualGuidanceReason(
-                    for: $0.descriptor.engine
-                )
-            }
+        // Browsers without a write plan say so by name, in both languages.
+        for provider in providers where provider.historyWriteAdapter == nil {
+            let texts = BrowserPrivacyDirectDeletionBlocker.browserNotSupported.localizedTexts(
+                browserName: provider.descriptor.displayName,
+                engine: provider.descriptor.engine
+            )
+            XCTAssertTrue(texts.chinese.contains(provider.descriptor.displayName))
+            XCTAssertTrue(texts.english.contains(provider.descriptor.displayName))
+            XCTAssertTrue(texts.chinese.contains("不直接修改"))
+            XCTAssertTrue(texts.english.localizedCaseInsensitiveContains("does not modify"))
+        }
+    }
+
+    func testScanRecordsWhyAProfileCannotBeDeletedDirectly() async throws {
+        // Safari-family history has no write plan.
+        let safari = try SafariHistoryFixtureDatabase(schema: .real)
+        let item = try safari.insertItem(url: "https://www.example.com/")
+        try safari.insertVisit(item: item, title: "Example", visitedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        let safariOutcome = try await safari.scanner().scan()
+        XCTAssertEqual(safariOutcome.records.map(\.directDeletionBlocker), [.browserNotSupported])
+
+        // A deletable record carries no blocker.
+        let exact = try ChromiumV70HistoryFixture(mode: .production)
+        let exactOutcome = try await exact.scanOutcome()
+        XCTAssertTrue(exactOutcome.records.allSatisfy {
+            $0.locator != nil && $0.directDeletionBlocker == nil
+        })
+
+        // A schema version this build has not audited.
+        let newer = try ChromiumV70HistoryFixture(mode: .production, schemaVersion: "80")
+        let newerOutcome = try await newer.scanOutcome()
+        XCTAssertEqual(
+            Set(newerOutcome.records.map(\.directDeletionBlocker)),
+            [.schemaNotSupported]
         )
-        XCTAssertTrue(reasons.contains { $0.localizedCaseInsensitiveContains("Safari") })
-        XCTAssertTrue(reasons.contains { $0.localizedCaseInsensitiveContains("Chromium") })
-        XCTAssertTrue(reasons.contains { $0.localizedCaseInsensitiveContains("Firefox") })
-        XCTAssertTrue(reasons.allSatisfy {
-            $0.localizedCaseInsensitiveContains("parent")
-                || $0.localizedCaseInsensitiveContains("derived")
-                || $0.localizedCaseInsensitiveContains("frecency")
-                || $0.localizedCaseInsensitiveContains("sidecar")
+
+        // The database cannot be tied to an installed, signed browser.
+        let unverified = try ChromiumV70HistoryFixture(mode: .production)
+        let unverifiedOutcome = try await unverified.scanOutcome(installedApplications: [])
+        XCTAssertEqual(
+            Set(unverifiedOutcome.records.map(\.directDeletionBlocker)),
+            [.applicationNotVerified]
+        )
+
+    }
+
+    func testSyncedVisitsAreMarkedForTheBrowserAndDoNotHoldBackTheOthers() async throws {
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.execute(
+            """
+            UPDATE visits SET is_known_to_sync = 1 WHERE id = 12;
+            UPDATE visits SET originator_cache_guid = 'other-device' WHERE id = 13;
+            """
+        )
+
+        let outcome = try await fixture.scanOutcome()
+        let synced = outcome.records.filter { $0.locator == nil }
+        XCTAssertEqual(synced.count, 2)
+        XCTAssertEqual(Set(synced.map(\.directDeletionBlocker)), [.syncedWithAccount])
+        XCTAssertEqual(
+            Set(outcome.records.compactMap(\.locator?.visitRowID)),
+            [11, 21],
+            "visits that never left this Mac stay directly deletable"
+        )
+
+        // One confirmation: the local visits are deleted, the synced ones
+        // are reported for the browser, and the synced rows are untouched.
+        let report = await fixture.processor().process(records: outcome.records)
+        XCTAssertEqual(report.entries.count, 2)
+        XCTAssertEqual(report.verifiedDeletedRecordCount, 2)
+        XCTAssertEqual(report.manualRecordCount, 2)
+        let manual = try XCTUnwrap(report.entries.first { $0.outcome == .manual })
+        XCTAssertEqual(
+            manual.detail,
+            BrowserPrivacyDirectDeletionBlocker.syncedWithAccount.detail(
+                browserName: "Google Chrome",
+                engine: .chromium
+            )
+        )
+        XCTAssertEqual(
+            try fixture.rows("SELECT id FROM visits ORDER BY id"),
+            ["12", "13"]
+        )
+        XCTAssertEqual(
+            try fixture.rows("SELECT visit_count, typed_count, last_visit_time FROM urls WHERE id = 1"),
+            ["2\u{1f}1\u{1f}13324473603000000"],
+            "the page keeps its synced visits and the matching counters"
+        )
+    }
+
+    func testJournalFilesAtScanTimeDoNotDecideWhetherAPageCanBeDeleted() async throws {
+        // A scan usually runs while the browser does, when its journal file
+        // exists. That is checked when deleting, after the browser has quit.
+        let fixture = try ChromiumV70HistoryFixture(mode: .production)
+        try fixture.createSidecar("-journal", contents: Data())
+
+        let outcome = try await fixture.scanOutcome()
+
+        XCTAssertEqual(outcome.records.count, 4)
+        XCTAssertTrue(outcome.records.allSatisfy {
+            $0.locator != nil && $0.directDeletionBlocker == nil
         })
     }
 
@@ -1580,7 +1943,9 @@ private enum BrowserPrivacyTestFactory {
         browserID: String = "fixture",
         browserName: String = "Fixture Browser",
         profileID: String = "fixture:Default",
+        profileDisplayName: String? = nil,
         domain: String,
+        url: String? = nil,
         title: String? = nil,
         searchKeyword: String?,
         category: BrowserPrivacyCategory,
@@ -1601,8 +1966,9 @@ private enum BrowserPrivacyTestFactory {
             id: UUID(),
             browser: browser,
             profileID: profileID,
+            profileDisplayName: profileDisplayName,
             source: .history,
-            url: "https://\(domain)/",
+            url: url ?? "https://\(domain)/",
             domain: domain,
             title: title,
             searchKeyword: searchKeyword,
@@ -1820,6 +2186,234 @@ private final class BrowserPrivacyFixtureDatabase {
             throw BrowserPrivacyFixtureError.sqlite
         }
         return statement
+    }
+}
+
+/// Safari history databases built in a temporary directory. `.real` mirrors
+/// the table layout Safari ships (page titles live on `history_visits`);
+/// the other shapes exercise the scanner's column fallbacks.
+private final class SafariHistoryFixtureDatabase {
+    enum Schema {
+        case real
+        case itemTitleOnly
+        case noTitleColumns
+    }
+
+    let root: URL
+    let snapshotRoot: URL
+    let profile: BrowserPrivacyProfile
+    private let schema: Schema
+
+    init(schema: Schema) throws {
+        self.schema = schema
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BrowserPrivacySafariTests-\(UUID().uuidString)", isDirectory: true)
+        snapshotRoot = root.appendingPathComponent("snapshots", isDirectory: true)
+        let profileRoot = root.appendingPathComponent("Library/Safari", isDirectory: true)
+        try FileManager.default.createDirectory(at: profileRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: snapshotRoot, withIntermediateDirectories: true)
+        let browser = BrowserPrivacyBrowser(
+            id: "fixture-safari",
+            displayName: "Fixture Safari",
+            engine: .safari,
+            bundleIdentifier: "com.storagecleaner.fixture.safari",
+            version: "1.0"
+        )
+        profile = BrowserPrivacyProfile(
+            id: "fixture-safari:Safari",
+            browser: browser,
+            displayName: "Safari",
+            historyDatabaseURL: profileRoot.appendingPathComponent("History.db"),
+            sourceTrustedParentURL: profileRoot
+        )
+        let database = try Self.open(at: profile.historyDatabaseURL)
+        defer { sqlite3_close_v2(database) }
+        guard sqlite3_exec(database, Self.sql(for: schema), nil, nil, nil) == SQLITE_OK else {
+            throw BrowserPrivacyFixtureError.sqlite
+        }
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func insertItem(url: String, itemTitle: String? = nil) throws -> Int64 {
+        let database = try Self.open(at: profile.historyDatabaseURL)
+        defer { sqlite3_close_v2(database) }
+        let sql: String
+        switch schema {
+        case .real:
+            sql = """
+            INSERT INTO history_items
+                (url, domain_expansion, visit_count, daily_visit_counts,
+                 should_recompute_derived_visit_counts, visit_count_score)
+                VALUES (?1, NULL, 1, x'00', 0, 100)
+            """
+        case .itemTitleOnly:
+            sql = "INSERT INTO history_items (url, title) VALUES (?1, ?2)"
+        case .noTitleColumns:
+            sql = "INSERT INTO history_items (url) VALUES (?1)"
+        }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            throw BrowserPrivacyFixtureError.sqlite
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_text(statement, 1, url, -1, browserPrivacySQLiteTransient) == SQLITE_OK else {
+            throw BrowserPrivacyFixtureError.sqlite
+        }
+        if schema == .itemTitleOnly {
+            if let itemTitle {
+                guard sqlite3_bind_text(statement, 2, itemTitle, -1, browserPrivacySQLiteTransient) == SQLITE_OK else {
+                    throw BrowserPrivacyFixtureError.sqlite
+                }
+            } else if sqlite3_bind_null(statement, 2) != SQLITE_OK {
+                throw BrowserPrivacyFixtureError.sqlite
+            }
+        }
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw BrowserPrivacyFixtureError.sqlite }
+        return sqlite3_last_insert_rowid(database)
+    }
+
+    func insertVisit(item: Int64, title: String?, visitedAt: Date) throws {
+        let database = try Self.open(at: profile.historyDatabaseURL)
+        defer { sqlite3_close_v2(database) }
+        let sql = schema == .real
+            ? "INSERT INTO history_visits (history_item, visit_time, title) VALUES (?1, ?2, ?3)"
+            : "INSERT INTO history_visits (history_item, visit_time) VALUES (?1, ?2)"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            throw BrowserPrivacyFixtureError.sqlite
+        }
+        defer { sqlite3_finalize(statement) }
+        // Safari stores seconds since the 2001 reference date.
+        guard sqlite3_bind_int64(statement, 1, item) == SQLITE_OK,
+              sqlite3_bind_double(statement, 2, visitedAt.timeIntervalSinceReferenceDate) == SQLITE_OK else {
+            throw BrowserPrivacyFixtureError.sqlite
+        }
+        if schema == .real {
+            if let title {
+                guard sqlite3_bind_text(statement, 3, title, -1, browserPrivacySQLiteTransient) == SQLITE_OK else {
+                    throw BrowserPrivacyFixtureError.sqlite
+                }
+            } else if sqlite3_bind_null(statement, 3) != SQLITE_OK {
+                throw BrowserPrivacyFixtureError.sqlite
+            }
+        }
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw BrowserPrivacyFixtureError.sqlite }
+    }
+
+    func scanner() -> BrowserPrivacyRecordScanner {
+        let provider = BrowserPrivacyFixtureProvider(
+            descriptor: BrowserPrivacyProviderDescriptor(
+                id: profile.browser.id,
+                displayName: profile.browser.displayName,
+                engine: .safari,
+                bundleIdentifiers: [],
+                profileRootRelativePaths: []
+            ),
+            profile: profile,
+            historyWriteAdapter: nil
+        )
+        return BrowserPrivacyRecordScanner(
+            registry: BrowserPrivacyProviderRegistry(providers: [provider]),
+            snapshotService: SQLiteSnapshotService(temporaryRoot: snapshotRoot),
+            homeDirectory: root,
+            installedApplications: [],
+            limits: BrowserPrivacyRecordScanLimits(totalTimeoutSeconds: 2)
+        )
+    }
+
+    func visitRowCount() throws -> Int {
+        let database = try Self.open(at: profile.historyDatabaseURL)
+        defer { sqlite3_close_v2(database) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT count(*) FROM history_visits", -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            throw BrowserPrivacyFixtureError.sqlite
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw BrowserPrivacyFixtureError.sqlite }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private static func open(at url: URL) throws -> OpaquePointer {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(
+            url.path,
+            &database,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK, let database else {
+            if let database { sqlite3_close_v2(database) }
+            throw BrowserPrivacyFixtureError.sqlite
+        }
+        return database
+    }
+
+    private static func sql(for schema: Schema) -> String {
+        switch schema {
+        case .real:
+            return """
+            CREATE TABLE history_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                domain_expansion TEXT NULL,
+                visit_count INTEGER NOT NULL,
+                daily_visit_counts BLOB NOT NULL,
+                weekly_visit_counts BLOB NULL,
+                autocomplete_triggers BLOB NULL,
+                should_recompute_derived_visit_counts INTEGER NOT NULL,
+                visit_count_score INTEGER NOT NULL,
+                status_code INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE history_visits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                history_item INTEGER NOT NULL REFERENCES history_items(id) ON DELETE CASCADE,
+                visit_time REAL NOT NULL,
+                title TEXT NULL,
+                load_successful BOOLEAN NOT NULL DEFAULT 1,
+                http_non_get BOOLEAN NOT NULL DEFAULT 0,
+                synthesized BOOLEAN NOT NULL DEFAULT 0,
+                redirect_source INTEGER NULL UNIQUE REFERENCES history_visits(id) ON DELETE CASCADE,
+                redirect_destination INTEGER NULL UNIQUE REFERENCES history_visits(id) ON DELETE CASCADE,
+                origin INTEGER NOT NULL DEFAULT 0,
+                generation INTEGER NOT NULL DEFAULT 0,
+                attributes INTEGER NOT NULL DEFAULT 0,
+                score INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX history_items__domain_expansion ON history_items (domain_expansion);
+            CREATE INDEX history_visits__last_visit
+                ON history_visits (history_item, visit_time DESC, synthesized ASC);
+            """
+        case .itemTitleOnly:
+            return """
+            CREATE TABLE history_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                title TEXT NULL
+            );
+            CREATE TABLE history_visits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                history_item INTEGER NOT NULL,
+                visit_time REAL NOT NULL
+            );
+            """
+        case .noTitleColumns:
+            return """
+            CREATE TABLE history_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE history_visits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                history_item INTEGER NOT NULL,
+                visit_time REAL NOT NULL
+            );
+            """
+        }
     }
 }
 

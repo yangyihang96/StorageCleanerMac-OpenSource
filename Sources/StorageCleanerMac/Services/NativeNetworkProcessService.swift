@@ -25,8 +25,10 @@ struct NativeNetworkProcessSnapshot: Equatable, Sendable {
 }
 
 /// Reads a single one-second delta from macOS' built-in `nettop` utility.
-/// Sampling is requested only while the full geek Network detail is visible;
-/// the service does not own a timer or a persistent background process.
+/// The resident owner requests visible reads every 10 seconds (60 in Low
+/// Power Mode); D75 hidden prestorage uses 60 seconds (180 in Low Power Mode).
+/// This service does not
+/// own a timer or a persistent background process.
 enum NativeNetworkProcessService {
     static let executablePath = "/usr/bin/nettop"
     static let arguments = [

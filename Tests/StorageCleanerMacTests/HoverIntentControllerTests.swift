@@ -57,14 +57,14 @@ final class HoverIntentControllerTests: XCTestCase {
 
     func testImmediateOpenChecksTheLatestHoverCondition() async {
         let controller = HoverIntentController()
-        var hovering = true
+        let hovering = R2TestValue(true)
         var opened = false
         controller.scheduleOpen(
             anchorID: first,
             panelRole: .secondary,
-            condition: { hovering }
+            condition: { hovering.value }
         ) { opened = true }
-        hovering = false
+        hovering.value = false
 
         try? await Task.sleep(for: .milliseconds(15))
 
@@ -329,12 +329,12 @@ final class HoverIntentControllerTests: XCTestCase {
         var policy = HoverIntentPolicy()
         policy.initialOpenDelay = .milliseconds(5)
         policy.switchDelay = .milliseconds(5)
-        var pointer = NSPoint(x: 120, y: 220)
+        let pointer = R2TestValue(NSPoint(x: 120, y: 220))
         let registry = SmallWindowAnchorRegistry()
         let coordinator = GeekPanelCoordinator(
             hoverIntentController: HoverIntentController(policy: policy),
             anchorRegistry: registry,
-            pointerLocationProvider: { pointer }
+            pointerLocationProvider: { pointer.value }
         )
         let anchorID = SmallWindowAnchorID.module(.network)
         registry.update(id: anchorID, screenRect: NSRect(x: 100, y: 200, width: 80, height: 44),
@@ -360,12 +360,12 @@ final class HoverIntentControllerTests: XCTestCase {
         coordinator.removeAnchor(anchorID)
         coordinator.moduleHoverExited(.network)
         // Movement within the old trigger is not an exit even after removal.
-        pointer = NSPoint(x: 125, y: 222)
+        pointer.value = NSPoint(x: 125, y: 222)
         coordinator.moduleHoverExited(.network)
         // The replacement host may register its trigger at a new screen rect.
         registry.update(id: anchorID, screenRect: NSRect(x: 200, y: 200, width: 80, height: 44),
                         parentPanelRole: .primary, preferredPlacementEdge: .left, contentKind: "network")
-        pointer = NSPoint(x: 220, y: 222)
+        pointer.value = NSPoint(x: 220, y: 222)
         coordinator.moduleHoverExited(.network)
         coordinator.scheduleModulePreview(.network, condition: { true }) {
             openCount += 1
@@ -375,7 +375,7 @@ final class HoverIntentControllerTests: XCTestCase {
         XCTAssertEqual(coordinator.route, .summary)
         XCTAssertEqual(openCount, 0)
 
-        pointer = NSPoint(x: 320, y: 300)
+        pointer.value = NSPoint(x: 320, y: 300)
         coordinator.moduleHoverExited(.network)
         coordinator.scheduleModulePreview(
             .network,
@@ -394,10 +394,10 @@ final class HoverIntentControllerTests: XCTestCase {
         var policy = HoverIntentPolicy()
         policy.initialOpenDelay = .milliseconds(5)
         policy.switchDelay = .milliseconds(5)
-        var pointer = NSPoint(x: 120, y: 220)
+        let pointer = R2TestValue(NSPoint(x: 120, y: 220))
         let coordinator = GeekPanelCoordinator(
             hoverIntentController: HoverIntentController(policy: policy),
-            pointerLocationProvider: { pointer }
+            pointerLocationProvider: { pointer.value }
         )
         func register(_ section: PanelSection, _ rect: NSRect) {
             coordinator.registerAnchor(id: .module(section), screenRect: rect, contentKind: section.rawValue)
@@ -423,24 +423,24 @@ final class HoverIntentControllerTests: XCTestCase {
         coordinator.moduleHoverExited(.disk)
         coordinator.removeAnchor(.module(.disk))
         register(.disk, NSRect(x: 100, y: 180, width: 80, height: 90))
-        coordinator.recordPointer(pointer)
+        coordinator.recordPointer(pointer.value)
         enterDisk()
         try? await Task.sleep(for: .milliseconds(15))
         XCTAssertEqual(openCount, 0)
         XCTAssertEqual(coordinator.route, .summary)
 
         // Moving within the new, larger trigger is still not a departure.
-        pointer = NSPoint(x: 125, y: 255)
-        coordinator.recordPointer(pointer)
+        pointer.value = NSPoint(x: 125, y: 255)
+        coordinator.recordPointer(pointer.value)
         coordinator.moduleHoverExited(.sensors)
         enterDisk()
         try? await Task.sleep(for: .milliseconds(15))
         XCTAssertEqual(openCount, 0)
 
-        pointer = NSPoint(x: 320, y: 300)
-        coordinator.recordPointer(pointer)
-        pointer = NSPoint(x: 120, y: 220)
-        coordinator.recordPointer(pointer)
+        pointer.value = NSPoint(x: 320, y: 300)
+        coordinator.recordPointer(pointer.value)
+        pointer.value = NSPoint(x: 120, y: 220)
+        coordinator.recordPointer(pointer.value)
         enterDisk()
         try? await Task.sleep(for: .milliseconds(15))
         XCTAssertEqual(openCount, 1)
@@ -455,10 +455,10 @@ final class HoverIntentControllerTests: XCTestCase {
         var policy = HoverIntentPolicy()
         policy.initialOpenDelay = .milliseconds(5)
         policy.switchDelay = .milliseconds(5)
-        var pointer = NSPoint(x: 10, y: 10)
+        let pointer = R2TestValue(NSPoint(x: 10, y: 10))
         let coordinator = GeekPanelCoordinator(
             hoverIntentController: HoverIntentController(policy: policy),
-            pointerLocationProvider: { pointer }
+            pointerLocationProvider: { pointer.value }
         )
         let selection = GeekPanelHistorySelection.builtIn("power")
         coordinator.selectModule(.power)
@@ -478,7 +478,7 @@ final class HoverIntentControllerTests: XCTestCase {
         XCTAssertEqual(coordinator.route, .module(.power))
         XCTAssertEqual(openCount, 0)
 
-        pointer = NSPoint(x: 200, y: 200)
+        pointer.value = NSPoint(x: 200, y: 200)
         coordinator.tertiaryHoverExited()
         coordinator.scheduleTertiaryPreview(
             identifier: "power",
@@ -497,12 +497,12 @@ final class HoverIntentControllerTests: XCTestCase {
         var policy = HoverIntentPolicy()
         policy.initialOpenDelay = .milliseconds(5)
         policy.switchDelay = .milliseconds(5)
-        var pointer = NSPoint(x: 120, y: 220)
+        let pointer = R2TestValue(NSPoint(x: 120, y: 220))
         let registry = SmallWindowAnchorRegistry()
         let coordinator = GeekPanelCoordinator(
             hoverIntentController: HoverIntentController(policy: policy),
             anchorRegistry: registry,
-            pointerLocationProvider: { pointer }
+            pointerLocationProvider: { pointer.value }
         )
         let anchorID = SmallWindowAnchorID.module(.network)
         registry.update(id: anchorID, screenRect: NSRect(x: 100, y: 200, width: 80, height: 44),
@@ -531,7 +531,7 @@ final class HoverIntentControllerTests: XCTestCase {
 
         // A late exit while moving inside the same measured overview row is
         // still not a genuine departure from that trigger.
-        pointer = NSPoint(x: 125, y: 222)
+        pointer.value = NSPoint(x: 125, y: 222)
         coordinator.tertiaryHoverExited()
         schedule("network-history")
         try? await Task.sleep(for: .milliseconds(15))
@@ -541,13 +541,13 @@ final class HoverIntentControllerTests: XCTestCase {
         // the moved live hitbox may turn an in-row pointer into a fresh entry.
         registry.update(id: anchorID, screenRect: NSRect(x: 200, y: 200, width: 80, height: 44),
                         parentPanelRole: .primary, preferredPlacementEdge: .left, contentKind: "network")
-        pointer = NSPoint(x: 220, y: 222)
+        pointer.value = NSPoint(x: 220, y: 222)
         coordinator.tertiaryHoverExited()
         schedule("network-history")
         try? await Task.sleep(for: .milliseconds(15))
         XCTAssertEqual(opened, 0)
 
-        pointer = NSPoint(x: 320, y: 300)
+        pointer.value = NSPoint(x: 320, y: 300)
         coordinator.tertiaryHoverExited()
         schedule("new-history-entry")
         try? await Task.sleep(for: .milliseconds(15))

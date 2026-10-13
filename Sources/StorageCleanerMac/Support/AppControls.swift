@@ -3,7 +3,7 @@ import SwiftUI
 /// The single button vocabulary used by the main window, sheets and menu-bar
 /// panels. Native Button, Menu and focus behavior remain intact; this type only
 /// selects the appropriate macOS emphasis and density.
-enum AppButtonKind: Equatable {
+enum AppButtonKind: Equatable, CaseIterable {
     case primary
     case secondary
     case tertiary
@@ -16,6 +16,21 @@ enum AppButtonKind: Equatable {
     case disclosure
     case smallUtility
     case metric
+    case selectionRow
+}
+
+enum AppButtonIconPolicy {
+    static func showsInlineIcon(kind: AppButtonKind, systemImage: String?) -> Bool {
+        guard systemImage != nil else { return false }
+        return switch kind {
+        case .primary, .glassProminent:
+            false
+        case .disclosure, .metric, .selectionRow:
+            true
+        case .secondary, .tertiary, .destructive, .toolbar, .icon, .glass, .menu, .smallUtility:
+            systemImage == "arrow.up.right" || systemImage == "arrow.up.right.square"
+        }
+    }
 }
 
 private struct AppButtonChromeModifier: ViewModifier {
@@ -28,11 +43,12 @@ private struct AppButtonChromeModifier: ViewModifier {
             content
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.roundedRectangle(radius: 9))
+                .tint(AppAppearanceColors.controlFill)
         } else {
             switch kind {
             case .primary, .glassProminent:
                 content
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(AppPrimaryButtonStyle())
                     .buttonBorderShape(.roundedRectangle(radius: 9))
             case .secondary, .glass:
                 content
@@ -49,9 +65,31 @@ private struct AppButtonChromeModifier: ViewModifier {
                     .tint(AppDesignTokens.Palette.destructive)
             case .tertiary, .toolbar, .icon, .menu, .disclosure:
                 content.buttonStyle(.borderless)
-            case .metric:
+            case .metric, .selectionRow:
                 content.buttonStyle(.plain)
             }
+        }
+    }
+}
+
+/// Like AppKit's default button, an unavailable primary action loses its
+/// accent fill. The style resolves at the button itself, so `.disabled` is
+/// honoured whichever side of `appButtonChrome` it is applied on.
+private struct AppPrimaryButtonStyle: PrimitiveButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        AppPrimaryButton(configuration: configuration)
+    }
+}
+
+private struct AppPrimaryButton: View {
+    @Environment(\.isEnabled) private var isEnabled
+    let configuration: PrimitiveButtonStyleConfiguration
+
+    var body: some View {
+        if isEnabled {
+            Button(configuration).buttonStyle(.borderedProminent)
+        } else {
+            Button(configuration).buttonStyle(.bordered)
         }
     }
 }
@@ -104,7 +142,9 @@ private struct AdaptiveAppButtonLabel: View {
 
     private func fullLabel(systemImage: String) -> some View {
         HStack(spacing: AppDesignTokens.Spacing.small) {
-            actionIcon(systemImage: systemImage)
+            if showsInlineIcon {
+                actionIcon(systemImage: systemImage)
+            }
 
             Text(title)
         }
@@ -112,27 +152,15 @@ private struct AdaptiveAppButtonLabel: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    @ViewBuilder
+    // D64: text already names ordinary actions. Selection glyphs, disclosure
+    // state and external-link direction still carry useful information.
+    private var showsInlineIcon: Bool {
+        AppButtonIconPolicy.showsInlineIcon(kind: kind, systemImage: systemImage)
+    }
+
     private func actionIcon(systemImage: String) -> some View {
-        switch kind {
-        case .primary, .glassProminent:
-            Image(systemName: systemImage)
-                .symbolRenderingMode(.hierarchical)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 22, height: 22)
-                .background(
-                    AppDesignTokens.Palette.onAccent.opacity(0.16),
-                    in: Circle()
-                )
-                .accessibilityHidden(true)
-        case .secondary, .glass, .destructive:
-            Image(systemName: systemImage)
-                .symbolRenderingMode(.hierarchical)
-                .accessibilityHidden(true)
-        case .tertiary, .toolbar, .icon, .menu, .disclosure, .smallUtility, .metric:
-            Image(systemName: systemImage)
-                .accessibilityHidden(true)
-        }
+        Image(systemName: systemImage)
+            .accessibilityHidden(true)
     }
 
     private var titleOnlyLabel: some View {
@@ -194,7 +222,7 @@ struct AppButton: View {
         switch kind {
         case .primary, .glassProminent:
             return moduleTheme.featureGroup == .settings
-                ? AppDesignTokens.Palette.accent
+                ? AppAppearanceColors.controlFill
                 : moduleTheme.actionFill
         case .destructive:
             return AppDesignTokens.Palette.destructive
@@ -267,7 +295,7 @@ struct AppSelectionButton: View {
                 AdaptiveAppButtonLabel(
                     title: title,
                     systemImage: systemImage,
-                    kind: .toolbar,
+                    kind: .selectionRow,
                     isLoading: false,
                     allowsIconOnlyFallback: false
                 )
@@ -447,3 +475,17 @@ struct AppControls_Previews: PreviewProvider {
     }
 }
 #endif
+
+/// Decorative boundaries share the same pigment in windows and sheets.
+/// Use physical pixels; never remove the native keyboard focus indicator.
+struct AppSeparator: View {
+    @Environment(\.displayScale) private var displayScale
+    var vertical = false
+    var body: some View {
+        Rectangle()
+            .fill(AppAppearanceColors.border)
+            .frame(width: vertical ? 1 / max(1, displayScale) : nil,
+                   height: vertical ? nil : 1 / max(1, displayScale))
+            .accessibilityHidden(true)
+    }
+}

@@ -166,7 +166,7 @@ final class MacBenchmarkLeaderboardTests: XCTestCase {
 
     func testLeaderboardUISourceUsesAdaptiveCapacityFieldsAndSharedScoreColumns() throws {
         let source = try sourceText(
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkLeaderboardSection.swift"
+            "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7LeaderboardSection.swift"
         )
 
         XCTAssertTrue(source.contains("private enum TableLayout"))
@@ -175,9 +175,9 @@ final class MacBenchmarkLeaderboardTests: XCTestCase {
         XCTAssertTrue(source.contains("LazyVGrid("))
         XCTAssertTrue(source.contains("GridItem(.adaptive(minimum: 150)"))
         XCTAssertTrue(source.contains("entry.processorModel"))
-        XCTAssertTrue(source.contains("entry.physicalMemoryBytes"))
-        XCTAssertTrue(source.contains("entry.systemDiskCapacityBytes"))
-        XCTAssertTrue(source.contains("MacBenchmarkPresentation.standardLeaderboardScoreTitle"))
+        XCTAssertTrue(source.contains("entry.memoryGB"))
+        XCTAssertTrue(source.contains("entry.completedOn"))
+        XCTAssertTrue(source.contains("scoreText(entry.score)"))
         XCTAssertTrue(source.contains("fixedSize(horizontal: false, vertical: true)"))
         XCTAssertFalse(source.contains(".lineLimit(1)"))
         XCTAssertFalse(source.contains("width: 190"))
@@ -506,9 +506,9 @@ final class MacBenchmarkLeaderboardTests: XCTestCase {
 
     @MainActor
     func testIdentityProviderPersistsRandomInstallationIDWithoutHardwareData() throws {
-        let suiteName = "MacBenchmarkLeaderboardTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let provider = DefaultMacBenchmarkLeaderboardIdentityProvider(defaults: defaults)
 
         let first = provider.installationID()
@@ -524,9 +524,9 @@ final class MacBenchmarkLeaderboardTests: XCTestCase {
 
     @MainActor
     func testIdentityProviderUsesCurrentComputerNameBeforeSavedDisplayName() throws {
-        let suiteName = "MacBenchmarkLeaderboardTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         defaults.set(
             "旧电脑名称",
             forKey: "benchmarkLeaderboard.displayName.v1"

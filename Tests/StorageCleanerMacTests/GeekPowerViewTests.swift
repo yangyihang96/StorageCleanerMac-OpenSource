@@ -8,12 +8,9 @@ final class GeekPowerViewTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
         let card = try sourceSegment(
             source,
             from: "private var geekPowerModeCard",
@@ -35,10 +32,7 @@ final class GeekPowerViewTests: XCTestCase {
         let sources = try [
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift",
         ].map {
-            try String(
-                contentsOf: projectRoot.appendingPathComponent($0),
-                encoding: .utf8
-            )
+            try r2ProductionSource(at: projectRoot.appendingPathComponent($0))
         }
 
         XCTAssertTrue(sources.allSatisfy {
@@ -61,29 +55,33 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 2), 59)
         XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 3), 79)
         XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 5), 79)
-        XCTAssertEqual(GeekPowerLayout.secondaryCardHeights.count, 4)
-        XCTAssertEqual(GeekPowerLayout.secondaryContentHeight, 310)
+        XCTAssertEqual(GeekPowerLayout.secondaryCardHeights.count, 6)
+        // D57: the power card lists five rows (computer, power input,
+        // battery, display backlight, chip total), 46 pt more than three.
+        XCTAssertEqual(GeekPowerLayout.powerHeight, GeekSensorReadoutLayout.cardHeight(rowCount: 5))
+        XCTAssertEqual(GeekPowerLayout.desktopPowerHeight, GeekSensorReadoutLayout.cardHeight(rowCount: 3))
+        XCTAssertEqual(GeekPowerLayout.secondaryContentHeight, 538)
         XCTAssertEqual(GeekPanelLayout.detailSpacing, MiniWindowStyleTokens.cardSpacing)
         XCTAssertEqual(GeekPanelLayout.overviewPowerCardHeight, 64)
         XCTAssertEqual(GeekPowerLayout.displayedEnergyAppCount, 3)
         XCTAssertEqual(GeekPowerLayout.detailPreviewDuration, GeekChartRange.oneHour.duration)
         XCTAssertEqual(GeekPanelPresentationMetrics.powerDetailWidth, 264)
-        XCTAssertEqual(GeekPowerLayout.historyTertiaryOffset, 125)
-        XCTAssertEqual(GeekPowerLayout.energyModeTertiaryOffset, 209)
+        XCTAssertEqual(GeekPowerLayout.historyTertiaryOffset, 126)
+        XCTAssertEqual(GeekPowerLayout.energyModeTertiaryOffset, 436)
         XCTAssertEqual(
             GeekPowerLayout.energyModeSourceOffset(hasInternalBattery: true),
-            209
+            436
         )
         XCTAssertEqual(
             GeekPowerLayout.energyModeSourceOffset(hasInternalBattery: false),
-            GeekPanelLayout.contentPadding
+            209
         )
 
         let requiredHeight = GeekPowerLayout.secondaryContentHeight
             + GeekPanelLayout.detailSpacing
             + 33
             + GeekPanelLayout.contentPadding * 2
-        XCTAssertEqual(requiredHeight, 364)
+        XCTAssertEqual(requiredHeight, 593)
         XCTAssertLessThanOrEqual(
             requiredHeight,
             GeekPanelPresentationMetrics.detailSize(for: .power).height
@@ -114,12 +112,9 @@ final class GeekPowerViewTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
 
         XCTAssertFalse(source.contains("geekPowerElectricalCard"))
         XCTAssertFalse(source.contains("GeekCombinedCard(height: 90)"))
@@ -128,7 +123,12 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertTrue(source.contains("当前没有显著能耗应用"))
         XCTAssertTrue(source.contains("geekHasEnergyImpactSnapshot"))
         XCTAssertTrue(source.contains(".frame(height: 19)"))
-        XCTAssertTrue(source.contains("Text(app.currentPowerWattsText)"))
+        XCTAssertTrue(source.contains("Text(powerText)"))
+        XCTAssertTrue(source.contains("app.currentEvidence.source == .unknown ? \"—\" : app.currentPowerWattsText"))
+        XCTAssertTrue(source.contains("app.currentEvidence.detail"))
+        let rowRange = try XCTUnwrap(source.range(of: "private struct GeekPowerEnergyAppRow"))
+        let energyRow = String(source[rowRange.lowerBound...])
+        XCTAssertFalse(energyRow.contains("app.measurementTitle"), "Current watts cannot inherit cumulative evidence")
         XCTAssertTrue(source.contains("statusSymbol: geekBatteryRingSymbol"))
         XCTAssertFalse(source.contains("L10n.text(\"充电中\", \"Charging\")"))
         XCTAssertTrue(source.contains("ProgressView()"))
@@ -166,7 +166,7 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertTrue(history.contains("metric: .charge"))
         XCTAssertTrue(history.contains("duration: GeekPowerLayout.detailPreviewDuration"))
         XCTAssertTrue(history.contains("points: batteryPowerHistory"))
-        XCTAssertTrue(history.contains("chargingTint: GeekBatteryChartPalette.battery"))
+        XCTAssertTrue(history.contains("chargingTint: panelMetricColors.batteryDraining"))
         XCTAssertTrue(history.contains("sourceOffset: GeekPowerLayout.historyTertiaryOffset"))
         XCTAssertTrue(history.contains("usesCardActiveBorder: true"))
         XCTAssertTrue(history.contains(".frame(height: 67)"))
@@ -212,18 +212,12 @@ final class GeekPowerViewTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let panel = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let panel = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"
-            ),
-            encoding: .utf8
-        )
-        let hover = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+            ))
+        let hover = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
 
         let selectedHistory = try sourceSegment(
             panel,
@@ -238,9 +232,9 @@ final class GeekPowerViewTests: XCTestCase {
 
         XCTAssertTrue(selectedHistory.contains("batteryPowerHistory"))
         XCTAssertFalse(selectedHistory.contains("MenuBarHistoryRetention.selected"))
-        let kernel = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let kernel = try r2ProductionSource(at: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerPreparationKernel.swift"), encoding: .utf8)
+            .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerPreparationKernel.swift"))
         XCTAssertTrue(kernel.contains("end.addingTimeInterval(-duration)"))
         XCTAssertTrue(rawHistory.contains("return auxiliaryState.powerHistory"))
         XCTAssertTrue(hover.contains("inlineContentStore.update(hostedDetail, force: true)"))
@@ -253,16 +247,13 @@ final class GeekPowerViewTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
         let summary = try sourceSegment(
             source,
             from: "var geekPowerSummaryCard",
-            to: "var geekSystemLoadCard"
+            to: "var geekChartHistory"
         )
 
         XCTAssertTrue(summary.contains("GeekCombinedRing("))
@@ -279,9 +270,9 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertFalse(source.contains("private struct GeekBatteryLevelBar"))
 
         let batteryCard = try sourceSegment(
-            summary,
-            from: "private var geekBatterySummaryCard",
-            to: "private var geekAppPowerSummaryCard"
+            source,
+            from: "struct GeekBatteryPresentation: View",
+            to: "struct GeekSensorsPresentation: View"
         )
         XCTAssertTrue(batteryCard.contains(
             "height: GeekPanelLayout.overviewPowerCardHeight"
@@ -304,9 +295,9 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertTrue(powerRoute.contains("GeekOverviewModuleButton(destination: .power"))
         XCTAssertTrue(powerRoute.contains("action: selectGeekSection"))
         XCTAssertFalse(powerRoute.contains("ControlPaletteAnchorButton("))
-        let powerDetail = try String(contentsOf: projectRoot.appendingPathComponent(
+        let powerDetail = try r2ProductionSource(at: projectRoot.appendingPathComponent(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift"
-        ), encoding: .utf8)
+        ))
         XCTAssertTrue(powerDetail.contains("ControlPaletteHoverAnchor("))
         XCTAssertTrue(powerDetail.contains("kind: .power"))
         XCTAssertTrue(powerDetail.contains("打开电源模式控制"))
@@ -314,7 +305,7 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertFalse(powerRoute.contains("Image(systemName: AppSymbols.Panel.attachedDetail)"))
         XCTAssertFalse(powerRoute.contains("selectGeekHardwareDetail(.power)"))
         XCTAssertTrue(source.contains("case .power:\n                return showsOverviewPowerModule"))
-        XCTAssertTrue(source.contains("return !hasConfirmedNoInternalBattery"))
+        XCTAssertTrue(source.contains("return hasInternalBattery"))
     }
 
     func testBatterylessOverviewRemovesExactlyThePowerCardFootprint() {
@@ -322,7 +313,9 @@ final class GeekPowerViewTests: XCTestCase {
         let batterylessSize = GeekPanelLayout.overviewSize(showsPowerModule: false)
 
         XCTAssertEqual(fullSize.width, MiniWindowStyleTokens.overviewSize.width)
-        XCTAssertEqual(fullSize.height, 588)
+        // CPU's reference-calibrated card is 12 pt taller; the hardware-
+        // absence contract below must still remove exactly one card and gap.
+        XCTAssertEqual(fullSize.height, 605) // fix1 B1: the entry belongs inside the unchanged sensor-card footprint.
         XCTAssertEqual(batterylessSize.width, fullSize.width)
         XCTAssertEqual(
             batterylessSize.height,
@@ -376,12 +369,9 @@ final class GeekPowerViewTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
 
         XCTAssertTrue(source.contains("hasPowerSnapshot: batterySnapshot != nil"))
         XCTAssertTrue(source.contains("hasElectricalBatteryData: batteryElectricalSnapshot?.hasBatteryData == true"))
@@ -394,23 +384,17 @@ final class GeekPowerViewTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
         let detail = try sourceSegment(
             source,
             from: "private var tertiaryPowerDetail",
             to: "private struct TertiaryMultilineValueRow"
         )
-        let powerPage = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let powerPage = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
 
         XCTAssertTrue(detail.contains("if hasInternalBattery"))
         XCTAssertTrue(detail.contains("Current Electrical Readings"))

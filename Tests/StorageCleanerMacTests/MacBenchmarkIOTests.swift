@@ -669,7 +669,7 @@ final class MacBenchmarkIOTests: XCTestCase {
             attributes: [.posixPermissions: 0o755]
         )
         try FileManager.default.createSymbolicLink(at: root, withDestinationURL: target)
-        defer { try? FileManager.default.removeItem(at: temporary) }
+        defer { TestFileSystem.remove(temporary) }
         let originalPermissions = try XCTUnwrap(
             (try FileManager.default.attributesOfItem(atPath: target.path)[.posixPermissions]
                 as? NSNumber)?.intValue
@@ -699,7 +699,7 @@ final class MacBenchmarkIOTests: XCTestCase {
         let root = alias.appendingPathComponent("BenchmarkTemporary", isDirectory: true)
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: outside)
-        defer { try? FileManager.default.removeItem(at: temporary) }
+        defer { TestFileSystem.remove(temporary) }
         let kernel = DiskBenchmarkKernel(
             configuration: .testing,
             rootDirectory: root
@@ -729,7 +729,7 @@ final class MacBenchmarkIOTests: XCTestCase {
             "BenchmarkTemporary",
             isDirectory: true
         )
-        defer { try? FileManager.default.removeItem(at: forbiddenParent) }
+        defer { TestFileSystem.remove(forbiddenParent) }
         let kernel = DiskBenchmarkKernel(
             configuration: .testing,
             rootDirectory: root
@@ -788,7 +788,7 @@ final class MacBenchmarkIOTests: XCTestCase {
         let sibling = temporary.appendingPathComponent("sibling", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temporary) }
+        defer { TestFileSystem.remove(temporary) }
 
         let old = root.appendingPathComponent("benchmark-old.tmp")
         let young = root.appendingPathComponent("benchmark-young.tmp")

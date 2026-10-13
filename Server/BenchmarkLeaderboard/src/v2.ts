@@ -1,3 +1,4 @@
+import { readBoundedJSON } from "./bounded-json";
 import { assertHMACSecret, hmacHex, sha256Hex } from "./crypto";
 import {
   V2_API_SCHEMA_VERSION,
@@ -663,60 +664,7 @@ function rateLimitedError(): V2APIError {
 }
 
 async function readV2JSONBody(request: Request): Promise<unknown> {
-  const mediaType = request.headers.get("content-type")
-    ?.split(";", 1)[0]?.trim().toLowerCase();
-  if (mediaType !== "application/json") {
-    throw new V2ValidationError("body", "unsupported_media_type");
-  }
-  const declaredLength = Number(request.headers.get("content-length") ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > V2_MAX_REQUEST_BYTES) {
-    try {
-      await request.body?.cancel();
-    } catch {
-      // The security boundary is the rejection; cancellation is best effort.
-    }
-    throw new V2ValidationError("body", "payload_too_large");
-  }
-  const body = request.body;
-  if (!body) throw new V2ValidationError("body");
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let byteCount = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      byteCount += value.byteLength;
-      if (byteCount > V2_MAX_REQUEST_BYTES) {
-        try {
-          await reader.cancel();
-        } catch {
-          // Rejection remains fail-closed even if the producer cannot cancel.
-        }
-        throw new V2ValidationError("body", "payload_too_large");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(byteCount);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new V2ValidationError("body");
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new V2ValidationError("body");
-  }
+  return readBoundedJSON(request, V2_MAX_REQUEST_BYTES, reason => new V2ValidationError("body", reason));
 }
 
 function v2PublicEntry(row: V2RankedRow): V2PublicEntry {

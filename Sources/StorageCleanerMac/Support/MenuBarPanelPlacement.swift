@@ -46,6 +46,8 @@ struct MenuBarCascadeLayout: Equatable, Sendable {
     let childFrames: [NSRect]
     let secondaryPresentationMode: MenuBarSecondaryPresentationMode
     let tertiaryPresentationMode: MenuBarTertiaryPresentationMode
+    // In compact mode these are alternative pages, not overlapping surfaces.
+    var isCompact: Bool = false
 
     var visibleFrames: [NSRect] {
         [parentFrame] + childFrames

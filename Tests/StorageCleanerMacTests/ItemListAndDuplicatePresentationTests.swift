@@ -256,9 +256,9 @@ final class ItemListAndDuplicatePresentationTests: XCTestCase {
 
     @MainActor
     func testDuplicateWorkspaceRestoresFiltersAndScopesButNotDestructiveSelection() throws {
-        let suite = "duplicate-workspace-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
 
         let first = DuplicateFilesStore(defaults: defaults)
         first.searchText = "invoice"
@@ -280,9 +280,9 @@ final class ItemListAndDuplicatePresentationTests: XCTestCase {
 
     @MainActor
     func testDuplicateWorkspaceMigratesSimilarImageRuleOnceAndPreservesOptOut() throws {
-        let suite = "duplicate-workspace-rules-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         defaults.set(
             [
                 DuplicateFileCandidateGroup.Rule.sameName.rawValue,
@@ -326,7 +326,7 @@ final class ItemListAndDuplicatePresentationTests: XCTestCase {
             duplicateGroupID: "candidate|c|1024|bin",
             duplicateMatchKind: DuplicateFileCandidateGroup.Rule.sameNameSizeAndType.rawValue
         )
-        let store = DuplicateFilesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let store = DuplicateFilesStore(defaults: TestPreferenceDomain.make(for: self))
 
         store.setSelected(true, item: first, allItems: [first, second, candidate])
         XCTAssertEqual(store.selectedItemIDs, Set([first.id]))
@@ -389,7 +389,9 @@ final class ItemListAndDuplicatePresentationTests: XCTestCase {
         XCTAssertTrue(accessory.contains("duplicateLocationButton(externalVolume: true)"))
         XCTAssertTrue(accessory.contains("chooseDuplicateRoot(externalVolume: externalVolume)"))
         XCTAssertTrue(accessory.contains("workspace.scanScope = scope"))
-        XCTAssertTrue(accessory.contains(".accessibilityAddTraits(workspace.scanScope == scope"))
+        // D62①: the common segmented control now owns the selected accessibility trait.
+        XCTAssertTrue(accessory.contains("CapsuleSegmentedControl(selection: Binding("))
+        XCTAssertTrue(accessory.contains("guard workspace.scopeUnavailableReason(scope) == nil else { return }"))
         XCTAssertTrue(accessory.contains("minHeight: GoldenLandingMetrics.locationButtonHeight"))
         XCTAssertTrue(accessory.contains("ForEach(workspace.configuredAdditionalRoots"))
         XCTAssertTrue(accessory.contains("workspace.removeExternalRoot(path)"))

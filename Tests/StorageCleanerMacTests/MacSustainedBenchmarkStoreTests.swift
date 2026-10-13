@@ -97,6 +97,7 @@ private extension MacSustainedBenchmarkStoreTests {
                 baselineCatalog: catalog
             ),
             sustainedService: sustainedService,
+            v7PromotionRevocationDefaults: TestPreferenceDomain.make(for: self),
             onCompletedResult: onCoreCompleted
         )
     }

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import FileOperationShared
 
 struct ApplicationIdentity: Codable, Hashable, Sendable {
     let bundleIdentifier: String
@@ -34,57 +35,22 @@ struct ApplicationVersion: Codable, Hashable, Sendable, Comparable {
         return "\(marketing) (\(build))"
     }
 
+    func reaches(_ target: Self) -> Bool {
+        if target.marketing.isEmpty { return !build.isEmpty && Self.compare(build, target.build) != .orderedAscending }
+        let order = Self.compare(marketing, target.marketing)
+        if order != .orderedSame { return order == .orderedDescending }
+        return target.build.isEmpty || Self.compare(build, target.build) != .orderedAscending
+    }
+
     static func < (lhs: Self, rhs: Self) -> Bool {
-        compare(lhs.preferred, rhs.preferred) == .orderedAscending
+        ApplicationUpdateVersionOrder.isNewer(marketing: rhs.marketing, build: rhs.build,
+            installedMarketing: lhs.marketing, installedBuild: lhs.build)
     }
 
     static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
-        let left = tokenize(lhs)
-        let right = tokenize(rhs)
-        let count = max(left.count, right.count)
-
-        for index in 0..<count {
-            let leftPart = index < left.count ? left[index] : .number(0)
-            let rightPart = index < right.count ? right[index] : .number(0)
-            if leftPart == rightPart { continue }
-            return leftPart < rightPart ? .orderedAscending : .orderedDescending
-        }
-        return .orderedSame
+        ApplicationUpdateVersionOrder.compare(lhs, rhs)
     }
 
-    private enum Part: Equatable, Comparable {
-        case number(Int)
-        case text(String)
-
-        static func < (lhs: Part, rhs: Part) -> Bool {
-            switch (lhs, rhs) {
-            case let (.number(left), .number(right)):
-                return left < right
-            case let (.text(left), .text(right)):
-                return left.localizedStandardCompare(right) == .orderedAscending
-            case (.number, .text):
-                return false
-            case (.text, .number):
-                return true
-            }
-        }
-    }
-
-    private static func tokenize(_ value: String) -> [Part] {
-        let normalized = value.trimmed.lowercased()
-        guard !normalized.isEmpty else { return [] }
-        let pattern = #"([0-9]+|[a-z]+)"#
-        guard let expression = try? NSRegularExpression(pattern: pattern) else {
-            return [.text(normalized)]
-        }
-        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
-        return expression.matches(in: normalized, range: range).compactMap { match in
-            guard let swiftRange = Range(match.range, in: normalized) else { return nil }
-            let token = String(normalized[swiftRange])
-            if let number = Int(token) { return .number(number) }
-            return .text(token)
-        }
-    }
 }
 
 enum ApplicationInstallationSource: String, Codable, CaseIterable, Sendable {
@@ -202,9 +168,20 @@ struct HomebrewPackageMetadata: Codable, Hashable, Sendable {
     let autoUpdates: Bool
     let requiresManualInstaller: Bool
     let appBundlePaths: [String]
+    /// Optional for inventories persisted before D78. Old installer metadata
+    /// conservatively requests authorization rather than silently disabling sudo.
+    let administratorReasons: [String]?
+    /// Freeze brew --prefix with the package, including custom installations.
+    /// Optional keeps older inventories and recovery intents decodable.
+    let prefixPath: String?
+    var needsAdministrator: Bool { administratorReasons?.isEmpty == false || (administratorReasons == nil && requiresManualInstaller) }
 
     var effectiveOutdatedProvenance: HomebrewOutdatedProvenance {
         outdatedProvenance ?? .unknown
+    }
+
+    var hasOutdatedEvidence: Bool {
+        isOutdated && [.plain, .greedy].contains(effectiveOutdatedProvenance)
     }
 
     var hasPlainOutdatedEvidence: Bool {
@@ -224,7 +201,9 @@ struct HomebrewPackageMetadata: Codable, Hashable, Sendable {
         isDeprecated: Bool,
         autoUpdates: Bool,
         requiresManualInstaller: Bool,
-        appBundlePaths: [String]
+        appBundlePaths: [String],
+        administratorReasons: [String]? = nil,
+        prefixPath: String? = nil
     ) {
         self.token = token
         self.kind = kind
@@ -239,6 +218,8 @@ struct HomebrewPackageMetadata: Codable, Hashable, Sendable {
         self.autoUpdates = autoUpdates
         self.requiresManualInstaller = requiresManualInstaller
         self.appBundlePaths = appBundlePaths
+        self.administratorReasons = administratorReasons
+        self.prefixPath = prefixPath
     }
 }
 
@@ -429,8 +410,8 @@ struct InstalledApplication: Identifiable, Codable, Hashable, Sendable {
             )
         case .requiresAuthorization:
             return L10n.text(
-                "目标目录不可直接写入；当前自动队列不会请求或绕过管理员授权。",
-                "The destination is not directly writable; the automatic queue does not request or bypass administrator authorization."
+                "本批需要一次管理员授权，授权后的项目会自动执行并核验结果。",
+                "This batch needs one administrator authorization; authorized items run and are verified automatically."
             )
         case .appStore, .website, .manual, .skipped:
             break
@@ -485,11 +466,19 @@ struct InstalledApplication: Identifiable, Codable, Hashable, Sendable {
 
     var canJoinAutomaticUpdateBatch: Bool {
         switch ApplicationUpdatePlanBuilder.destination(for: self) {
-        case .automatic, .requiresQuit:
+        case .automatic, .requiresQuit, .requiresAuthorization:
             true
-        case .requiresAuthorization, .appStore, .website, .manual, .skipped:
+        case .appStore, .website, .manual, .skipped:
             false
         }
+    }
+
+    /// Website items stay in the persisted guidance queue; selecting them does
+    /// not grant an installer or count opening a page as an update.
+    var canJoinSelectedUpdateBatch: Bool {
+        if canJoinAutomaticUpdateBatch { return true }
+        return [.website, .manual].contains(ApplicationUpdatePlanBuilder.destination(for: self))
+            && AppUpdateService.validatedManualUpdateURL(for: self) != nil
     }
 
     @MainActor

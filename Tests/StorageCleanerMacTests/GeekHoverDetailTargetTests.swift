@@ -13,14 +13,18 @@ final class GeekHoverDetailTargetTests: XCTestCase {
     @MainActor
     func testReferenceTertiaryDetailGeometryIsKeptExplicit() {
         XCTAssertEqual(GeekHoverDetailMetrics.historySize, CGSize(width: MiniWindowStyleTokens.historyWidth, height: 216))
+        XCTAssertEqual(GeekHoverDetailMetrics.cpuHistorySize, GeekHoverDetailMetrics.historySize)
+        XCTAssertEqual(GeekHoverDetailMetrics.memoryHistorySize, GeekHoverDetailMetrics.historySize)
+        XCTAssertEqual(GeekHoverDetailMetrics.diskIOSize, GeekHoverDetailMetrics.historySize)
+        XCTAssertEqual(GeekSensorPowerHoverDetailMetrics.batteryHistorySize, GeekHoverDetailMetrics.historySize)
+        XCTAssertGreaterThan(GeekMemoryCompositionHistoryDetail.preferredSize.height, GeekHoverDetailMetrics.historySize.height)
         for size in [GeekHoverDetailMetrics.cpuHistorySize, GeekHoverDetailMetrics.memoryHistorySize, GeekHoverDetailMetrics.cpuUsageSize] {
             XCTAssertEqual(GeekPanelPresentationMetrics.normalizedTertiarySize(size), size)
         }
         XCTAssertEqual(GeekHoverDetailMetrics.compactHistorySize, CGSize(width: MiniWindowStyleTokens.compactHistoryWidth, height: 216))
-        XCTAssertEqual(GeekHoverDetailMetrics.diskIOSize, CGSize(width: MiniWindowStyleTokens.historyWidth, height: 248))
         XCTAssertEqual(GeekHoverDetailMetrics.volumeSize, CGSize(width: 220, height: 339))
         XCTAssertEqual(GeekHoverDetailMetrics.vpnWidth, 220)
-        XCTAssertEqual(GeekHoverDetailMetrics.uptimeSize, CGSize(width: 220, height: 136))
+        XCTAssertEqual(GeekHoverDetailMetrics.uptimeSize, CGSize(width: 220, height: 106))
         XCTAssertEqual(GeekNetworkTertiaryView.referenceSize, CGSize(width: 255, height: 419))
     }
 
@@ -81,12 +85,22 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         let session = try source("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift")
         let advanced = try source("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift")
 
-        XCTAssertTrue(target.contains(
+        let hover = try r2SourceDeclaration("private func targetHoverChanged(", in: target)
+        let captureGuard = try XCTUnwrap(hover.range(of:
             "guard !MiniWindowDemoData.isCapturingMenuBarPanelSnapshots else { return }"
         ))
-        XCTAssertTrue(tertiary.contains(
-            "guard !MiniWindowDemoData.isCapturingMenuBarPanelSnapshots else { return }"
-        ))
+        // D64 retired the other pointer opener (the legacy detail button).
+        // The live target must reject capture-time hover before changing state
+        // or taking either the immediate or coordinated preview path.
+        XCTAssertTrue(hover.contains("#if DEBUG || STORAGE_CLEANER_BETA"))
+        for effect in ["isTargetHovered = hovering", "presentDetail(pinned: false)", "scheduleTertiaryPreview("] {
+            let effectRange = try XCTUnwrap(hover.range(of: effect))
+            XCTAssertLessThan(captureGuard.lowerBound, effectRange.lowerBound, effect)
+        }
+        XCTAssertTrue(target.contains("targetHoverChanged(true)"))
+        XCTAssertTrue(target.contains("targetHoverChanged(false)"))
+        XCTAssertFalse(tertiary.contains("func tertiaryDetailButton("))
+        XCTAssertFalse(tertiary.contains("func tertiaryButtonHoverChanged("))
         XCTAssertTrue(session.contains("panelCoordinator?.presentHistory("))
         XCTAssertTrue(session.contains("requestedSection?.tertiaryDetail?.rawValue"))
         XCTAssertTrue(session.contains("?? \"debug.processor.activity\""))
@@ -192,7 +206,9 @@ final class GeekHoverDetailTargetTests: XCTestCase {
 
         XCTAssertEqual(processor.components(separatedBy: "GeekHoverDetailTarget(").count - 1, 4)
         XCTAssertEqual(memory.components(separatedBy: "GeekHoverDetailTarget(").count - 1, 3)
-        XCTAssertEqual(disk.components(separatedBy: "GeekHoverDetailTarget(").count - 1, 2)
+        // One volume target, one combined chart target, and one reusable
+        // target instantiated for each of the read/write values.
+        XCTAssertEqual(disk.components(separatedBy: "GeekHoverDetailTarget(").count - 1, 3)
 
         XCTAssertTrue(processor.contains("GeekProcessorActivityHoverDetail"))
         XCTAssertTrue(processor.contains("GeekGPUHoverDetail"))
@@ -205,12 +221,88 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertTrue(memory.contains("GeekSwapHoverDetail"))
         XCTAssertTrue(disk.contains("GeekDiskVolumeHoverDetail"))
         XCTAssertTrue(disk.contains("GeekDiskIOHoverDetail"))
+        XCTAssertTrue(disk.contains("geekDiskThroughputHoverTarget(.read)"))
+        XCTAssertTrue(disk.contains("geekDiskThroughputHoverTarget(.write)"))
+        XCTAssertTrue(disk.contains("GeekDiskThroughputHoverDetail"))
 
         XCTAssertFalse(detail.contains("L10n.text(\"历史趋势\", \"History Trend\")"))
-        XCTAssertTrue(detail.contains("GPU 内存"))
+        // Batch 2b review: the GPU memory reading keeps one name, 显存 /
+        // GPU Memory (GeekGPUVocabulary), on the CPU page ring and here.
+        XCTAssertTrue(detail.contains("title: GeekGPUVocabulary.memory"))
         XCTAssertFalse(detail.contains("频率 / FPS"))
         XCTAssertFalse(detail.contains("value: \"-- / --\""))
         XCTAssertFalse(detail.contains("Text(pressureExplanation)"))
+    }
+
+    func testDiskWriteChartUsesItsOwnScaleInsteadOfReadPeak() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let points = (0..<3).map { index in
+            NativeDiskIOPoint(
+                date: now.addingTimeInterval(Double(index - 2)),
+                readBytesPerSecond: 10_000,
+                writeBytesPerSecond: 100,
+                readOperationsPerSecond: 2,
+                writeOperationsPerSecond: 1
+            )
+        }
+        let frame = GeekPreparedDiskFrame(
+            points: points,
+            plot: CGRect(x: 0, y: 0, width: 240, height: 100),
+            duration: 120,
+            reference: now,
+            scale: 2
+        )
+
+        XCTAssertGreaterThan(GeekDiskIOChartMode.write.maximum(for: frame), 0)
+        XCTAssertLessThan(
+            GeekDiskIOChartMode.write.maximum(for: frame),
+            GeekDiskIOChartMode.read.maximum(for: frame)
+        )
+        XCTAssertEqual(
+            GeekDiskIOChartMode.combined.maximum(for: frame),
+            GeekDiskIOChartMode.read.maximum(for: frame)
+        )
+    }
+
+    func testSwapDetailKeepsMeasuredZeroUnknownAndHistoricalPeakDistinct() {
+        let unknown = GeekSwapDetailData(usedBytes: nil, totalBytes: nil)
+        XCTAssertEqual(unknown.summary, "—")
+        XCTAssertNil(unknown.fraction)
+
+        let onDemand = GeekSwapDetailData(usedBytes: 0, totalBytes: 0)
+        XCTAssertNil(onDemand.fraction)
+        XCTAssertTrue(onDemand.summary.contains("按需分配") || onDemand.summary.contains("On Demand"))
+
+        let mebibyte: UInt64 = 1_048_576
+        let measured = GeekSwapDetailData(usedBytes: 2 * mebibyte, totalBytes: 4 * mebibyte)
+        XCTAssertEqual(measured.fraction, 0.5)
+        XCTAssertTrue(measured.summary.contains(" / "))
+        XCTAssertEqual(
+            GeekSwapDetailData(usedBytes: 5 * mebibyte, totalBytes: 4 * mebibyte).fraction,
+            1
+        )
+
+        let point = MenuBarTelemetryPoint(
+            date: Date(timeIntervalSince1970: 100), cpuTotal: nil, cpuUser: nil,
+            cpuSystem: nil, gpu: nil, memory: nil, swapUsedBytes: 9 * mebibyte,
+            chipTemperature: nil, fanRPM: nil, downBytesPerSecond: nil,
+            upBytesPerSecond: nil
+        )
+        XCTAssertEqual(measured.chartMaximum(for: [point]), Double(9 * mebibyte))
+        XCTAssertEqual(onDemand.chartMaximum(for: []), 1)
+    }
+
+    func testSwapHistoryUsesTheExistingMemoryRangeAndRealSamples() throws {
+        let memory = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift")
+        let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift")
+        let swapTarget = try XCTUnwrap(memory.components(separatedBy: "private var geekMemorySwapHoverTarget").last?.components(separatedBy: "private var geekSwapProgress").first)
+        let swapDetail = try XCTUnwrap(detail.components(separatedBy: "struct GeekSwapHoverDetail: View {").last?.components(separatedBy: "struct GeekDiskVolumeHoverDetail").first)
+        XCTAssertTrue(swapTarget.contains("chartRangeMetric: .memory"))
+        XCTAssertTrue(swapTarget.contains("points: memoryHistory"))
+        XCTAssertTrue(swapTarget.contains("duration: geekMetricRange(.memory).duration"))
+        XCTAssertTrue(swapDetail.contains("channel: .swapUsedBytes"))
+        XCTAssertTrue(swapDetail.contains("showsRangePicker: true"))
+        XCTAssertFalse(swapDetail.contains("GeekHoverLargeValue"))
     }
 
     func testNetworkTrendConnectionAndVPNUseSharedAttachedHoverDetail() throws {
@@ -258,7 +350,7 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertTrue(advanced.contains("let matchesCurrentRequest ="))
         XCTAssertTrue(advanced.contains("activeInlineTertiaryRequest?.id == requestID"))
         XCTAssertTrue(advanced.contains("matchesCurrentDetail || matchesCurrentRequest"))
-        XCTAssertTrue(detail.contains(".padding(GeekPanelLayout.contentPadding)"))
+        XCTAssertTrue(detail.contains(".padding(pageProvidesInset ? 0 : GeekPanelLayout.contentPadding)"))
         XCTAssertFalse(detail.contains(
             ".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)"
         ))
@@ -276,15 +368,44 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         let detailHost = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift")
 
         XCTAssertTrue(target.contains("proxy.frame(in: .named(GeekTertiarySourceCoordinateSpace.name)).minY"))
-        XCTAssertTrue(target.contains("measuredSourceOffset = max(0, offset)"))
+        let measurementStart = try XCTUnwrap(target.range(
+            of: "private func sourceOffsetChanged(_ offset: CGFloat) {"
+        )?.upperBound)
+        let publicationStart = try XCTUnwrap(target.range(
+            of: "private func scheduleSourceOffsetUpdate()",
+            range: measurementStart..<target.endIndex
+        )?.lowerBound)
+        let measurement = String(target[measurementStart..<publicationStart])
+        XCTAssertTrue(measurement.contains("guard offset.isFinite else { return }"))
+        XCTAssertTrue(measurement.contains("let normalized = max(0, offset)"))
+        XCTAssertTrue(measurement.contains("guard measuredSourceOffset != normalized else { return }"))
+        XCTAssertTrue(measurement.contains("measuredSourceOffset = normalized"))
+        XCTAssertTrue(measurement.contains("scheduleSourceOffsetUpdate()"))
+
+        let publicationEnd = try XCTUnwrap(target.range(
+            of: "private func cancelSourceOffsetUpdate()",
+            range: publicationStart..<target.endIndex
+        )?.lowerBound)
+        let publication = String(target[publicationStart..<publicationEnd])
+        XCTAssertTrue(publication.contains("sourceOffsetUpdateTask?.cancel()"))
+        XCTAssertTrue(publication.contains("Task { @MainActor in"))
+        XCTAssertTrue(publication.contains("guard !Task.isCancelled"))
+        XCTAssertTrue(publication.contains("activeInlineRequestID == panelActivityID"))
+        XCTAssertTrue(publication.contains("let latestOffset = measuredSourceOffset"))
+        XCTAssertTrue(publication.contains("inlineTertiaryEvent?(.updateSourceOffset("))
+        XCTAssertTrue(publication.contains("id: panelActivityID"))
+        XCTAssertTrue(publication.contains("offset: latestOffset"))
         XCTAssertTrue(detailHost.contains(".coordinateSpace(name: GeekTertiarySourceCoordinateSpace.name)"))
     }
 
     func testOnDemandSnapshotFreshnessHasExplicitCurrentAndStaleStates() {
-        XCTAssertEqual(GeekOnDemandSnapshotFreshness.refreshInterval, 2)
+        // r2-mini-sampling (D71④): subprocess-backed process lists refresh
+        // every 10 s on the visible tertiary page (was 2 s).
+        XCTAssertEqual(GeekOnDemandSnapshotFreshness.refreshInterval, 10)
+        XCTAssertEqual(GeekOnDemandSnapshotFreshness.refreshInterval, MenuBarPerformancePolicy.visibleProcessInterval)
         let sampleStart = Date(timeIntervalSince1970: 5_000)
-        XCTAssertFalse(GeekOnDemandSnapshotFreshness.shouldRefresh(startedAt: sampleStart, now: sampleStart.addingTimeInterval(1.8)))
-        XCTAssertTrue(GeekOnDemandSnapshotFreshness.shouldRefresh(startedAt: sampleStart, now: sampleStart.addingTimeInterval(2)))
+        XCTAssertFalse(GeekOnDemandSnapshotFreshness.shouldRefresh(startedAt: sampleStart, now: sampleStart.addingTimeInterval(9.8)))
+        XCTAssertTrue(GeekOnDemandSnapshotFreshness.shouldRefresh(startedAt: sampleStart, now: sampleStart.addingTimeInterval(10)))
         XCTAssertTrue(GeekOnDemandSnapshotFreshness.shouldRefresh(startedAt: nil, now: sampleStart))
         let now = Date(timeIntervalSince1970: 10_000)
 
@@ -351,7 +472,9 @@ final class GeekHoverDetailTargetTests: XCTestCase {
             XCTAssertFalse(source.contains("Load Average"))
         }
         XCTAssertTrue(processor.contains("CPU 占用"))
-        XCTAssertTrue(processor.contains("percentText(cpuChartHistory.last?.cpuTotal)"))
+        // D39: the total reads the current reading (history's last point, or
+        // the live one while the history is not prepared).
+        XCTAssertTrue(processor.contains("percentText(cpuCurrentReading?.cpuTotal)"))
         XCTAssertTrue(processor.contains("percentText(geekCurrentCPUUserPercent)"))
         XCTAssertTrue(processor.contains("percentText(geekCurrentCPUSystemPercent)"))
         XCTAssertFalse(processor.contains("percentText(cpuBreakdown?."))
@@ -365,12 +488,15 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         let memory = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift")
 
         XCTAssertTrue(memory.contains("GeekMemoryProcessSelectionMenu(store: store, tint: memoryTint)"))
-        XCTAssertTrue(memory.contains("GeekMemoryCleanupButton(store: store, tint: memoryTint)"))
+        // Decision D2 (2026-10-04): "内存清理" is "退出所选应用" and no longer
+        // falls back to the suggested apps (was: "内存清理" / "Clean Memory" and
+        // store.ensureMemorySelectionForQuit()).
+        XCTAssertTrue(memory.contains("GeekMemoryQuitSelectedButton(store: store, tint: memoryTint)"))
         XCTAssertTrue(memory.contains("@ObservedObject var store: ScanStore"))
         XCTAssertTrue(memory.contains("L10n.text(\"选择内存进程\", \"Select Memory Processes\")"))
         XCTAssertTrue(memory.contains("store.toggleMemoryAppUsageSelection(process)"))
-        XCTAssertTrue(memory.contains("L10n.text(\"内存清理\", \"Clean Memory\")"))
-        XCTAssertTrue(memory.contains("store.ensureMemorySelectionForQuit()"))
+        XCTAssertTrue(memory.contains("L10n.text(\"退出所选应用\", \"Quit Selected Apps\")"))
+        XCTAssertFalse(memory.contains("store.ensureMemorySelectionForQuit()"))
         XCTAssertTrue(
             memory.contains(
                 "store.requestQuitSelectedMemoryProcesses(presentConfirmationInMenuBar: true)"
@@ -381,7 +507,7 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertTrue(memory.contains("退出所选应用？"))
         XCTAssertTrue(memory.contains("store.isMemoryAppUsageSelected(process)"))
         XCTAssertTrue(memory.contains("\"checkmark.circle.fill\""))
-        XCTAssertTrue(memory.contains("L10n.text(\"已选择清理\", \"Selected for cleanup\")"))
+        XCTAssertTrue(memory.contains("L10n.text(\"已选择退出\", \"Selected to quit\")"))
     }
 
     func testMemoryConfirmationBindingsDoNotTurnPassiveDismissalIntoCancellation() throws {
@@ -390,11 +516,6 @@ final class GeekHoverDetailTargetTests: XCTestCase {
                 try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift"),
                 "private var confirmationBinding: Binding<Bool>",
                 "var body: some View"
-            ),
-            (
-                try source("Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"),
-                "private var memoryBatchQuitAlertBinding: Binding<Bool>",
-                "private var snapshot: MemorySnapshot?"
             ),
             (
                 try source("Sources/StorageCleanerMac/Views/ContentView.swift"),
@@ -500,7 +621,7 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertTrue(actions.contains("只读查看全部已采样进程"))
         XCTAssertFalse(actions.contains("requestQuitSelectedMemoryProcesses"))
         XCTAssertTrue(actions.contains("GeekMemoryProcessSelectionMenu"))
-        XCTAssertTrue(actions.contains("GeekMemoryCleanupButton"))
+        XCTAssertTrue(actions.contains("GeekMemoryQuitSelectedButton"))
     }
 
     func testLatestPanelPolishUsesGroupedMemoryAppsTruthfulDiskPeaksAndVisibleHoverFeedback() throws {
@@ -517,7 +638,7 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertTrue(memory.contains("value: geekSwapPercentText"))
         XCTAssertTrue(memory.contains("return used == 0 ? 0 : nil"))
         XCTAssertTrue(memory.contains("\\(usedText) · 未使用"))
-        XCTAssertTrue(detail.contains("L10n.text(\"按需分配\", \"On Demand\")"))
+        XCTAssertTrue(detail.contains("按需分配"))
         XCTAssertFalse(memory.contains("Capsule()"))
         XCTAssertTrue(disk.contains("title: L10n.text(\"读取峰值\", \"Read Peak\")"))
         XCTAssertTrue(disk.contains("title: L10n.text(\"写入峰值\", \"Write Peak\")"))
@@ -551,10 +672,7 @@ final class GeekHoverDetailTargetTests: XCTestCase {
     }
 
     private func source(_ relativePath: String) throws -> String {
-        try String(
-            contentsOf: projectRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        try r2ProductionSource(at: projectRoot.appendingPathComponent(relativePath))
     }
 }
 

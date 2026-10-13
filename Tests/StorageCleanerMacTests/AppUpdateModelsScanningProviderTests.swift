@@ -1,6 +1,15 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import StorageCleanerMac
+
+private final class UpdateScannerFixtureFileManager: FileManager, @unchecked Sendable {
+    override func isExecutableFile(atPath path: String) -> Bool { path == "/opt/homebrew/bin/brew" }
+    override func attributesOfItem(atPath path: String) throws -> [FileAttributeKey: Any] {
+        guard ["/opt/homebrew/bin/brew", "/opt/homebrew/bin", "/opt/homebrew"].contains(path) else { throw CocoaError(.fileNoSuchFile) }
+        return [.ownerAccountID: NSNumber(value: getuid()), .posixPermissions: NSNumber(value: 0o755)]
+    }
+}
 
 final class AppUpdateModelsScanningProviderTests: XCTestCase {
     func testInventoryScanAwaitsCallbacksAndStopsMetadataWorkOnCancellation() throws {
@@ -31,10 +40,9 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
     }
 
     func testReadingDefaultUpdatePreferencesDoesNotPersistOrNotifyAChange() throws {
-        let suiteName = "AppUpdatePreferencesReadTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
         let didChange = expectation(
             forNotification: UserDefaults.didChangeNotification,
@@ -89,11 +97,10 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let source = try SettingsSourceContract.source(
+            at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/SettingsView.swift"
-            ),
-            encoding: .utf8
+            )
         )
 
         XCTAssertTrue(source.contains("自动安装可静默更新项目"))
@@ -103,9 +110,9 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
     }
 
     func testApplicationUpdateCheckScheduleHonorsFrequencyBoundariesAndOptOuts() throws {
-        let suiteName = "AppUpdateCheckScheduleTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let checkedAt = Date(timeIntervalSince1970: 1_789_000_000)
         var preferences = ApplicationUpdatePreferencesSnapshot(
             automaticallyChecks: true,
@@ -565,7 +572,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             application.updateCapability = source.canAutomaticallyUpdate ? .automatic : .manual
             application.canAutomaticallyUpdate = source.canAutomaticallyUpdate
             application.requiresUserInteraction = source.requiresUserInteraction
-            let shouldBeAutomatic = testCase.provenance == .plain && testCase.isOutdated
+            let shouldBeAutomatic = testCase.provenance != .unknown && testCase.isOutdated
 
             XCTAssertEqual(source.canAutomaticallyUpdate, shouldBeAutomatic, testCase.name)
             XCTAssertEqual(
@@ -755,6 +762,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         let runner = ScriptedHomebrewCommandRunner()
         let scanner = HomebrewInventoryScanner(
             runner: runner,
+            fileManagerFactory: { UpdateScannerFixtureFileManager() },
             environmentProvider: {
                 [
                     "HOME": "/Users/example",
@@ -764,9 +772,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
                 ]
             }
         )
-        guard scanner.locateHomebrewExecutable() != nil else {
-            throw XCTSkip("A trusted local Homebrew executable is required for this command-shape test.")
-        }
+        XCTAssertNotNil(scanner.locateHomebrewExecutable())
 
         _ = try await scanner.scan()
         let invocations = await runner.invocations
@@ -785,10 +791,8 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
 
     func testHomebrewInventoryScannerKeepsPlainAndGreedyQueriesSeparate() async throws {
         let runner = ScriptedHomebrewCommandRunner()
-        let scanner = HomebrewInventoryScanner(runner: runner)
-        guard scanner.locateHomebrewExecutable() != nil else {
-            throw XCTSkip("A trusted local Homebrew executable is required for this command-shape test.")
-        }
+        let scanner = HomebrewInventoryScanner(runner: runner, fileManagerFactory: { UpdateScannerFixtureFileManager() })
+        XCTAssertNotNil(scanner.locateHomebrewExecutable())
 
         _ = try await scanner.scan(includeGreedyCasks: true)
         let outdatedInvocations = await runner.invocations
@@ -800,7 +804,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         ])
     }
 
-    func testHomebrewAutomaticLayersRequirePlainOutdatedProvenance() async throws {
+    func testHomebrewAutomaticLayersAcceptPlainAndGreedyAndRejectUnknownProvenance() async throws {
         let executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
         let provider = HomebrewProvider(homebrewExecutableProvider: { executableURL })
 
@@ -811,7 +815,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             application.homebrewMetadata = AppUpdateTestFixtures.homebrewMetadata(
                 outdatedProvenance: provenance
             )
-            let shouldBeAutomatic = provenance == .plain
+            let shouldBeAutomatic = provenance != .unknown
 
             let source = try await provider.inspect(application)
             let check = try await provider.checkForUpdate(application)
@@ -847,7 +851,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         }
     }
 
-    func testHomebrewCaskVersionProjectionKeepsAmbiguousCSVManual() async throws {
+    func testHomebrewCaskVersionProjectionAdmitsOutdatedTuplesAndLatestForPostVerification() async throws {
         let executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
         let provider = HomebrewProvider(homebrewExecutableProvider: { executableURL })
         let cases: [(
@@ -861,22 +865,22 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         )] = [
             ("plain", "1.0", "1.0", "2.0", true, .automaticallyUpdatable, "2.0"),
             ("digest", "1.0", "1.0,0123456abcdef", "2.0,abcdef0123456", true, .automaticallyUpdatable, "2.0"),
-            ("numeric-build", "1.2.3", "1.2.3,100", "1.2.3,200", false, .updateAvailable, "1.2.3,200"),
-            ("multi-csv", "1.0", "1.0,100,arm64", "2.0,200,arm64", false, .updateAvailable, "2.0,200,arm64"),
-            ("empty-first", "1.0", "1.0", ",abcdef0", false, .latestVersionUnknown, nil),
-            ("current-latest", "1.0", "1.0", "latest", false, .latestVersionUnknown, nil),
-            ("current-colon-latest", "1.0", "1.0", ":latest", false, .latestVersionUnknown, nil),
-            ("current-uppercase-latest", "1.0", "1.0", "LATEST", false, .latestVersionUnknown, nil),
-            ("current-uppercase-colon-latest", "1.0", "1.0", ":LATEST", false, .latestVersionUnknown, nil),
-            ("current-trimmed-colon-latest", "1.0", "1.0", "  :LaTeSt  ", false, .latestVersionUnknown, nil),
-            ("installed-latest", "latest", "latest", "2.0", false, .latestVersionUnknown, nil),
-            ("installed-colon-latest", ":latest", ":latest", "2.0", false, .latestVersionUnknown, nil),
-            ("installed-uppercase-latest", "1.0", "LATEST", "2.0", false, .latestVersionUnknown, nil),
-            ("installed-uppercase-colon-latest", "1.0", ":LATEST", "2.0", false, .latestVersionUnknown, nil),
-            ("disk-uppercase-latest", "LATEST", "1.0", "2.0", false, .latestVersionUnknown, nil),
-            ("disk-uppercase-colon-latest", ":LATEST", "1.0", "2.0", false, .latestVersionUnknown, nil),
-            ("short-digest", "1.0", "1.0,abc123", "2.0,def456", false, .updateAvailable, "2.0,def456"),
-            ("numeric-digest-tail", "1.0", "1.0,1234567", "2.0,2345678", false, .updateAvailable, "2.0,2345678"),
+            ("numeric-build", "1.2.3", "1.2.3,100", "1.2.3,200", true, .automaticallyUpdatable, "1.2.3,200"),
+            ("multi-csv", "1.0", "1.0,100,arm64", "2.0,200,arm64", true, .automaticallyUpdatable, "2.0,200,arm64"),
+            ("empty-first", "1.0", "1.0", ",abcdef0", true, .automaticallyUpdatable, ",abcdef0"),
+            ("current-latest", "1.0", "1.0", "latest", true, .automaticallyUpdatable, "latest"),
+            ("current-colon-latest", "1.0", "1.0", ":latest", true, .automaticallyUpdatable, ":latest"),
+            ("current-uppercase-latest", "1.0", "1.0", "LATEST", true, .automaticallyUpdatable, "LATEST"),
+            ("current-uppercase-colon-latest", "1.0", "1.0", ":LATEST", true, .automaticallyUpdatable, ":LATEST"),
+            ("current-trimmed-colon-latest", "1.0", "1.0", "  :LaTeSt  ", true, .automaticallyUpdatable, ":LaTeSt"),
+            ("installed-latest", "latest", "latest", "2.0", true, .automaticallyUpdatable, "2.0"),
+            ("installed-colon-latest", ":latest", ":latest", "2.0", true, .automaticallyUpdatable, "2.0"),
+            ("installed-uppercase-latest", "1.0", "LATEST", "2.0", true, .automaticallyUpdatable, "2.0"),
+            ("installed-uppercase-colon-latest", "1.0", ":LATEST", "2.0", true, .automaticallyUpdatable, "2.0"),
+            ("disk-uppercase-latest", "LATEST", "1.0", "2.0", true, .automaticallyUpdatable, "2.0"),
+            ("disk-uppercase-colon-latest", ":LATEST", "1.0", "2.0", true, .automaticallyUpdatable, "2.0"),
+            ("short-digest", "1.0", "1.0,abc123", "2.0,def456", true, .automaticallyUpdatable, "2.0,def456"),
+            ("numeric-digest-tail", "1.0", "1.0,1234567", "2.0,2345678", true, .automaticallyUpdatable, "2.0,2345678"),
         ]
 
         for testCase in cases {
@@ -925,16 +929,16 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         }
     }
 
-    func testHomebrewAutoUpdatesCaskRequiresStrictComparableTargetAndIdentity() async throws {
+    func testHomebrewAutoUpdatesCaskUsesOutdatedEvidenceAndDefersIdentityVerification() async throws {
         let provider = HomebrewProvider(
             homebrewExecutableProvider: { URL(fileURLWithPath: "/opt/homebrew/bin/brew") }
         )
         let cases: [(name: String, current: String?, outdated: Bool, expectedAutomatic: Bool)] = [
             ("newer", "2.0", true, true),
             ("not-outdated", "2.0", false, false),
-            ("equal", "1.0", true, false),
-            ("lower", "0.9", true, false),
-            ("latest", ":latest", true, false),
+            ("equal", "1.0", true, true),
+            ("lower", "0.9", true, true),
+            ("latest", ":latest", true, true),
         ]
 
         for testCase in cases {
@@ -959,8 +963,9 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
                 XCTAssertEqual(check.status, .upToDate)
             } else if testCase.expectedAutomatic {
                 XCTAssertEqual(check.status, .automaticallyUpdatable)
-                XCTAssertEqual(check.availableVersion, ApplicationVersion(marketing: "2.0"))
+                XCTAssertEqual(check.availableVersion, ApplicationVersion(marketing: testCase.current!))
                 var planned = application
+                planned.availableVersion = check.availableVersion
                 planned.updateCapability = .automatic
                 planned.canAutomaticallyUpdate = true
                 planned.updateStatus = .automaticallyUpdatable
@@ -975,6 +980,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
                     XCTAssertEqual(check.availableVersion?.marketing, testCase.current)
                 }
                 var planned = application
+                planned.availableVersion = check.availableVersion
                 planned.updateCapability = .automatic
                 planned.canAutomaticallyUpdate = true
                 planned.updateStatus = .automaticallyUpdatable
@@ -994,7 +1000,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             requiresUserInteraction: false
         )
         let incompleteInfo = try await provider.inspect(incompleteIdentity)
-        XCTAssertFalse(incompleteInfo.canAutomaticallyUpdate)
+        XCTAssertTrue(incompleteInfo.canAutomaticallyUpdate)
 
         let ambiguousPath = AppUpdateTestFixtures.application(
             id: "homebrew-ambiguous-path",
@@ -1006,10 +1012,10 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             requiresUserInteraction: false
         )
         let ambiguousInfo = try await provider.inspect(ambiguousPath)
-        XCTAssertFalse(ambiguousInfo.canAutomaticallyUpdate)
+        XCTAssertTrue(ambiguousInfo.canAutomaticallyUpdate)
     }
 
-    func testHomebrewAutomaticVersionGateRejectsSymbolicInstalledLatest() async throws {
+    func testHomebrewOutdatedEvidenceAdmitsSymbolicInstalledLatest() async throws {
         let provider = HomebrewProvider(
             homebrewExecutableProvider: { URL(fileURLWithPath: "/opt/homebrew/bin/brew") }
         )
@@ -1020,12 +1026,12 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             expectedStatus: ApplicationUpdateStatus,
             expectedAvailable: String?
         )] = [
-            ("latest", "latest", ["latest"], .latestVersionUnknown, nil),
-            ("colon-latest", ":latest", [":latest"], .latestVersionUnknown, nil),
-            ("uppercase-latest", "LATEST", ["LATEST"], .latestVersionUnknown, nil),
-            ("uppercase-colon-latest", ":LATEST", [":LATEST"], .latestVersionUnknown, nil),
-            ("mixed-latest", "1.0", ["1.0", "latest"], .latestVersionUnknown, nil),
-            ("mixed-colon-latest", "1.0", ["1.0", ":LATEST"], .latestVersionUnknown, nil),
+            ("latest", "latest", ["latest"], .automaticallyUpdatable, "2.0"),
+            ("colon-latest", ":latest", [":latest"], .automaticallyUpdatable, "2.0"),
+            ("uppercase-latest", "LATEST", ["LATEST"], .automaticallyUpdatable, "2.0"),
+            ("uppercase-colon-latest", ":LATEST", [":LATEST"], .automaticallyUpdatable, "2.0"),
+            ("mixed-latest", "1.0", ["1.0", "latest"], .automaticallyUpdatable, "2.0"),
+            ("mixed-colon-latest", "1.0", ["1.0", ":LATEST"], .automaticallyUpdatable, "2.0"),
         ]
 
         for testCase in cases {
@@ -1047,7 +1053,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             let source = try await provider.inspect(application)
             let check = try await provider.checkForUpdate(application)
 
-            XCTAssertFalse(source.canAutomaticallyUpdate, testCase.name)
+            XCTAssertTrue(source.canAutomaticallyUpdate, testCase.name)
             XCTAssertEqual(check.status, testCase.expectedStatus, testCase.name)
             XCTAssertEqual(check.availableVersion?.marketing, testCase.expectedAvailable, testCase.name)
         }
@@ -1146,7 +1152,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
     func testProviderPriorityIsSystemAppStoreHomebrewSparkleOfficialManual() async {
         let registry = ApplicationUpdateProviderRegistry(providers: [
             SystemManagedProvider(),
-            MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true)),
+            MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true), masExecutableProvider: { nil }, outdatedProvider: { [:] }),
             HomebrewProvider(),
             SparkleProvider(),
             OfficialWebsiteUpdateProvider(),
@@ -1218,7 +1224,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         XCTAssertTrue(source.canAutomaticallyUpdate)
     }
 
-    func testProviderArbitrationUsesVerifiedOfficialDMGForAutoUpdatesHomebrewCasks() async throws {
+    func testProviderArbitrationKeepsHomebrewOwnershipForAutoUpdatesCasks() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("provider-official-priority-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1264,12 +1270,12 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             XCTAssertEqual(application.officialSource?.expectedBundleIdentifier, bundleIdentifier)
             XCTAssertEqual(application.officialSource?.expectedTeamIdentifier, teamIdentifier)
             XCTAssertEqual(application.officialSource?.capability, .automatic)
-            XCTAssertEqual(provider.identifier, .officialWebsite)
+            XCTAssertEqual(provider.identifier, .homebrew)
             XCTAssertTrue(source.canAutomaticallyUpdate)
         }
     }
 
-    func testProviderArbitrationUsesVerifiedOfficialDMGWhenOrdinaryHomebrewIsManual() async throws {
+    func testProviderArbitrationKeepsHomebrewOwnershipWithoutExactApplicationPath() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("provider-manual-homebrew-official-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1292,7 +1298,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         let source = try await provider.inspect(application)
 
         XCTAssertEqual(application.homebrewMetadata?.autoUpdates, false)
-        XCTAssertEqual(provider.identifier, .officialWebsite)
+        XCTAssertEqual(provider.identifier, .homebrew)
         XCTAssertTrue(source.canAutomaticallyUpdate)
     }
 
@@ -1358,7 +1364,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         XCTAssertFalse(source.requiresUserInteraction)
     }
 
-    func testHomebrewProviderOnlyMarksExactCaskMatchAutomatic() async throws {
+    func testHomebrewProviderAdmitsPackageTokenWithoutPreUpdateSignedApplicationGate() async throws {
         let metadata = AppUpdateTestFixtures.homebrewMetadata()
         let exact = AppUpdateTestFixtures.application(
             availableVersion: nil,
@@ -1385,9 +1391,9 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
 
         XCTAssertTrue(exactInfo.canAutomaticallyUpdate)
         XCTAssertEqual(exactCheck.status, .automaticallyUpdatable)
-        XCTAssertFalse(fallbackInfo.canAutomaticallyUpdate)
-        XCTAssertEqual(fallbackCheck.status, .updateAvailable)
-        XCTAssertNotNil(fallbackCheck.warning)
+        XCTAssertTrue(fallbackInfo.canAutomaticallyUpdate)
+        XCTAssertEqual(fallbackCheck.status, .automaticallyUpdatable)
+        XCTAssertNil(fallbackCheck.warning)
     }
 
     func testHomebrewProviderRejectsInvalidFormulaAndCaskTokensBeforeInstall() async throws {
@@ -1449,7 +1455,26 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
     func testHomebrewProviderRunsOnlyPreparedStructuredFormulaAndCaskArguments() async throws {
         let executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
         let recorder = RecordingHomebrewUpdateCapture()
+        let cask = AppUpdateTestFixtures.strictHomebrewApplication(
+            id: "structured-cask",
+            token: "structured-cask"
+        )
         let provider = HomebrewProvider(
+            applicationRechecker: AppUpdateFreshTestRechecker { url in
+                XCTAssertEqual(url, cask.bundleURL)
+                var current = cask
+                if !recorder.commands.isEmpty {
+                    current.installedVersion = ApplicationVersion(marketing: "2.0")
+                }
+                return InstalledApplicationRecheckSnapshot(
+                    application: current,
+                    signature: AppUpdatePerformanceTestSupport.signature(for: current)
+                )
+            },
+            installedFormulaVersionProvider: { token in
+                XCTAssertEqual(token, "structured-formula")
+                return ApplicationVersion(marketing: recorder.commands.count < 2 ? "1.0" : "2.0", build: recorder.commands.count < 2 ? "100" : "")
+            },
             homebrewExecutableProvider: { executableURL },
             environmentProvider: {
                 [
@@ -1469,10 +1494,6 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
                 )
                 return "updated"
             }
-        )
-        let cask = AppUpdateTestFixtures.strictHomebrewApplication(
-            id: "structured-cask",
-            token: "structured-cask"
         )
         var formula = AppUpdateTestFixtures.strictHomebrewApplication(
             id: "structured-formula",
@@ -1538,8 +1559,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         ])
         let provider = MacAppStoreProvider(
             receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true),
-            catalogResolver: FixedAppStoreCatalogResolver(resolution: .notFound)
-        )
+            catalogResolver: FixedAppStoreCatalogResolver(resolution: .notFound), masExecutableProvider: { nil }, outdatedProvider: { [:] })
 
         let info = try await provider.inspect(application)
         let check = try await provider.checkForUpdate(application)
@@ -1550,7 +1570,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         XCTAssertNil(check.availableVersion)
     }
 
-    func testAppStoreProviderAlwaysHandsOffToSystemAppStore() async throws {
+    func testAppStoreProviderUsesTrustedMasAndSharedBatchAuthorization() async throws {
         let productID: UInt64 = 123_456_789
         let productURL = try XCTUnwrap(URL(string: "https://apps.apple.com/app/id\(productID)"))
         let executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/mas")
@@ -1578,6 +1598,9 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             bundleURL: application.bundleURL
         )
         let provider = MacAppStoreProvider(
+            authorizedUpgrade: { id in
+                recorder.recordCommand(executableURL: executableURL, arguments: ["upgrade", String(id)], environment: [:])
+            },
             receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true),
             catalogResolver: FixedAppStoreCatalogResolver(resolution: .matched(
                 AppStoreCatalogEntry(
@@ -1608,39 +1631,41 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
                     arguments: arguments,
                     environment: environment
                 )
-                return "updated"
+                return "must-not-run-directly"
             }
         )
 
         let source = try await provider.inspect(application)
         let check = try await provider.checkForUpdate(application)
-        XCTAssertFalse(source.canAutomaticallyUpdate)
-        XCTAssertTrue(source.requiresUserInteraction)
-        XCTAssertEqual(check.status, .updateAvailable)
+        XCTAssertTrue(source.canAutomaticallyUpdate)
+        XCTAssertFalse(source.requiresUserInteraction)
+        XCTAssertEqual(check.status, .automaticallyUpdatable)
         XCTAssertEqual(check.availableVersion, ApplicationVersion(marketing: "2.0"))
 
         application = await ApplicationUpdateProviderRegistry(providers: [provider])
             .classify(application)
         XCTAssertEqual(application.updateProvider, .macAppStore)
-        XCTAssertEqual(application.updateStatus, .updateAvailable)
-        XCTAssertEqual(application.effectiveUpdateCapability, .appStoreManaged)
-        XCTAssertFalse(application.canAutomaticallyUpdate)
-        XCTAssertTrue(application.requiresUserInteraction)
+        XCTAssertEqual(application.updateStatus, .automaticallyUpdatable)
+        XCTAssertEqual(application.effectiveUpdateCapability, .automatic)
+        XCTAssertTrue(application.canAutomaticallyUpdate)
+        XCTAssertFalse(application.requiresUserInteraction)
 
         let executionPlan = ApplicationUpdatePlanBuilder().build(applications: [application])
         XCTAssertTrue(executionPlan.automaticApplicationIDs.isEmpty)
-        XCTAssertEqual(executionPlan.appStoreApplicationIDs, [application.id])
+        XCTAssertEqual(executionPlan.requiresAuthorizationApplicationIDs, [application.id])
+        XCTAssertTrue(executionPlan.appStoreApplicationIDs.isEmpty)
         let oneClickPlan = AppUpdateService.oneClickPlan(for: [application])
-        XCTAssertTrue(oneClickPlan.automaticApps.isEmpty)
-        XCTAssertEqual(oneClickPlan.appStoreApps.map(\.id), [application.id])
+        XCTAssertEqual(oneClickPlan.automaticApps.map(\.id), [application.id])
+        XCTAssertTrue(oneClickPlan.appStoreApps.isEmpty)
         XCTAssertTrue(recorder.commands.isEmpty)
 
-        do {
-            _ = try await provider.prepareUpdate(application)
-            XCTFail("App Store updates must require the system App Store confirmation flow")
-        } catch {
-            XCTAssertTrue(recorder.commands.isEmpty)
-        }
+        let prepared = try await provider.prepareUpdate(application)
+        XCTAssertEqual(prepared.executionRecipe?.arguments, ["upgrade", String(productID)])
+        XCTAssertEqual(prepared.executionRecipe?.requiresAdministrator, true)
+        let result = try await provider.install(prepared) { _ in }
+        XCTAssertEqual(result.state, .needsReconciliation)
+        XCTAssertEqual(recorder.commands.map(\.arguments), [["upgrade", String(productID)]])
+
     }
 
     func testAppStoreProviderFailsClosedForIdentityOrVersionMismatch() async throws {
@@ -1780,7 +1805,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
 
     func testAppStoreReceiptAloneIsNotTrustedAsProviderEvidence() async {
         let application = AppUpdateTestFixtures.application(sourceEvidence: ["app-store-receipt"])
-        let provider = MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true))
+        let provider = MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true), masExecutableProvider: { nil }, outdatedProvider: { [:] })
 
         let canHandle = await provider.canHandle(application)
         XCTAssertFalse(canHandle)
@@ -1793,7 +1818,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             "valid-code-signature",
             "signed-bundle-identity",
         ])
-        let provider = MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: false))
+        let provider = MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: false), masExecutableProvider: { nil }, outdatedProvider: { [:] })
 
         let canHandle = await provider.canHandle(application)
         XCTAssertFalse(canHandle)
@@ -1835,7 +1860,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         XCTAssertNil(MacAppStoreReceiptPayloadParser.bundleIdentifier(from: validPayload + Data([0x00])))
     }
 
-    func testHomebrewCaskRequiresActualArtifactPathAndSignedIdentity() async throws {
+    func testHomebrewCaskAdmissionUsesPackageAndDefersArtifactIdentityToExecution() async throws {
         let provider = HomebrewProvider(
             homebrewExecutableProvider: { URL(fileURLWithPath: "/opt/homebrew/bin/brew") }
         )
@@ -1854,8 +1879,8 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         )
 
         let info = try await provider.inspect(application)
-        XCTAssertFalse(info.canAutomaticallyUpdate)
-        XCTAssertFalse(ApplicationUpdatePlanBuilder.isEligibleForAutomaticUpdate(application))
+        XCTAssertTrue(info.canAutomaticallyUpdate)
+        XCTAssertTrue(ApplicationUpdatePlanBuilder.isEligibleForAutomaticUpdate(application))
     }
 
     func testClassificationKeepsSourceResolutionSeparateFromVersionCheckFailure() async {
@@ -2019,8 +2044,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         let classified = await ApplicationUpdateProviderRegistry(providers: [
             MacAppStoreProvider(
                 receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true),
-                catalogResolver: FixedAppStoreCatalogResolver(resolution: .notFound)
-            ),
+                catalogResolver: FixedAppStoreCatalogResolver(resolution: .notFound), masExecutableProvider: { nil }, outdatedProvider: { [:] }),
             ManualUpdateProvider(),
         ]).classify(application)
 
@@ -2131,8 +2155,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             ]
         )
         let provider = MacAppStoreProvider(
-            receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true)
-        )
+            receiptVerifier: FixedMacAppStoreReceiptVerifier(result: true), masExecutableProvider: { nil }, outdatedProvider: { [:] })
 
         let canHandle = await provider.canHandle(application)
         XCTAssertFalse(canHandle)
@@ -2203,7 +2226,7 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
     private func providerArbitrationRegistry() -> ApplicationUpdateProviderRegistry {
         ApplicationUpdateProviderRegistry(providers: [
             SystemManagedProvider(),
-            MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: false)),
+            MacAppStoreProvider(receiptVerifier: FixedMacAppStoreReceiptVerifier(result: false), masExecutableProvider: { nil }, outdatedProvider: { [:] }),
             HomebrewProvider(
                 homebrewExecutableProvider: { URL(fileURLWithPath: "/opt/homebrew/bin/brew") }
             ),

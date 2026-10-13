@@ -1,0 +1,622 @@
+[
+  {
+    "case": "missing-BatteryHealthService",
+    "source": "BatteryHealthService()",
+    "expect_rejection": true
+  },
+  {
+    "case": "explicit-BatteryHealthService",
+    "source": "BatteryHealthService(powerModeWriter: isolated)",
+    "expect_rejection": false
+  },
+  {
+    "case": "missing-PrivilegedBatteryPowerModeCommandRunner",
+    "source": "PrivilegedBatteryPowerModeCommandRunner()",
+    "expect_rejection": true
+  },
+  {
+    "case": "explicit-PrivilegedBatteryPowerModeCommandRunner",
+    "source": "PrivilegedBatteryPowerModeCommandRunner(fanControlProvider: isolated)",
+    "expect_rejection": false
+  },
+  {
+    "case": "missing-ControlPaletteRootView",
+    "source": "ControlPaletteRootView()",
+    "expect_rejection": true
+  },
+  {
+    "case": "explicit-ControlPaletteRootView",
+    "source": "ControlPaletteRootView(fanControl: isolated)",
+    "expect_rejection": false
+  },
+  {
+    "case": "nil-ControlPaletteRootView",
+    "source": "ControlPaletteRootView(fanControl: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "missing-MenuBarAdvancedStatusView",
+    "source": "MenuBarAdvancedStatusView()",
+    "expect_rejection": true
+  },
+  {
+    "case": "explicit-MenuBarAdvancedStatusView",
+    "source": "MenuBarAdvancedStatusView(fanControl: isolated)",
+    "expect_rejection": false
+  },
+  {
+    "case": "nil-MenuBarAdvancedStatusView",
+    "source": "MenuBarAdvancedStatusView(fanControl: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "missing-SettingsView",
+    "source": "SettingsView()",
+    "expect_rejection": true
+  },
+  {
+    "case": "explicit-SettingsView",
+    "source": "SettingsView(fanControl: isolated)",
+    "expect_rejection": false
+  },
+  {
+    "case": "nil-SettingsView",
+    "source": "SettingsView(fanControl: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "missing-MenuBarStatusController",
+    "source": "MenuBarStatusController()",
+    "expect_rejection": true
+  },
+  {
+    "case": "explicit-MenuBarStatusController",
+    "source": "MenuBarStatusController(fanControlProvider: isolated)",
+    "expect_rejection": false
+  },
+  {
+    "case": "nil-MenuBarStatusController",
+    "source": "MenuBarStatusController(fanControlProvider: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "coordinator-missing-sender",
+    "source": "FanControlCoordinator(defaults: isolated)",
+    "expect_rejection": true
+  },
+  {
+    "case": "coordinator-nil-sender",
+    "source": "FanControlCoordinator(defaults: isolated, requestSender: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "coordinator-optional-sender",
+    "source": "var sender: Sender?; FanControlCoordinator(defaults: isolated, requestSender: sender)",
+    "expect_rejection": true
+  },
+  {
+    "case": "coordinator-safe-sender",
+    "source": "FanControlCoordinator(defaults: isolated, requestSender: { _ in throw CancellationError() })",
+    "expect_rejection": false
+  },
+  {
+    "case": "dashboard-missing-provider",
+    "source": "GeekDashboardConfigurationStore(defaults: isolated)",
+    "expect_rejection": true
+  },
+  {
+    "case": "dashboard-safe-provider",
+    "source": "GeekDashboardConfigurationStore(defaults: isolated, fanControlProvider: { isolated })",
+    "expect_rejection": false
+  },
+  {
+    "case": "setup-member-standard",
+    "source": "class Fixture { var prefs: UserDefaults!; func setUp() { prefs = UserDefaults.standard }; func testWrite() { prefs.set(1, forKey: \"key\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "setup-explicit-member-standard",
+    "source": "class Fixture { var prefs: UserDefaults!; func setUp() { self.prefs = UserDefaults.standard }; func testWrite() { self.prefs.set(1, forKey: \"key\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "late-member-standard",
+    "source": "class Fixture { var prefs: UserDefaults!; func testWrite() { self.prefs.set(1, forKey: \"key\") }; func setUp() { self.prefs = UserDefaults.standard } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "init-member-home",
+    "source": "class Fixture { var root: URL; init() { root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Library/Caches\") }; func write() { try Data().write(to: self.root) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "member-branch-home",
+    "source": "class Fixture { var root: URL; func setUp() { root = TestFileSystem.uniqueRoot(); if condition { self.root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop\") } }; func write() { try Data().write(to: root) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "member-safe-later-does-not-erase",
+    "source": "class Fixture { var prefs: UserDefaults; func dangerous() { self.prefs = UserDefaults.standard }; func safe() { self.prefs = isolated }; func write() { self.prefs.set(1, forKey: \"key\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "member-isolated-allowed",
+    "source": "class Fixture { var root: URL; init() { root = TestFileSystem.uniqueRoot() }; func write() { try Data().write(to: self.root) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "member-local-shadow-allowed",
+    "source": "class Fixture { var prefs: UserDefaults; func setUp() { prefs = UserDefaults.standard }; func write() { let prefs = TestPreferenceDomain.make(for: self); prefs.set(1, forKey: \"key\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "member-parameter-shadow-allowed",
+    "source": "class Fixture { var prefs: UserDefaults; func setUp() { prefs = UserDefaults.standard }; func write(prefs: UserDefaults) { prefs.set(1, forKey: \"key\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "member-closure-shadow-allowed",
+    "source": "class Fixture { var prefs: UserDefaults; func setUp() { self.prefs = UserDefaults.standard }; func write() { run { prefs in prefs.set(1, forKey: \"key\") } } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "different-type-member-allowed",
+    "source": "class Unsafe { var prefs: UserDefaults; func setUp() { self.prefs = UserDefaults.standard } }; class Safe { var prefs: UserDefaults; func setUp() { self.prefs = isolated }; func write() { self.prefs.set(1, forKey: \"key\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "member-read-only-allowed",
+    "source": "class Fixture { var prefs: UserDefaults; func setUp() { prefs = UserDefaults.standard }; func read() { _ = self.prefs.string(forKey: \"key\") } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "home-Desktop-write",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop\"); try Data().write(to: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "home-Trash-write",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\".Trash\"); try Data().write(to: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "home-Downloads-write",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Downloads\"); try Data().write(to: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "home-config-write",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\".config\"); try Data().write(to: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "home-trash-remove",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\".Trash/x\"); try FileManager.default.removeItem(at: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "home-appending-path",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: \"Library/Caches/x\"); try Data().write(to: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "tilde-desktop-write",
+    "source": "let root = (\"~/Desktop/x\" as NSString).expandingTildeInPath; try Data().write(toFile: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "home-read-only-allowed",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop\"); _ = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)",
+    "expect_rejection": false
+  },
+  {
+    "case": "isolated-desktop-write-allowed",
+    "source": "let root = try TestFileSystem.makeHome(for: self); try Data().write(to: root.appendingPathComponent(\"Desktop/x\"))",
+    "expect_rejection": false
+  },
+  {
+    "case": "desktop-system-directory-write",
+    "source": "let root = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!; try Data().write(to: root)",
+    "expect_rejection": true
+  },
+  {
+    "case": "desktop-system-directory-create",
+    "source": "let root = try FileManager.default.url(for: .desktopDirectory, in: .userDomainMask, appropriateFor: nil, create: true)",
+    "expect_rejection": true
+  },
+  {
+    "case": "desktop-system-directory-read-only",
+    "source": "let root = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!; _ = root.path",
+    "expect_rejection": false
+  },
+  {
+    "case": "r2-explicit-sender-try-optional-allowed",
+    "source": "FanControlCoordinator(defaults: isolated, requestSender: { request in try? await pause(); return reply })",
+    "expect_rejection": false
+  },
+  {
+    "case": "r2-explicit-sender-optional-state-allowed",
+    "source": "var state: State?; FanControlCoordinator(defaults: isolated, requestSender: { request in let measured = state?.value; return Reply(value: measured) })",
+    "expect_rejection": false
+  },
+  {
+    "case": "r2-sender-alias-with-optional-body-allowed",
+    "source": "let sender = { request in try? await pause(); return reply }; FanControlCoordinator(defaults: isolated, requestSender: sender)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r2-optional-sender-with-closure-initializer-rejected",
+    "source": "let sender: Sender? = { request in try? await pause(); return reply }; FanControlCoordinator(defaults: isolated, requestSender: sender)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r2-closure-sender-live-capture-rejected",
+    "source": "let transport = HelperTransport.live; FanControlCoordinator(defaults: isolated, requestSender: { request in try? await pause(); return transport.reply(to: request) })",
+    "expect_rejection": true
+  },
+  {
+    "case": "r2-nil-sender-still-rejected",
+    "source": "FanControlCoordinator(defaults: isolated, requestSender: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r2-parenthesized-explicit-sender-allowed",
+    "source": "FanControlCoordinator(defaults: isolated, requestSender: ({ request in try? await pause(); return reply }))",
+    "expect_rejection": false
+  },
+  {
+    "case": "r2-parenthesized-optional-sender-rejected",
+    "source": "var sender: Sender?; FanControlCoordinator(defaults: isolated, requestSender: (sender))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r2-provider-literal-with-live-source-rejected",
+    "source": "let controller = Controller.shared; MenuBarStatusController(fanControlProvider: { controller })",
+    "expect_rejection": true
+  },
+  {
+    "case": "r2-runtime-display-path-independent-output-allowed",
+    "source": "let view = View(currentItem: \"/Users/example/demo\"); let host = Host(view: view); let bitmap = Bitmap(host: host); if let path = ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"] { let directory = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); let data = bitmap.png; try data.write(to: directory.appendingPathComponent(\"fixture.png\")) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r2-conditional-real-home-write-rejected",
+    "source": "if let path = FileManager.default.homeDirectoryForCurrentUser.path as String? { let directory = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); try Data().write(to: directory.appendingPathComponent(\"fixture\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r2-conditional-body-unsafe-write-still-rejected",
+    "source": "if let path = ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"] { let directory = URL(fileURLWithPath: path); let real = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop/fixture\"); try Data().write(to: real); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r2-guard-real-home-write-rejected",
+    "source": "func write() { guard let path = FileManager.default.homeDirectoryForCurrentUser.path as String? else { return }; try Data().write(toFile: path) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-F6a-if-body-without-for",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-F6b-if-body-for-first",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { for item in items { _ = item }; url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-F6c-if-body-word-ending-in",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { url = FileManager.default.homeDirectoryForCurrentUser; again() }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-F6d-if-body-starting-with-call-again",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { retain; url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-F2b-guard-multi-clause",
+    "source": "func testSnapshot() throws { let view = View(currentItem: \"/Users/example/demo\"); guard let scale = Optional(2), let path = ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"] else { _ = view; return }; let directory = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-F2c-if-var-single",
+    "source": "func testSnapshot() throws { let view = View(currentItem: \"/Users/example/demo\"); if var path = ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"] { _ = view; path += \"/x\"; try FileManager.default.createDirectory(at: URL(fileURLWithPath: path), withIntermediateDirectories: true) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-F2d-else-if-let",
+    "source": "func testSnapshot() throws { let view = View(currentItem: \"/Users/example/demo\"); if flag { } else if let path = ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"] { _ = view; try FileManager.default.createDirectory(at: URL(fileURLWithPath: path), withIntermediateDirectories: true) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-A10-computer-health-store-default-power-writer",
+    "source": "func testChange() async { let store = ComputerHealthStore(probe: Probe()); await store.changeBatteryPowerMode(source: .batteryPower, mode: .lowPower) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A11-computer-health-store-convenience",
+    "source": "func testChange() async { await ComputerHealthStore().changeBatteryPowerMode(source: .acPower, mode: .highPower) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A12-battery-runtime-shared",
+    "source": "func testChange() async { _ = await BatteryHealthRuntime.shared.changePowerMode(source: .batteryPower, mode: .lowPower) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-R1-closure-provider-alias-shared",
+    "source": "let c: FanControlCoordinator = .shared; MenuBarStatusController(fanControlProvider: { c })",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-R2-ternary-nil-sender",
+    "source": "FanControlCoordinator(defaults: isolated, requestSender: flag ? { _ in throw CancellationError() } : nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-R3-closure-wrapping-optional-sender-call",
+    "source": "let maybe: Sender? = nil; FanControlCoordinator(defaults: isolated, requestSender: { request in try await maybe!(request) })",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-R4-guard-optional-real-home",
+    "source": "func testWrite() throws { let maybe: URL? = FileManager.default.homeDirectoryForCurrentUser; guard let dir = maybe else { return }; try Data().write(to: dir) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-R5-if-let-real-home-alias-then-write-outside",
+    "source": "func testWrite() throws { let real = FileManager.default.homeDirectoryForCurrentUser; var target = try TestFileSystem.makeHome(for: self); if let r = Optional(real) { target = r }; try Data().write(to: target) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-R6-while-let-real-home",
+    "source": "func testWrite() throws { var it = [FileManager.default.homeDirectoryForCurrentUser].makeIterator(); while let dir = it.next() { try Data().write(to: dir) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-R7-member-placeholder-standard-then-setup",
+    "source": "class T { var defaults: UserDefaults = .standard; func setUp() { defaults = TestPreferenceDomain.make(for: self) }; func test() { defaults.set(1, forKey: \"k\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A2-contextual-shared-fan",
+    "source": "func testWrite() { let fan: FanControlCoordinator = .shared; fan.selectedMode = .manual }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A3-dashboard-shared-applyLive",
+    "source": "func testApply() throws { try GeekDashboardConfigurationStore.shared.applyLive(.defaultValue) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A4-menubar-shared-install",
+    "source": "func testInstall(store: ScanStore) { MenuBarStatusController.shared.install(store: store) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A5-optional-function-type-sender",
+    "source": "let sender: ((FanControlHelperRequest) async throws -> FanControlHelperReply)? = nil; FanControlCoordinator(defaults: isolated, requestSender: sender)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A6-iuo-member-fan",
+    "source": "class T { var fan: FanControlCoordinator!; func make(store: ScanStore) { _ = MenuBarAdvancedStatusView(store: store, computerHealthStore: health, panelSettingsState: state, fanControl: fan) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A7-panel-root-indirect-shared",
+    "source": "func testRender(store: ScanStore) { _ = MenuBarStatusPanelRoot(store: store, computerHealthStore: health) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-A8-provider-shared-literal",
+    "source": "PrivilegedBatteryPowerModeCommandRunner(fanControlProvider: { FanControlCoordinator.shared })",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-B5-init-parameter-member",
+    "source": "struct Fixture { let root: URL; init(root: URL) { self.root = root } }\nfunc testWrite() throws { let f = Fixture(root: FileManager.default.homeDirectoryForCurrentUser); try Data().write(to: f.root) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-B6-closure-member-assignment",
+    "source": "class T { var prefs: UserDefaults = isolated; func setUp() { run { self.prefs = .standard } }; func test() { prefs.set(1, forKey: \"k\") } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-B7-lazy-member-home",
+    "source": "class F { lazy var root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Desktop\"); func w() throws { try Data().write(to: root) } }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C1-url-homeDirectory",
+    "source": "func testWrite() throws { try Data().write(to: URL.homeDirectory.appending(path: \"Desktop/x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C2-homeDirectory-forUser",
+    "source": "func testWrite() throws { let home = FileManager.default.homeDirectory(forUser: NSUserName())!; try Data().write(to: home.appendingPathComponent(\"Desktop/x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C3-NSSearchPath",
+    "source": "func testWrite() throws { let dir = NSSearchPathForDirectoriesInDomains(.desktopDirectory, .userDomainMask, true)[0]; try Data().write(to: URL(fileURLWithPath: dir).appendingPathComponent(\"x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C4-env-HOME",
+    "source": "func testWrite() throws { let home = ProcessInfo.processInfo.environment[\"HOME\"]!; try Data().write(to: URL(fileURLWithPath: home).appendingPathComponent(\"Desktop/x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C5-getpwuid",
+    "source": "func testWrite() throws { let home = String(cString: getpwuid(getuid())!.pointee.pw_dir); try Data().write(toFile: home + \"/Desktop/x\") }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C6-URL-desktopDirectory",
+    "source": "func testWrite() throws { try FileManager.default.removeItem(at: URL.desktopDirectory.appending(path: \"x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C7-trashItem-real",
+    "source": "func testWrite() throws { let real = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(\"Documents/x\"); try FileManager.default.trashItem(at: real, resultingItemURL: nil) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C8-interpolated-NSHomeDirectory",
+    "source": "func testWrite() throws { try Data().write(to: URL(fileURLWithPath: \"\\(NSHomeDirectory())/Desktop/x\")) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-C9-string-write-real",
+    "source": "func testWrite() throws { let root = FileManager.default.homeDirectoryForCurrentUser; try \"x\".write(to: root.appendingPathComponent(\"y\"), atomically: true, encoding: .utf8) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-F1-isolated-write-with-virtual-users-label",
+    "source": "func testWrite() throws { let root = try TestFileSystem.makeHome(for: self); let label = \"/Users/fixture/Documents/a.txt\"; try Data().write(to: root.appendingPathComponent(URL(fileURLWithPath: label).lastPathComponent)) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-F2-multi-clause-conditional-binding",
+    "source": "func testSnapshot() throws { let view = View(currentItem: \"/Users/example/demo\"); if let scale = Optional(2), let path = ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"] { let rendered = view; let directory = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) } }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-F3-real-read-isolated-write",
+    "source": "func testWrite() throws { let home = try TestFileSystem.makeOperationHome(for: self); let real = FileManager.default.homeDirectoryForCurrentUser; _ = real.path; try Data().write(to: home.appendingPathComponent(\"x\")) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-F4-local-reassigned-isolated",
+    "source": "func testWrite() throws { var url = FileManager.default.homeDirectoryForCurrentUser; _ = url.path; url = try TestFileSystem.makeHome(for: self); try Data().write(to: url) }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-review-F5-word-ending-in-in-scope",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { url = FileManager.default.homeDirectoryForCurrentUser; let domain = plain }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-review-F6-if-body-misread-as-closure",
+    "source": "func testWrite() throws { var url = try TestFileSystem.makeHome(for: self); if flag { for item in items { _ = item }; url = FileManager.default.homeDirectoryForCurrentUser }; try Data().write(to: url) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-actual-function-sender-with-closure-initializer",
+    "source": "let sender: ((FanControlHelperRequest) async throws -> FanControlHelperReply)? = { _ in throw CancellationError() }; FanControlCoordinator(defaults: isolated, requestSender: sender)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-actual-function-sender-nonnil-allowed",
+    "source": "let sender: (FanControlHelperRequest) async throws -> FanControlHelperReply = { _ in throw CancellationError() }; FanControlCoordinator(defaults: isolated, requestSender: sender)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-iuo-function-sender-rejected",
+    "source": "var sender: ((FanControlHelperRequest) async throws -> FanControlHelperReply)!; FanControlCoordinator(defaults: isolated, requestSender: sender)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-ternary-two-closures-allowed",
+    "source": "FanControlCoordinator(defaults: isolated, requestSender: flag ? { _ in throw CancellationError() } : { _ in throw CancellationError() })",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-ternary-coalescing-then-nil-rejected",
+    "source": "let sender: Sender? = nil; FanControlCoordinator(defaults: isolated, requestSender: flag ? sender ?? { _ in throw CancellationError() } : nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-explicit-health-controller-allowed",
+    "source": "ComputerHealthStore(probe: probe, batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-nil-health-controller-rejected",
+    "source": "ComputerHealthStore(probe: probe, batteryPowerModeController: nil)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-aliased-shared-health-controller-rejected",
+    "source": "let controller = BatteryHealthRuntime.shared; ComputerHealthStore(probe: probe, batteryPowerModeController: controller)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-virtual-users-component-under-isolated-root-allowed",
+    "source": "let root = try TestFileSystem.makeHome(for: self); let component = \"/Users/fixture/example\"; try Data().write(to: root.appendingPathComponent(component))",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-real-home-base-with-virtual-component-rejected",
+    "source": "let root = FileManager.default.homeDirectoryForCurrentUser; let component = \"/Users/fixture/example\"; try Data().write(to: root.appendingPathComponent(component))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-real-home-api-component-not-literal-rejected",
+    "source": "let root = try TestFileSystem.makeHome(for: self); try Data().write(to: root.appendingPathComponent(FileManager.default.homeDirectoryForCurrentUser.path))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-url-static-home-read-only-allowed",
+    "source": "_ = URL.homeDirectory.path; _ = URL.desktopDirectory.path",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-env-snapshot-dir-allowed",
+    "source": "let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment[\"SNAPSHOT_DIR\"]!); try Data().write(to: root)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-search-system-domain-read-allowed",
+    "source": "let paths = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .systemDomainMask, true); _ = paths",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-while-multiple-binding-real-home-rejected",
+    "source": "while let x = iterator.next(), let root = Optional(URL.homeDirectory) { try Data().write(to: root) }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-ternary-real-home-component-retains-source",
+    "source": "let root = try TestFileSystem.makeHome(for: self); let component = flag ? URL.homeDirectory.path : \"/Users/fixture/example\"; try Data().write(to: root.appendingPathComponent(component))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-coalescing-real-home-component-retains-source",
+    "source": "let root = try TestFileSystem.makeHome(for: self); let maybe: String? = URL.homeDirectory.path; let component = maybe ?? \"/Users/fixture/example\"; try Data().write(to: root.appendingPathComponent(component))",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-if-argument-closure-shadow-allowed",
+    "source": "let prefs = UserDefaults.standard; if values.contains(where: { prefs in prefs.set(1, forKey: key); return true }) { read() }",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-if-argument-closure-standard-write-rejected",
+    "source": "let prefs = UserDefaults.standard; if values.contains(where: { item in prefs.set(1, forKey: key); return true }) { read() }",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-contextual-health-init-rejected",
+    "source": "MenuBarAdvancedStatusView(store: store, computerHealthStore: .init(), panelSettingsState: state, fanControl: injected)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-contextual-health-init-with-controller-allowed",
+    "source": "MenuBarAdvancedStatusView(store: store, computerHealthStore: .init(batteryPowerModeController: refused), panelSettingsState: state, fanControl: injected)",
+    "expect_rejection": false
+  },
+  {
+    "case": "r3-unknown-lastPathComponent-retains-real-home-source",
+    "source": "let wrapper = Wrapper(root: FileManager.default.homeDirectoryForCurrentUser); try Data().write(to: wrapper.lastPathComponent)",
+    "expect_rejection": true
+  },
+  {
+    "case": "r3-url-leaf-traversal-retains-home-source",
+    "source": "let root = TestFileSystem.uniqueOperationRoot(\"probe\"); let label = \"/Users/..\"; let component = URL(fileURLWithPath: label).lastPathComponent; try FileManager.default.createDirectory(at: root.appendingPathComponent(component).appendingPathComponent(\"Library/Caches/fixture\"), withIntermediateDirectories: true)",
+    "expect_rejection": true
+  }
+]

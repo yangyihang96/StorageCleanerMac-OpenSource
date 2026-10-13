@@ -13,6 +13,13 @@ enum SQLiteSnapshotFailure: Error, Equatable, Sendable {
     case unavailable
 }
 
+/// Identifies failures of the caller-owned recovery file, separately from
+/// reading or writing the live database. Cancellation/deadlines stay unchanged.
+enum SQLitePersistentBackupFailure: Error, Equatable, Sendable {
+    case destinationWrite
+    case sourceRead(SQLiteSnapshotFailure)
+}
+
 struct SQLiteTableAllowlist: Equatable, Sendable {
     let name: String
     let requiredColumns: Set<String>
@@ -46,15 +53,18 @@ struct SQLiteSnapshotSource: Equatable, Sendable {
     let databaseURL: URL
     let trustedParentURL: URL
     let allowsImmutableReadFallback: Bool
+    let allowsUnavailableImmutableReadFallback: Bool
 
     init(
         databaseURL: URL,
         trustedParentURL: URL,
-        allowsImmutableReadFallback: Bool = false
+        allowsImmutableReadFallback: Bool = false,
+        allowsUnavailableImmutableReadFallback: Bool = false
     ) {
         self.databaseURL = databaseURL
         self.trustedParentURL = trustedParentURL
         self.allowsImmutableReadFallback = allowsImmutableReadFallback
+        self.allowsUnavailableImmutableReadFallback = allowsUnavailableImmutableReadFallback
     }
 }
 
@@ -224,10 +234,14 @@ struct SQLiteSnapshotService: Sendable {
             busyRetrySeconds: busyRetrySeconds,
             deadlineNanoseconds: deadlineNanoseconds
         ) { snapshot in
-            guard !FileManager.default.fileExists(atPath: destinationURL.path) else {
-                throw SQLiteSnapshotFailure.unavailable
+            do {
+                guard !FileManager.default.fileExists(atPath: destinationURL.path) else {
+                    throw SQLitePersistentBackupFailure.destinationWrite
+                }
+                try Self.createPrivateFile(at: destinationURL)
+            } catch {
+                throw SQLitePersistentBackupFailure.destinationWrite
             }
-            try Self.createPrivateFile(at: destinationURL)
             do {
                 try SQLiteRuntime.withReadOnlyDatabase(
                     at: snapshot.fileURL,
@@ -240,25 +254,31 @@ struct SQLiteSnapshotService: Sendable {
                         control: snapshot.control,
                         busyDeadlineNanoseconds: snapshot.busyDeadlineNanoseconds
                     )
-                    try SQLiteRuntime.withWritableDatabase(
-                        at: destinationURL,
-                        control: snapshot.control,
-                        busyDeadlineNanoseconds: snapshot.busyDeadlineNanoseconds
-                    ) { targetDatabase in
-                        try SQLiteRuntime.backup(
-                            from: sourceDatabase,
-                            to: targetDatabase,
-                            control: snapshot.control,
-                            busyDeadlineNanoseconds: snapshot.busyDeadlineNanoseconds,
-                            maximumBytes: sizeLimit,
-                            sourcePageSize: sourcePageSize
-                        )
-                        try SQLiteRuntime.validate(
-                            schema: schema,
-                            database: targetDatabase,
+                    do {
+                        try SQLiteRuntime.withWritableDatabase(
+                            at: destinationURL,
                             control: snapshot.control,
                             busyDeadlineNanoseconds: snapshot.busyDeadlineNanoseconds
-                        )
+                        ) { targetDatabase in
+                            try SQLiteRuntime.backup(
+                                from: sourceDatabase,
+                                to: targetDatabase,
+                                control: snapshot.control,
+                                busyDeadlineNanoseconds: snapshot.busyDeadlineNanoseconds,
+                                maximumBytes: sizeLimit,
+                                sourcePageSize: sourcePageSize
+                            )
+                            try SQLiteRuntime.validate(
+                                schema: schema,
+                                database: targetDatabase,
+                                control: snapshot.control,
+                                busyDeadlineNanoseconds: snapshot.busyDeadlineNanoseconds
+                            )
+                        }
+                    } catch let failure as SQLiteSnapshotFailure where failure == .cancelled || failure == .timedOut {
+                        throw failure
+                    } catch {
+                        throw SQLitePersistentBackupFailure.destinationWrite
                     }
                 }
             } catch {
@@ -295,57 +315,64 @@ struct SQLiteSnapshotService: Sendable {
                     trustedParent: destination.trustedParentURL,
                     expectedIdentityChain: destinationIdentity
                 )
-                let backupParent = backupURL.deletingLastPathComponent()
-                let backupIdentity = try SecureSourceFile.identityChain(
-                    for: backupURL,
-                    trustedParent: backupParent,
-                    expectedFinalKind: .regularFile
-                )
-                let canonicalBackup = try SecureSourceFile.canonicalizedURL(
-                    for: backupURL,
-                    trustedParent: backupParent,
-                    expectedIdentityChain: backupIdentity
-                )
-                try SQLiteRuntime.withReadOnlyDatabase(
-                    at: canonicalBackup,
-                    control: control,
-                    busyDeadlineNanoseconds: busyDeadline,
-                    forbidSymbolicLinks: true
-                ) { backupDatabase in
-                    try SQLiteRuntime.validate(
-                        schema: schema,
-                        database: backupDatabase,
-                        control: control,
-                        busyDeadlineNanoseconds: busyDeadline
+                // Keep destination failures outside the source wrapper even
+                // though SQLite holds the source open while copying it.
+                let destinationResult: Result<Void, any Error> = try Self.readPersistentBackup {
+                    let backupParent = backupURL.deletingLastPathComponent()
+                    let backupIdentity = try SecureSourceFile.identityChain(
+                        for: backupURL,
+                        trustedParent: backupParent,
+                        expectedFinalKind: .regularFile
                     )
-                    let sourcePageSize = try SQLiteRuntime.requireDatabaseSize(
-                        database: backupDatabase,
-                        maximumBytes: sizeLimit,
-                        control: control,
-                        busyDeadlineNanoseconds: busyDeadline
+                    let canonicalBackup = try SecureSourceFile.canonicalizedURL(
+                        for: backupURL,
+                        trustedParent: backupParent,
+                        expectedIdentityChain: backupIdentity
                     )
-                    try SQLiteRuntime.withWritableDatabase(
-                        at: canonicalDestination,
+                    return try SQLiteRuntime.withReadOnlyDatabase(
+                        at: canonicalBackup,
                         control: control,
                         busyDeadlineNanoseconds: busyDeadline,
                         forbidSymbolicLinks: true
-                    ) { targetDatabase in
-                        try SQLiteRuntime.backup(
-                            from: backupDatabase,
-                            to: targetDatabase,
-                            control: control,
-                            busyDeadlineNanoseconds: busyDeadline,
-                            maximumBytes: sizeLimit,
-                            sourcePageSize: sourcePageSize
-                        )
+                    ) { backupDatabase in
                         try SQLiteRuntime.validate(
                             schema: schema,
-                            database: targetDatabase,
+                            database: backupDatabase,
                             control: control,
                             busyDeadlineNanoseconds: busyDeadline
                         )
+                        let sourcePageSize = try SQLiteRuntime.requireDatabaseSize(
+                            database: backupDatabase,
+                            maximumBytes: sizeLimit,
+                            control: control,
+                            busyDeadlineNanoseconds: busyDeadline
+                        )
+                        return Result {
+                            try SQLiteRuntime.withWritableDatabase(
+                                at: canonicalDestination,
+                                control: control,
+                                busyDeadlineNanoseconds: busyDeadline,
+                                forbidSymbolicLinks: true
+                            ) { targetDatabase in
+                                try SQLiteRuntime.backup(
+                                    from: backupDatabase,
+                                    to: targetDatabase,
+                                    control: control,
+                                    busyDeadlineNanoseconds: busyDeadline,
+                                    maximumBytes: sizeLimit,
+                                    sourcePageSize: sourcePageSize
+                                )
+                                try SQLiteRuntime.validate(
+                                    schema: schema,
+                                    database: targetDatabase,
+                                    control: control,
+                                    busyDeadlineNanoseconds: busyDeadline
+                                )
+                            }
+                        }
                     }
                 }
+                try destinationResult.get()
                 guard try SecureSourceFile.identityChain(
                     for: destination.databaseURL,
                     trustedParent: destination.trustedParentURL,
@@ -361,6 +388,16 @@ struct SQLiteSnapshotService: Sendable {
             try await worker.value
         } onCancel: {
             worker.cancel()
+        }
+    }
+
+    private static func readPersistentBackup<T>(_ operation: () throws -> T) throws -> T {
+        do {
+            return try operation()
+        } catch let failure as SQLiteSnapshotFailure where failure == .cancelled || failure == .timedOut {
+            throw failure
+        } catch {
+            throw SQLitePersistentBackupFailure.sourceRead(error as? SQLiteSnapshotFailure ?? .unavailable)
         }
     }
 
@@ -408,7 +445,8 @@ struct SQLiteSnapshotService: Sendable {
             control: control,
             busyDeadlineNanoseconds: busyDeadlineNanoseconds,
             forbidSymbolicLinks: true,
-            immutableFallbackOnBusy: source.allowsImmutableReadFallback
+            immutableFallbackOnBusy: source.allowsImmutableReadFallback,
+            immutableFallbackOnUnavailable: source.allowsUnavailableImmutableReadFallback
         ) { sourceDatabase in
             let identityAfterOpen = try SecureSourceFile.identityChain(
                 for: source.databaseURL,
@@ -945,6 +983,7 @@ enum SQLiteRuntime {
         busyDeadlineNanoseconds: UInt64,
         forbidSymbolicLinks: Bool = false,
         immutableFallbackOnBusy: Bool = false,
+        immutableFallbackOnUnavailable: Bool = false,
         operation: (OpaquePointer) throws -> T
     ) throws -> T {
         let flags = SQLITE_OPEN_READONLY
@@ -958,7 +997,8 @@ enum SQLiteRuntime {
                 busyDeadlineNanoseconds: busyDeadlineNanoseconds,
                 operation: operation
             )
-        } catch SQLiteSnapshotFailure.busy where immutableFallbackOnBusy {
+        } catch let failure as SQLiteSnapshotFailure where
+            (failure == .busy && immutableFallbackOnBusy) || (failure == .unavailable && immutableFallbackOnUnavailable) {
             let sourceStamp = try SecureSourceFile.contentStamp(at: url)
             guard try SecureSourceFile.allowsImmutableSQLiteRead(at: url) else {
                 throw SQLiteSnapshotFailure.busy
@@ -984,13 +1024,15 @@ enum SQLiteRuntime {
         control: SQLiteExecutionControl,
         busyDeadlineNanoseconds: UInt64,
         forbidSymbolicLinks: Bool = false,
+        uriFilenames: Bool = false,
         operation: (OpaquePointer) throws -> T
     ) throws -> T {
         try withDatabase(
             at: url,
             flags: SQLITE_OPEN_READWRITE
                 | SQLITE_OPEN_FULLMUTEX
-                | (forbidSymbolicLinks ? SQLITE_OPEN_NOFOLLOW : 0),
+                | (forbidSymbolicLinks ? SQLITE_OPEN_NOFOLLOW : 0)
+                | (uriFilenames ? SQLITE_OPEN_URI : 0),
             control: control,
             busyDeadlineNanoseconds: busyDeadlineNanoseconds,
             operation: operation
@@ -1229,7 +1271,9 @@ enum SQLiteRuntime {
     ) throws -> T {
         try control.check()
         var database: OpaquePointer?
-        let path = immutable ? "\(url.standardizedFileURL.absoluteString)?immutable=1" : url.path
+        // The caller already supplies the canonical URL when NOFOLLOW is used.
+        // standardizing an existing /private/var URL can reintroduce /var.
+        let path = immutable ? "\(url.absoluteString)?immutable=1" : url.path
         let result = sqlite3_open_v2(path, &database, flags, nil)
         guard result == SQLITE_OK, let database else {
             if let database { sqlite3_close_v2(database) }

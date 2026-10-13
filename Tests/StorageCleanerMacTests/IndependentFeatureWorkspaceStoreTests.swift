@@ -17,7 +17,7 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         let store = LargeFilesStore(
             coordinator: coordinator,
             activityStore: HeavyWorkActivityStore(coordinator: coordinator),
-            defaults: UserDefaults(suiteName: "migration-source-\(UUID().uuidString)")!,
+            defaults: TestPreferenceDomain.make(for: self),
             scanOperation: { _ in [] }
         )
         let allowed = FileManager.default.homeDirectoryForCurrentUser
@@ -32,10 +32,10 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testLargeFilesFilterRestoresAndScanStoreKeepsWorkspaceResultAcrossRouteAccess() async {
-        let suite = "large-files-store-test-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testLargeFilesFilterRestoresAndScanStoreKeepsWorkspaceResultAcrossRouteAccess() async throws {
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let item = makeItem(sourceID: "large_files", title: "movie.mov", size: 42)
         let coordinator = HeavyWorkCoordinator()
         let activity = HeavyWorkActivityStore(coordinator: coordinator)
@@ -55,7 +55,7 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.phase, .finished)
         XCTAssertTrue(store.hasScanned)
 
-        let scanStore = ScanStore(
+        let scanStore = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
             heavyWorkActivityStore: activity
         )
@@ -88,7 +88,7 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         let store = LargeFilesStore(
             coordinator: coordinator,
             activityStore: activity,
-            defaults: UserDefaults(suiteName: "large-files-failure-\(UUID().uuidString)")!,
+            defaults: TestPreferenceDomain.make(for: self),
             scanOperation: operation
         )
 
@@ -103,7 +103,7 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testStorageAnalysisFailedRescanRetainsPreviousIndex() async {
+    func testStorageAnalysisFailedRescanRetainsPreviousIndex() async throws {
         let target = StorageMapScanTarget(
             path: "/tmp",
             title: "Fixture",
@@ -116,14 +116,15 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         let store = LargeFilesStore(
             coordinator: coordinator,
             activityStore: activity,
-            defaults: UserDefaults(suiteName: "storage-analysis-failure-\(UUID().uuidString)")!,
+            defaults: TestPreferenceDomain.make(for: self),
             scanOperation: { _ in [] },
             storageMapTargets: [target],
             storageAnalysisOperation: { _, _ in
                 let count = await calls.incrementAndRead()
                 if count > 1 { throw TestError.failed }
                 return previous
-            }
+            },
+            trashEnvironment: TestFileSystem.analysisEnvironment(home: try TestFileSystem.makeOperationHome(for: self))
         )
 
         store.startStorageAnalysis()
@@ -138,7 +139,7 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testStorageAnalysisCancellationReachesOperationAndKeepsPreviousIndex() async {
+    func testStorageAnalysisCancellationReachesOperationAndKeepsPreviousIndex() async throws {
         let target = StorageMapScanTarget(
             path: "/tmp",
             title: "Fixture",
@@ -150,13 +151,14 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         let store = LargeFilesStore(
             coordinator: coordinator,
             activityStore: activity,
-            defaults: UserDefaults(suiteName: "storage-analysis-cancel-\(UUID().uuidString)")!,
+            defaults: TestPreferenceDomain.make(for: self),
             scanOperation: { _ in [] },
             storageMapTargets: [target],
             storageAnalysisOperation: { _, _ in
                 try await Task.sleep(for: .seconds(30))
                 return previous
-            }
+            },
+            trashEnvironment: TestFileSystem.analysisEnvironment(home: try TestFileSystem.makeOperationHome(for: self))
         )
         store.replaceStorageAnalysisForTesting(previous)
 
@@ -184,7 +186,7 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
             return Self.report(items: [late])
         }
         let store = DuplicateFilesStore(
-            defaults: UserDefaults(suiteName: "duplicate-late-\(UUID().uuidString)")!,
+            defaults: TestPreferenceDomain.make(for: self),
             coordinator: coordinator,
             activityStore: activity,
             scanOperation: operation
@@ -214,11 +216,11 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     @MainActor
     func testDuplicateStoreReloadsResultAndFiltersWithoutSelection() async throws {
         let fixture = try makePersistedDuplicateFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let suite = "duplicate-result-reload-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let resultURL = fixture.root.appendingPathComponent("result.json")
+        defer { TestFileSystem.remove(fixture.root) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+        let resultURL = fixture.resultURL
         let resultStore = DuplicateFileResultStore(fileURL: resultURL)
         let coordinator = HeavyWorkCoordinator()
         let activity = HeavyWorkActivityStore(coordinator: coordinator)
@@ -229,7 +231,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
             coordinator: coordinator,
             activityStore: activity,
             scanOperation: operation,
-            resultStore: resultStore
+            resultStore: resultStore,
+            userHomeURL: fixture.root
         )
         first.addCustomRoot(fixture.root.path)
         first.resultFilter = .exact
@@ -239,7 +242,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
 
         XCTAssertEqual(first.phase, .finished)
         XCTAssertEqual(first.items.count, 2)
-        let selected = first.items[0]
+        XCTAssertTrue(first.items.allSatisfy { $0.modifiedAt != nil })
+        let selected = try XCTUnwrap(first.items.first)
         first.setSelected(true, item: selected, allItems: first.items)
         XCTAssertEqual(first.selectedItemIDs, [selected.id])
 
@@ -252,7 +256,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
                 _ = await restoreScanCalls.incrementAndRead()
                 return Self.report(items: [])
             },
-            resultStore: resultStore
+            resultStore: resultStore,
+            userHomeURL: fixture.root
         )
         await restored.waitForResultRestore()
         let restoreScanCallCount = await restoreScanCalls.currentValue()
@@ -292,15 +297,16 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     @MainActor
     func testDuplicateStoreCacheRestoreCannotOverwriteNewScanOrChangedScope() async throws {
         let fixture = try makePersistedDuplicateFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let suite = "duplicate-restore-race-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let resultStore = DuplicateFileResultStore(fileURL: fixture.root.appendingPathComponent("result.json"))
+        defer { TestFileSystem.remove(fixture.root) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+        let resultStore = DuplicateFileResultStore(fileURL: fixture.resultURL)
         let first = DuplicateFilesStore(
             defaults: defaults,
             scanOperation: persistedDuplicateScanOperation(fixture: fixture),
-            resultStore: resultStore
+            resultStore: resultStore,
+            userHomeURL: fixture.root
         )
         first.addCustomRoot(fixture.root.path)
         first.startScan()
@@ -317,7 +323,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         let rescan = DuplicateFilesStore(
             defaults: defaults,
             scanOperation: { _, _, _, _, _ in Self.report(items: []) },
-            resultStore: resultStore
+            resultStore: resultStore,
+            userHomeURL: fixture.root
         )
         rescan.startScan()
         await rescan.waitForResultRestore()
@@ -332,9 +339,9 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
 
     @MainActor
     func testDuplicateStoreKeepsCompletedScopeWhenNextScopeChanges() async {
-        let suite = "duplicate-completed-scope-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let coordinator = HeavyWorkCoordinator()
         let store = DuplicateFilesStore(
             defaults: defaults,
@@ -356,11 +363,11 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     @MainActor
     func testDuplicateStoreRejectsCorruptResultCache() async throws {
         let fixture = try makePersistedDuplicateFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let suite = "duplicate-result-corrupt-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let resultURL = fixture.root.appendingPathComponent("result.json")
+        defer { TestFileSystem.remove(fixture.root) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+        let resultURL = fixture.resultURL
         let resultDirectory = resultURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: resultDirectory, withIntermediateDirectories: true)
         try Data("not-json".utf8).write(to: resultURL)
@@ -383,12 +390,12 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     @MainActor
     func testDuplicateStoreRejectsResultWhenFileIdentityChanges() async throws {
         let fixture = try makePersistedDuplicateFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let suite = "duplicate-result-identity-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestFileSystem.remove(fixture.root) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let resultStore = DuplicateFileResultStore(
-            fileURL: fixture.root.appendingPathComponent("result.json")
+            fileURL: fixture.resultURL
         )
         let coordinator = HeavyWorkCoordinator()
         let activity = HeavyWorkActivityStore(coordinator: coordinator)
@@ -399,7 +406,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
             coordinator: coordinator,
             activityStore: activity,
             scanOperation: operation,
-            resultStore: resultStore
+            resultStore: resultStore,
+            userHomeURL: fixture.root
         )
         first.addCustomRoot(fixture.root.path)
         first.startScan()
@@ -412,7 +420,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
             coordinator: coordinator,
             activityStore: activity,
             scanOperation: operation,
-            resultStore: resultStore
+            resultStore: resultStore,
+            userHomeURL: fixture.root
         )
         await restored.waitForResultRestore()
         XCTAssertEqual(restored.phase, .idle)
@@ -428,12 +437,14 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         let large = LargeFilesStore(
             coordinator: coordinator,
             activityStore: activity,
+            defaults: TestPreferenceDomain.make(for: self),
             scanOperation: { _ in
                 await gate.wait()
                 return []
             }
         )
         let duplicate = DuplicateFilesStore(
+            defaults: TestPreferenceDomain.make(for: self),
             coordinator: coordinator,
             activityStore: activity,
             scanOperation: { _, _, _, _, _ in Self.report(items: []) }
@@ -449,8 +460,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testFeatureStoresDoNotWriteTheirResultsIntoScanStore() {
-        let scanStore = ScanStore()
+    func testFeatureStoresDoNotWriteTheirResultsIntoScanStore() throws {
+        let scanStore = try ScanStore.makeForTests(for: self)
         let original = makeItem(sourceID: "large_files", title: "original.mov", size: 1)
         scanStore.result = ScanResult(
             generatedAt: Date(),
@@ -506,18 +517,17 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
 
     private struct PersistedDuplicateFixture {
         let root: URL
+        let resultURL: URL
         let first: URL
         let second: URL
         let payloadSize: Int64
     }
 
     private func makePersistedDuplicateFixture() throws -> PersistedDuplicateFixture {
-        // Documents can receive provenance/sync attributes just after creation,
-        // changing ctime and correctly invalidating the saved file snapshot.
-        // Keep owned fixtures outside that managed directory; production file
-        // identity and metadata validation remain fully enabled.
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".StorageCleanerDuplicateResultTests-\(UUID().uuidString)", isDirectory: true)
+        // 文件身份/选择校验走隐藏家目录；普通结果 JSON 仍留在系统临时目录。
+        let root = TestFileSystem.uniqueOperationRoot("DuplicateResult")
+        TestFileSystem.registerCleanup(of: root, for: self)
+        let resultURL = try TestFileSystem.makeHome(for: self).appendingPathComponent("result.json")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700],
@@ -528,8 +538,15 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         let payload = Data("persisted duplicate payload".utf8)
         try payload.write(to: first)
         try payload.write(to: second)
+        // Stable, real filesystem metadata keeps scan/resource-values and
+        // the nanosecond cache snapshot comparable as complete StorageItems.
+        for url in [first, second] {
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                ofItemAtPath: url.path)
+        }
         return PersistedDuplicateFixture(
             root: root,
+            resultURL: resultURL,
             first: first,
             second: second,
             payloadSize: Int64(payload.count)
@@ -544,7 +561,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
                 DirectoryEntry(
                     name: $0.lastPathComponent,
                     path: $0.path,
-                    sizeBytes: fixture.payloadSize
+                    sizeBytes: fixture.payloadSize,
+                    modifiedAt: (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
                 )
             }
             let group = DuplicateFileGroup(

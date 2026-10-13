@@ -54,7 +54,10 @@ struct RuntimeInlineStatus: View {
     @Environment(\.moduleTheme) private var theme
     var state: RuntimeWorkflowState = .running
     let title: String
-    var detail: String? = nil
+    init(state: RuntimeWorkflowState = .running, title: String, detail: String? = nil) {
+        self.state = state
+        self.title = title
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -66,14 +69,10 @@ struct RuntimeInlineStatus: View {
                 }
             }
             .frame(width: 24, height: 24)
-            .foregroundStyle(state.tint(accent: theme.accent))
+            .foregroundStyle(state.tint(accent: theme.actionFill))
             .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(AppDesignTokens.Typography.compactLabelEmphasis)
-                if let detail, !detail.isEmpty {
-                    Text(detail).font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(theme.secondaryText)
-                }
             }
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -81,16 +80,18 @@ struct RuntimeInlineStatus: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(theme.primaryText)
-        .background(state.tint(accent: theme.accent).opacity(0.08),
+        .background(state.tint(accent: theme.actionFill).opacity(0.08),
                     in: RoundedRectangle(cornerRadius: AppDesignTokens.Layout.rowRadius))
         .overlay(RoundedRectangle(cornerRadius: AppDesignTokens.Layout.rowRadius)
-            .strokeBorder(state.tint(accent: theme.accent).opacity(0.18), lineWidth: 1))
+            .strokeBorder(state.tint(accent: theme.actionFill).opacity(0.18), lineWidth: 1))
         .accessibilityElement(children: .combine)
     }
 }
 
 struct RuntimeActivityCard<Details: View>: View {
     @Environment(\.moduleTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppSurfaces private var surfaces
     let title: String
     var subtitle: String? = nil
     var state: RuntimeWorkflowState = .running
@@ -99,34 +100,24 @@ struct RuntimeActivityCard<Details: View>: View {
     var currentItem: String? = nil
     @ViewBuilder let details: Details
 
+    /// D53 §3.2.3: a ring that sweeps with the measured progress, the stage
+    /// title cross-fading, numbers rolling, and a bouncing check when done.
     var body: some View {
         let measured = RuntimeWorkflowState.measuredFraction(fraction)
-        let tint = state.tint(accent: theme.accent)
+        let tint = state.tint(accent: theme.isImmersive ? theme.pigment.brightColor : theme.actionFill)
         ContentPanel {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .center, spacing: 16) {
-                    ZStack {
-                        Circle().fill(tint.opacity(0.12))
-                        if state.isActive && measured == nil {
-                            ProgressView().controlSize(.regular).tint(tint)
-                        } else {
-                            Image(systemName: state.symbol)
-                                .font(.system(size: 24, weight: .medium)).foregroundStyle(tint)
-                        }
-                    }
-                    .frame(width: 56, height: 56)
-                    .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center, spacing: 18) {
+                    progressRing(measured: measured, tint: tint)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(state.title).font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(tint)
-                        Text(title).font(.system(size: 23, weight: .semibold))
+                        Text(title).font(.system(size: 22, weight: .bold))
                             .fixedSize(horizontal: false, vertical: true)
-                        if let subtitle, !subtitle.isEmpty {
-                            Text(subtitle).font(AppDesignTokens.Typography.secondary)
-                                .foregroundStyle(theme.secondaryText)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                            .id(title)
+                            .transition(.opacity)
+
                     }
+                    .animation(AppMotion.resolved(.standard, reduceMotion: reduceMotion), value: title)
+                    .animation(AppMotion.resolved(.standard, reduceMotion: reduceMotion), value: subtitle)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let measured {
@@ -134,29 +125,36 @@ struct RuntimeActivityCard<Details: View>: View {
                         GeometryReader { proxy in
                             ZStack(alignment: .leading) {
                                 Capsule().fill(tint.opacity(0.14))
-                                Capsule().fill(tint).frame(width: proxy.size.width * measured)
+                                Capsule()
+                                    .fill(LinearGradient(colors: theme.isImmersive ? theme.pigment.gradientStops : [tint, tint],
+                                                         startPoint: .leading, endPoint: .trailing))
+                                    .frame(width: max(6, proxy.size.width * measured))
+                                    .shadow(color: tint.opacity(surfaces.isNight ? 0.45 : 0), radius: 4)
+                                    .animation(AppMotion.resolved(.data, reduceMotion: reduceMotion), value: measured)
                             }
                         }
                         .frame(height: 6)
                         Text("\(Int(measured * 100))%")
-                            .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                            .font(AppDesignTokens.TypeScale.bodyEmphasis)
                             .monospacedDigit().frame(width: 44, alignment: .trailing)
+                            .appDataTransition(value: Int(measured * 100))
                     }
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(L10n.text("进度", "Progress"))
                     .accessibilityValue("\(Int(measured * 100))%")
                 }
                 if !metrics.isEmpty {
-                    Divider()
+                    Rectangle().fill(surfaces.divider).frame(height: 1).accessibilityHidden(true)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 124), spacing: 14)],
                               alignment: .leading, spacing: 14) {
                         ForEach(metrics) { metric in
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(metric.title).font(AppDesignTokens.Typography.metadata)
-                                    .foregroundStyle(theme.secondaryText)
-                                Text(metric.value).font(.system(size: 21, weight: .semibold))
-                                    .monospacedDigit().lineLimit(1)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(metric.title).font(AppDesignTokens.TypeScale.caption)
+                                    .foregroundStyle(surfaces.textSecondary)
+                                Text(metric.value).font(AppDesignTokens.TypeScale.metricCard)
+                                    .lineLimit(1)
                                     .help(metric.value)
+                                    .appDataTransition(value: metric.value)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -164,14 +162,10 @@ struct RuntimeActivityCard<Details: View>: View {
                 }
                 details
                 if let currentItem, !currentItem.isEmpty {
-                    Divider()
-                    Label {
-                        Text(currentItem).lineLimit(1).truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: "folder").accessibilityHidden(true)
-                    }
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(theme.secondaryText)
+                    Rectangle().fill(surfaces.divider).frame(height: 1).accessibilityHidden(true)
+                    Text(currentItem).lineLimit(1).truncationMode(.middle)
+                    .font(AppDesignTokens.TypeScale.caption)
+                    .foregroundStyle(surfaces.textSecondary)
                     .help(currentItem)
                     .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
                     .accessibilityLabel(L10n.text("当前对象", "Current Item"))
@@ -184,12 +178,36 @@ struct RuntimeActivityCard<Details: View>: View {
             .padding(20)
         }
         .fixedSize(horizontal: false, vertical: true)
-        .foregroundStyle(theme.primaryText)
+        .foregroundStyle(surfaces.textPrimary)
         .accessibilityElement(children: .contain)
+    }
+
+    private func progressRing(measured: Double?, tint: Color) -> some View {
+        let colors = theme.isImmersive
+            ? [theme.pigment.lightStop, theme.pigment.brightColor]
+            : [tint, tint]
+        return ZStack {
+            if state == .completed {
+                MetricRing(fraction: 1, colors: [AppDesignTokens.Palette.success, AppDesignTokens.Palette.success], lineWidth: 7)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(AppDesignTokens.Palette.success)
+                    .symbolEffect(.bounce, value: !reduceMotion && state == .completed)
+            } else if state.isActive, measured == nil {
+                MetricRing(fraction: 0.001, colors: colors, lineWidth: 7)
+                ProgressView().controlSize(.regular).tint(tint)
+            } else {
+                MetricRing(fraction: measured ?? 0, colors: colors, lineWidth: 7)
+                Image(systemName: state.symbol)
+                    .font(.system(size: 20, weight: .semibold)).foregroundStyle(tint)
+            }
+        }
+        .frame(width: 68, height: 68)
+        .accessibilityHidden(true)
     }
 }
 
-struct FeatureRuntimePage<Details: View, Actions: View>: View {
+struct LegacyFeatureRuntimePage<Details: View, Actions: View>: View {
     let module: ReviewFilter
     let title: String
     var subtitle: String? = nil
@@ -203,7 +221,7 @@ struct FeatureRuntimePage<Details: View, Actions: View>: View {
 
     var body: some View {
         SmartScanPageShell(fitsVisibleHeight: true) {
-            AppPageHeader(title: module.sidebarTitle, subtitle: module.pageSubtitle,
+            AppPageHeader(title: module.sidebarTitle,
                           systemImage: module.systemImage, isHero: true) { EmptyView() }
         } content: {
             RuntimeActivityColumns(module: module) {

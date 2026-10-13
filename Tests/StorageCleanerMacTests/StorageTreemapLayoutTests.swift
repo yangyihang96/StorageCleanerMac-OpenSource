@@ -314,7 +314,7 @@ final class StorageTreemapLayoutTests: XCTestCase {
         let fileManager = FileManager.default
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("storage-map-category-test-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let media = root.appendingPathComponent("Media", isDirectory: true)
         let nested = media.appendingPathComponent("Nested", isDirectory: true)
@@ -482,7 +482,7 @@ final class StorageTreemapLayoutTests: XCTestCase {
         let fileManager = FileManager.default
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("storage-map-test-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let folder = root.appendingPathComponent("Folder", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -518,7 +518,7 @@ final class StorageTreemapLayoutTests: XCTestCase {
         let fileManager = FileManager.default
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("storage-map-index-test-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let projects = root.appendingPathComponent("Projects", isDirectory: true)
         let archive = projects.appendingPathComponent("Archive", isDirectory: true)
@@ -569,7 +569,7 @@ final class StorageTreemapLayoutTests: XCTestCase {
         let fileManager = FileManager.default
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("storage-map-hardlink-test-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let alpha = root.appendingPathComponent("A", isDirectory: true)
         let beta = root.appendingPathComponent("B", isDirectory: true)
@@ -597,7 +597,7 @@ final class StorageTreemapLayoutTests: XCTestCase {
     }
 
     @MainActor
-    func testLargeFilesStoreDrillsDownAndReusesCachedDirectorySnapshot() async {
+    func testLargeFilesStoreDrillsDownAndReusesCachedDirectorySnapshot() async throws {
         let calls = StorageMapBrowseCallCounter()
         let nestedEntry = StorageTreemapEntry(
             id: "/tmp/Projects/Build", title: "Build", path: "/tmp/Projects/Build", sizeBytes: 42, kind: "folder", isDirectory: true
@@ -684,9 +684,9 @@ final class StorageTreemapLayoutTests: XCTestCase {
         )
         let coordinator = HeavyWorkCoordinator()
         let activity = HeavyWorkActivityStore(coordinator: coordinator)
-        let suite = "storage-map-store-test-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let store = LargeFilesStore(
             coordinator: coordinator,
             activityStore: activity,
@@ -695,7 +695,8 @@ final class StorageTreemapLayoutTests: XCTestCase {
             directoryBrowseOperation: { path, _ in
                 await calls.record(path)
                 return path == nestedEntry.path ? nestedSnapshot : snapshot
-            }
+            },
+            trashEnvironment: TestFileSystem.analysisEnvironment(home: try TestFileSystem.makeOperationHome(for: self))
         )
 
         store.replaceStorageAnalysisForTesting(analysis)
@@ -781,7 +782,7 @@ final class StorageTreemapLayoutTests: XCTestCase {
         let fileManager = FileManager.default
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("storage-map-fairness-test-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let first = root.appendingPathComponent("A-heavy", isDirectory: true)
         let second = root.appendingPathComponent("B-small", isDirectory: true)

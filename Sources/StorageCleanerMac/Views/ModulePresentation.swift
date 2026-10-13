@@ -86,6 +86,10 @@ struct WindowLayoutMetrics {
     let density: Density
     let viewportHeight: CGFloat
     let isShort: Bool
+    /// Landing pages switch to their compact header, rows and controls below
+    /// this height; between 560 and 660 pt the regular layout clipped the last
+    /// options row inside the options list (size-sweep tests).
+    let isCompactLanding: Bool
     let sidebarMinimumWidth: CGFloat
     let sidebarIdealWidth: CGFloat
     let sidebarMaximumWidth: CGFloat
@@ -107,6 +111,7 @@ struct WindowLayoutMetrics {
         let compact = contentSize.width < AppWindowLayoutPolicy.compactBreakpoint
         density = compact ? .compact : .regular
         isShort = contentSize.height < 560
+        isCompactLanding = contentSize.height < 660
         sidebarMinimumWidth = compact ? 158 : AppDesignTokens.Layout.sidebarMinimumWidth
         sidebarIdealWidth = compact ? 164 : AppDesignTokens.Layout.sidebarExpandedWidth
         sidebarMaximumWidth = compact ? 172 : AppDesignTokens.Layout.sidebarMaximumWidth
@@ -150,18 +155,22 @@ extension EnvironmentValues {
 /// Only the middle slot changes its contents; header/footer geometry stays put.
 struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
     @Environment(\.windowLayoutMetrics) private var layout
+    @Environment(\.pageLayout) private var pageLayout
     private let fitsVisibleHeight: Bool
+    private let alignsWithFeatureFlow: Bool
     private let header: Header
     private let content: Content
     private let footer: Footer
 
     init(
         fitsVisibleHeight: Bool = false,
+        alignsWithFeatureFlow: Bool = false,
         @ViewBuilder header: () -> Header,
         @ViewBuilder content: () -> Content,
         @ViewBuilder footer: () -> Footer
     ) {
         self.fitsVisibleHeight = fitsVisibleHeight
+        self.alignsWithFeatureFlow = alignsWithFeatureFlow
         self.header = header()
         self.content = content()
         self.footer = footer()
@@ -169,9 +178,14 @@ struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let page = pageLayout ?? PageLayout.resolve(size: proxy.size)
+            let metrics = LandingMetrics(page: page, size: proxy.size, systemImage: ReviewFilter.overview.systemImage)
+            let composition = FeatureCompositionGeometry(metrics: metrics,
+                areaSize: metrics.compositionAreaSize(in: proxy.size))
             VStack(spacing: 0) {
                 header
                     .fixedSize(horizontal: false, vertical: true)
+                    .frame(height: alignsWithFeatureFlow ? metrics.headerHeight : nil, alignment: .top)
 #if DEBUG
                     .layoutProbe(LayoutProbeID.smartScanHeader)
 #endif
@@ -191,8 +205,10 @@ struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
 #endif
             }
             .padding(.horizontal, layout.contentPadding)
-            .padding(.top, AppDesignTokens.Spacing.small)
-            .padding(.bottom, layout.contentPadding)
+            // D62's running-to-results transition shares the header anchor
+            // and footer bottom. Result rows and their actions are unchanged.
+            .padding(.top, alignsWithFeatureFlow ? metrics.topPadding + composition.headerTop : AppDesignTokens.Spacing.small)
+            .padding(.bottom, alignsWithFeatureFlow ? metrics.bottomPadding : layout.contentPadding)
             .frame(
                 width: proxy.size.width,
                 height: fitsVisibleHeight ? min(proxy.size.height, layout.viewportHeight) : proxy.size.height,
@@ -203,6 +219,7 @@ struct SmartScanPageShell<Header: View, Content: View, Footer: View>: View {
 #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .pageOwnsScrolling(alignsWithFeatureFlow)
     }
 }
 
@@ -363,18 +380,16 @@ struct ModuleBackground: View {
     let theme: ModuleTheme
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [theme.startColor(for: colorScheme), theme.endColor(for: colorScheme)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+        Group {
             if theme.isImmersive {
-                RadialGradient(
-                    colors: [colorScheme == .dark ? theme.darkRadialHighlight : theme.radialHighlight, .clear],
-                    center: .topLeading,
-                    startRadius: 0,
-                    endRadius: 720
+                // D53/D63: the night or cool daylight canvas with the
+                // module glow, resolved from the view's environment.
+                ModuleGlowCanvas(theme: theme)
+            } else {
+                LinearGradient(
+                    colors: [theme.startColor(for: colorScheme), theme.endColor(for: colorScheme)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
                 )
             }
         }
@@ -446,6 +461,9 @@ final class TitlebarDragView: NSView {
 }
 
 struct MainContentHost<Content: View>: View {
+    @Namespace private var lightfieldNamespace
+    @State private var lightfieldPhase: FeatureLightfieldPhase = .landing
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let route: ReviewFilter
     let showsIntegratedTitlebar: Bool
     private let content: Content
@@ -473,20 +491,87 @@ struct MainContentHost<Content: View>: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(ModuleBackground(theme: theme))
+        .background {
+            if FeatureLightfield.owns(route) {
+                GeometryReader { proxy in
+                    let topInset = proxy.safeAreaInsets.top
+                    let canvas = CGSize(width: proxy.size.width, height: max(1, proxy.size.height - topInset))
+                    FeatureLightfieldBackdrop(module: route, phase: lightfieldPhase,
+                        geometry: FeatureLightfieldGeometry(size: canvas, phase: lightfieldPhase),
+                        canvasTopInset: topInset)
+                }
+                .ignoresSafeArea(.container, edges: .top)
+            } else {
+                ModuleBackground(theme: theme)
+            }
+        }
+        .onPreferenceChange(FeatureLightfieldPhasePreferenceKey.self) { lightfieldPhase = $0 }
+        .onChange(of: route) { lightfieldPhase = .landing }
         .environment(\.moduleTheme, theme)
-        .tint(theme.accent)
-        .foregroundStyle(theme.primaryText)
+        .environment(\.featureLightfieldModule, FeatureLightfield.owns(route) ? route : nil)
+        .environment(\.featureLightfieldBackdropProvided, FeatureLightfield.owns(route))
+        .environment(\.smartScanFlowNamespace, FeatureLightfield.owns(route) ? lightfieldNamespace : nil)
+        .tint(theme.actionFill)
+        .foregroundStyle(theme.primaryText, theme.secondaryText, theme.tertiaryText)
 
+    }
+}
+
+/// D53 §3.2.1: a page change fades the new page in and lifts it 8 pt; the
+/// old page fades out in 0.15 s (Reduce Motion: a fade). Keyed by the
+/// sidebar destination, or by the Smart Scan flow stage, so the pages stay
+/// mutually exclusive and only their change is animated; the system tools
+/// keep their own transition between tools.
+struct PageTransitionContainer<Key: Hashable, Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let key: Key
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            content
+                .id(key)
+                .transition(AppMotion.pageTransition(reduceMotion: reduceMotion))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(reduceMotion ? AppMotion.reducedFade : AppMotion.pageChange, value: key)
     }
 }
 
 /// Keep a usable content area when macOS tiles a window below its normal
 /// minimum size. Lists keep their own bounded scrolling; the page itself only
 /// overflows in short windows, instead of squeezing those lists to zero height.
+///
+/// D53 §2.1: the detail area is measured here once and published as
+/// `PageLayout` (with 16 pt hysteresis). Pages that own their scrolling get
+/// exactly the visible height; other pages keep a minimum page of the real
+/// minimum detail height (468 pt = 520 pt window content − 52 pt toolbar)
+/// instead of the old 520 pt, which cut every status bar in half.
 struct AdaptivePageViewport<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.featureDisablesLayoutAnimations) private var disablesLayoutAnimations
+    @State private var lastLayout: PageLayout?
+    @State private var pageOwnsScrolling = false
     private let resetID: ReviewFilter?
     private let content: Content
+
+    private static func hasMeasured(_ layout: PageLayout?) -> Bool {
+        guard let layout else { return false }
+        return layout.size.width > 1 && layout.size.height > 1
+    }
+
+    private var capturesStaticLayout: Bool {
+#if DEBUG
+        FeaturePresentationDemo.disablesLayoutAnimations
+#else
+        false
+#endif
+    }
+
+    static var minimumDetailHeight: CGFloat {
+        AppWindowLayoutPolicy.minimumReferenceContentSize.height
+            - AppDesignTokens.Layout.integratedTitlebarHeight
+    }
 
     init(resetID: ReviewFilter? = nil, @ViewBuilder content: () -> Content) {
         self.resetID = resetID
@@ -495,23 +580,56 @@ struct AdaptivePageViewport<Content: View>: View {
 
     var body: some View {
         GeometryReader { proxy in
-            ScrollViewReader { reader in
-                ScrollView(.vertical) {
-                    content
-                        .frame(
-                            width: proxy.size.width,
-                            height: max(AppWindowLayoutPolicy.minimumReferenceContentSize.height, proxy.size.height),
-                            alignment: .top
-                        )
-                        .id("main-page-top")
-                }
-                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-                .onChange(of: resetID) {
-                    reader.scrollTo("main-page-top", anchor: .top)
+            let pageLayout = PageLayout.resolve(size: proxy.size, previous: lastLayout)
+            Group {
+                if resetID == .performance || resetID.map(ReviewFilter.fileWorkspaceCases.contains) == true
+                    || resetID.map(FeatureLightfield.owns) == true {
+                    // These workspaces own their scrolling and action bars.
+                    // An outer minimum-height page would move those actions
+                    // below a short tiled window's real viewport.
+                    content.frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                } else {
+                    ScrollViewReader { reader in
+                        ScrollView(.vertical) {
+                            content
+                                .frame(
+                                    width: proxy.size.width,
+                                    height: pageOwnsScrolling
+                                        ? proxy.size.height
+                                        : max(Self.minimumDetailHeight, proxy.size.height),
+                                    alignment: .top
+                                )
+                                .id("main-page-top")
+                        }
+                        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                        .onChange(of: resetID) {
+                            reader.scrollTo("main-page-top", anchor: .top)
+                        }
+                    }
                 }
             }
             // Measure the detail column, not the window including its sidebar.
             .environment(\.windowLayoutMetrics, WindowLayoutMetrics(contentSize: proxy.size))
+            .environment(\.pageLayout, pageLayout)
+            .onPreferenceChange(PageOwnsScrollingPreferenceKey.self) { owns in
+                if pageOwnsScrolling != owns { pageOwnsScrolling = owns }
+            }
+            .onChange(of: pageLayout, initial: true) { _, newLayout in
+                if lastLayout != newLayout { lastLayout = newLayout }
+            }
+            // §2.1: a class change animates with `standard`; the first real
+            // measurement (after an unsized first pass) lays out at once.
+            .animation(
+                Self.hasMeasured(lastLayout) && !disablesLayoutAnimations && !capturesStaticLayout
+                    ? AppMotion.layout(reduceMotion: reduceMotion) : nil,
+                value: pageLayout.classKey
+            )
+        }
+        .transaction { transaction in
+            if disablesLayoutAnimations || capturesStaticLayout {
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+            }
         }
 #if DEBUG
         .layoutProbe(LayoutProbeID.pageViewport)
@@ -520,21 +638,42 @@ struct AdaptivePageViewport<Content: View>: View {
 }
 
 struct ContentPanel<Content: View>: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.moduleTheme) private var theme
 
     private let cornerRadius: CGFloat
     private let content: Content
 
     init(
-        cornerRadius: CGFloat = AppDesignTokens.Radius.modulePanel,
+        cornerRadius: CGFloat = AppDesignTokens.Corner.card,
         @ViewBuilder content: () -> Content
     ) {
         self.cornerRadius = cornerRadius
         self.content = content()
     }
+
+    var body: some View {
+        // D53: module pages use the v2 card (fill, top-lit edge, daylight
+        // shadow); neutral surfaces keep the window background.
+        if theme.isImmersive {
+            content
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .background {
+                    SurfaceBackground(level: .card, cornerRadius: cornerRadius)
+                }
+        } else {
+            NeutralContentPanel(cornerRadius: cornerRadius) { content }
+        }
+    }
+}
+
+private struct NeutralContentPanel<Content: View>: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.moduleTheme) private var theme
+
+    let cornerRadius: CGFloat
+    @ViewBuilder let content: Content
 
     var body: some View {
         content
@@ -605,8 +744,6 @@ struct GlassToolbarButton: View {
             HStack(spacing: AppDesignTokens.Spacing.tight) {
                 if isLoading {
                     ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: systemImage).accessibilityHidden(true)
                 }
                 Text(title)
             }
@@ -716,7 +853,6 @@ typealias StatusMessageRow = ScanStatusView
 
 struct HeroScanPage<Accessory: View>: View {
     let title: String
-    let subtitle: String
     let headerSystemImage: String?
     let configurationTitle: String?
     let actionTitle: String
@@ -733,7 +869,7 @@ struct HeroScanPage<Accessory: View>: View {
 
     init(
         title: String,
-        subtitle: String,
+        subtitle: String = "",
         headerSystemImage: String? = nil,
         configurationTitle: String? = nil,
         actionTitle: String,
@@ -749,7 +885,6 @@ struct HeroScanPage<Accessory: View>: View {
         @ViewBuilder accessory: () -> Accessory
     ) {
         self.title = title
-        self.subtitle = subtitle
         self.headerSystemImage = headerSystemImage
         self.configurationTitle = configurationTitle
         self.actionTitle = actionTitle
@@ -768,7 +903,6 @@ struct HeroScanPage<Accessory: View>: View {
     var body: some View {
         FileToolLandingPage(
             title: title,
-            subtitle: subtitle,
             systemImage: headerSystemImage ?? actionSystemImage,
             configurationTitle: showsAccessory
                 ? configurationTitle ?? L10n.text("扫描选项", "Scan Options")
@@ -791,7 +925,7 @@ struct HeroScanPage<Accessory: View>: View {
 extension HeroScanPage where Accessory == EmptyView {
     init(
         title: String,
-        subtitle: String,
+        subtitle: String = "",
         headerSystemImage: String? = nil,
         configurationTitle: String? = nil,
         actionTitle: String,
@@ -806,7 +940,6 @@ extension HeroScanPage where Accessory == EmptyView {
     ) {
         self.init(
             title: title,
-            subtitle: subtitle,
             headerSystemImage: headerSystemImage,
             configurationTitle: configurationTitle,
             actionTitle: actionTitle,
@@ -828,16 +961,22 @@ typealias FeatureLandingPageShell<Accessory: View> = HeroScanPage<Accessory>
 
 struct ModulePageHeader<Actions: View>: View {
     let title: String
-    let subtitle: String?
     let systemImage: String
     @ViewBuilder let actions: Actions
+    init(title: String, subtitle: String? = nil, systemImage: String,
+         @ViewBuilder actions: () -> Actions) {
+        self.title = title
+        self.systemImage = systemImage
+        self.actions = actions()
+    }
 
     var body: some View {
         AppPageHeader(
             title: title,
-            subtitle: subtitle,
             systemImage: systemImage,
-            isHero: [ReviewFilter.privacy.systemImage, ReviewFilter.startup.systemImage, ReviewFilter.performance.systemImage, "speedometer"].contains(systemImage)
+            isHero: [ReviewFilter.privacy.systemImage, ReviewFilter.startup.systemImage, ReviewFilter.performance.systemImage, "speedometer"].contains(systemImage),
+            // D53 §2.3: list and dashboard pages keep the height for data.
+            role: .tool
         ) {
             actions
         }
@@ -850,7 +989,6 @@ struct ManagementListPage<Actions: View, Controls: View, Content: View>: View {
     @Environment(\.windowLayoutMetrics) private var layout
 
     let title: String
-    let subtitle: String?
     let systemImage: String
     @ViewBuilder private let actions: Actions
     private let summary: AnyView?
@@ -866,7 +1004,6 @@ struct ManagementListPage<Actions: View, Controls: View, Content: View>: View {
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
-        self.subtitle = subtitle
         self.systemImage = systemImage
         self.actions = actions()
         self.summary = nil
@@ -884,7 +1021,6 @@ struct ManagementListPage<Actions: View, Controls: View, Content: View>: View {
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
-        self.subtitle = subtitle
         self.systemImage = systemImage
         self.actions = actions()
         self.summary = AnyView(summary())
@@ -896,8 +1032,7 @@ struct ManagementListPage<Actions: View, Controls: View, Content: View>: View {
         VStack(spacing: 0) {
             PageHeader(
                 title: title,
-                subtitle: subtitle,
-                systemImage: systemImage
+                    systemImage: systemImage
             ) {
                 actions
             }
@@ -930,7 +1065,6 @@ struct DashboardPage<Actions: View, Content: View>: View {
     @Environment(\.windowLayoutMetrics) private var layout
 
     let title: String
-    let subtitle: String?
     let systemImage: String
     @ViewBuilder private let actions: Actions
     @ViewBuilder private let content: Content
@@ -943,7 +1077,6 @@ struct DashboardPage<Actions: View, Content: View>: View {
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
-        self.subtitle = subtitle
         self.systemImage = systemImage
         self.actions = actions()
         self.content = content()
@@ -953,8 +1086,7 @@ struct DashboardPage<Actions: View, Content: View>: View {
         VStack(spacing: 0) {
             PageHeader(
                 title: title,
-                subtitle: subtitle,
-                systemImage: systemImage
+                    systemImage: systemImage
             ) {
                 actions
             }

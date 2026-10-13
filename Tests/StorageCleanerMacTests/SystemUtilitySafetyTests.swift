@@ -6,8 +6,8 @@ import XCTest
 
 final class SystemUtilitySafetyTests: XCTestCase {
     @MainActor
-    func testScanBusyGuardDoesNotMislabelOtherWorkAsCleanupPreparation() {
-        let store = ScanStore()
+    func testScanBusyGuardDoesNotMislabelOtherWorkAsCleanupPreparation() throws {
+        let store = try ScanStore.makeForTests(for: self)
         XCTAssertNil(store.activeScanStatusText)
         store.isScanningDuplicates = true
         XCTAssertTrue(store.isPreparingScan)
@@ -132,7 +132,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
     func testSharedUninstallInventoryDiscoversNestedApplicationCollections() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         let appURL = root
             .appendingPathComponent("Setapp", isDirectory: true)
             .appendingPathComponent("Nested Tool.app", isDirectory: true)
@@ -165,10 +165,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUninstallRejectsAPathReplacedAfterScanning() async throws {
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        TestFileSystem.registerCleanup(of: root, for: self)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         let appURL = root
             .appendingPathComponent("Setapp", isDirectory: true)
             .appendingPathComponent("Replaceable.app", isDirectory: true)
@@ -188,6 +188,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertNotNil(scanned.scanIdentity)
         XCTAssertTrue(UninstallCandidatePathPolicy.isSafeComponent(scanned.bundleIdentifier))
         XCTAssertEqual(scanned.scanIdentity, AppUninstallService.uninstallFileIdentity(at: scanned.path))
+        XCTAssertTrue(AppUninstallService.scannedApplicationStillAtPath(scanned))
         XCTAssertNoThrow(try AppUninstallService.validateCurrentApplicationIdentity(scanned))
 
         try FileManager.default.removeItem(at: appURL)
@@ -198,11 +199,208 @@ final class SystemUtilitySafetyTests: XCTestCase {
             build: "1"
         )
 
+        XCTAssertFalse(AppUninstallService.scannedApplicationStillAtPath(scanned),
+                       "Finder handoff must not reveal a replacement at the scanned path")
+
         XCTAssertThrowsError(try AppUninstallService.validateCurrentApplicationIdentity(scanned)) { error in
             guard case AppUninstallError.identityChanged = error else {
                 return XCTFail("Expected identityChanged, got \(error)")
             }
         }
+    }
+
+    func testUninstallTrashesOnlyAnIsolatedFixtureAndPersistsItsReceipt() async throws {
+        let fm = FileManager.default
+        // Batch 3a: an injected, isolated Trash folder replaces the real
+        // ~/.Trash, so the whole round trip runs in every environment and never
+        // touches the user's Trash (it used to be skipped without Trash access).
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        defer { TestFileSystem.remove(root) }
+        let trash = root.appendingPathComponent("fixture-trash", isDirectory: true)
+        try fm.createDirectory(at: trash, withIntermediateDirectories: true)
+        let appURL = root.appendingPathComponent("RecycleFixture.app", isDirectory: true)
+        try writeTestApplication(at: appURL, bundleIdentifier: "com.example.recycle-fixture",
+                                 version: "1.0", build: "1")
+        let scan = await AppUninstallService.scanInstalledAppsFromSharedInventory(
+            directories: [ApplicationScanDirectory(url: root, maximumDepth: 1)],
+            timeLimit: 5, maximumConcurrency: 1
+        )
+        let app = try XCTUnwrap(scan.apps.first)
+        let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
+        let plan = try UninstallPlan(app: app, selectedPaths: [], homeDirectory: root)
+        let coordinator = HeavyWorkCoordinator()
+        // Never the privileged helper: an authorization request fails the test.
+        let noAuthorization = UninstallAuthorizationEnvironment(helperVerdict: { _, _, _ in .rejectsLocation },
+            isWritable: { _ in true }, protection: { _ in .none }, move: { _, _, _, _ in
+                XCTFail("The isolated fixture must never request authorization")
+                throw POSIXError(.EPERM)
+            })
+        let result = try await coordinator.withLease(owner: .cleanup) { lease in
+            await AppUninstallService.execute(plan, coordinator: coordinator, lease: lease,
+                recycle: { source in
+                    let destination = trash.appendingPathComponent(source.lastPathComponent)
+                    try FileManager.default.moveItem(at: source, to: destination)
+                    return destination
+                },
+                authorization: noAuthorization,
+                persist: { try journal.checkpoint($0, expectedIdentities: $1) })
+        }
+        XCTAssertEqual(result.report?.summary.movedItemCount, 1)
+        XCTAssertEqual(result.report?.restorableReceipts.count, 1)
+        XCTAssertEqual(result.report?.restorableReceipts.first?.resultingItemURL.deletingLastPathComponent().path,
+                       trash.path)
+        XCTAssertFalse(fm.fileExists(atPath: appURL.path))
+        XCTAssertEqual(try journal.load().first?.restorableReceipts.count, 1)
+        // Reload the durable report, as a new launch would, then restore through
+        // the production recovery service rather than moving the fixture back directly.
+        let reloaded = try XCTUnwrap(journal.load().first)
+        let restored = try await coordinator.withLease(owner: .restore) { lease in
+            await CleanupRecoveryService().restore(report: reloaded, coordinator: coordinator,
+                lease: lease, journal: journal, userHomeURL: root, trashURL: trash)
+        }
+        XCTAssertEqual(restored.recovery.restoredCount, 1)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: trash.path), [], "Nothing is left in the isolated Trash")
+        XCTAssertEqual(try FoundationReadOnlyFileSystem().snapshot(at: appURL).identity, app.scanIdentity)
+        XCTAssertEqual(try journal.load().first?.recoveryAttempts?.last?.restoredCount, 1)
+        XCTAssertEqual(NSDictionary(contentsOf: appURL.appendingPathComponent("Contents/Info.plist"))?["CFBundleIdentifier"] as? String,
+                       "com.example.recycle-fixture")
+    }
+
+    func testUninstallPermissionFailureKeepsFixtureAndRecordsSystemCode() async throws {
+        let fm = FileManager.default
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        TestFileSystem.registerCleanup(of: root, for: self)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { TestFileSystem.remove(root) }
+        let appURL = root.appendingPathComponent("DeniedFixture.app", isDirectory: true)
+        try writeTestApplication(at: appURL, bundleIdentifier: "com.example.denied-fixture",
+                                 version: "1.0", build: "1")
+        let scan = await AppUninstallService.scanInstalledAppsFromSharedInventory(
+            directories: [ApplicationScanDirectory(url: root, maximumDepth: 1)],
+            timeLimit: 5, maximumConcurrency: 1
+        )
+        let app = try XCTUnwrap(scan.apps.first)
+        let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
+        let result = try AppUninstallService.moveToTrash(app, homeDirectory: root, move: { _ in
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError)
+        }, persist: { try journal.checkpoint($0, expectedIdentities: $1) })
+        XCTAssertEqual(result.report?.summary.movedItemCount, 0)
+        XCTAssertTrue(fm.fileExists(atPath: appURL.path))
+        let persisted = try XCTUnwrap(journal.load().first)
+        guard case let .failed(failure) = try XCTUnwrap(persisted.items.first).outcome else {
+            return XCTFail("Permission failure must be recorded")
+        }
+        XCTAssertEqual(failure.detailCode, "NSCocoaErrorDomain:\(NSFileWriteNoPermissionError)")
+    }
+
+    func testUninstallDoesNotClaimRemovalIfRecyclerLeavesOriginalInPlace() async throws {
+        let fm = FileManager.default
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        TestFileSystem.registerCleanup(of: root, for: self)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { TestFileSystem.remove(root) }
+        let appURL = root.appendingPathComponent("CopyOnlyFixture.app", isDirectory: true)
+        try writeTestApplication(at: appURL, bundleIdentifier: "com.example.copy-only-fixture",
+                                 version: "1.0", build: "1")
+        let scan = await AppUninstallService.scanInstalledAppsFromSharedInventory(
+            directories: [ApplicationScanDirectory(url: root, maximumDepth: 1)],
+            timeLimit: 5, maximumConcurrency: 1
+        )
+        let app = try XCTUnwrap(scan.apps.first)
+        let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
+        let result = try AppUninstallService.moveToTrash(app, homeDirectory: root, move: { source in
+            let fakeTrash = root.appendingPathComponent("fake-trash")
+            try fm.createDirectory(at: fakeTrash, withIntermediateDirectories: true)
+            let target = fakeTrash.appendingPathComponent(source.lastPathComponent)
+            try fm.copyItem(at: source, to: target)
+            return target
+        }, persist: { try journal.checkpoint($0, expectedIdentities: $1) })
+        XCTAssertEqual(result.report?.summary.movedItemCount, 0)
+        XCTAssertTrue(fm.fileExists(atPath: appURL.path))
+        let saved = try XCTUnwrap(journal.load().first)
+        guard case let .failed(failure) = try XCTUnwrap(saved.items.first).outcome else {
+            return XCTFail("A copy cannot be recorded as a completed uninstall")
+        }
+        XCTAssertEqual(failure.code, .moveOutcomeUnknown)
+    }
+
+    func testRelatedFileReviewMovesOnlySelectedExactCandidateAndCanRestoreIt() async throws {
+        let fm = FileManager.default
+        let bundleID = "com.example.storage-cleaner-fixture-\(UUID().uuidString.lowercased())"
+        let home = try TestFileSystem.makeOperationHome(for: self)
+        let cache = home.appendingPathComponent("Library/Caches/\(bundleID)")
+        let preference = home.appendingPathComponent("Library/Preferences/\(bundleID).plist")
+        let root = home.appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
+        let trash = root.appendingPathComponent("fixture-trash")
+        try fm.createDirectory(at: trash, withIntermediateDirectories: true)
+        try Data("cache".utf8).write(to: cache)
+        try Data("preference".utf8).write(to: preference)
+        defer {
+            TestFileSystem.remove(cache)
+            TestFileSystem.remove(preference)
+            TestFileSystem.remove(root)
+        }
+        let related = try [cache, preference].map { url in
+            InstalledAppRelatedItem(path: url.path, sizeBytes: 10,
+                scanIdentity: try FoundationReadOnlyFileSystem().snapshot(at: url).identity,
+                verifiedExclusiveOwnerBundleID: bundleID)
+        }
+        let app = InstalledAppItem(id: "/Applications/Fixture.app", name: "Fixture",
+            bundleIdentifier: bundleID, path: "/Applications/Fixture.app", version: "1",
+            build: "1", category: "Utility", appDescription: "Fixture", sizeBytes: 1,
+            source: "fixture", modifiedAt: nil, relatedPaths: related.map(\.path),
+            relatedItems: related, status: .installed)
+        XCTAssertEqual(AppUninstallService.reviewableRelatedItems(for: app, homeDirectory: home).count, 2)
+        let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
+        let moved = AppUninstallService.moveRelatedItemsToTrash(for: app,
+            selectedPaths: [cache.path], homeDirectory: home, move: { source in
+                let target = trash.appendingPathComponent(source.lastPathComponent)
+                try fm.moveItem(at: source, to: target)
+                return target
+            }, persist: { try journal.checkpoint($0, expectedIdentities: $1) })
+        XCTAssertEqual(moved.movedRelatedItems.map(\.path), [cache.path])
+        XCTAssertTrue(fm.fileExists(atPath: preference.path))
+        XCTAssertFalse(fm.fileExists(atPath: cache.path))
+        let report = try XCTUnwrap(journal.load().first)
+        XCTAssertEqual(report.restorableReceipts.count, 1)
+        let recovery = await CleanupRecoveryService().restore(receipts: report.restorableReceipts,
+            userHomeURL: home, trashURL: trash)
+        XCTAssertEqual(recovery.restoredCount, 1)
+        XCTAssertEqual(try String(contentsOf: cache, encoding: .utf8), "cache")
+    }
+
+    func testRelatedFileReplacementAfterReviewIsReportedWithoutMovingReplacement() throws {
+        let fm = FileManager.default
+        let bundleID = "com.example.storage-cleaner-fixture-\(UUID().uuidString.lowercased())"
+        let home = try TestFileSystem.makeOperationHome(for: self)
+        let cache = home.appendingPathComponent("Library/Caches/\(bundleID)")
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        TestFileSystem.registerCleanup(of: root, for: self)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: cache)
+        defer {
+            TestFileSystem.remove(cache)
+            TestFileSystem.remove(root)
+        }
+        let identity = try FoundationReadOnlyFileSystem().snapshot(at: cache).identity
+        let app = InstalledAppItem(id: "/Applications/Fixture.app", name: "Fixture",
+            bundleIdentifier: bundleID, path: "/Applications/Fixture.app", version: "1",
+            build: "1", category: "Utility", appDescription: "Fixture", sizeBytes: 1,
+            source: "fixture", modifiedAt: nil, relatedPaths: [cache.path],
+            relatedItems: [InstalledAppRelatedItem(path: cache.path, sizeBytes: 3,
+                scanIdentity: identity, verifiedExclusiveOwnerBundleID: bundleID)], status: .installed)
+        try fm.removeItem(at: cache)
+        try Data("new".utf8).write(to: cache)
+        let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
+        let result = AppUninstallService.moveRelatedItemsToTrash(for: app,
+            selectedPaths: [cache.path], homeDirectory: home, move: { _ in
+                XCTFail("A replaced candidate must never reach the move operation")
+                throw CleanupMoveError.invalidResult
+            }, persist: { try journal.checkpoint($0, expectedIdentities: $1) })
+        XCTAssertEqual(result.report?.summary.failedItemCount, 1)
+        XCTAssertEqual(result.failedRelatedPaths, [cache.path])
+        XCTAssertEqual(try String(contentsOf: cache, encoding: .utf8), "new")
+        XCTAssertEqual(try journal.load().first?.summary.failedItemCount, 1)
     }
 
     func testSharedUninstallInventoryKeepsExplicitManagedCollectionRoot() throws {
@@ -278,18 +476,19 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(app.canMoveToTrash)
     }
 
-    func testAppUninstallRelatedCleanupOnlyAllowsCommonUserLibraryRoots() {
-        let home = NSHomeDirectory()
+    func testAppUninstallRelatedCleanupOnlyAllowsCommonUserLibraryRoots() throws {
+        let homeURL = try TestFileSystem.makeOperationHome(for: self)
+        let home = homeURL.path
 
-        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Application Support/com.example.Tool"))
-        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Caches/com.example.Tool"))
-        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Preferences/com.example.Tool.plist"))
-        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Containers/com.example.Tool"))
-        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Group Containers/com.example.Tool"))
+        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Application Support/com.example.Tool", homeDirectory: homeURL))
+        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Caches/com.example.Tool", homeDirectory: homeURL))
+        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Preferences/com.example.Tool.plist", homeDirectory: homeURL))
+        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Containers/com.example.Tool", homeDirectory: homeURL))
+        XCTAssertTrue(AppUninstallService.isSafeRelatedPath("\(home)/Library/Group Containers/com.example.Tool", homeDirectory: homeURL))
 
-        XCTAssertFalse(AppUninstallService.isSafeRelatedPath("\(home)/Downloads/com.example.Tool"))
-        XCTAssertFalse(AppUninstallService.isSafeRelatedPath("/Applications/Tool.app"))
-        XCTAssertFalse(AppUninstallService.isSafeRelatedPath("/tmp/com.example.Tool"))
+        XCTAssertFalse(AppUninstallService.isSafeRelatedPath("\(home)/Downloads/com.example.Tool", homeDirectory: homeURL))
+        XCTAssertFalse(AppUninstallService.isSafeRelatedPath("/Applications/Tool.app", homeDirectory: homeURL))
+        XCTAssertFalse(AppUninstallService.isSafeRelatedPath("/tmp/com.example.Tool", homeDirectory: homeURL))
     }
 
     func testInstalledAppDisplayDescriptionDetailRemovesRepeatedIntroduction() {
@@ -316,8 +515,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUninstallDescriptionUsesCategoryAndScanMetadata() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let description = AppUninstallService.appDescription(
             displayName: "Example App",
@@ -350,8 +550,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUninstallIntroductionUsesKnownBundlePurpose() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let introduction = AppUninstallService.appIntroduction(
             displayName: "Final Cut Pro",
@@ -366,8 +567,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUninstallIntroductionUsesKnownThirdPartyPurpose() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let introduction = AppUninstallService.appIntroduction(
             displayName: "Docker Desktop",
@@ -382,8 +584,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUninstallIntroductionUsesCategoryPurposeFallback() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let introduction = AppUninstallService.appIntroduction(
             displayName: "Unknown Studio",
@@ -653,8 +856,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testInstalledAppInsightCardsSummarizePurposeUsageAndLeftovers() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let app = makeInstalledApp(
             name: "Archive Studio",
@@ -676,8 +880,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testInstalledAppInsightCardsUseGreenLeftoverToneWhenNoCommonLeftovers() {
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let app = makeInstalledApp(name: "Daily Tool", relatedBytes: 0)
 
@@ -688,8 +893,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUninstallCategoryTitleMapsKnownCategory() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         XCTAssertEqual(
             AppUninstallService.categoryTitle(for: "public.app-category.developer-tools"),
@@ -698,8 +904,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testUtilityListExportMarkdownIncludesUninstallBoundaryAndLeftovers() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let app = makeInstalledApp(
             name: "Old Tool",
@@ -722,7 +929,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(markdown.contains("/tmp/Old Tool-cache"))
     }
 
-    func testUninstallPreviewDefersAssociatedFilesUntilAfterAppRemoval() throws {
+    func testUninstallPreviewUsesOneExplicitSelectionAndRetainsOwnershipBoundary() throws {
         let projectRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -743,23 +950,33 @@ final class SystemUtilitySafetyTests: XCTestCase {
             contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Services/AppUninstallService.swift"),
             encoding: .utf8
         )
-        let previewStart = try XCTUnwrap(utilitySource.range(of: "struct UninstallPreviewSheet: View"))
-        let previewEnd = try XCTUnwrap(
-            utilitySource.range(of: "private struct UninstallPreviewAppIcon: View", range: previewStart.upperBound..<utilitySource.endIndex)
-        )
-        let previewSource = String(utilitySource[previewStart.lowerBound..<previewEnd.lowerBound])
+        let previewSource = try String(contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/UninstallPreviewSheet.swift"), encoding: .utf8)
+        let relatedStart = try XCTUnwrap(utilitySource.range(of: "struct RelatedAppFilesReviewSheet: View"))
+        let relatedReviewSource = String(utilitySource[relatedStart.lowerBound...])
 
-        XCTAssertTrue(previewSource.contains("应用会先移到废纸篓"))
-        XCTAssertFalse(previewSource.contains("relatedItems"))
-        XCTAssertFalse(previewSource.contains("关联文件"))
-        XCTAssertTrue(contentSource.contains("是否清除关联文件？"))
-        XCTAssertTrue(contentSource.contains("store.confirmRelatedAppCleanup()"))
-        XCTAssertTrue(storeSource.contains("try AppUninstallService.moveToTrash(app)"))
-        XCTAssertTrue(storeSource.contains("pendingRelatedCleanupApp = app"))
-        XCTAssertTrue(serviceSource.contains("static func moveRelatedItemsToTrash(for app:"))
+        XCTAssertTrue(previewSource.contains("所选数据会一并移入废纸篓"))
+        XCTAssertTrue(previewSource.contains("relatedItems"))
+        // D1 (DECISIONS.md): related files start unchecked; only the app itself
+        // is preselected. This replaces the old "uncheck to keep" wording.
+        XCTAssertTrue(previewSource.contains("包含设置和本地数据，默认保留；勾选后才会随应用移入废纸篓。"))
+        XCTAssertFalse(previewSource.contains("取消勾选即可保留"))
+        // Leftover mode: the app is already in Trash, so the hint does not say "with the app".
+        XCTAssertTrue(previewSource.contains("包含设置和本地数据，默认保留；勾选的项目会移入废纸篓。"))
+        XCTAssertTrue(previewSource.contains("全选已核实项"))
+        XCTAssertFalse(storeSource.contains("uninstallSelectedPaths = Set(AppUninstallService.reviewableRelatedItems"))
+        XCTAssertTrue(previewSource.contains("移入废纸篓"))
+        XCTAssertTrue(contentSource.contains("RelatedAppFilesReviewSheet("))
+        XCTAssertTrue(contentSource.contains("store.confirmRelatedAppCleanup(selectedPaths: $0)"))
+        XCTAssertTrue(relatedReviewSource.contains("@State private var selectedPaths = Set<String>()"))
+        XCTAssertTrue(relatedReviewSource.contains("不能证明专属归属"))
+        XCTAssertTrue(storeSource.contains("await AppUninstallService.execute(plan"))
+        XCTAssertFalse(storeSource.contains("pendingRelatedCleanupApp = app"))
+        XCTAssertTrue(serviceSource.contains("item.verifiedExclusiveOwnerBundleID == app.bundleIdentifier"))
+        XCTAssertTrue(serviceSource.contains("static func moveRelatedItemsToTrash("))
+        XCTAssertTrue(serviceSource.contains("selectedPaths: Set<String>"))
     }
 
-    func testUninstallRowKeepsDirectButtonAndShowsOnlySuggestionReason() throws {
+    func testUninstallRowUsesNativeSelectionWithoutExecutingCleanup() throws {
         let viewURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -772,18 +989,46 @@ final class SystemUtilitySafetyTests: XCTestCase {
         )
         let rowSource = String(source[rowStart.lowerBound..<rowEnd.lowerBound])
 
-        XCTAssertEqual(rowSource.components(separatedBy: "store.requestUninstall(app)").count - 1, 1)
+        // Native List selection and accessibility activation open review, never execute cleanup.
+        XCTAssertEqual(rowSource.components(separatedBy: "store.requestUninstall(app)").count - 1, 0)
+        XCTAssertTrue(source.contains("FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,"))
+        // D67 round 6 (main-session review): selecting a row, by click or arrow
+        // keys, never opens the preview; the primary action does, and closing
+        // the preview keeps the selection. Native coverage:
+        // FeatureLightfieldContractTests.testProductionUninstallRowSelectionNeverOpensPreview.
+        XCTAssertFalse(source.contains(".onChange(of: selectedApplicationID)"))
+        let page = try XCTUnwrap(source.range(of: "private var resultContent: some View"))
+        let pageEnd = try XCTUnwrap(source.range(of: "private var lightfieldResultControls: some View", range: page.upperBound..<source.endIndex))
+        let pageSource = String(source[page.lowerBound..<pageEnd.lowerBound])
+        XCTAssertEqual(pageSource.components(separatedBy: "store.requestUninstall(app)").count - 1, 1,
+            "Only the primary action opens the preview")
+        XCTAssertTrue(pageSource.contains("actionTitle: L10n.text(\"卸载所选\", \"Uninstall Selected\")"))
+        let binding = try XCTUnwrap(source.range(of: "private var uninstallPreviewBinding: Binding<Bool>"))
+        let bindingEnd = try XCTUnwrap(source.range(of: "private var uninstallSortMenu", range: binding.upperBound..<source.endIndex))
+        XCTAssertFalse(source[binding.lowerBound..<bindingEnd.lowerBound].contains("selectedApplicationID = nil"),
+            "Closing the preview keeps the selection")
+        let list = try String(contentsOf: viewURL.deletingLastPathComponent()
+            .appendingPathComponent("DesignSystem/FeatureLightfieldUninstallList.swift"), encoding: .utf8)
+        XCTAssertTrue(list.contains("Button { select(app) } label: {"))
+        let move = try XCTUnwrap(list.range(of: ".onMoveCommand"))
+        XCTAssertFalse(list[move.lowerBound...].contains("review("), "Arrow keys only select")
+        XCTAssertTrue(rowSource.contains(".appButtonChrome(.selectionRow)"))
+        XCTAssertTrue(rowSource.contains("Button(action: select)"))
+        XCTAssertFalse(rowSource.contains("confirmUninstall"))
         XCTAssertTrue(rowSource.contains(".contextMenu {"))
-        let contextActions = try XCTUnwrap(rowSource.components(separatedBy: ".contextMenu {").last)
+        let menuStart = try XCTUnwrap(rowSource.range(of: ".contextMenu {")?.lowerBound)
+        let menuEnd = rowSource.endIndex
+        let contextActions = String(rowSource[menuStart..<menuEnd])
         XCTAssertTrue(contextActions.contains("store.copyPath(app.path)"))
         XCTAssertTrue(contextActions.contains("store.reveal(app.path)"))
         XCTAssertFalse(contextActions.contains("requestUninstall"))
-        XCTAssertTrue(rowSource.contains("查看卸载计划"))
-        XCTAssertTrue(rowSource.contains("uninstallSuggestionReason"))
-        XCTAssertTrue(rowSource.contains("建议卸载"))
-        XCTAssertTrue(rowSource.contains("来源：\\(provider)"))
+        XCTAssertTrue(rowSource.contains("Text(app.name)"))
+        XCTAssertTrue(rowSource.contains("Text(app.versionDisplay)"))
+        XCTAssertTrue(rowSource.contains("ByteFormat.string(app.sizeBytes)"))
+        XCTAssertFalse(rowSource.contains("建议卸载"))
+        XCTAssertTrue(rowSource.contains(".help(app.path)"))
         XCTAssertFalse(rowSource.contains("openExternalAppManager"))
-        XCTAssertFalse(rowSource.contains("related"))
+        XCTAssertFalse(rowSource.contains("confirmRelatedAppCleanup"))
     }
 
     func testUninstallPageUsesOneInAppTrashEligibilityFilter() throws {
@@ -831,8 +1076,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testMemoryProcessExplainsQuitBoundaryForAppsAndSystemProcesses() {
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let appProcess = MemoryProcess(
             id: 100,
@@ -899,8 +1145,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testMemorySnapshotBuildsActionableAdviceFromQuitCandidates() {
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let smallApp = MemoryProcess(
             id: 200,
@@ -1146,12 +1393,13 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertEqual(snapshot.cachedEstimateBytes, 3_000 * 1024 * 1024)
         XCTAssertEqual(snapshot.availableBytes, 4_000 * 1024 * 1024)
         XCTAssertEqual(snapshot.usedBytes, 12_000 * 1024 * 1024)
-        XCTAssertEqual(snapshot.pressureLevel, .normal)
+        XCTAssertEqual(snapshot.reportablePressureLevel, .normal)
     }
 
     func testMemoryPressureSummaryUsesReadableFreePercentage() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let output = """
         The system has 51539607552 (3145728 pages with a page size of 16384).
@@ -1201,7 +1449,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             pressureFreePercentage: nil
         )
 
-        XCTAssertEqual(snapshot.pressureLevel, .normal)
+        XCTAssertEqual(snapshot.reportablePressureLevel, .normal)
         XCTAssertEqual(snapshot.pressureHeadroomPercent, 45)
         XCTAssertEqual(snapshot.pressureEstimatePercent, 55)
         XCTAssertEqual(snapshot.reportablePressureLevel, .normal)
@@ -1210,7 +1458,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertNil(invalidSnapshot.pressureHeadroomPercent)
         XCTAssertNil(invalidSnapshot.pressureEstimatePercent)
         XCTAssertNil(invalidSnapshot.reportablePressureLevel)
-        XCTAssertEqual(headroomUnavailableSnapshot.pressureLevel, .normal)
+        XCTAssertEqual(headroomUnavailableSnapshot.reportablePressureLevel, .normal)
         XCTAssertNil(headroomUnavailableSnapshot.pressureHeadroomPercent)
         XCTAssertEqual(headroomUnavailableSnapshot.reportablePressureLevel, .normal)
         XCTAssertNil(fullyUnavailableSnapshot.reportablePressureLevel)
@@ -1235,9 +1483,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
             compressedBytes: 4_000_000_000
         )
 
-        XCTAssertEqual(normal.pressureLevel, .normal)
+        XCTAssertEqual(normal.reportablePressureLevel, .normal)
         XCTAssertEqual(normal.cleanupPlan.primaryAction, .observe)
-        XCTAssertEqual(elevated.pressureLevel, .elevated)
+        XCTAssertEqual(elevated.reportablePressureLevel, .elevated)
         XCTAssertEqual(elevated.cleanupPlan.primaryAction, .observe)
         XCTAssertEqual(elevated.cleanupPlan.estimatedRecoverableBytes, 0)
     }
@@ -1251,7 +1499,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         )
 
         XCTAssertEqual(snapshot.availableRatio, 0.5, accuracy: 0.001)
-        XCTAssertEqual(snapshot.pressureLevel, .normal)
+        XCTAssertEqual(snapshot.reportablePressureLevel, .normal)
         XCTAssertEqual(snapshot.cleanupPlan.primaryAction, .observe)
     }
 
@@ -1282,7 +1530,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             topProcesses: [heavyApp]
         )
 
-        XCTAssertEqual(snapshot.pressureLevel, .elevated)
+        XCTAssertEqual(snapshot.reportablePressureLevel, .elevated)
         XCTAssertEqual(snapshot.cleanupPlan.primaryAction, .quitHighUsageApps)
     }
 
@@ -1440,7 +1688,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
     func testShellTimeoutTerminatesDescendantProcesses() throws {
         let pidFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("StorageCleanerMac-shell-child-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: pidFile) }
+        defer { TestFileSystem.remove(pidFile) }
 
         XCTAssertThrowsError(
             try Shell.capture(
@@ -1481,7 +1729,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     @MainActor
     func testScanReadinessTimeoutRestoresControls() async throws {
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             scanReadinessTimeout: .milliseconds(25),
             loadScanReadinessSummary: {
                 Thread.sleep(forTimeInterval: 0.2)
@@ -1504,7 +1752,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         let counter = ThreadSafeInvocationCounter()
         let completionGate = DispatchSemaphore(value: 0)
         defer { completionGate.signal() }
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             scanReadinessTimeout: .milliseconds(20),
             loadScanReadinessSummary: {
                 counter.increment()
@@ -1534,14 +1782,15 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     @MainActor
     func testFolderAccessRestoreTimeoutDoesNotBlockScanningForever() async throws {
-        UserDefaults.standard.set(true, forKey: ScanStore.initialPermissionCheckDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: ScanStore.initialPermissionCheckDefaultsKey) }
+        let preferences = TestPreferenceDomain.make(for: self)
+        preferences.set(true, forKey: ScanStore.initialPermissionCheckDefaultsKey)
 
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             folderAccessRestoreTimeout: .milliseconds(25),
             restoreSavedAccessOperation: {
                 Thread.sleep(forTimeInterval: 0.2)
-            }
+            },
+            preferences: preferences
         )
 
         store.prepareInitialPermissionCheckOnLaunch()
@@ -1671,7 +1920,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(storeSource.contains("try await Task.detached(priority: .userInitiated)"))
         XCTAssertTrue(storeSource.contains("FolderAccessGrantService.restoreSavedAccess()"))
         XCTAssertTrue(storeSource.contains("Task.detached(priority: .utility)"))
-        XCTAssertTrue(memoryProbeSource.contains("timeout: 2"))
+        // D38: the status sample reads the free percentage from the kernel
+        // instead of starting memory_pressure, so there is no tool to bound.
+        XCTAssertFalse(memoryProbeSource.contains("\"/usr/bin/memory_pressure\""))
+        XCTAssertTrue(memoryProbeSource.contains("sysctlbyname(\"kern.memorystatus_level\""))
         XCTAssertFalse(memorySource.contains("/usr/sbin/purge"))
         XCTAssertFalse(memorySource.contains("Process()"))
         XCTAssertTrue(updateSource.contains("Shell.run(executable, arguments, timeout: timeoutSeconds)"))
@@ -1792,8 +2044,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUpdateItemSeparatesOneClickReadyFromReviewOnlySources() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let appStore = makeAppUpdateItem(name: "Store", method: .appStore)
         let homebrew = makeAppUpdateItem(name: "Brew", method: .homebrew, caskToken: "brew-app")
@@ -1813,10 +2066,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUpdateIgnoreOnlyHidesTheSameLatestVersion() throws {
-        let suiteName = "StorageCleanerMacTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
         defer {
-            defaults.removePersistentDomain(forName: suiteName)
+            TestPreferenceDomain.cleanup(suiteName: suiteName)
         }
 
         let current = makeAppUpdateItem(name: "Store", method: .appStore, latestVersion: "1.1")
@@ -1833,10 +2086,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppUpdateSourcePreferencesRoundTrip() throws {
-        let suiteName = "StorageCleanerMacTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
         defer {
-            defaults.removePersistentDomain(forName: suiteName)
+            TestPreferenceDomain.cleanup(suiteName: suiteName)
         }
 
         XCTAssertEqual(AppUpdateSourcePreferences.configuration(defaults: defaults), .all)
@@ -1860,26 +2113,43 @@ final class SystemUtilitySafetyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
-        let source = try String(contentsOf: settingsURL, encoding: .utf8)
+        let source = try SettingsSourceContract.source(at: settingsURL)
 
-        XCTAssertTrue(source.contains("关闭更新来源只停止对应远程检查"))
-        XCTAssertTrue(source.contains("不影响存储清理助手自身的 Sparkle 更新"))
-        XCTAssertTrue(source.contains("Disabling an update source only stops its remote checks"))
-        XCTAssertTrue(source.contains("it does not affect Storage Cleaner's own Sparkle updates"))
+        // D64 retains the safety boundary in one bilingual sentence. Source
+        // selection is not a permission failure or the app's own updater.
+        XCTAssertTrue(source.contains("关闭来源仅停止该来源的远程检查"))
+        XCTAssertTrue(source.contains("不改变权限，也不影响存储清理助手自身的 Sparkle 更新"))
+        XCTAssertTrue(source.contains("Disabling a source only stops its remote checks"))
+        XCTAssertTrue(source.contains("permissions and Storage Cleaner's own Sparkle updates are unchanged"))
+        XCTAssertTrue(source.contains("value: \"\\(updateSourceConfiguration.enabledCount)/\\(AppUpdateMethod.allCases.count)\""))
+        XCTAssertTrue(source.contains("resetUpdateSources()"))
+        XCTAssertTrue(source.contains("get: { updateSourceConfiguration.includes(method) }"))
+        XCTAssertTrue(source.contains("set: { setUpdateSource(method, isEnabled: $0) }"))
     }
 
-    func testSettingsLaunchAtLoginUsesServiceManagementAndExplainsSessionRestore() throws {
+    func testSettingsLaunchAtLoginUsesServiceManagementAndKeepsSessionRestoreDisabled() throws {
         let settingsURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
-        let source = try String(contentsOf: settingsURL, encoding: .utf8)
+        let source = try SettingsSourceContract.source(at: settingsURL)
 
         XCTAssertTrue(source.contains("SMAppService.mainApp.register()") || source.contains("try service.register()"))
         XCTAssertTrue(source.contains("try service.unregister()"))
         XCTAssertTrue(source.contains("登录后自动打开存储清理助手"))
-        XCTAssertTrue(source.contains("应用不会加入 macOS 的登录会话恢复列表"))
+        // D64 removes the repeated launch guidance; the actual opt-out must
+        // remain in the app delegate, independent of login-item registration.
+        XCTAssertFalse(source.contains("应用不会加入 macOS 的登录会话恢复列表"))
+        XCTAssertFalse(source.contains("The app opts out of macOS login-session restoration"))
+        let appURL = settingsURL.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("App/StorageCleanerMacApp.swift")
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+        XCTAssertTrue(appSource.contains("NSApp.disableRelaunchOnLogin()"))
+        XCTAssertTrue(source.contains("SMAppService.openSystemSettingsLoginItems()"))
+        XCTAssertTrue(source.contains("登录项已提交，请在系统设置中批准。"))
+        XCTAssertTrue(source.contains("The login item was submitted; approve it in System Settings."))
+        XCTAssertTrue(source.contains(".disabled(isChangingLaunchAtLogin || launchAtLoginStatus == nil)"))
     }
 
     func testAppUpdateCandidateFilteringHonorsSourceConfiguration() {
@@ -1898,8 +2168,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testUtilityListExportMarkdownIncludesAppUpdateVersionsAndBoundary() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let homebrew = makeAppUpdateItem(
             name: "Brew Tool",
@@ -2003,7 +2274,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     func testOneClickHomebrewRunDetectsTerminalAuthorizationRequirement() throws {
         let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let brew = root.appendingPathComponent("brew")
         let script = """
@@ -2029,11 +2300,12 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testOneClickHomebrewSuccessAsksForRescanBeforeClaimingVersions() throws {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let brew = root.appendingPathComponent("brew")
         let script = """
@@ -2056,8 +2328,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testOneClickSummarySeparatesCommandCompletionFromVersionConfirmation() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let result = AppUpdateOneClickResult(
             launched: AppUpdateOneClickLaunchResult(openedAppStore: false, copiedManualReviewList: false),
@@ -2073,8 +2346,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testOneClickAppStoreResultDoesNotReportOpenedWhenLaunchFails() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let app = makeAppUpdateItem(name: "Store App", method: .appStore)
         let plan = AppUpdateService.oneClickPlan(for: [app])
@@ -2201,7 +2475,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
             .storage,
             .loginItems,
             .fullDiskAccess,
-            .filesAndFolders
+            .filesAndFolders,
+            .appManagement
         ]
 
         for destination in destinations {
@@ -2216,6 +2491,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(
             try XCTUnwrap(CleanupService.systemSettingsURL(for: .filesAndFolders)?.absoluteString)
                 .contains("Privacy_FilesAndFolders")
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(CleanupService.systemSettingsURL(for: .appManagement)?.absoluteString)
+                .contains("Privacy_AppBundles")
         )
     }
 
@@ -2250,8 +2529,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppRuntimeLocationTitlesExplainInstalledAndDevelopmentState() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         XCTAssertEqual(AppRuntimeLocationKind.applications.title, "已安装")
         XCTAssertEqual(AppRuntimeLocationKind.applications.detail, "正在从 /Applications 运行")
@@ -2261,8 +2541,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppRuntimeDiagnosticsMarkdownIncludesVersionBundleAndPath() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let info = AppRuntimeLocationService.info(
             bundlePath: "/Applications/存储清理助手.app",
@@ -2292,8 +2573,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testAppRuntimeAccessStabilityExplainsWhyDevelopmentBuildsMayPromptAgain() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let installed = AppRuntimeLocationService.info(
             bundlePath: "/Applications/存储清理助手.app",
@@ -2316,18 +2598,20 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(development.authorizationWindowLifecycleNote.contains("macOS 仍可能把它当作新 App"))
     }
 
-    func testSettingsDiagnosticsCopyExplainsItDoesNotChangeAuthorization() throws {
+    func testSettingsDiagnosticsPreserveAccessStatusWithoutRepeatedGuidance() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SettingsSourceContract.source(at: sourceURL)
 
-        XCTAssertTrue(source.contains("授权复用建议"))
-        XCTAssertTrue(source.contains("authorizationStabilityAction"))
-        XCTAssertTrue(source.contains("窗口关闭说明"))
-        XCTAssertTrue(source.contains("authorizationWindowLifecycleNote"))
+        // D64 removes two always-visible guidance rows; the status and copied
+        // diagnostics remain. Runtime-location model behavior is tested above.
+        XCTAssertFalse(source.contains("授权复用建议"))
+        XCTAssertFalse(source.contains("窗口关闭说明"))
+        XCTAssertTrue(source.contains("authorizationStabilityStatus"))
+        XCTAssertTrue(source.contains("runtimeInfo.diagnosticsMarkdown"))
         XCTAssertTrue(source.contains("诊断信息已复制"))
     }
 
@@ -2340,9 +2624,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
             contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Stores/ScanStore.swift"),
             encoding: .utf8
         )
-        let settings = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift"),
-            encoding: .utf8
+        let settings = try SettingsSourceContract.source(
+            at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
         )
 
         XCTAssertTrue(store.contains("仅移除本机记录，不会删除任何文件"))
@@ -2394,7 +2677,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         )
 
         XCTAssertFalse(dashboardSource.contains("DisclosureGroup"))
-        XCTAssertTrue(dashboardSource.contains("CachedAppIconView"))
+        XCTAssertTrue(dashboardSource.contains("LightfieldAppIcon(path: item.applicationIconPath"))
         XCTAssertTrue(dashboardSource.contains("candidate.state.management == .directlyManageable"))
         XCTAssertTrue(dashboardSource.contains("candidate.actionCapability.canEnableDirectly"))
         XCTAssertTrue(dashboardSource.contains("candidate.actionCapability.canDisableDirectly"))
@@ -2403,7 +2686,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(dashboardSource.contains("item.isSystemSettingsOnly"))
         XCTAssertTrue(dashboardSource.contains("if item.requiresAdministrator"))
         XCTAssertTrue(dashboardSource.contains("StartupItemsCategory"))
-        XCTAssertTrue(dashboardSource.contains("GlassSegmentedControl("))
+        XCTAssertTrue(dashboardSource.contains("LightfieldTextSegments(titles: primaryCategories.map"))
         XCTAssertTrue(dashboardSource.contains(".toggleStyle(.switch)"))
         XCTAssertTrue(dashboardSource.contains("else if directCandidate != nil"))
         XCTAssertFalse(dashboardSource.contains("filter: .actionable"))
@@ -2425,7 +2708,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("onEnable: { store.requestStartupOperation(.enable"))
         XCTAssertTrue(source.contains("onDisable: { store.requestStartupOperation(.disable"))
         XCTAssertTrue(source.contains("onOpenSystemSettings: { SMAppService.openSystemSettingsLoginItems() }"))
-        XCTAssertTrue(source.contains("EnergyImpactListPresenter.presentation("))
+        let energyPage = try String(contentsOf: sourceURL.deletingLastPathComponent().appendingPathComponent("LightfieldEnergyPage.swift"), encoding: .utf8)
+        XCTAssertTrue(energyPage.contains("EnergyImpactListPresenter.presentation("))
+        XCTAssertTrue(source.contains("LightfieldEnergyPage(snapshot: snapshot"))
         XCTAssertTrue(source.contains("store.installedApps.filter(\\.canMoveToTrash)"))
         XCTAssertFalse(source.contains("openExternalAppManager"))
         XCTAssertFalse(source.contains("没有可在此关闭的登录项"))
@@ -2508,10 +2793,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
             versionFile.components(separatedBy: "DEFAULT_APP_BUILD=").count - 1,
             1
         )
-        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=1.10.1"))
+        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=2.0.0"))
         XCTAssertNotNil(
             versionFile.range(
-                of: #"(?m)^DEFAULT_APP_BUILD=\d{12}$"#,
+                of: #"(?m)^DEFAULT_APP_BUILD=\d{14}$"#,
                 options: .regularExpression
             )
         )
@@ -2795,7 +3080,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(releaseScript.contains("export COPYFILE_DISABLE=1"))
         XCTAssertTrue(releaseScript.contains("BUILD_CONFIGURATION=\"${BUILD_CONFIGURATION:-release}\""))
         XCTAssertTrue(releaseScript.contains("SWIFT_BUILD_JOBS=\"${SWIFT_BUILD_JOBS:-2}\""))
-        XCTAssertTrue(releaseScript.contains("build -c \"$BUILD_CONFIGURATION\" --scratch-path \"$SWIFT_BUILD_DIR\" --jobs \"$SWIFT_BUILD_JOBS\""))
+        XCTAssertTrue(releaseScript.contains("swift_build_args=(\n  -c \"$BUILD_CONFIGURATION\"\n  --scratch-path \"$SWIFT_BUILD_DIR\"\n  --jobs \"$SWIFT_BUILD_JOBS\""))
         XCTAssertTrue(releaseScript.contains("test -c release"))
         XCTAssertTrue(releaseScript.contains("--jobs \"$SWIFT_BUILD_JOBS\""))
         XCTAssertTrue(releaseScript.contains("codesign --verify --deep --strict --verbose=4 \"$DIST_APP\""))
@@ -2894,7 +3179,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         ))
         XCTAssertTrue(utilitiesSource.contains("store.performRecommendedMemoryAction()"))
         XCTAssertTrue(utilitiesSource.contains("store.refreshInstalledApps()"))
-        XCTAssertTrue(appUpdatesSource.contains("onScan: store.refreshAppUpdates"))
+        // r2-perf-startup task 1: explicit demand cancels the bounded launch wait,
+        // then invokes the same inventory scan through the existing page action.
+        XCTAssertTrue(appUpdatesSource.contains("onScan: refreshImmediately"))
+        XCTAssertTrue(appUpdatesSource.contains("StartupApplicationUpdateScheduler.shared.performUserRequest { store.refreshAppUpdates() }"))
         XCTAssertTrue(utilitiesSource.contains("store.scanDuplicateFiles()"))
     }
 
@@ -2958,9 +3246,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
             ),
             encoding: .utf8
         )
-        let settingsSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift"),
-            encoding: .utf8
+        let settingsSource = try SettingsSourceContract.source(
+            at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
         )
         let appSource = try String(
             contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"),
@@ -2970,8 +3257,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(modelsSource.contains("case .updater: L10n.text(\"应用更新\", \"App Updates\")"))
         XCTAssertTrue(updaterSource.contains("title: ReviewFilter.updater.title"))
         XCTAssertTrue(settingsSource.contains("L10n.text(\"应用更新\", \"App Updates\")"))
-        XCTAssertTrue(settingsSource.contains("不影响存储清理助手自身的 Sparkle 更新"))
-        XCTAssertTrue(settingsSource.contains("does not affect Storage Cleaner's own Sparkle updates"))
+        XCTAssertTrue(settingsSource.contains("不改变权限，也不影响存储清理助手自身的 Sparkle 更新"))
+        XCTAssertTrue(settingsSource.contains("permissions and Storage Cleaner's own Sparkle updates are unchanged"))
         XCTAssertTrue(appSource.contains("L10n.text(\"检查存储清理助手更新\", \"Check Storage Cleaner Updates\")"))
         XCTAssertFalse(updaterSource.contains("检查存储清理助手更新"))
     }
@@ -2995,7 +3282,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
         ] {
             XCTAssertTrue(source.contains("case let .\(phase)"), phase)
         }
-        XCTAssertTrue(source.contains("HeroScanPage("))
+        // D67/D69/D70 migrate the updater landing page to the shared skeleton.
+        XCTAssertTrue(source.contains("FeatureLightfieldPage(module: .updater, phase: .landing"))
         XCTAssertTrue(source.contains("AppUpdateScanSummaryPage("))
         XCTAssertTrue(source.contains("AppUpdateManagerPage("))
         XCTAssertTrue(source.contains("AppUpdateProgressPage("))
@@ -3014,7 +3302,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("placeholder: L10n.text(\"搜索应用、版本或来源\""))
         XCTAssertTrue(source.contains("store.requestSelectedAppUpdates("))
         XCTAssertTrue(source.contains("store.requestAppUpdate(app)"))
-        XCTAssertTrue(source.contains("一键更新全部 · \\("))
+        XCTAssertTrue(source.contains("AppUpdateBatchPresentation(applications: summary.applications).title"))
+        XCTAssertTrue(source.contains("WebsiteUpdateAssistantCard("))
+        XCTAssertTrue(source.contains("store.recheckExternalUpdate(app)"))
         XCTAssertFalse(source.contains("安全更新 · \\("))
         XCTAssertTrue(source.contains("store.openUpdateEntry(app)"))
         XCTAssertTrue(source.contains("store.requestAppStoreUpdate(app)"))
@@ -3121,15 +3411,31 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(sidebarSource.contains("@AppStorage private var isExpanded: Bool"))
         XCTAssertTrue(sidebarSource.contains("struct SidebarFooter: View"))
         XCTAssertTrue(sidebarSource.contains("SettingsLink"))
-        XCTAssertTrue(sidebarSource.contains("SidebarFooter()"))
+        // D53 §2.2: the footer also has an icon-rail form.
+        XCTAssertTrue(sidebarSource.contains("SidebarFooter(isRail: isRail)"))
         XCTAssertFalse(sidebarSource.contains(".overlay(alignment: .bottom)"))
         XCTAssertFalse(sidebarSource.contains("AppDesignTokens.Layout.sidebarFooterHeight"))
         XCTAssertFalse(sidebarSource.contains(".scrollIndicators(.hidden)"))
-        XCTAssertTrue(sidebarSource.contains("sidebarTrafficLightClearance"))
-        XCTAssertTrue(sidebarSource.contains("Text(filter.sidebarTitle)"))
-        XCTAssertTrue(sidebarSource.contains("Image(systemName: filter.systemImage)"))
-        XCTAssertTrue(sidebarSource.contains("filter.moduleTheme.sidebarIconColor"))
-        XCTAssertTrue(sidebarSource.contains("AppMotionTokens.hover"))
+        // D53 §2.2 / audit 2.16: the fixed title area replaces the extra
+        // 44 pt traffic-light spacer (the sidebar already clears the toolbar band).
+        XCTAssertTrue(sidebarSource.contains("AppDesignTokens.Layout.sidebarTopInset"))
+        XCTAssertTrue(sidebarSource.contains("title ?? filter.sidebarTitle"))
+        let navigationRow = try XCTUnwrap(
+            sidebarSource.components(separatedBy: "private struct SidebarNavigationRow: View").last?
+                .components(separatedBy: "private struct SidebarFooter: View").first
+        )
+        // D67: clickable navigation uses 20 pt approved art and keeps module selection/hover.
+        XCTAssertTrue(navigationRow.contains("FeatureLightfieldArtwork(art:"))
+        XCTAssertTrue(navigationRow.contains(".frame(width: 20, height: 20)"))
+        XCTAssertTrue(navigationRow.contains("GeneratedArt.module(for: filter)"))
+        XCTAssertTrue(navigationRow.contains("pigment: pigment"))
+        // The highlighted row draws the one sliding selection block and white
+        // text; other rows only show the hover fill.
+        XCTAssertTrue(navigationRow.contains("if isHighlighted {\n                    SidebarSelectionBlock(pigment: pigment)\n                        .matchedGeometryEffect(id: \"sidebar.selection\", in: namespace)"))
+        XCTAssertTrue(navigationRow.contains(".foregroundStyle(isHighlighted ? Color.white : surfaces.textPrimary)"))
+        XCTAssertTrue(navigationRow.contains("if !isHighlighted {\n                    RoundedRectangle(cornerRadius: AppDesignTokens.Corner.row, style: .continuous)\n                        .fill(isHovered ? surfaces.hover : .clear)"))
+        XCTAssertTrue(sidebarSource.contains("filter.moduleTheme.pigment"))
+        XCTAssertTrue(sidebarSource.contains("AppMotion.resolved(.hover, reduceMotion: reduceMotion)"))
         XCTAssertTrue(sidebarSource.contains("accessibilityAddTraits(isSelected ? .isSelected : [])"))
         XCTAssertFalse(sidebarSource.contains("sidebarSystemImage"))
         XCTAssertFalse(sidebarSource.contains("SidebarNavigationGlyph"))
@@ -3165,7 +3471,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertFalse(contentSource.contains("SettingsLink"))
         XCTAssertFalse(contentSource.contains("sidebar.compact.v1"))
         XCTAssertTrue(contentSource.contains(".toolbar(removing: .sidebarToggle)"))
-        XCTAssertTrue(contentSource.contains("ideal: metrics.sidebarIdealWidth"))
+        // D53 §2.2: full sidebar or icon rail, sized by its presentation.
+        XCTAssertTrue(contentSource.contains("FeatureLightfield.owns(activePresentationFilter)"))
+        XCTAssertTrue(contentSource.contains("FeatureLightfield.sidebarWidth : sidebarMode.idealWidth"))
         XCTAssertTrue(contentSource.contains(".focusedSceneValue("))
         XCTAssertTrue(contentSource.contains("#selector(NSSplitViewController.toggleSidebar(_:))"))
         XCTAssertTrue(appSource.contains("MainWindowSidebarCommands()"))
@@ -3250,8 +3558,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testUtilityDeepLinksOpenToolboxWithRequestedInternalTab() {
-        let store = ScanStore()
+    func testUtilityDeepLinksOpenToolboxWithRequestedInternalTab() throws {
+        let store = try ScanStore.makeForTests(for: self)
 
         store.showFilter(.updater)
 
@@ -3302,8 +3610,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testNavigationChangesDoNotInvalidateTheScanningStore() {
-        let store = ScanStore()
+    func testNavigationChangesDoNotInvalidateTheScanningStore() throws {
+        let store = try ScanStore.makeForTests(for: self)
         var storeUpdateCount = 0
         let cancellable = store.objectWillChange.sink {
             storeUpdateCount += 1
@@ -3370,7 +3678,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(utilitySource.contains("AppUninstallScanLandingView(store: store)"))
         XCTAssertTrue(utilitySource.contains("!store.hasScannedInstalledApps"))
         XCTAssertFalse(utilitySource.contains("!store.hasScannedInstalledApps || store.isLoadingInstalledApps"))
-        XCTAssertTrue(utilitySource.contains("List(selection: $selectedApplicationID)"))
+        XCTAssertTrue(utilitySource.contains("List {"))
+        XCTAssertTrue(utilitySource.contains("FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,"))
         XCTAssertTrue(utilitySource.contains("!store.hasScannedStartupItems"))
         XCTAssertTrue(utilitySource.contains("ForEach(apps)"))
         XCTAssertFalse(utilitySource.contains(".id(selectedTool.wrappedValue)"))
@@ -3403,11 +3712,11 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testAutoCleanReviewPageCarriesAllCleanupDecisionTiers() {
+    func testAutoCleanReviewPageCarriesAllCleanupDecisionTiers() throws {
         let cache = makeStorageItem(sourceID: "caches", title: "Build Cache", tier: .green, sizeBytes: 1_000)
         let review = makeStorageItem(sourceID: "downloads", title: "Archive", tier: .yellow, sizeBytes: 5_000)
         let careful = makeStorageItem(sourceID: "applications", title: "Xcode", tier: .red, sizeBytes: 3_000)
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.result = ScanResult(
             generatedAt: Date(timeIntervalSince1970: 100),
             scanSeconds: 1,
@@ -3519,7 +3828,15 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertFalse(smartCareSource.contains("SmartCareInstrumentCore"))
         XCTAssertFalse(smartCareSource.contains("TimelineView(.animation("))
         XCTAssertTrue(smartCareSource.contains("} else if isActive {\n                ProgressView()"))
-        XCTAssertTrue(smartCareSource.contains("width: progress == nil ? 32 : size"))
+        // D64 removes a decorative static glyph's slot, while actual progress,
+        // activity and completed/failed/warning operation results keep theirs.
+        XCTAssertTrue(smartCareSource.contains(".frame(width: renderedSize, height: renderedSize)"))
+        XCTAssertTrue(smartCareSource.contains("if progress != nil { return size }"))
+        XCTAssertTrue(smartCareSource.contains("return isActive || showsStaticStatus ? 32 : 0"))
+        XCTAssertTrue(smartCareSource.contains("var role: AppStateIconRole = .result"))
+        XCTAssertTrue(smartCareSource.contains("var showsStaticStatus: Bool { role == .result }"))
+        XCTAssertFalse(smartCareSource.contains("switch systemImage"))
+        XCTAssertTrue(smartCareSource.contains("} else if showsStaticStatus {"))
         XCTAssertTrue(smartCareSource.contains("ProgressView()"))
         XCTAssertTrue(smartCareSource.contains("ProgressView(value: Double(renderedProgress), total: 1)"))
         XCTAssertTrue(smartCareSource.contains(".progressViewStyle(.linear)"))
@@ -3549,17 +3866,14 @@ final class SystemUtilitySafetyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let residentPaths = [
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift",
             "Sources/StorageCleanerMac/Views/SettingsView.swift",
             "Sources/StorageCleanerMac/Support/MenuBarStatusRenderer.swift"
         ]
 
         for path in residentPaths {
-            let source = try String(
-                contentsOf: projectRoot.appendingPathComponent(path),
-                encoding: .utf8
-            )
+            let source = try SettingsSourceContract.source(at: projectRoot.appendingPathComponent(path))
             XCTAssertFalse(source.contains("repeatForever"), "Unexpected continuous animation in \(path)")
             XCTAssertFalse(source.contains("TimelineView"), "Unexpected resident TimelineView in \(path)")
         }
@@ -3601,9 +3915,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
             contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"),
             encoding: .utf8
         )
-        let settingsSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift"),
-            encoding: .utf8
+        let settingsSource = try SettingsSourceContract.source(
+            at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
         )
 
         XCTAssertTrue(localizationSource.contains("func applyAppKitPreference()"))
@@ -3646,7 +3959,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(itemListSource.contains("清理记录"))
         XCTAssertTrue(itemListSource.contains("store.copyCleanupHistoryEntry(latest)"))
         XCTAssertTrue(itemListSource.contains("store.requestRestoreLatestCleanup()"))
-        XCTAssertTrue(itemListSource.contains("arrow.uturn.backward"))
+        // D64 removes the redundant undo icon; availability, label and request callback stay required.
+        XCTAssertFalse(itemListSource.contains("arrow.uturn.backward"))
+        XCTAssertTrue(itemListSource.contains("if store.canRestoreLatestCleanup"))
+        XCTAssertTrue(itemListSource.contains("Text(L10n.text(\"撤销最近清理\", \"Undo Latest Cleanup\"))"))
         XCTAssertFalse(itemListSource.contains("arrow.uturn.backward.circle"))
         XCTAssertTrue(itemListSource.contains(".appButtonChrome(.secondary)"))
         XCTAssertTrue(contentSource.contains("撤销最近清理？"))
@@ -3875,7 +4191,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
-        let source = try String(contentsOf: viewURL, encoding: .utf8)
+        let source = try SettingsSourceContract.source(at: viewURL)
 
         XCTAssertTrue(source.contains("openFullDiskAccessSettings()"))
         XCTAssertTrue(source.contains("已打开完整磁盘访问设置，授权后请重新扫描"))
@@ -3912,7 +4228,16 @@ final class SystemUtilitySafetyTests: XCTestCase {
             XCTAssertFalse(source.contains("openPermissionSettings(for item"))
             XCTAssertFalse(source.contains("Label(actionTitle, systemImage: \"arrow.up.forward.app\")"))
         }
-        XCTAssertTrue(overviewSource.contains("scanReadinessCheckedAt"))
+        // D64: the unused freshness panel was removed. Keep the live permission source and recheck action.
+        XCTAssertTrue(overviewSource.contains("store.scanReadinessSummary ?? ScanReadinessService.summary(fromScanDeniedPaths: result.deniedPaths)"))
+        let summaryStart = try XCTUnwrap(overviewSource.range(of: "private var permissionSummary:")).lowerBound
+        let summaryEnd = try XCTUnwrap(overviewSource.range(of: "private var permissionTint:", range: summaryStart..<overviewSource.endIndex)).lowerBound
+        let permissionEvidence = String(overviewSource[summaryStart..<summaryEnd])
+        XCTAssertTrue(permissionEvidence.contains("store.scanReadinessSummary"))
+        XCTAssertTrue(permissionEvidence.contains("result.deniedPaths"))
+        XCTAssertFalse(permissionEvidence.contains("AppUpdateSourcePreferences"))
+        XCTAssertFalse(permissionEvidence.contains("appUpdateSourceConfiguration"))
+        XCTAssertTrue(overviewSource.contains("store.refreshScanReadiness()"))
         XCTAssertTrue(overviewSource.contains("shouldShowPermissionPanelInMainInterface"))
         XCTAssertTrue(homeSource.contains("授权文件夹"))
         XCTAssertTrue(homeSource.contains("prepareInitialPermissionCheckOnLaunch()"))
@@ -3921,25 +4246,17 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testInitialPermissionCheckCompletionHidesMainPermissionPanel() {
-        let defaults = UserDefaults.standard
+    func testInitialPermissionCheckCompletionHidesMainPermissionPanel() throws {
+        let defaults = TestPreferenceDomain.make(for: self)
         let key = ScanStore.initialPermissionCheckDefaultsKey
-        let previousValue = defaults.object(forKey: key)
-        defer {
-            if let previousValue {
-                defaults.set(previousValue, forKey: key)
-            } else {
-                defaults.removeObject(forKey: key)
-            }
-        }
 
-        defaults.removeObject(forKey: key)
-        let firstLaunchStore = ScanStore()
+        defaults.set(false, forKey: key)
+        let firstLaunchStore = try ScanStore.makeForTests(for: self, preferences: defaults)
         XCTAssertFalse(firstLaunchStore.didCompleteInitialPermissionCheck)
         XCTAssertTrue(firstLaunchStore.shouldShowPermissionPanelInMainInterface)
 
         defaults.set(true, forKey: key)
-        let laterLaunchStore = ScanStore()
+        let laterLaunchStore = try ScanStore.makeForTests(for: self, preferences: defaults)
         XCTAssertTrue(laterLaunchStore.didCompleteInitialPermissionCheck)
         XCTAssertFalse(laterLaunchStore.shouldShowPermissionPanelInMainInterface)
     }
@@ -3948,7 +4265,13 @@ final class SystemUtilitySafetyTests: XCTestCase {
         let steps = AccessRepairGuideService.steps()
 
         XCTAssertEqual(steps.map(\.id), [.openSettings, .grantAccess, .rescan])
+        // The symbols remain a D6 source-compatibility field until its row changes.
         XCTAssertEqual(steps.map(\.systemImage), ["folder", "checkmark.shield.fill", "arrow.clockwise"])
+        // D64 #8: only titles and the media-library privacy boundary remain.
+        XCTAssertTrue(steps.allSatisfy { !$0.title.isEmpty })
+        XCTAssertEqual(steps[0].detail, "")
+        XCTAssertEqual(steps[1].detail, L10n.text("媒体资料库默认不读取。", "Media libraries are not read by default."))
+        XCTAssertEqual(steps[2].detail, "")
     }
 
     func testAccessRepairGuidePromptsOnlyWhenCurrentReadinessConfirmsPermissionGaps() {
@@ -4042,11 +4365,12 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreTreatsAccessCheckAsPreparingScan() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+    func testScanStoreTreatsAccessCheckAsPreparingScan() throws {
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
 
         XCTAssertFalse(store.isPreparingScan)
         XCTAssertEqual(store.scanActionSystemImage, "arrow.clockwise")
@@ -4070,8 +4394,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreBlocksDuplicateScanDuringMainScanPreparation() {
-        let store = ScanStore()
+    func testScanStoreBlocksDuplicateScanDuringMainScanPreparation() throws {
+        let store = try ScanStore.makeForTests(for: self)
 
         XCTAssertTrue(store.canScanDuplicates)
 
@@ -4092,8 +4416,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreBlocksMainScanDuringDuplicateScan() {
-        let store = ScanStore()
+    func testScanStoreBlocksMainScanDuringDuplicateScan() throws {
+        let store = try ScanStore.makeForTests(for: self)
         store.isScanningDuplicates = true
 
         XCTAssertTrue(store.isPreparingScan)
@@ -4107,8 +4431,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreBlocksTrashActionsDuringMainScanPreparation() {
-        let store = ScanStore(cleanupFeatureConfiguration: .legacy)
+    func testScanStoreBlocksTrashActionsDuringMainScanPreparation() throws {
+        let operations = TestOperationFactory(for: self)
+        let store = try ScanStore.makeForTests(for: self,
+            scanHeavyWorkOperations: operations.scanOperations(), cleanupFeatureConfiguration: .legacy)
         let cache = makeStorageItem(sourceID: "caches", title: "Build Cache", tier: .green)
         store.result = ScanResult(
             generatedAt: Date(),
@@ -4166,11 +4492,12 @@ final class SystemUtilitySafetyTests: XCTestCase {
         store.confirmEmptyTrash()
         XCTAssertEqual(store.pendingEmptyTrashSummary, TrashSummary(itemCount: 1, totalBytes: 42))
         XCTAssertFalse(store.isEmptyingTrash)
+        XCTAssertEqual(operations.unexpectedCalls, [])
     }
 
     @MainActor
-    func testScanStoreBlocksMemoryActionsDuringMemoryRefreshOrOptimization() {
-        let store = ScanStore()
+    func testScanStoreBlocksMemoryActionsDuringMemoryRefreshOrOptimization() throws {
+        let store = try ScanStore.makeForTests(for: self)
         let app = MemoryProcess(
             id: 9_991,
             name: "Example App",
@@ -4248,8 +4575,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreBlocksStartupAndUninstallActionsDuringRefresh() {
-        let store = ScanStore()
+    func testScanStoreBlocksStartupAndUninstallActionsDuringRefresh() throws {
+        let store = try ScanStore.makeForTests(for: self)
         let highAttribution = StartupItemsDomain.Attribution(
             applicationBundleIdentifier: "com.example.app",
             applicationURL: URL(fileURLWithPath: "/Applications/Example.app"),
@@ -4366,8 +4693,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testMemoryRefreshDismissesStaleQuitConfirmationAndSelection() {
-        let store = ScanStore()
+    func testMemoryRefreshDismissesStaleQuitConfirmationAndSelection() throws {
+        let store = try ScanStore.makeForTests(for: self)
         let app = MemoryProcess(
             id: 9_991,
             name: "Example App",
@@ -4392,8 +4719,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreExportsOnlyWhenCurrentResultIsStable() {
-        let store = ScanStore()
+    func testScanStoreExportsOnlyWhenCurrentResultIsStable() throws {
+        let store = try ScanStore.makeForTests(for: self)
 
         XCTAssertFalse(store.canExportCurrentScanArtifacts)
 
@@ -4420,8 +4747,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testOneClickUserRequestKeepsAutomaticQueueBehindConfirmation() {
-        let store = ScanStore()
+    func testOneClickUserRequestKeepsAutomaticQueueBehindConfirmation() throws {
+        let store = try ScanStore.makeForTests(for: self)
         store.appUpdates = [makeAppUpdateItem(name: "Brew", method: .homebrew, caskToken: "brew-app")]
 
         store.requestOneClickAppUpdates()
@@ -4431,8 +4758,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testDirectAppUpdateRejectsStaleAutomaticEligibility() {
-        let store = ScanStore()
+    func testDirectAppUpdateRejectsStaleAutomaticEligibility() throws {
+        let store = try ScanStore.makeForTests(for: self)
         let stale = makeAppUpdateItem(name: "Brew", method: .homebrew, caskToken: "brew-app")
         var current = stale
         current.canAutomaticallyUpdate = false
@@ -4463,10 +4790,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         )
         let managerSource = String(source[summaryEnd.lowerBound..<managerEnd.lowerBound])
 
-        XCTAssertTrue(summarySource.contains("summary.batchEligibleApps.map(\\.id)"))
+        XCTAssertTrue(summarySource.contains("onUpdateAll: { store.previewOneClickAppUpdates(); store.confirmOneClickAppUpdates() }"))
         XCTAssertEqual(
             summarySource.components(separatedBy: "store.requestSelectedAppUpdates(").count - 1,
-            1
+            0
         )
         XCTAssertEqual(
             managerSource.components(separatedBy: "store.requestSelectedAppUpdates(applicationIDs: ids)").count - 1,
@@ -4474,6 +4801,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         )
         XCTAssertFalse(summarySource.contains("store.requestOneClickAppUpdates()"))
         XCTAssertFalse(managerSource.contains("store.previewOneClickAppUpdates()"))
+        XCTAssertFalse(managerSource.contains("onUpdateAll: { store.previewOneClickAppUpdates(); store.confirmOneClickAppUpdates() }"))
     }
 
     func testPrimaryViewsDoNotExposeEquivalentDuplicateControls() throws {
@@ -4505,11 +4833,16 @@ final class SystemUtilitySafetyTests: XCTestCase {
         let installedRowSource = String(utilitySource[installedRowStart.lowerBound..<installedRowEnd.lowerBound])
         XCTAssertEqual(
             installedRowSource.components(separatedBy: "store.requestUninstall(app)").count - 1,
-            1
+            0
         )
-        XCTAssertFalse(installedRowSource.contains(".onTapGesture"))
+        XCTAssertTrue(utilitySource.contains("FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,"))
+        XCTAssertTrue(installedRowSource.contains(".appButtonChrome(.selectionRow)"))
+        XCTAssertTrue(installedRowSource.contains("Button(action: select)"))
+        XCTAssertFalse(installedRowSource.contains("confirmUninstall"))
         XCTAssertTrue(installedRowSource.contains(".contextMenu {"))
-        let contextActions = try XCTUnwrap(installedRowSource.components(separatedBy: ".contextMenu {").last)
+        let menuStart = try XCTUnwrap(installedRowSource.range(of: ".contextMenu {")?.lowerBound)
+        let menuEnd = installedRowSource.endIndex
+        let contextActions = String(installedRowSource[menuStart..<menuEnd])
         XCTAssertFalse(contextActions.contains("requestUninstall"))
         XCTAssertFalse(installedRowSource.contains("inspectInstalledApp"))
 
@@ -4604,8 +4937,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreBlocksOneClickUpdatesWhileScanningUpdates() {
-        let store = ScanStore()
+    func testScanStoreBlocksOneClickUpdatesWhileScanningUpdates() throws {
+        let store = try ScanStore.makeForTests(for: self)
         store.appUpdates = [makeAppUpdateItem(name: "Brew", method: .homebrew, caskToken: "brew-app")]
 
         XCTAssertTrue(store.canRequestOneClickAppUpdates)
@@ -4634,8 +4967,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreDefersAutomaticAppUpdateRecheckDuringPendingBatch() {
-        let store = ScanStore()
+    func testScanStoreDefersAutomaticAppUpdateRecheckDuringPendingBatch() throws {
+        let store = try ScanStore.makeForTests(for: self)
         let app = makeAppUpdateItem(name: "Manual Review", method: .manual, latestVersion: "2.0")
         store.appUpdates = [app]
 
@@ -4649,11 +4982,13 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreBlocksAppUpdateListChangesDuringScanOrOneClickUpdate() {
-        AppUpdateIgnoreService.clear()
-        defer { AppUpdateIgnoreService.clear() }
+    func testScanStoreBlocksAppUpdateListChangesDuringScanOrOneClickUpdate() throws {
+        let fixture = TestPreferenceDomain.make()
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
+        let ignoredPreferences = fixture.defaults
+        ignoredPreferences.set([String: String](), forKey: "appUpdateIgnoredLatestVersions")
 
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self, preferences: ignoredPreferences)
         let app = makeAppUpdateItem(name: "Blocked Update", method: .manual, latestVersion: "9.9.9")
         store.appUpdates = [app]
         store.ignoredAppUpdateCount = 1
@@ -4668,9 +5003,19 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertFalse(store.canIgnoreAppUpdate(app))
         XCTAssertFalse(store.canClearIgnoredAppUpdates)
 
+        // D48 / N26：仍核对 store 与持久域两条证据，反证也只能写临时域。
+        let persistentDomainName = fixture.suiteName
+        let persistedBefore = ignoredPreferences.persistentDomain(forName: persistentDomainName)?[
+            "appUpdateIgnoredLatestVersions"
+        ] as? [String: String]
         store.ignoreAppUpdate(app)
         XCTAssertEqual(store.appUpdates.map(\.id), [app.id])
-        XCTAssertFalse(AppUpdateIgnoreService.isIgnored(app))
+        XCTAssertNotEqual(store.appUpdates.first?.updateStatus, .ignored)
+        XCTAssertFalse(AppUpdateIgnoreService.isIgnored(app, defaults: ignoredPreferences))
+        let persistedAfter = ignoredPreferences.persistentDomain(forName: persistentDomainName)?[
+            "appUpdateIgnoredLatestVersions"
+        ] as? [String: String]
+        XCTAssertEqual(persistedAfter, persistedBefore, "A blocked ignore must not write the persistent list")
 
         store.clearIgnoredAppUpdates()
         XCTAssertEqual(store.ignoredAppUpdateCount, 1)
@@ -4684,8 +5029,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testScanStoreBlocksHistoryClearingDuringActiveWork() {
-        let store = ScanStore()
+    func testScanStoreBlocksHistoryClearingDuringActiveWork() throws {
+        let store = try ScanStore.makeForTests(for: self)
         let scanEntry = ScanHistoryEntry(
             date: Date(),
             scanSeconds: 1,
@@ -4730,7 +5075,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
     @MainActor
     func testHeavyWorkConfirmationSurfacesDoNotAcquireLease() async throws {
         let coordinator = HeavyWorkCoordinator()
-        let store = ScanStore(
+        let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
             cleanupFeatureConfiguration: .legacy
         )
@@ -4772,7 +5117,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
     func testHeavyWorkCoordinatorBlocksStoreOperationOwnedByBenchmark() async throws {
         let coordinator = HeavyWorkCoordinator()
         let benchmarkLease = try await coordinator.acquire(owner: .benchmark)
-        let store = ScanStore(heavyWorkCoordinator: coordinator)
+        let store = try ScanStore.makeForTests(for: self, heavyWorkCoordinator: coordinator)
 
         store.scanDuplicateFiles()
         for _ in 0..<2_000 where store.isScanningDuplicates {
@@ -4791,7 +5136,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     @MainActor
     func testRepeatedActionMessageKeepsTheLatestVisibilityWindow() async throws {
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
 
         store.copyInstalledAppList([])
         let message = try XCTUnwrap(store.actionMessage)
@@ -4810,7 +5155,6 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     func testScanExclusionsNormalizeDedupeAndMatchChildren() throws {
         let defaults = try makeTemporaryDefaults()
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
 
         ScanExclusionService.add("~/Downloads", defaults: defaults)
         ScanExclusionService.add("\(NSHomeDirectory())/Downloads", defaults: defaults)
@@ -4823,7 +5167,6 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     func testScanExclusionsRejectSystemRoot() throws {
         let defaults = try makeTemporaryDefaults()
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
 
         ScanExclusionService.add("/", defaults: defaults)
 
@@ -4832,7 +5175,6 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     func testScanExclusionsReportAddOutcomeAndDisplayName() throws {
         let defaults = try makeTemporaryDefaults()
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
 
         XCTAssertTrue(ScanExclusionService.add("~/Downloads", defaults: defaults))
         XCTAssertFalse(ScanExclusionService.add("\(NSHomeDirectory())/Downloads", defaults: defaults))
@@ -4846,7 +5188,6 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     func testScanExclusionsRemoveAndClearPersistedPaths() throws {
         let defaults = try makeTemporaryDefaults()
-        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
 
         ScanExclusionService.add("~/Downloads", defaults: defaults)
         ScanExclusionService.add("~/Desktop", defaults: defaults)
@@ -4881,13 +5222,13 @@ final class SystemUtilitySafetyTests: XCTestCase {
     func testScanCoverageSummaryClassifiesPermissionState() {
         let complete = ScanCoverageService.summary(deniedPaths: [])
         XCTAssertEqual(complete.level, .complete)
-        XCTAssertEqual(complete.estimatedCoveragePercent, 100)
+        XCTAssertNil(complete.estimatedCoveragePercent, "Denial records do not measure whole-disk coverage")
 
         let partial = ScanCoverageService.summary(deniedPaths: ["~/Downloads"])
         XCTAssertEqual(partial.level, .partial)
         XCTAssertEqual(partial.deniedCount, 1)
         XCTAssertEqual(partial.highImpactDeniedCount, 1)
-        XCTAssertEqual(partial.estimatedCoveragePercent, 85)
+        XCTAssertNil(partial.estimatedCoveragePercent, "Denial records do not measure whole-disk coverage")
         XCTAssertEqual(partial.scorePenalty, 6)
 
         let limited = ScanCoverageService.summary(
@@ -4898,7 +5239,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertEqual(limited.previewPaths, ["~/Desktop", "~/Documents"])
         XCTAssertEqual(limited.hiddenDeniedCount, 1)
         XCTAssertEqual(limited.highImpactDeniedCount, 3)
-        XCTAssertEqual(limited.estimatedCoveragePercent, 55)
+        XCTAssertNil(limited.estimatedCoveragePercent, "Denial records do not measure whole-disk coverage")
         XCTAssertEqual(limited.scorePenalty, 8)
     }
 
@@ -4939,7 +5280,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     func testDuplicateFileScannerFindsSameNameAndSizeCandidates() throws {
         let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let firstFolder = root.appendingPathComponent("first", isDirectory: true)
         let secondFolder = root.appendingPathComponent("second", isDirectory: true)
@@ -4966,7 +5307,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
     func testDuplicateFileScannerHonorsImmediateTimeLimit() throws {
         let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         try Data("same payload".utf8).write(to: root.appendingPathComponent("export.mov"))
 
@@ -5125,13 +5466,11 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("\".codebase-memory\""))
         XCTAssertTrue(source.contains("\".next\""))
         XCTAssertTrue(source.contains("Gemini CLI、OpenCode、WorkBuddy、Windsurf、Continue、Cline、Roo Code"))
-        XCTAssertTrue(catalogPaths.contains("~/.codex/sessions"))
-        XCTAssertEqual(
-            DeveloperToolArtifactCatalog.definitions.first {
-                $0.id == "developer.codex-agent-data"
-            }?.policy,
-            .referenceOnly
-        )
+        // D19: agent sessions and checkpoints are not junk and have no rule.
+        XCTAssertFalse(catalogPaths.contains("~/.codex/sessions"))
+        XCTAssertNil(DeveloperToolArtifactCatalog.definitions.first {
+            $0.id == "developer.codex-agent-data"
+        })
         XCTAssertFalse(catalogPaths.contains("~/.codex/memories"))
         XCTAssertFalse(artifactSource.contains(".codex/sessions"))
         XCTAssertFalse(artifactSource.contains(".codex/memories"))
@@ -5262,8 +5601,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testMaintenanceChecklistMarkdownIncludesPlanAndSafetyBoundaries() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let green = makeStorageItem(sourceID: "caches", title: "Build Cache", tier: .green, sizeBytes: 2_000_000_000)
         let red = makeStorageItem(sourceID: "applications", title: "Xcode", tier: .red, sizeBytes: 3_000_000_000)
@@ -5302,8 +5642,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
     }
 
     func testMaintenanceChecklistMarkdownExplainsEmptyPlan() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let result = ScanResult(
             generatedAt: Date(timeIntervalSince1970: 1_786_000_000),
@@ -5334,7 +5675,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
     func testMaintenanceChecklistExportWritesMarkdownFile() throws {
         let tempDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        defer { TestFileSystem.remove(tempDirectory) }
 
         let result = ScanResult(
             generatedAt: Date(timeIntervalSince1970: 1_786_000_000),
@@ -5477,14 +5818,14 @@ final class SystemUtilitySafetyTests: XCTestCase {
         #endif
 
         let fileManager = FileManager.default
-        let testRoot = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".storage-cleaner-migration-test-\(UUID().uuidString)")
+        let testRoot = TestFileSystem.uniqueOperationRoot("Migration")
+        TestFileSystem.registerCleanup(of: testRoot, for: self)
         let sourceDirectory = testRoot.appendingPathComponent("Source", isDirectory: true)
         let volumeURL = testRoot.appendingPathComponent("External", isDirectory: true)
         let trashDirectory = testRoot.appendingPathComponent("Trash", isDirectory: true)
         try fileManager.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: volumeURL, withIntermediateDirectories: true)
-        defer { try? fileManager.removeItem(at: testRoot) }
+        defer { TestFileSystem.remove(testRoot) }
 
         let sourceURL = sourceDirectory.appendingPathComponent("movie.mov")
         let contents = Data("verified migration".utf8)
@@ -5510,7 +5851,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
             item,
             to: volume,
             fileManager: fileManager,
-            trustedVolumes: [volume]
+            trustedVolumes: [volume],
+            homeDirectory: testRoot
         )
 
         let destination = volumeURL
@@ -5520,18 +5862,23 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), contents)
         XCTAssertTrue(fileManager.fileExists(atPath: sourceURL.path))
 
+        // N18 review P2-2: fixture moves name their own receipt journal.
+        let receiptJournal = CleanupReportJournal(directory: testRoot.appendingPathComponent("Receipts", isDirectory: true))
         let removal = try ExternalDriveMigrationService.moveOriginalToTrash(
             item,
             verifiedCopyAt: destination,
             on: volume,
             fileManager: fileManager,
-            trustedVolumes: [volume]
-        ) { source in
-            try fileManager.createDirectory(at: trashDirectory, withIntermediateDirectories: true)
-            let trashed = trashDirectory.appendingPathComponent(source.lastPathComponent)
-            try fileManager.moveItem(at: source, to: trashed)
-            return trashed
-        }
+            trustedVolumes: [volume],
+            trashOperation: { source in
+                try fileManager.createDirectory(at: trashDirectory, withIntermediateDirectories: true)
+                let trashed = trashDirectory.appendingPathComponent(source.lastPathComponent)
+                try fileManager.moveItem(at: source, to: trashed)
+                return trashed
+            },
+            journal: receiptJournal,
+            homeDirectory: testRoot
+        )
 
         XCTAssertEqual(removal.destinationURL, destination)
         XCTAssertTrue(removal.didMoveSourceToTrash)
@@ -5545,7 +5892,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
                 item,
                 to: volume,
                 fileManager: fileManager,
-                trustedVolumes: [volume]
+                trustedVolumes: [volume],
+                homeDirectory: testRoot
             )
         ) { error in
             XCTAssertEqual(error as? ExternalDriveMigrationError, .destinationExists)
@@ -5567,7 +5915,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
                 staleItem,
                 to: volume,
                 fileManager: fileManager,
-                trustedVolumes: [volume]
+                trustedVolumes: [volume],
+                homeDirectory: testRoot
             )
         ) { error in
             XCTAssertEqual(error as? ExternalDriveMigrationError, .sourceChanged)
@@ -5594,7 +5943,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
             retainedItem,
             to: volume,
             fileManager: fileManager,
-            trustedVolumes: [volume]
+            trustedVolumes: [volume],
+            homeDirectory: testRoot
         )
         let retainedDestination = volumeURL
             .appendingPathComponent("StorageCleaner Migration/Large Files/archive.zip")
@@ -5609,7 +5959,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
                 on: volume,
                 fileManager: fileManager,
                 trustedVolumes: [volume],
-                trashOperation: { _ in throw CocoaError(.fileWriteNoPermission) }
+                trashOperation: { _ in throw CocoaError(.fileWriteNoPermission) },
+                journal: receiptJournal,
+                homeDirectory: testRoot
             )
         ) { error in
             XCTAssertEqual(error as? ExternalDriveMigrationError, .originalRemovalFailed)
@@ -5625,7 +5977,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
                 on: volume,
                 fileManager: fileManager,
                 trustedVolumes: [volume],
-                trashOperation: { _ in nil }
+                trashOperation: { _ in nil },
+                journal: receiptJournal,
+                homeDirectory: testRoot
             )
         ) { error in
             XCTAssertEqual(error as? ExternalDriveMigrationError, .copyVerificationFailed)
@@ -5715,14 +6069,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertEqual(ItemListPresenter.availableScopes(for: []), [.all])
     }
 
-    private var defaultsSuiteName: String {
-        "StorageCleanerMacTests.ScanExclusions"
-    }
-
     private func makeTemporaryDefaults() throws -> UserDefaults {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuiteName))
-        defaults.removePersistentDomain(forName: defaultsSuiteName)
-        return defaults
+        TestPreferenceDomain.make(for: self)
     }
 
     private func makeTemporaryDirectory() throws -> URL {

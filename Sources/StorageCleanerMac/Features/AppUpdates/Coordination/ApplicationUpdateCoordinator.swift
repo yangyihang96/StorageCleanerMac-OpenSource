@@ -1,6 +1,7 @@
 import Foundation
 
 protocol ApplicationUpdateExecuting: Sendable {
+    func prepareRecoveryEvidence(application: InstalledApplication, task: ApplicationUpdateTask, relatedApplications: [InstalledApplication]) async throws -> ApplicationUpdateRecoveryEvidence?
     func execute(
         application: InstalledApplication,
         task: ApplicationUpdateTask,
@@ -13,6 +14,7 @@ protocol ApplicationUpdateExecuting: Sendable {
         task: ApplicationUpdateTask,
         application: InstalledApplication?
     ) async throws -> ApplicationUpdateInstallResult
+    func verifyAndRelease(task: ApplicationUpdateTask, application: InstalledApplication?) async throws -> ApplicationUpdateInstallResult
 
     func stageDownloads(
         applications: [InstalledApplication],
@@ -24,6 +26,10 @@ protocol ApplicationUpdateExecuting: Sendable {
 }
 
 extension ApplicationUpdateExecuting {
+    func verifyAndRelease(task: ApplicationUpdateTask, application: InstalledApplication?) async throws -> ApplicationUpdateInstallResult {
+        try await reconcile(task: task, application: application)
+    }
+    func prepareRecoveryEvidence(application: InstalledApplication, task: ApplicationUpdateTask, relatedApplications: [InstalledApplication]) async throws -> ApplicationUpdateRecoveryEvidence? { nil }
     func stageDownloads(
         applications _: [InstalledApplication],
         tasks _: [ApplicationUpdateTask],
@@ -79,6 +85,8 @@ enum ApplicationUpdateCoordinatorError: LocalizedError, Sendable {
     case taskCannotBeRetried(String)
     case sessionStillActive
     case cancellationInProgress
+    case pendingInstallation(String)
+    case queueRecoveryConfirmationRequired
     case persistenceFailed(String)
     case cancellationPersistenceFailed(saveError: String, clearError: String)
 
@@ -102,6 +110,10 @@ enum ApplicationUpdateCoordinatorError: LocalizedError, Sendable {
             return "The active application update session cannot be cleared."
         case .cancellationInProgress:
             return "The application update session is still cancelling its active executor."
+        case let .pendingInstallation(id):
+            return L10n.text("上次安装尚待核验，不能再次更新；旧 Homebrew 记录缺少包范围时，该来源全部隔离。请先点“核验并恢复”：", "Previous installation remains quarantined; old Homebrew records without package scope quarantine the whole provider. Use Verify and Recover first: ") + id
+        case .queueRecoveryConfirmationRequired:
+            return L10n.text("更新记录已归档待确认；请先在应用更新页确认没有正在进行的更新，才能继续 Homebrew 更新。", "The update queue was archived and needs confirmation. Confirm on the App Updates page that no update is in progress before continuing Homebrew updates.")
         case let .persistenceFailed(detail):
             return "The update queue could not persist its next safe state: \(detail)"
         case let .cancellationPersistenceFailed(saveError, clearError):
@@ -132,6 +144,8 @@ actor ApplicationUpdateCoordinator {
     private var worker: Task<Void, Never>?
     private var currentApplicationID: String?
     private var isCancelling = false
+    private var isReconciling = false
+    private var queueRecoveryIssue: ApplicationUpdateQueueRecoveryIssue?
     private var eventContinuations: [UUID: AsyncStream<ApplicationUpdateCoordinatorEvent>.Continuation] = [:]
 
     init(
@@ -164,6 +178,64 @@ actor ApplicationUpdateCoordinator {
 
     func currentSnapshot() -> ApplicationUpdateQueueSnapshot? {
         snapshot
+    }
+
+    func recoveryStatus() async -> ApplicationUpdateRecoveryStatus {
+        var tasks = snapshot?.tasks ?? []
+        do {
+            if snapshot == nil, let loaded = try await repository.load() {
+                tasks = loaded.tasks.map { original in
+                    var task = original
+                    if [.installing, .verifying].contains(task.state) { task.state = .needsReconciliation }
+                    return task
+                }
+            }
+            queueRecoveryIssue = try await repository.recoveryIssue()
+        } catch let ApplicationUpdateQueueRepositoryError.recoveryRequired(issue) { queueRecoveryIssue = issue }
+        catch {
+            queueRecoveryIssue = .init(archivedPath: "", archivedAt: now(), reason: AppUpdateErrorRedaction.text(error.localizedDescription))
+        }
+        return .init(tasks: tasks.filter(\.requiresInstallationReconciliation), queueIssue: queueRecoveryIssue)
+    }
+
+    func acknowledgeDamagedQueue() async throws {
+        guard !isCancelling, !isReconciling, worker == nil else { throw ApplicationUpdateCoordinatorError.sessionAlreadyActive }
+        // The UI supplies an explicit no-update-in-progress confirmation. Never
+        // clear a valid unresolved task alongside the damaged queue marker.
+        try await repository.acknowledgeRecoveryIssue()
+        queueRecoveryIssue = nil
+    }
+
+    func verifyAndRelease(applicationID: String, applications: [InstalledApplication]) async throws {
+        guard !isCancelling, !isReconciling else { throw ApplicationUpdateCoordinatorError.sessionAlreadyActive }
+        let drainDeadline = Date().addingTimeInterval(1)
+        while worker != nil, snapshot?.tasks.allSatisfy({ $0.state.isTerminal || $0.requiresInstallationReconciliation }) == true, Date() < drainDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard worker == nil else { throw ApplicationUpdateCoordinatorError.sessionAlreadyActive }
+        if snapshot == nil { _ = try await restore(applications: applications, autoResume: false) }
+        applicationsByID.merge(Self.applicationMap(from: applications)) { _, new in new }
+        guard var current = snapshot, let index = current.tasks.firstIndex(where: { $0.applicationID == applicationID }),
+            current.tasks[index].requiresInstallationReconciliation else { throw ApplicationUpdateCoordinatorError.unknownApplication(applicationID) }
+        isReconciling = true
+        defer { isReconciling = false }
+        // A completed-but-finishing task remains isolated and can regress. Put
+        // it through the same persisted reconciliation gate before a fresh read.
+        current.tasks[index].state = .needsReconciliation
+        current.tasks[index].updatedAt = now()
+        current.updatedAt = now()
+        try await repository.save(current)
+        snapshot = current
+        let task = current.tasks[index]
+        emit(.snapshotChanged(current))
+        do {
+            let result = try await executor.verifyAndRelease(task: task, application: applicationsByID[applicationID])
+            await applyExecutionResult(result, to: task.id, sessionID: current.plan.id)
+        } catch {
+            await finishTask(task.id, sessionID: current.plan.id, state: .needsReconciliation,
+                error: AppUpdateErrorRedaction.text(error.localizedDescription),
+                detail: L10n.text("核验未完成，仍保持隔离；可稍后再次核验。", "Verification did not complete; quarantine remains. Verify again later."))
+        }
     }
 
     @discardableResult
@@ -306,19 +378,40 @@ actor ApplicationUpdateCoordinator {
         plan: ApplicationUpdatePlan,
         applications: [InstalledApplication]
     ) async throws -> ApplicationUpdateQueueSnapshot {
-        guard !isCancelling else {
+        guard !isCancelling, !isReconciling else {
             throw ApplicationUpdateCoordinatorError.cancellationInProgress
         }
-        if let snapshot, hasActiveWork(snapshot), !allTasksTerminal(snapshot.tasks) {
+        // A fresh coordinator must not overwrite an on-disk unresolved intent
+        // just because its caller did not explicitly restore before rescanning.
+        if snapshot == nil, var loaded = try await loadForNewBatch() {
+            for index in loaded.tasks.indices where [.installing, .verifying].contains(loaded.tasks[index].state) {
+                loaded.tasks[index].state = .needsReconciliation
+            }
+            try await repository.save(loaded)
+            snapshot = loaded
+            applicationsByID = Self.applicationMap(from: applications)
+        }
+        if let snapshot, snapshot.tasks.contains(where: { !$0.state.isTerminal && $0.state != .needsReconciliation }) {
             throw ApplicationUpdateCoordinatorError.sessionAlreadyActive
         }
         guard worker == nil else { throw ApplicationUpdateCoordinatorError.sessionAlreadyActive }
 
         let applicationMap = Self.applicationMap(from: applications)
         try validate(plan: plan, applications: applicationMap)
+        queueRecoveryIssue = try await repository.recoveryIssue() ?? queueRecoveryIssue
+        if queueRecoveryIssue != nil, plan.batchApplicationIDs.contains(where: { applicationMap[$0]?.updateProvider == .homebrew }) {
+            throw ApplicationUpdateCoordinatorError.queueRecoveryConfirmationRequired
+        }
+        let unresolved = snapshot?.tasks.filter(\.requiresInstallationReconciliation) ?? []
+        for id in plan.batchApplicationIDs {
+            if let application = applicationMap[id], unresolved.contains(where: { $0.isolates(application) }) {
+                throw ApplicationUpdateCoordinatorError.pendingInstallation(id)
+            }
+        }
 
         let createdAt = now()
-        let tasks = allPlanIDs(plan).map { applicationID -> ApplicationUpdateTask in
+        let retainedIDs = Set(unresolved.map(\.applicationID))
+        let tasks = allPlanIDs(plan).filter { !retainedIDs.contains($0) }.map { applicationID -> ApplicationUpdateTask in
             let application = applicationMap[applicationID]!
             let state = initialState(applicationID: applicationID, plan: plan)
             var task = ApplicationUpdateTask(
@@ -330,10 +423,12 @@ actor ApplicationUpdateCoordinator {
             task.detail = initialDetail(for: state, application: application)
             return task
         }
+        let effectivePlan = Self.carryingUnresolved(unresolved, in: plan)
+        let carriedTasks = Self.carryingUnresolved(unresolved, sessionID: plan.id)
         let newSnapshot = ApplicationUpdateQueueSnapshot(
             schemaVersion: ApplicationUpdateQueueRepository.currentSchemaVersion,
-            plan: plan,
-            tasks: tasks,
+            plan: effectivePlan,
+            tasks: tasks + carriedTasks,
             isPaused: false,
             updatedAt: createdAt
         )
@@ -376,6 +471,14 @@ actor ApplicationUpdateCoordinator {
             emit(.drained(newSnapshot))
         }
         return newSnapshot
+    }
+
+    private func loadForNewBatch() async throws -> ApplicationUpdateQueueSnapshot? {
+        do { return try await repository.load() }
+        catch let ApplicationUpdateQueueRepositoryError.recoveryRequired(issue) {
+            queueRecoveryIssue = issue
+            return nil
+        }
     }
 
     @discardableResult
@@ -438,6 +541,7 @@ actor ApplicationUpdateCoordinator {
 
         let runningWorker = worker
         runningWorker?.cancel()
+        if let batch = executor as? any ApplicationUpdateBatchExecuting { await batch.endBatch(sessionID: current.plan.id) }
         if let currentApplicationID {
             await executor.cancel(applicationID: currentApplicationID)
         }
@@ -445,10 +549,10 @@ actor ApplicationUpdateCoordinator {
         worker = nil
         self.currentApplicationID = nil
         await executor.discardStagedDownloads()
-        if let persistenceError {
-            throw persistenceError
-        }
-        emit(.drained(current))
+        let finished = snapshot ?? current
+        if let persistenceError, finished.tasks.contains(where: \.requiresInstallationReconciliation) { throw persistenceError }
+        try await persistExplicitCancellation(finished)
+        emit(.drained(finished))
     }
 
     private static func markNonterminalTasksCancelled(
@@ -456,9 +560,13 @@ actor ApplicationUpdateCoordinator {
         at timestamp: Date
     ) {
         for index in snapshot.tasks.indices where !snapshot.tasks[index].state.isTerminal {
-            snapshot.tasks[index].state = .cancelled
+            let state = snapshot.tasks[index].state
+            if state == .needsReconciliation { continue }
+            snapshot.tasks[index].state = [.installing, .verifying, .needsReconciliation].contains(state) ? .needsReconciliation : .cancelled
             snapshot.tasks[index].progressFraction = nil
-            snapshot.tasks[index].detail = "Cancelled by the user."
+            snapshot.tasks[index].detail = state == .installing || state == .verifying
+                ? L10n.text("取消已请求，等待停止回执及版本核验。", "Cancellation requested; awaiting a stop receipt and version verification.")
+                : "Cancelled by the user."
             snapshot.tasks[index].updatedAt = timestamp
         }
         snapshot.isPaused = false
@@ -542,52 +650,98 @@ actor ApplicationUpdateCoordinator {
     }
 
     func retry(applicationID: String) async throws {
-        guard !isCancelling else {
-            throw ApplicationUpdateCoordinatorError.cancellationInProgress
+        try await retry(applicationIDs: [applicationID])
+    }
+
+    func retry(applicationIDs: Set<String>) async throws {
+        guard !isCancelling, !isReconciling else { throw ApplicationUpdateCoordinatorError.cancellationInProgress }
+        if snapshot?.tasks.allSatisfy({ $0.state.isTerminal || $0.state == .needsReconciliation }) == true {
+            await worker?.value
+            worker = nil
         }
         guard var current = snapshot else { throw ApplicationUpdateCoordinatorError.noActiveSession }
-        guard let index = current.tasks.firstIndex(where: { $0.applicationID == applicationID }) else {
-            throw ApplicationUpdateCoordinatorError.unknownApplication(applicationID)
+        queueRecoveryIssue = try await repository.recoveryIssue() ?? queueRecoveryIssue
+        if queueRecoveryIssue != nil, applicationIDs.contains(where: { applicationsByID[$0]?.updateProvider == .homebrew }) {
+            throw ApplicationUpdateCoordinatorError.queueRecoveryConfirmationRequired
         }
-        let oldState = current.tasks[index].state
-        guard oldState == .failed || oldState == .cancelled || oldState == .needsReconciliation else {
-            throw ApplicationUpdateCoordinatorError.taskCannotBeRetried(applicationID)
+        for applicationID in applicationIDs {
+            guard let task = current.tasks.first(where: { $0.applicationID == applicationID }) else {
+                throw ApplicationUpdateCoordinatorError.unknownApplication(applicationID)
+            }
+            guard task.state == .failed || task.state == .cancelled else {
+                throw ApplicationUpdateCoordinatorError.taskCannotBeRetried(applicationID)
+            }
+            guard let application = applicationsByID[applicationID],
+                (application.canJoinAutomaticUpdateBatch || ApplicationUpdatePlanBuilder.isEligibleForAutomaticUpdate(application)) else {
+                throw ApplicationUpdateCoordinatorError.unsafeAutomaticApplication(applicationID)
+            }
+            if current.tasks.contains(where: { $0.isolates(application) }) {
+                throw ApplicationUpdateCoordinatorError.pendingInstallation(applicationID)
+            }
+            try Self.validateTransition(applicationID: applicationID, from: task.state, to: .queued)
         }
-        guard let application = applicationsByID[applicationID],
-              ApplicationUpdatePlanBuilder.isEligibleForAutomaticUpdate(application)
-        else {
-            throw ApplicationUpdateCoordinatorError.unsafeAutomaticApplication(applicationID)
+        guard !applicationIDs.isEmpty else { return }
+        if worker == nil {
+            let old = current.plan
+            let newID = UUID()
+            current.isPaused = false
+            current.plan = ApplicationUpdatePlan(id: newID, createdAt: now(),
+                automaticApplicationIDs: old.automaticApplicationIDs.filter(applicationIDs.contains),
+                requiresQuitApplicationIDs: old.requiresQuitApplicationIDs.filter(applicationIDs.contains),
+                requiresAuthorizationApplicationIDs: old.requiresAuthorizationApplicationIDs.filter(applicationIDs.contains),
+                appStoreApplicationIDs: [], websiteApplicationIDs: [], manualApplicationIDs: [], skippedApplicationIDs: [])
+            let unresolved = current.tasks.filter(\.requiresInstallationReconciliation)
+            current.tasks.removeAll { !applicationIDs.contains($0.applicationID) && !$0.requiresInstallationReconciliation }
+            current.plan = Self.carryingUnresolved(unresolved, in: current.plan)
+            for i in current.tasks.indices {
+                if current.tasks[i].requiresInstallationReconciliation { current.tasks[i].originalSessionID = current.tasks[i].originalSessionID ?? current.tasks[i].sessionID }
+                current.tasks[i].sessionID = newID
+            }
         }
-        try Self.validateTransition(applicationID: applicationID, from: oldState, to: .queued)
-        current.tasks[index].state = .queued
-        current.tasks[index].progressFraction = nil
-        current.tasks[index].detail = "Queued for retry."
-        current.tasks[index].errorDescription = nil
-        current.tasks[index].updatedAt = now()
+        for index in current.tasks.indices where applicationIDs.contains(current.tasks[index].applicationID) {
+            current.tasks[index].state = .queued
+            current.tasks[index].progressFraction = nil
+            current.tasks[index].detail = L10n.text("重试批次；需管理员权限的项目在新批次将再次授权。", "Retry batch; administrator items require authorization again in a new batch.")
+            current.tasks[index].errorDescription = nil
+            current.tasks[index].recoveryEvidence = nil
+            current.tasks[index].updatedAt = now()
+        }
         current.updatedAt = now()
         snapshot = current
         try await repository.save(current)
-        emit(.taskChanged(current.tasks[index]))
+        for task in current.tasks where applicationIDs.contains(task.applicationID) { emit(.taskChanged(task)) }
         emit(.snapshotChanged(current))
         scheduleWorkerIfNeeded(sessionID: current.plan.id)
     }
 
     func reconcilePendingTasks() async {
-        guard let current = snapshot else { return }
+        guard !isReconciling, let current = snapshot else { return }
+        isReconciling = true
+        defer { isReconciling = false }
         let sessionID = current.plan.id
         let taskIDs = current.tasks
-            .filter { $0.state == .needsReconciliation }
+            .filter(\.requiresInstallationReconciliation)
             .map(\.id)
 
         for taskID in taskIDs where !Task.isCancelled {
-            guard let task = task(id: taskID, sessionID: sessionID) else { continue }
+            guard var task = task(id: taskID, sessionID: sessionID) else { continue }
+            if task.state.isTerminal {
+                guard var next = snapshot, let index = next.tasks.firstIndex(where: { $0.id == taskID }) else { continue }
+                next.tasks[index].state = .needsReconciliation
+                do { try await repository.save(next); snapshot = next; task = next.tasks[index] }
+                catch { continue }
+            }
             currentApplicationID = task.applicationID
             do {
                 let result = try await executor.reconcile(
                     task: task,
                     application: applicationsByID[task.applicationID]
                 )
-                await applyExecutionResult(result, to: taskID, sessionID: sessionID)
+                if result.state == .completed || result.confirmedStopped || result.recoveryEvidence != nil {
+                    await applyExecutionResult(result, to: taskID, sessionID: sessionID)
+                } else {
+                    await finishTask(taskID, sessionID: sessionID, state: .needsReconciliation, error: nil, detail: result.detail)
+                }
             } catch is CancellationError {
                 await finishTask(
                     taskID,
@@ -600,9 +754,9 @@ actor ApplicationUpdateCoordinator {
                 await finishTask(
                     taskID,
                     sessionID: sessionID,
-                    state: .failed,
-                    error: String(describing: error),
-                    detail: "The interrupted update could not be reconciled."
+                    state: .needsReconciliation,
+                    error: AppUpdateErrorRedaction.text(error.localizedDescription),
+                    detail: L10n.text("核验尚未确认安装完成或停止，仍待核验；禁止重试。", "Readback has not proved installation completion or stop; reconciliation remains required and retry is forbidden.")
                 )
             }
             if currentApplicationID == task.applicationID {
@@ -619,7 +773,7 @@ actor ApplicationUpdateCoordinator {
             try await repository.clear()
             return
         }
-        guard allTasksTerminal(current.tasks) else {
+        guard allTasksTerminal(current.tasks), !current.tasks.contains(where: \.requiresInstallationReconciliation) else {
             throw ApplicationUpdateCoordinatorError.sessionStillActive
         }
         isCancelling = true
@@ -643,15 +797,68 @@ actor ApplicationUpdateCoordinator {
             }
         }
 
+        if let batchExecutor = executor as? any ApplicationUpdateBatchExecuting, let current = snapshot {
+            let pendingIDs = Set(current.tasks.filter { !$0.state.isTerminal }.map(\.applicationID))
+            let candidates = current.plan.batchApplicationIDs.filter { pendingIDs.contains($0) }.compactMap { applicationsByID[$0] }
+            await batchExecutor.beginBatch(applications: candidates, sessionID: sessionID)
+        }
         await stageOfficialWebsiteTasks(sessionID: sessionID)
         while !Task.isCancelled {
             guard let current = snapshot, current.plan.id == sessionID else { return }
             if current.isPaused { return }
             guard let nextTask = current.tasks.first(where: { $0.state == .queued }) else {
+                if let batchExecutor = executor as? any ApplicationUpdateBatchExecuting {
+                    await batchExecutor.endBatch(sessionID: sessionID)
+                }
                 emit(.drained(current))
                 return
             }
-            await execute(taskID: nextTask.id, sessionID: sessionID)
+            if nextTask.providerIdentifier == .homebrew,
+               let batchExecutor = executor as? any ApplicationUpdateBatchExecuting {
+                await executeHomebrewBatch(executor: batchExecutor, sessionID: sessionID)
+            } else {
+                await execute(taskID: nextTask.id, sessionID: sessionID)
+            }
+        }
+        if let batchExecutor = executor as? any ApplicationUpdateBatchExecuting {
+            await batchExecutor.endBatch(sessionID: sessionID)
+        }
+    }
+
+    private func executeHomebrewBatch(executor: any ApplicationUpdateBatchExecuting, sessionID: UUID) async {
+        guard let current = snapshot, current.plan.id == sessionID else { return }
+        let tasks = current.tasks.filter { $0.state == .queued && $0.providerIdentifier == .homebrew }
+        var ready = [ApplicationUpdateTask]()
+        for task in tasks {
+            do {
+                try await transition(taskID: task.id, sessionID: sessionID, to: .checking) { $0.attemptCount += 1 }
+                if let application = applicationsByID[task.applicationID] {
+                    if let evidence = try await executor.prepareRecoveryEvidence(application: application, task: task, relatedApplications: tasks.compactMap { applicationsByID[$0.applicationID] }) {
+                        try await transition(taskID: task.id, sessionID: sessionID, to: .checking) { $0.recoveryEvidence = evidence }
+                    }
+                }
+                // Persist every affected intent before a merged brew invocation.
+                try await transition(taskID: task.id, sessionID: sessionID, to: .installing) { $0.detail = L10n.text("正在准备 Homebrew 批次", "Preparing Homebrew batch") }
+                if let frozen = self.task(id: task.id, sessionID: sessionID) { ready.append(frozen) }
+            } catch {
+                await finishTask(task.id, sessionID: sessionID, state: .failed, error: error.localizedDescription,
+                    detail: L10n.text("无法冻结整包恢复证据，未执行更新", "Package recovery evidence could not be frozen; no update executed"))
+                if case ApplicationUpdateCoordinatorError.persistenceFailed = error { return }
+            }
+        }
+        let frozenTasks = ready
+        let results = await executor.executeHomebrewBatch(
+            applications: frozenTasks.compactMap { applicationsByID[$0.applicationID] }, tasks: frozenTasks,
+            progress: { [weak self] event in
+                guard let task = frozenTasks.first(where: { $0.applicationID == event.applicationID }) else { return }
+                await self?.receive(progress: event, taskID: task.id, sessionID: sessionID)
+            })
+        for task in frozenTasks {
+            if let result = results.first(where: { $0.applicationID == task.applicationID }) {
+                await applyExecutionResult(result, to: task.id, sessionID: sessionID)
+            } else {
+                await finishTask(task.id, sessionID: sessionID, state: .failed, error: "Missing batch result", detail: L10n.text("未收到单项更新结果", "No item result received"))
+            }
         }
     }
 
@@ -773,7 +980,12 @@ actor ApplicationUpdateCoordinator {
                 )
                 task.errorDescription = nil
             }
+            if let evidence = try await executor.prepareRecoveryEvidence(application: application, task: startingTask, relatedApplications: [application]) {
+                try await transition(taskID: taskID, sessionID: sessionID, to: .checking) { $0.recoveryEvidence = evidence }
+            }
         } catch {
+            await finishTask(taskID, sessionID: sessionID, state: .failed, error: error.localizedDescription,
+                detail: L10n.text("无法冻结恢复证据，未执行更新", "Recovery evidence could not be frozen; no update executed"))
             return
         }
 
@@ -790,13 +1002,16 @@ actor ApplicationUpdateCoordinator {
             )
             await applyExecutionResult(result, to: taskID, sessionID: sessionID)
         } catch is CancellationError {
-            await finishTask(taskID, sessionID: sessionID, state: .cancelled, error: nil, detail: "Update was cancelled.")
+            let state = task(id: taskID, sessionID: sessionID)?.state
+            let pending = state.map { [.installing, .verifying, .needsReconciliation].contains($0) } ?? false
+            await finishTask(taskID, sessionID: sessionID, state: pending ? .needsReconciliation : .cancelled, error: nil,
+                detail: pending ? AppUpdateCommandError.needsReconciliation.localizedDescription : "Update was cancelled.")
         } catch {
             let description = error.localizedDescription
             await finishTask(
                 taskID,
                 sessionID: sessionID,
-                state: .failed,
+                state: task(id: taskID, sessionID: sessionID)?.state == .needsReconciliation ? .needsReconciliation : .failed,
                 error: description,
                 detail: description
             )
@@ -815,6 +1030,7 @@ actor ApplicationUpdateCoordinator {
         guard let currentTask = task(id: taskID, sessionID: sessionID),
               currentTask.applicationID == progress.applicationID,
               !currentTask.state.isTerminal,
+              currentTask.state != .needsReconciliation,
               progress.state != .completed,
               progress.state != .needsReconciliation
         else { return }
@@ -851,19 +1067,35 @@ actor ApplicationUpdateCoordinator {
               !currentTask.state.isTerminal
         else { return }
 
+        if let evidence = result.recoveryEvidence {
+            do { try await transition(taskID: taskID, sessionID: sessionID, to: currentTask.state) {
+                $0.recoveryEvidence = evidence
+                $0.installationIsolated = result.installationIsolated ? true : nil
+            } }
+            catch { return }
+        } else if result.installationIsolated || currentTask.installationIsolated == true {
+            do { try await transition(taskID: taskID, sessionID: sessionID, to: currentTask.state) { $0.installationIsolated = result.installationIsolated ? true : nil } }
+            catch { return }
+        }
+        if currentTask.state == .needsReconciliation && result.state != .completed && !result.confirmedStopped {
+            await finishTask(taskID, sessionID: sessionID, state: .needsReconciliation, error: nil, detail: result.detail)
+            return
+        }
         switch result.state {
         case .completed:
             guard let observed = result.observedVersion,
                   isVerifiedUpgrade(
                     observed,
                     from: currentTask.originalVersion,
-                    target: currentTask.targetVersion
+                    target: currentTask.providerIdentifier == .homebrew
+                        ? currentTask.targetVersion.flatMap { HomebrewAutomaticUpdateSafety.strictComparableVersionProjection($0.preferred).map { ApplicationVersion(marketing: $0) } }
+                        : currentTask.targetVersion
                   )
             else {
                 await finishTask(
                     taskID,
                     sessionID: sessionID,
-                    state: .failed,
+                    state: currentTask.state == .needsReconciliation ? .needsReconciliation : .failed,
                     error: "The on-disk version did not change to the expected version.",
                     detail: "The provider completed, but version verification failed."
                 )
@@ -915,7 +1147,9 @@ actor ApplicationUpdateCoordinator {
                     detail: "The update provider returned an invalid waiting state."
                 )
             }
-        case .queued, .checking, .downloading, .installing, .verifying, .needsReconciliation:
+        case .needsReconciliation:
+            await finishTask(taskID, sessionID: sessionID, state: .needsReconciliation, error: nil, detail: result.detail)
+        case .queued, .checking, .downloading, .installing, .verifying:
             await finishTask(
                 taskID,
                 sessionID: sessionID,
@@ -972,7 +1206,8 @@ actor ApplicationUpdateCoordinator {
                 task.errorDescription = error
             }
         } catch let transitionError {
-            guard state != .failed else { return }
+            guard state != .failed, state != .needsReconciliation,
+                task(id: taskID, sessionID: sessionID)?.state != .needsReconciliation else { return }
             try? await transition(taskID: taskID, sessionID: sessionID, to: .failed) { task in
                 task.progressFraction = nil
                 task.detail = detail
@@ -1002,6 +1237,10 @@ actor ApplicationUpdateCoordinator {
         } catch {
             let saveError = String(describing: error)
             emit(.persistenceFailed(sessionID: snapshot.plan.id, detail: saveError))
+            guard !snapshot.tasks.contains(where: \.requiresInstallationReconciliation) else {
+                throw ApplicationUpdateCoordinatorError.cancellationPersistenceFailed(saveError: saveError,
+                    clearError: "待核验安装记录必须保留，不能删除旧的执行意图")
+            }
             do {
                 try await repository.clear()
             } catch {
@@ -1066,13 +1305,34 @@ actor ApplicationUpdateCoordinator {
             + plan.skippedApplicationIDs
     }
 
+    private static func carryingUnresolved(_ tasks: [ApplicationUpdateTask], in plan: ApplicationUpdatePlan) -> ApplicationUpdatePlan {
+        let ids = Set(tasks.map(\.applicationID))
+        return .init(id: plan.id, createdAt: plan.createdAt,
+            automaticApplicationIDs: plan.automaticApplicationIDs.filter { !ids.contains($0) },
+            requiresQuitApplicationIDs: plan.requiresQuitApplicationIDs.filter { !ids.contains($0) },
+            requiresAuthorizationApplicationIDs: plan.requiresAuthorizationApplicationIDs.filter { !ids.contains($0) },
+            appStoreApplicationIDs: plan.appStoreApplicationIDs.filter { !ids.contains($0) },
+            websiteApplicationIDs: plan.websiteApplicationIDs.filter { !ids.contains($0) },
+            manualApplicationIDs: plan.manualApplicationIDs.filter { !ids.contains($0) },
+            skippedApplicationIDs: plan.skippedApplicationIDs.filter { !ids.contains($0) } + tasks.map(\.applicationID))
+    }
+
+    private static func carryingUnresolved(_ tasks: [ApplicationUpdateTask], sessionID: UUID) -> [ApplicationUpdateTask] {
+        tasks.map { task in
+            var retained = task
+            retained.originalSessionID = retained.originalSessionID ?? retained.sessionID
+            retained.sessionID = sessionID
+            return retained
+        }
+    }
+
     private func initialState(
         applicationID: String,
         plan: ApplicationUpdatePlan
     ) -> ApplicationUpdateTaskState {
         if plan.automaticApplicationIDs.contains(applicationID) { return .queued }
-        if plan.requiresQuitApplicationIDs.contains(applicationID) { return .waitingForQuit }
-        if plan.requiresAuthorizationApplicationIDs.contains(applicationID) { return .waitingForAuthorization }
+        if plan.requiresQuitApplicationIDs.contains(applicationID) { return executor is any ApplicationUpdateBatchExecuting ? .queued : .waitingForQuit }
+        if plan.requiresAuthorizationApplicationIDs.contains(applicationID) { return executor is any ApplicationUpdateBatchExecuting ? .queued : .waitingForAuthorization }
         return .skipped
     }
 
@@ -1096,7 +1356,7 @@ actor ApplicationUpdateCoordinator {
     }
 
     private func hasActiveWork(_ snapshot: ApplicationUpdateQueueSnapshot) -> Bool {
-        snapshot.tasks.contains { !$0.state.isTerminal }
+        snapshot.tasks.contains { !$0.state.isTerminal || $0.requiresInstallationReconciliation }
     }
 
     private func allTasksTerminal(_ tasks: [ApplicationUpdateTask]) -> Bool {
@@ -1132,12 +1392,11 @@ actor ApplicationUpdateCoordinator {
         case .waitingForQuit, .waitingForAuthorization:
             allowed = [.queued, .installing, .verifying, .failed, .cancelled, .skipped]
         case .installing:
-            allowed = [.verifying, .needsReconciliation, .failed, .cancelled]
+            allowed = [.verifying, .needsReconciliation, .failed, .cancelled, .skipped]
         case .verifying:
             allowed = [.completed, .needsReconciliation, .failed, .cancelled]
         case .needsReconciliation:
-            allowed = [.queued, .downloading, .waitingForQuit, .waitingForAuthorization,
-                       .installing, .verifying, .completed, .failed, .cancelled, .skipped]
+            allowed = [.verifying, .completed, .cancelled, .failed]
         case .failed, .cancelled:
             allowed = [.queued]
         case .completed, .skipped:
@@ -1182,7 +1441,7 @@ actor ApplicationUpdateCoordinator {
               compareVersion(observed, original) != .orderedAscending
         else { return false }
         guard let target else { return true }
-        return compareVersion(observed, target) != .orderedAscending
+        return observed.reaches(target)
     }
 
     private func compareVersion(

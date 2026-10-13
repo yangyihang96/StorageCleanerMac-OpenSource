@@ -15,7 +15,7 @@ struct AppUpdaterView: View {
     var body: some View {
         VStack(spacing: 0) {
 #if DEBUG
-            if store.isDebugAppUpdatePresentationFixtureActive {
+            if store.isDebugAppUpdatePresentationFixtureActive && !FeaturePresentationDemo.isEnabled {
                 Label(
                     L10n.text(
                         "界面演示 · 不会扫描或安装",
@@ -37,6 +37,16 @@ struct AppUpdaterView: View {
 #endif
 
             VStack(spacing: 0) {
+                AppUpdateRecoveryPanel(store: store)
+                if !usesFeatureTemplate && store.appUpdatePresentationState.phase != .scanning {
+                    HStack {
+                        Spacer()
+                        ownUpdateButton
+                    }
+                    .padding(.horizontal, AppDesignTokens.Layout.pagePadding)
+                    .padding(.top, AppDesignTokens.Spacing.compact)
+                }
+
                 if shouldShowOrchestratorStatusBanner {
                     AppUpdateOrchestratorStatusBanner(
                         state: store.appUpdateOrchestratorState,
@@ -49,10 +59,25 @@ struct AppUpdaterView: View {
                     .padding(.top, AppDesignTokens.Spacing.compact)
                 }
 
+                if let queue = store.websiteUpdateQueueSnapshot,
+                   let current = store.currentWebsiteUpdateItem {
+                    WebsiteUpdateAssistantCard(
+                        queue: queue,
+                        current: current,
+                        resultMessage: store.websiteUpdateResultMessage,
+                        isPreparing: store.isPreparingWebsiteUpdateQueue || store.isRunningOneClickUpdate,
+                        onOpen: store.openCurrentWebsiteUpdate,
+                        onRecheck: store.recheckCurrentWebsiteUpdate,
+                        onDefer: store.deferCurrentWebsiteUpdate
+                    )
+                    .padding(.horizontal, AppDesignTokens.Layout.pagePadding)
+                    .padding(.top, AppDesignTokens.Spacing.compact)
+                }
+
                 if isShowingSessionLog {
                     AppUpdateSessionLogPage(
                         state: store.appUpdatePresentationState,
-                        onRetry: store.retryAppUpdates,
+                        onRetry: retryImmediately,
                         onBack: { isShowingSessionLog = false }
                     )
                 } else {
@@ -61,10 +86,35 @@ struct AppUpdaterView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: layout.viewportHeight, alignment: .top)
+        .frame(height: usesFeatureTemplate ? nil : layout.viewportHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .pageOwnsScrolling(usesFeatureTemplate)
+        .featureFlowTransition(value: store.appUpdatePresentationState.phase == .scanning)
         .animation(
-            reduceMotion ? nil : .easeInOut(duration: 0.18),
+            reduceMotion ? AppMotion.reducedFade : AppMotion.pageChange,
             value: store.appUpdatePresentationState.phase
+        )
+    }
+
+    private func refreshImmediately() {
+        StartupApplicationUpdateScheduler.shared.performUserRequest { store.refreshAppUpdates() }
+    }
+
+    private func retryImmediately(applicationIDs: Set<String>) {
+        StartupApplicationUpdateScheduler.shared.performUserRequest { store.retryAppUpdates(applicationIDs: applicationIDs) }
+    }
+
+    private var usesFeatureTemplate: Bool {
+        !isShowingSessionLog && [.idle, .scanning, .scanSummary].contains(store.appUpdatePresentationState.phase)
+    }
+
+    private var ownUpdateButton: some View {
+        AppButton(
+            title: L10n.text("本软件更新…", "This App’s Updates…"),
+            systemImage: "arrow.down.app",
+            kind: .toolbar,
+            isDisabled: ownUpdateCheckDisabled,
+            action: { AppUpdater.shared.checkForUpdates() }
         )
     }
 
@@ -75,8 +125,9 @@ struct AppUpdaterView: View {
             AppUpdateIdlePage(
                 lastSummary: lastSummary,
                 canScan: store.canRefreshAppUpdates,
-                onScan: store.refreshAppUpdates,
-                onManage: store.showAppUpdateManager
+                onScan: refreshImmediately,
+                onManage: store.showAppUpdateManager,
+                onOwnUpdate: ownUpdateCheckDisabled ? nil : { AppUpdater.shared.checkForUpdates() }
             )
         case let .scanning(progress):
             AppUpdateScanningPage(
@@ -88,14 +139,12 @@ struct AppUpdaterView: View {
             AppUpdateScanSummaryPage(
                 summary: summary,
                 warnings: store.appUpdateScanWarnings,
-                canUpdate: store.canRequestOneClickAppUpdates,
-                onUpdateAll: {
-                    store.requestSelectedAppUpdates(
-                        applicationIDs: Set(summary.batchEligibleApps.map(\.id))
-                    )
-                },
+                canManage: store.canRequestOneClickAppUpdates,
+                canRescan: store.canRefreshAppUpdates,
+                onUpdateAll: { store.previewOneClickAppUpdates(); store.confirmOneClickAppUpdates() },
                 onManage: store.showAppUpdateManager,
-                onRescan: store.refreshAppUpdates
+                onRescan: refreshImmediately,
+                onOwnUpdate: ownUpdateCheckDisabled ? nil : { AppUpdater.shared.checkForUpdates() }
             )
         case let .managing(snapshot):
             AppUpdateManagerPage(
@@ -107,13 +156,14 @@ struct AppUpdaterView: View {
                 batchState: store.appUpdateOrchestratorState,
                 canRunActions: store.canRequestOneClickAppUpdates,
                 onShowSummary: store.showAppUpdateScanSummary,
-                onRescan: store.refreshAppUpdates,
+                onRescan: refreshImmediately,
                 onUpdateAutomatic: { ids in
                     store.requestSelectedAppUpdates(applicationIDs: ids)
                 },
                 onAutomaticUpdate: { app in store.requestAppUpdate(app) },
                 onAppStoreUpdate: { app in store.requestAppStoreUpdate(app) },
-                onOpenUpdateEntry: { app in store.openUpdateEntry(app) }
+                onOpenUpdateEntry: { app in store.openUpdateEntry(app) },
+                onRecheckExternalUpdate: { app in store.recheckExternalUpdate(app) }
             )
         case let .preparingUpdate(plan):
             AppUpdatePreparingPage(
@@ -144,7 +194,7 @@ struct AppUpdaterView: View {
                 // installation sessions retain their own execution report.
                 AppUpdateScanCancelledPage(
                     canScan: store.canRefreshAppUpdates,
-                    onScan: store.refreshAppUpdates,
+                    onScan: refreshImmediately,
                     onBack: store.resetAppUpdatePresentation
                 )
             }
@@ -160,7 +210,7 @@ struct AppUpdaterView: View {
         AppUpdateReportPage(
             report: report,
             fallbackOutcome: fallbackOutcome,
-            onRetry: store.retryAppUpdates,
+            onRetry: retryImmediately,
             onShowLog: { isShowingSessionLog = true },
             onManage: store.showAppUpdateManager,
             onDone: store.showAppUpdateScanSummary
@@ -176,6 +226,14 @@ struct AppUpdaterView: View {
         case .idle, .completed, .partialFailure, .failed, .cancelled:
             false
         }
+    }
+
+    private var ownUpdateCheckDisabled: Bool {
+#if DEBUG
+        store.isDebugAppUpdatePresentationFixtureActive
+#else
+        false
+#endif
     }
 
     private var shouldShowOrchestratorStatusBanner: Bool {
@@ -196,6 +254,94 @@ struct AppUpdaterView: View {
         case .idle, .completed, .partialFailure, .failed, .cancelled:
             {}
         }
+    }
+}
+
+private struct WebsiteUpdateAssistantCard: View {
+    @Environment(\.moduleTheme) private var theme
+
+    let queue: WebsiteUpdateQueueSnapshot
+    let current: WebsiteUpdateQueueItem
+    let resultMessage: String?
+    let isPreparing: Bool
+    let onOpen: () -> Void
+    let onRecheck: () -> Void
+    let onDefer: () -> Void
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                summary
+                Spacer(minLength: 8)
+                actionRow
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                summary
+                ViewThatFits(in: .horizontal) {
+                    actionRow
+                    VStack(alignment: .leading, spacing: 8) { actions }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(AppAppearanceColors.panel, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .contain)
+    }
+
+    private var summary: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "safari")
+                .foregroundStyle(theme.accent)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.text(
+                    "官网更新 · \(current.displayName) · \(completedCount)/\(queue.items.count)",
+                    "Website Update · \(current.displayName) · \(completedCount)/\(queue.items.count)"
+                ))
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(theme.primaryText)
+                Text(resultMessage ?? current.detail ?? L10n.text(
+                    "打开已验证来源；完成安装后复查本机版本",
+                    "Open the verified source; recheck the installed version after installation"
+                ))
+                .font(.system(size: 11.5))
+                .foregroundStyle(theme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 8) { actions }.fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder private var actions: some View {
+        AppButton(
+            title: L10n.text("打开官网", "Open Website"),
+            systemImage: "arrow.up.right",
+            kind: .secondary,
+            isDisabled: isPreparing || ![.queued, .waitingForUser].contains(current.state),
+            action: onOpen
+        )
+        AppButton(
+            title: L10n.text("复查版本", "Recheck Version"),
+            systemImage: "arrow.clockwise",
+            kind: .primary,
+            isDisabled: isPreparing || current.state != .waitingForUser,
+            action: onRecheck
+        )
+        AppButton(
+            title: L10n.text("稍后", "Later"),
+            systemImage: "clock",
+            kind: .secondary,
+            isDisabled: isPreparing || ![.queued, .waitingForUser].contains(current.state),
+            action: onDefer
+        )
+    }
+
+    private var completedCount: Int {
+        queue.items.count { $0.state == .completed }
     }
 }
 
@@ -283,29 +429,40 @@ private struct AppUpdateOrchestratorStatusBanner: View {
     }
 }
 
-private struct AppUpdateIdlePage: View {
+struct AppUpdateIdlePage: View {
     let lastSummary: LastAppScanSummary?
     let canScan: Bool
     let onScan: () -> Void
     let onManage: () -> Void
+    var onOwnUpdate: (() -> Void)? = nil
 
     var body: some View {
-        HeroScanPage(
-            title: ReviewFilter.updater.title,
-            subtitle: ReviewFilter.updater.pageSubtitle,
-            headerSystemImage: ReviewFilter.updater.systemImage,
-            configurationTitle: L10n.text("上次检查", "Last Check"),
-            actionTitle: L10n.text("检查更新", "Check for Updates"),
-            actionDetail: "",
-            actionSystemImage: "arrow.triangle.2.circlepath",
-            status: status,
-            isActionDisabled: !canScan,
-            trustText: nil,
-            showsAccessory: lastSummary != nil,
-            action: onScan
-        ) {
-            if let lastSummary {
-                AppUpdateLastScanAccessory(summary: lastSummary, onManage: onManage)
+        FeatureLightfieldPage(module: .updater, phase: .landing, title: ReviewFilter.updater.title,
+            status: status.title,
+            safety: L10n.text("只读检查 · 安装前确认", "Read-only check · Confirm before installation"),
+            actionTitle: L10n.text("检查更新", "Check for Updates"), actionEnabled: canScan, action: onScan) {
+            FeatureLightfieldOptions(title: L10n.text("检查范围", "Check Scope")) {
+                LightfieldOptionRow(title: L10n.text("软件包线索", "Package Sources"), icon: .updaterPackages, module: .updater,
+                    probeID: "lightfield.updater.option.packages")
+                LightfieldOptionRow(title: "App Store", icon: .updaterStore, module: .updater,
+                    probeID: "lightfield.updater.option.store")
+                LightfieldOptionRow(title: L10n.text("应用内更新源", "In-App Update Feeds"), icon: .updaterUpdateFeed, module: .updater,
+                    probeID: "lightfield.updater.option.feed")
+                LightfieldOptionRow(title: L10n.text("开发者官网", "Developer Websites"), icon: .updaterWebsite, module: .updater,
+                    probeID: "lightfield.updater.option.website")
+                if let lastSummary {
+                    LightfieldMetricGroup(metrics: AppUpdateLightfieldPresentation.metrics(lastSummary), style: .inline,
+                        probeID: "lightfield.updater.previousMetrics").padding(.top, 12)
+                }
+                HStack(spacing: 20) {
+                    if lastSummary != nil {
+                        Button(action: onManage) {
+                            Text(L10n.text("管理更新", "Manage Updates"))
+                                .frame(minWidth: 72, minHeight: 24, alignment: .leading)
+                        }
+                    }
+                    if let onOwnUpdate { Button(L10n.text("本软件更新…", "This App’s Updates…"), action: onOwnUpdate) }
+                }.font(.system(size: 13)).buttonStyle(FeatureLightfieldRowButtonStyle()).padding(.top, 12)
             }
         }
     }
@@ -321,75 +478,6 @@ private struct AppUpdateIdlePage: View {
     }
 }
 
-private struct AppUpdateLastScanAccessory: View {
-    @Environment(\.moduleTheme) private var theme
-
-    let summary: LastAppScanSummary
-    let onManage: () -> Void
-
-    var body: some View {
-        ContentPanel(cornerRadius: 12) {
-            HStack(spacing: 18) {
-                AppUpdateCompactMetric(
-                    value: summary.automaticCount,
-                    title: L10n.text("可直接更新", "Automatic")
-                )
-                AppUpdateCompactMetric(
-                    value: summary.requiresQuitCount,
-                    title: L10n.text("需先退出", "Quit First")
-                )
-                AppUpdateCompactMetric(
-                    value: summary.requiresAuthorizationCount,
-                    title: L10n.text("需要授权", "Authorization")
-                )
-                AppUpdateCompactMetric(
-                    value: summary.manualCount,
-                    title: L10n.text("需手动处理", "Manual")
-                )
-                AppUpdateCompactMetric(
-                    value: summary.currentCount,
-                    title: L10n.text("已是最新", "Current")
-                )
-
-                Divider().frame(height: 34)
-
-                AppButton(
-                    title: L10n.text("管理更新", "Manage Updates"),
-                    systemImage: "list.bullet.rectangle",
-                    kind: .secondary,
-                    tint: theme.accent,
-                    action: onManage
-                )
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-        }
-        .frame(maxWidth: 510)
-    }
-}
-
-private struct AppUpdateCompactMetric: View {
-    @Environment(\.moduleTheme) private var theme
-
-    let value: Int
-    let title: String
-
-    var body: some View {
-        VStack(spacing: 2) {
-            Text(value, format: .number)
-                .font(.system(size: 18, weight: .bold, design: .rounded))
-                .foregroundStyle(theme.primaryText)
-                .monospacedDigit()
-            Text(title)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(theme.secondaryText)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title)
-        .accessibilityValue("\(value)")
-    }
-}
-
 struct AppUpdateScanCancelledPage: View {
     @Environment(\.moduleTheme) private var theme
     let canScan: Bool
@@ -399,7 +487,6 @@ struct AppUpdateScanCancelledPage: View {
     var body: some View {
         SmartScanPageShell(fitsVisibleHeight: true) {
             AppPageHeader(title: ReviewFilter.updater.sidebarTitle,
-                subtitle: ReviewFilter.updater.pageSubtitle,
                 systemImage: ReviewFilter.updater.systemImage, isHero: true) { EmptyView() }
         } content: {
             RuntimeActivityColumns(module: .updater) {
@@ -419,100 +506,25 @@ struct AppUpdateScanCancelledPage: View {
     }
 }
 
-private struct AppUpdateScanningPage: View {
-    @Environment(\.moduleTheme) private var theme
-
+struct AppUpdateScanningPage: View {
     let progress: AppScanProgressSnapshot
     let canCancel: Bool
     let onCancel: () -> Void
 
     var body: some View {
-        SmartScanPageShell(fitsVisibleHeight: true) {
-            AppPageHeader(
-                title: ReviewFilter.updater.sidebarTitle,
-                subtitle: ReviewFilter.updater.pageSubtitle,
-                systemImage: ReviewFilter.updater.systemImage,
-                isHero: true
-            ) { EmptyView() }
-        } content: {
-            RuntimeActivityColumns(module: .updater) {
-                RuntimeActivityCard(
-                    title: L10n.text("正在检查应用", "Checking Applications"),
-                    subtitle: progress.stage.title,
-                    fraction: progress.progressFraction,
-                    metrics: [.init(title: L10n.text("已处理", "Processed"), value: progress.totalUnitCount.map {
-                        "\(progress.completedUnitCount) / \($0)"
-                    } ?? String(progress.completedUnitCount))],
-                    currentItem: progress.currentApplicationName
-                ) {
-                    AppUpdateStageRail(activeStage: progress.stage)
-                }
-            }
-        } footer: {
-            RuntimeActivityFooter(text: L10n.text(
-                "只读检查 · 安装更新前确认", "Read-only check · Confirm before installation"
-            )) {
-                AppButton(
-                    title: L10n.text("停止扫描", "Stop Scanning"),
-                    systemImage: "stop.circle",
-                    kind: .secondary,
-                    tint: theme.accent,
-                    isDisabled: !canCancel,
-                    help: L10n.text(
-                        "在当前扫描器的安全边界停止；已读取的结果不会被当作完整扫描",
-                        "Stop at the current scanner safety boundary; partial results are not treated as a completed scan"
-                    ),
-                    action: onCancel
-                )
-            }
-        }
-    }
-
-}
-
-private struct AppUpdateStageRail: View {
-    @Environment(\.moduleTheme) private var theme
-
-    let activeStage: AppScanStage
-
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 8)], spacing: 12) {
-            ForEach(AppScanStage.allPresentationStages, id: \.self) { stage in
-                HStack(spacing: 6) {
-                    Image(systemName: symbol(for: stage))
-                        .foregroundStyle(color(for: stage))
-                        .accessibilityHidden(true)
-                    Text(stage.shortTitle)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .foregroundStyle(color(for: stage))
-                }
-                .font(.system(size: 11, weight: stage == activeStage ? .semibold : .medium))
-                .frame(maxWidth: .infinity)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(stage.title)
-                .accessibilityValue(accessibilityState(for: stage))
-            }
-        }
-    }
-
-    private func symbol(for stage: AppScanStage) -> String {
-        if stage.presentationIndex < activeStage.presentationIndex { return "checkmark.circle.fill" }
-        if stage == activeStage { return "circle.inset.filled" }
-        return "circle"
-    }
-
-    private func color(for stage: AppScanStage) -> Color {
-        stage.presentationIndex <= activeStage.presentationIndex
-            ? theme.accent
-            : .secondary.opacity(0.55)
-    }
-
-    private func accessibilityState(for stage: AppScanStage) -> String {
-        if stage.presentationIndex < activeStage.presentationIndex {
-            return L10n.text("已完成", "Completed")
-        }
-        if stage == activeStage { return L10n.text("正在进行", "In Progress") }
-        return L10n.text("等待中", "Waiting")
+        FeatureRunningTemplate(module: .updater,
+            title: progress.stage.title, fraction: progress.progressFraction,
+            metrics: [.init(title: L10n.text("已处理", "Processed"), value: progress.totalUnitCount.map {
+                "\(progress.completedUnitCount) / \($0)"
+            } ?? String(progress.completedUnitCount))],
+            currentItem: progress.currentApplicationName, taskIdentity: progress.sessionID.uuidString,
+            pageTitle: ReviewFilter.updater.sidebarTitle,
+            trustText: L10n.text("只读检查 · 安装更新前确认", "Read-only check · Confirm before installation"),
+            canCancel: canCancel, cancelTitle: L10n.text("停止扫描", "Stop Scanning"),
+            cancelHelp: L10n.text("在当前扫描器的安全边界停止；已读取的结果不会被当作完整扫描",
+                                 "Stop at the current scanner safety boundary; partial results are not treated as a completed scan"),
+            onCancel: onCancel
+        ) { EmptyView() } actions: { EmptyView() }
     }
 }
 
@@ -626,197 +638,69 @@ private extension View {
     }
 }
 
-private struct AppUpdateScanSummaryPage: View {
-    @Environment(\.moduleTheme) private var theme
-
+struct AppUpdateScanSummaryPage: View {
+    @Environment(\.colorScheme) private var scheme
     let summary: AppScanSummary
     let warnings: [String]
-    let canUpdate: Bool
+    let canManage: Bool
+    let canRescan: Bool
     let onUpdateAll: () -> Void
     let onManage: () -> Void
     let onRescan: () -> Void
+    var onOwnUpdate: (() -> Void)? = nil
 
     var body: some View {
-        VStack(spacing: 0) {
-            ModulePageHeader(
-                title: L10n.text("扫描完成", "Scan Complete"),
-                subtitle: L10n.text("可更新项目已整理", "Available updates are ready"),
-                systemImage: "checkmark.circle.fill"
-            ) {
-                GlassToolbarButton(
-                    title: L10n.text("重新扫描", "Scan Again"),
-                    systemImage: "arrow.clockwise",
-                    isDisabled: !canUpdate,
-                    action: onRescan
-                )
-            }
-            .padding(.bottom, AppDesignTokens.Spacing.medium)
-
-            FeatureWorkspaceSurface {
-                ScrollView {
-                    VStack(spacing: 22) {
-                        VStack(spacing: 5) {
-                            Text(summary.scannedCount, format: .number)
-                                .font(.system(size: 50, weight: .bold, design: .rounded))
-                                .foregroundStyle(theme.primaryText)
-                                .monospacedDigit()
-                            Text(L10n.text("已检查的应用", "Applications Checked"))
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(theme.secondaryText)
-                        }
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(L10n.text("已检查的应用", "Applications Checked"))
-                        .accessibilityValue("\(summary.scannedCount)")
-
-                        LazyVGrid(
-                            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
-                            spacing: 10
-                        ) {
-                            AppUpdateSummaryMetric(
-                                title: L10n.text("可直接更新", "Automatic"),
-                                value: summary.automaticCount,
-                                systemImage: "arrow.down.circle.fill",
-                                color: theme.accent
-                            )
-                            AppUpdateSummaryMetric(
-                                title: L10n.text("退出后更新", "Quit First"),
-                                value: summary.requiresQuitCount,
-                                systemImage: "power.circle.fill",
-                                color: .indigo
-                            )
-                            AppUpdateSummaryMetric(
-                                title: L10n.text("需要授权", "Authorization"),
-                                value: summary.requiresAuthorizationCount,
-                                systemImage: "lock.shield.fill",
-                                color: AppDesignTokens.Palette.warning
-                            )
-                            AppUpdateSummaryMetric(
-                                title: L10n.text("需手动处理", "Manual"),
-                                value: summary.manualCount,
-                                systemImage: "hand.raised.fill",
-                                color: .orange
-                            )
-                            AppUpdateSummaryMetric(
-                                title: L10n.text("已是最新", "Current"),
-                                value: summary.currentCount,
-                                systemImage: "checkmark.shield.fill",
-                                color: AppDesignTokens.Palette.success
-                            )
-                            AppUpdateSummaryMetric(
-                                title: L10n.text("状态未知", "Unknown"),
-                                value: summary.unknownCount,
-                                systemImage: "questionmark.circle.fill",
-                                color: .secondary
-                            )
-                        }
-
-                        if summary.systemManagedCount > 0 {
-                            Label(
-                                L10n.text(
-                                    "另有 \(summary.systemManagedCount) 个应用由 macOS 或 App Store 管理；已计入检查总数，不会加入应用内批量更新。",
-                                    "Another \(summary.systemManagedCount) apps are managed by macOS or the App Store. They are included in the checked total and excluded from in-app batch updates."
-                                ),
-                                systemImage: "apple.logo"
-                            )
-                            .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(theme.secondaryText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-
-                        switch summary.completionState {
-                        case .updatesAvailable:
-                            EmptyView()
-                        case .allCurrent:
-                            AppUpdateActionNotice(
-                                title: L10n.text("所有应用都是最新版本", "All Apps Are Up to Date"),
-                                detail: L10n.text(
-                                    "本次扫描没有发现可用更新，也没有需要手动确认或版本状态未知的应用。",
-                                    "This scan found no available updates and no applications requiring manual review or with an unknown version state."
-                                ),
-                                systemImage: "checkmark.seal.fill"
-                            )
-                        case .noConfirmedUpdates:
-                            AppUpdateActionNotice(
-                                title: L10n.text("未发现可确认更新", "No Confirmed Updates Found"),
-                                detail: L10n.text(
-                                    "仍有应用需要手动检查、来源待确认或最新版本未知。",
-                                    "Some applications still require manual checks, source confirmation, or have an unknown latest version."
-                                ),
-                                systemImage: "questionmark.circle"
-                            )
-                        }
-
-                        if !warnings.isEmpty {
-                            AppUpdateWarningsView(warnings: warnings)
-                        }
-
-                        HStack(spacing: 10) {
-                            AppButton(
-                                title: L10n.text("管理更新", "Manage Updates"),
-                                systemImage: "list.bullet.rectangle",
-                                kind: .secondary,
-                                tint: theme.accent,
-                                action: onManage
-                            )
-                            if !summary.batchEligibleApps.isEmpty {
-                                AppButton(
-                                    title: L10n.text(
-                                        "一键更新全部 · \(summary.batchEligibleApps.count) 个",
-                                        "Update All · \(summary.batchEligibleApps.count)"
-                                    ),
-                                    systemImage: "arrow.down.circle.fill",
-                                    kind: .primary,
-                                    tint: theme.accent,
-                                    isDisabled: !canUpdate,
-                                    help: L10n.text(
-                                        "只包含可立即更新，以及可正常退出后更新的项目；需要授权的项目不会加入",
-                                        "Includes only items that can update now or after a normal quit; authorization-required items are excluded"
-                                    ),
-                                    action: onUpdateAll
-                                )
-                            }
-                        }
+        let presentation = AppUpdateLightfieldPresentation(summary: summary)
+        FeatureLightfieldPage(module: .updater, phase: .result, title: ReviewFilter.updater.sidebarTitle,
+            status: L10n.text("已检查 \(summary.scannedCount) 个应用 · \(presentation.entries.count) 个有更新",
+                "Checked \(summary.scannedCount) applications · \(presentation.entries.count) updates"),
+            safety: AppUpdateBatchPresentation(applications: summary.applications).detail,
+            actionTitle: AppUpdateBatchPresentation(applications: summary.applications).title,
+            actionEnabled: canManage && AppUpdateBatchPresentation(applications: summary.applications).count > 0,
+            action: onUpdateAll) {
+            FeatureLightfieldResults(module: .updater, label: L10n.text("已检查的应用", "Applications Checked"),
+                value: Double(summary.scannedCount), unit: L10n.text("个已检查", "checked"), metrics: presentation.metrics) {
+                LightfieldApplicationListHeader(kind: .updater)
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(presentation.entries.enumerated()), id: \.element.id) { index, entry in
+                        AppUpdateLightfieldRow(entry: entry, index: index, onReview: onManage)
+                            .disabled(!canManage)
                     }
-                    .padding(26)
-                    .frame(maxWidth: .infinity)
-                    .frame(maxWidth: .infinity, minHeight: 440)
                 }
+                if presentation.entries.isEmpty {
+                    Text(presentation.emptyMessage).font(.system(size: 15))
+                        .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 16)
+                }
+                if summary.systemManagedCount > 0 {
+                    Button(L10n.text("随 macOS 更新 · 打开软件更新", "Updated with macOS · Open Software Update")) {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension") { NSWorkspace.shared.open(url) }
+                    }.buttonStyle(FeatureLightfieldRowButtonStyle())
+                    Text(L10n.text("另有 \(summary.systemManagedCount) 个应用由系统管理，计入检查总数，不加入应用内批量更新",
+                        "Another \(summary.systemManagedCount) system-managed apps are counted in the checked total and excluded from in-app batch updates"))
+                        .font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg3)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
+                }
+                if summary.applications.contains(where: { $0.updateProvider == .macAppStore }) {
+                    Button(L10n.text("打开 App Store 更新", "Open App Store Updates")) { AppUpdateService.openAppStoreUpdates() }
+                        .buttonStyle(FeatureLightfieldRowButtonStyle())
+                }
+                ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in
+                    HStack(alignment: .top, spacing: 12) {
+                        LightfieldStatusGlyph(status: .warning)
+                        Text(warning).font(.system(size: 13)).textSelection(.enabled)
+                    }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).warningColor)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
+                }
+                HStack(spacing: 20) {
+                    Button(L10n.text("重新检查", "Check Again"), action: onRescan).disabled(!canRescan)
+                    Button(L10n.text("管理更新", "Manage Updates"), action: onManage).disabled(!canManage)
+                    if let onOwnUpdate { Button(L10n.text("本软件更新…", "This App’s Updates…"), action: onOwnUpdate) }
+                }.font(.system(size: 13)).buttonStyle(FeatureLightfieldRowButtonStyle())
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 10)
+                    .lightfieldComponentProbe("lightfield.updater.toolbar")
             }
-            .frame(maxHeight: .infinity)
         }
-        .padding(.horizontal, AppDesignTokens.Layout.pagePadding)
-        .padding(.top, AppDesignTokens.Spacing.compact)
-        .padding(.bottom, AppDesignTokens.Layout.pagePadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    }
-}
-
-private struct AppUpdateSummaryMetric: View {
-    let title: String
-    let value: Int
-    let systemImage: String
-    let color: Color
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.system(size: 21, weight: .semibold))
-                .foregroundStyle(color)
-                .accessibilityHidden(true)
-            Text(value, format: .number)
-                .font(.system(size: 25, weight: .bold, design: .rounded))
-                .monospacedDigit()
-            Text(title)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.vertical, 16)
-        .frame(maxWidth: .infinity)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title)
-        .accessibilityValue("\(value)")
     }
 }
 
@@ -865,7 +749,7 @@ private enum AppUpdateCatalogSort: String, CaseIterable, Identifiable {
 private struct AppUpdateManagerPage: View {
     @Environment(\.moduleTheme) private var theme
     @Environment(\.windowLayoutMetrics) private var layout
-    @State private var selectedAutomaticApplicationIDs = Set<String>()
+    @State private var selectedUpdateApplicationIDs = Set<String>()
     @State private var showsCompactDetails = false
 
     let snapshot: AppUpdateCatalogSnapshot
@@ -881,6 +765,7 @@ private struct AppUpdateManagerPage: View {
     let onAutomaticUpdate: (InstalledApplication) -> Void
     let onAppStoreUpdate: (InstalledApplication) -> Void
     let onOpenUpdateEntry: (InstalledApplication) -> Void
+    let onRecheckExternalUpdate: (InstalledApplication) -> Void
 
     var body: some View {
         ManagementListPage(
@@ -899,16 +784,7 @@ private struct AppUpdateManagerPage: View {
                 isDisabled: !canRunActions,
                 action: onRescan
             )
-            GlassToolbarButton(
-                title: L10n.text(
-                    "更新所选 · \(selectedAutomaticApplicationIDs.count) 个",
-                    "Update Selected · \(selectedAutomaticApplicationIDs.count)"
-                ),
-                systemImage: "arrow.down.circle",
-                isDisabled: !canRunActions || selectedAutomaticApplicationIDs.isEmpty
-            ) {
-                onUpdateAutomatic(selectedAutomaticApplicationIDs)
-            }
+
         } controls: {
             catalogControls
         } content: {
@@ -918,10 +794,10 @@ private struct AppUpdateManagerPage: View {
             normalizeSelection(visibleEntries.map(\.id))
         }
         .onChange(of: snapshot.sessionID) { _, _ in
-            selectedAutomaticApplicationIDs.formIntersection(automaticApplicationIDs)
+            selectedUpdateApplicationIDs.formIntersection(eligibleApplicationIDs)
         }
-        .onChange(of: automaticApplicationIDs) { _, eligibleIDs in
-            selectedAutomaticApplicationIDs.formIntersection(eligibleIDs)
+        .onChange(of: eligibleApplicationIDs) { _, eligibleIDs in
+            selectedUpdateApplicationIDs.formIntersection(eligibleIDs)
         }
         .onChange(of: visibleEntries.map(\.id)) { _, ids in
             normalizeSelection(ids)
@@ -946,29 +822,19 @@ private struct AppUpdateManagerPage: View {
     private var catalogWorkspace: some View {
         VStack(spacing: 0) {
             catalogColumns
-            Divider()
+            AppSeparator()
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.text(
-                    "显示 \(visibleEntries.count) / \(snapshot.entries.count) 个应用；已选 \(selectedAutomaticApplicationIDs.count) 个，其中筛选外 \(selectedAutomaticApplicationIDs.subtracting(visibleAutomaticApplicationIDs).count) 个",
-                    "Showing \(visibleEntries.count) of \(snapshot.entries.count) apps; \(selectedAutomaticApplicationIDs.count) selected, including \(selectedAutomaticApplicationIDs.subtracting(visibleAutomaticApplicationIDs).count) outside this filter"
+                    "显示 \(visibleEntries.count) / \(snapshot.entries.count) 个应用；已选 \(selectedUpdateApplicationIDs.count) 个，其中筛选外 \(selectedUpdateApplicationIDs.subtracting(visibleEligibleApplicationIDs).count) 个",
+                    "Showing \(visibleEntries.count) of \(snapshot.entries.count) apps; \(selectedUpdateApplicationIDs.count) selected, including \(selectedUpdateApplicationIDs.subtracting(visibleEligibleApplicationIDs).count) outside this filter"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
                 .foregroundStyle(.secondary)
-                HStack {
-                    Button(L10n.text("选择当前可更新项", "Select Visible Updates")) {
-                        selectedAutomaticApplicationIDs.formUnion(visibleAutomaticApplicationIDs)
-                    }
-                    .disabled(visibleAutomaticApplicationIDs.isEmpty)
-                    Button(L10n.text("选择全部可更新项", "Select All Updates")) {
-                        selectedAutomaticApplicationIDs = automaticApplicationIDs
-                    }
-                    .disabled(automaticApplicationIDs.isEmpty)
-                    Button(L10n.text("清空选择", "Clear Selection")) {
-                        selectedAutomaticApplicationIDs.removeAll()
-                    }
-                    .disabled(selectedAutomaticApplicationIDs.isEmpty)
-                    Spacer(minLength: 0)
+                ViewThatFits(in: .horizontal) {
+                    HStack { selectionActions }
+                    VStack(alignment: .leading, spacing: 8) { selectionActions }
                 }
+
             }
             .padding(10)
             .fixedSize(horizontal: false, vertical: true)
@@ -978,29 +844,49 @@ private struct AppUpdateManagerPage: View {
         }
     }
 
+    @ViewBuilder private var selectionActions: some View {
+        Menu(L10n.text("选择", "Select")) {
+            Button(L10n.text("选择当前可更新项", "Select Visible Updates")) {
+                selectedUpdateApplicationIDs.formUnion(visibleEligibleApplicationIDs)
+            }.disabled(visibleEligibleApplicationIDs.isEmpty)
+            Button(L10n.text("选择全部可更新项", "Select All Updates")) {
+                selectedUpdateApplicationIDs = eligibleApplicationIDs
+            }.disabled(eligibleApplicationIDs.isEmpty)
+            Button(L10n.text("清空选择", "Clear Selection")) {
+                selectedUpdateApplicationIDs.removeAll()
+            }.disabled(selectedUpdateApplicationIDs.isEmpty)
+        }.menuStyle(.borderlessButton)
+        Button(L10n.text("更新所选 · \(selectedUpdateApplicationIDs.count)", "Update Selected · \(selectedUpdateApplicationIDs.count)")) {
+            onUpdateAutomatic(selectedUpdateApplicationIDs)
+        }.appButtonChrome(.primary)
+            .disabled(!canRunActions || selectedUpdateApplicationIDs.isEmpty)
+    }
+
     @ViewBuilder
     private var catalogColumns: some View {
-        if layout.density == .compact {
-            VStack(spacing: 0) {
-                catalogList
-                    .frame(minHeight: 0, maxHeight: .infinity)
-                Divider()
-                HStack {
-                    Button(L10n.text("查看所选应用详情", "Show Selected Application Details")) {
-                        showsCompactDetails = true
+        GeometryReader { viewport in
+            if viewport.size.width < 660 {
+                VStack(spacing: 0) {
+                    catalogList
+                        .frame(minHeight: 0, maxHeight: .infinity)
+                    AppSeparator()
+                    HStack {
+                        Button(L10n.text("查看所选应用详情", "Show Selected Application Details")) {
+                            showsCompactDetails = true
+                        }
+                        .disabled(selectedEntry == nil)
+                        Spacer(minLength: 0)
                     }
-                    .disabled(selectedEntry == nil)
-                    Spacer(minLength: 0)
+                    .padding(10)
                 }
-                .padding(10)
-            }
-        } else {
-            HStack(spacing: 0) {
-                catalogList
-                    .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
-                Divider()
-                detail
-                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            } else {
+                HStack(spacing: 0) {
+                    catalogList
+                        .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
+                    AppSeparator(vertical: true)
+                    detail
+                        .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
             }
         }
     }
@@ -1054,12 +940,12 @@ private struct AppUpdateManagerPage: View {
         }
     }
 
-    private var automaticApplicationIDs: Set<String> {
-        Set(snapshot.entries.filter(\.canJoinAutomaticUpdateBatch).map(\.id))
+    private var eligibleApplicationIDs: Set<String> {
+        Set(snapshot.entries.filter(\.canJoinSelectedUpdateBatch).map(\.id))
     }
 
-    private var visibleAutomaticApplicationIDs: Set<String> {
-        Set(visibleEntries.filter(\.canJoinAutomaticUpdateBatch).map(\.id))
+    private var visibleEligibleApplicationIDs: Set<String> {
+        Set(visibleEntries.filter(\.canJoinSelectedUpdateBatch).map(\.id))
     }
 
     private var subtitle: String {
@@ -1108,13 +994,13 @@ private struct AppUpdateManagerPage: View {
                         canRunActions: canRunActions,
                         onOpenManualUpdate: { onOpenUpdateEntry(entry.application) },
                         isSelectedForAutomaticUpdate: Binding(
-                            get: { selectedAutomaticApplicationIDs.contains(entry.id) },
+                            get: { selectedUpdateApplicationIDs.contains(entry.id) },
                             set: { isSelected in
-                                guard entry.canJoinAutomaticUpdateBatch else { return }
+                                guard entry.canJoinSelectedUpdateBatch else { return }
                                 if isSelected {
-                                    selectedAutomaticApplicationIDs.insert(entry.id)
+                                    selectedUpdateApplicationIDs.insert(entry.id)
                                 } else {
-                                    selectedAutomaticApplicationIDs.remove(entry.id)
+                                    selectedUpdateApplicationIDs.remove(entry.id)
                                 }
                             }
                         )
@@ -1137,7 +1023,8 @@ private struct AppUpdateManagerPage: View {
                 canRunActions: canRunActions,
                 onAutomaticUpdate: onAutomaticUpdate,
                 onAppStoreUpdate: onAppStoreUpdate,
-                onOpenUpdateEntry: onOpenUpdateEntry
+                onOpenUpdateEntry: onOpenUpdateEntry,
+                onRecheckExternalUpdate: onRecheckExternalUpdate
             )
         } else {
             ContentUnavailableView(
@@ -1191,7 +1078,7 @@ private struct AppUpdateCatalogRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            if entry.canJoinAutomaticUpdateBatch {
+            if entry.canJoinSelectedUpdateBatch {
                 Toggle(
                     L10n.text(
                         "选择 \(entry.application.name) 加入安全更新批次",
@@ -1316,6 +1203,7 @@ private struct AppUpdateCatalogDetail: View {
     let onAutomaticUpdate: (InstalledApplication) -> Void
     let onAppStoreUpdate: (InstalledApplication) -> Void
     let onOpenUpdateEntry: (InstalledApplication) -> Void
+    let onRecheckExternalUpdate: (InstalledApplication) -> Void
 
     var body: some View {
         ScrollView {
@@ -1388,6 +1276,22 @@ private struct AppUpdateCatalogDetail: View {
 
                 advancedHomebrewDetails
                 actionArea
+                if [.appStore, .inApplication, .website, .manual].contains(entry.category),
+                   entry.isUpdateAvailable {
+                    AppButton(
+                        title: L10n.text("复查已安装版本", "Recheck Installed Version"),
+                        systemImage: "checkmark.shield",
+                        kind: .secondary,
+                        tint: theme.accent,
+                        isDisabled: !canRunActions,
+                        help: L10n.text(
+                            "仅在原路径、Bundle ID、签名身份和目标版本均核对成功后才标记完成",
+                            "Completion requires the original path, bundle ID, signing identity and target version to match"
+                        )
+                    ) {
+                        onRecheckExternalUpdate(app)
+                    }
+                }
             }
             .padding(20)
             .frame(maxWidth: 650, alignment: .leading)
@@ -1978,6 +1882,7 @@ private struct AppUpdateReportPage: View {
                                 value: report.cancelledCount,
                                 color: .secondary
                             )
+                            AppUpdateReportCount(title: L10n.text("跳过", "Skipped"), value: report.skippedCount, color: .secondary)
                             Spacer(minLength: 0)
                         }
                         .padding(.horizontal, AppDesignTokens.Layout.sectionPadding)
@@ -2152,7 +2057,7 @@ private struct AppUpdateReportItemRow: View {
                     .foregroundStyle(item.state.color)
                 if item.canRetry {
                     AppButton(
-                        title: L10n.text("重试", "Retry"),
+                        title: L10n.text("重试（新批次，需再次授权）", "Retry (new batch; reauthorize)"),
                         systemImage: "arrow.clockwise",
                         kind: .smallUtility,
                         controlSize: .small,
@@ -2700,7 +2605,7 @@ private extension AppUpdateReportOutcome {
         case .allSucceeded:
             L10n.text("已核验安装版本。", "Installed versions verified.")
         case .partialSuccess:
-            L10n.text("可重试失败项目。", "Retry failed items.")
+            L10n.text("重试会建立新批次，需要再次管理员授权。", "Retry creates a new batch and requires administrator authorization again.")
         case .allFailed:
             L10n.text("请重试失败项目或查看日志。", "Retry failed items or view the log.")
         case .cancelled:

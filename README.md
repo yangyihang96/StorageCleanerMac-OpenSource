@@ -1,14 +1,14 @@
 # 存储清理助手 / Storage Cleaner Mac
 
-**当前版本 / Current version:** `1.10.1`
+**当前版本 / Current version:** `2.0.0`
 
-[下载与更新说明 / Downloads and update notes](https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v1.10.1) · [源码发布 / Source release](https://github.com/yangyihang96/StorageCleanerMac-OpenSource/releases/tag/v1.10.1)
+[下载与更新说明 / Downloads and update notes](https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v2.0.0) · [源码发布 / Source release](https://github.com/yangyihang96/StorageCleanerMac-OpenSource/releases/tag/v2.0.0)
 
-正式版使用原有 `appcast.xml`，测试版使用独立的 `appcast-beta.xml`；均通过 Sparkle 验证更新包签名。旧正式版可在“工具 → 检查存储清理助手更新”获取 1.10.1。此前关闭更新器的测试版需要先手动替换为本次测试版，以后可在应用内检查更新。两个通道保持不同应用标识，不互相覆盖。
+正式版通过原有的 `appcast.xml` 更新，测试版使用独立的 `appcast-beta.xml`，两者都用 Sparkle 校验更新包签名。旧正式版可以在“工具 → 检查存储清理助手更新”里升级到 2.0.0。两个通道的应用标识不同，不会互相覆盖。
 
-下载包适用于 Apple silicon、macOS 14 或更高版本。目前仍为 Apple Development 签名，尚未 Developer ID 公证，其他 Mac 可能阻止打开；应用内更新签名通过不等于 Gatekeeper 发行批准。
+下载包适用于 Apple Silicon、macOS 14 或更新版本。目前使用 Apple Development 签名，没有经过 Developer ID 公证，其他 Mac 可能会阻止打开；应用内更新的签名校验通过，不等于 Gatekeeper 已批准发行。
 
-Production retains `appcast.xml`; Beta uses a separate `appcast-beta.xml`. Both use Sparkle archive-signature verification. Earlier local-only betas need one manual replacement to enable in-app updates. The two bundle identities stay separate. Downloads require Apple silicon and macOS 14+. Builds use Apple Development signing and are not Developer ID notarized; other Macs may block them.
+Production uses `appcast.xml`; Beta uses a separate `appcast-beta.xml`. Both use Sparkle archive-signature verification, and existing production installs can update to 2.0.0 from Tools → Check for Updates. Downloads require Apple silicon and macOS 14+. Builds use Apple Development signing and are not Developer ID notarized; other Macs may block them.
 
 存储清理助手是一款原生 macOS SwiftUI 应用，用来把本机磁盘占用、可自动清理、大文件、重复文件、应用残留、启动项、程序升级和内存状态放到一个可复核的界面里。它强调“先看清楚，再决定处理”，扫描阶段保持只读，清理动作需要用户明确确认，并优先移到废纸篓。
 
@@ -125,51 +125,27 @@ Storage Cleaner Mac is a native macOS SwiftUI app that brings storage usage, aut
 
 ## 当前能力 / Features
 
-- 智能体检：扫描前只保留中央体检入口和上次结果摘要；扫描完成后显示可自动清理、开发缓存、大文件和重复文件四个任务磁贴，并保留预览、废纸篓确认和单独复核边界。
-- 首次权限检查：首次启动时自动读取关键位置权限；完成后主界面不再常驻权限卡片，可从“工具”菜单手动检查。
-- 一次授权文件夹：首次打开可选择常用文件夹并保存 macOS 安全授权，之后启动会自动恢复，避免反复授权。
-- 完整磁盘访问覆盖：检测到完整磁盘访问已生效后，不再要求重复授权文件夹。
-- 合并清理入口：主导航只保留“清理”和“文件整理”两个入口；前者在可自动清理/开发缓存间切换，后者在大文件/重复文件间切换。废纸篓复核、最近清理批次和风险分级仍整合在可自动清理页。
-- 系统健康：用户手动刷新时检查磁盘介质、容量趋势、Time Machine、近期崩溃、电池健康和电源状态；网络测速必须再次确认后才运行，结果会标明接口和测试时间。
-- 全球性能榜：在当前 V7 性能测试页查看所有主动参与且通过同一官方协议资格校验的 Mac，显示排名、电脑机型、芯片、内存、总分和测试日期。查看榜单不上传本机数据；只有用户明确确认后才发布最佳合格成绩。公开名称来自随机安装标识，不读取电脑名称；服务端按冻结指标重新计算总分，公开成绩可单独删除，本地历史保持不变。
-- 图形与媒体加速实验套件：独立测量 Metal 3D、硬件光追、GPU FP16 矩阵计算和 H.264 硬件编解码；固定模型由程序内生成，只显示原始中位数/CV/硬件状态，不改 v6 综合分或公共榜单。
-- 隐私痕迹复核：在安全清理页按需扫描浏览器历史，默认遮罩域名；“可能敏感站点”分析默认关闭且只对本次扫描生效。清理仅引导到浏览器原生历史、下载或网站数据界面。
-- 精简工具入口：菜单栏“工具”只保留“检查权限”和“检测更新”；开机程序、内存、卸载、程序升级和能耗统计合并到侧边栏“工具箱”，工具箱可展开为五个直接子入口，重复文件扫描保留在“重复文件”页内。
-- 大文件：按文件夹、开发目录、视频、图片、安装包、压缩包、文稿等类型拆分。
-- 重复文件：定位疑似重复项，要求用户在 Finder 中复核，不自动删除。
-- 卸载程序：列出应用本体、版本、开发者、相关残留和建议；卸载前有确认，残留只处理安全的用户 Library 路径。
-- 登录项与后台任务：合并展示 Open at Login、现代后台项、用户/全局 LaunchAgent、LaunchDaemon 和已注册的应用内辅助组件；分开注册、授权、启用、载入和运行状态。只有归属可验证的当前用户 LaunchAgent 可直接管理；Apple、MDM、系统级和低置信项保持只读或转到系统设置。
-- 菜单栏小窗：常驻横条直接显示 CPU、GPU、内存、芯片温度、风扇和双行网络上下行。统一 Panel 可切换“简单 / 复杂 / 极客”：简单模式为约 360 × 300 点的“系统 / 清理”双标签，复杂模式为约 430 × 560 点的八模块日常监控，极客模式为约 720 × 620 点的同框高密度视图。三种模式共用标题、暂停/继续、刷新、更多菜单、设置、八模块选择和同一 App 级采样状态；均支持 1/2/5 秒刷新频率与等宽数字，应用耗电保持手动按需测量。
-- 能耗统计：按当前仍运行的应用汇总开机以来的归因电量，显示累计电量、当前功率、平均功率与实测覆盖；同一应用的多个进程合并，页面每 6 秒自动刷新，并可直接切换到应用或在 Finder 中显示。
-- 开发工具与产物：扫描 Codex、Claude Code 与 OpenClaw 的精确 cache/tmp 白名单、Xcode DerivedData、包管理器缓存和常见项目中间文件；只有可再生成内容进入绿色清理，日志与运行记录只供复核，配置、凭据、会话、workspace、skills、plugins 数据、用户成果、发布目录和 .app 包不会被当作缓存处理。
-- 应用更新：扫描标准应用目录、Spotlight 可发现位置和 Homebrew Formula/Cask，并按系统、App Store、Homebrew、Sparkle、经签名的官方来源与手动来源统一展示。“更新全部”只执行当前能安全验证的项目；App Store、官网和应用内流程会明确保留用户确认边界。
-- 自身更新：Sparkle 从公开签名 feed 自动检查并下载更新，校验通过后安全替换并重启；菜单栏也提供“检测更新”入口。
-- 内存优化：展示内存压力、文件缓存和应用占用列表；正常压力下不会强制 purge 或强杀进程。
-- 中文/英文界面：应用语言可跟随系统，也可以固定简体中文或英文。
-- 外观跟随系统：支持浅色、深色和跟随系统。
+以下概览按 2.0.0 测试版的侧栏组织，已支持范围以 2026-10-07 实机结果为准。操作步骤、安全边界、逐项依据和待验证状态见 [功能详情](docs/FEATURES.md)；修复已合并不代表已安装或复测通过。
 
-- Smart Care keeps one central scan action and a compact previous-result strip before scanning, then presents Auto Clean, Developer Cache, Large Files, and Duplicates as four actionable result tiles while retaining preview, Trash confirmation, and separate review boundaries.
-- First-launch permission check: the app reads key access states on the first launch, then removes the persistent permission card from the main UI; manual checks remain available from the Tools menu.
-- One-time folder access: choose common folders on first launch and save macOS security-scoped access so later launches can restore it automatically.
-- Full Disk Access coverage: once Full Disk Access is detected as active, folders no longer ask for duplicate authorization.
-- Consolidated cleanup navigation: the sidebar now keeps only Cleanup and File Review. Cleanup switches between Auto Clean and Developer Cache, while File Review switches between Large Files and Duplicates. Trash review, recent cleanup batches, browser cache/trace items, and risk tiers remain integrated into Auto Clean.
-- System Health checks disk media, capacity trends, Time Machine, recent crashes, battery health, and power state only after a manual refresh. Network quality requires a separate confirmation and reports the tested interface and time.
-- The Global Benchmark lists participating Macs that passed the same current V7 eligibility contract, including rank, Mac model, chip, rounded memory, overall score, and benchmark date. Viewing is read-only; publishing the best eligible result requires explicit confirmation. The public label is derived from a random installation ID rather than the computer name, the service recomputes the score, and removing a public entry never deletes local history.
-- The separate Graphics & Media Acceleration suite measures Metal 3D, fixed-function hardware ray tracing, GPU FP16 matrix compute, and hardware H.264 encode/decode. Its deterministic models are generated in memory and it reports only raw medians, CV, and hardware status without changing the v6 composite or public leaderboard.
-- Privacy trace review scans browser history on demand, masks domains by default, and keeps possible-sensitive-site analysis off unless enabled for that scan. Cleanup only guides the user to browser-native history, downloads, or website-data controls.
-- Simplified toolbox entry: the menu bar keeps only Check Permissions and Check for Updates. Startup, memory, energy, uninstall, and app-update tools are merged into the sidebar Toolbox, which can expand into five direct child shortcuts while duplicate scanning stays inside the Duplicates page.
-- Large-file review grouped by folders, development directories, video, images, installers, archives, documents, and more.
-- Duplicate-file review that locates candidates without deleting them automatically.
-- Uninstaller view with app size, version, developer, related leftovers, and review recommendations.
-- Login items and background tasks combine Open at Login, modern background records, user/global LaunchAgents, LaunchDaemons, and registered embedded helpers. Registration, authorization, enablement, load, and process state remain separate; only attributable current-user LaunchAgents are directly manageable, while Apple, MDM, system-level, and low-confidence items stay read-only or open System Settings.
-- The always-visible menu-bar strip shows CPU, GPU, memory, chip temperature, fan speed, and two-line upload/download values. One unified Panel switches among Simple (360 × 300 Cleanup/System), Complex (430 × 560 eight-module monitoring), and Geek (720 × 620 high-density monitoring). All three share one header, pause/resume and refresh controls, More menu, settings surface, module selection, and app-scoped sampler; 1/2/5-second refresh choices and aligned monospaced values remain, while app energy stays manual and on demand.
-- Energy statistics aggregate attributed energy for currently running apps since boot, with cumulative energy, current power, average power, and measured coverage. Processes from the same app are merged, the page refreshes every six seconds, and each row can activate or reveal the app.
-- Developer-tool review covers exact cache/tmp allowlists for Codex, Claude Code, and OpenClaw, plus Xcode DerivedData, package-manager caches, and common project intermediates. Only regenerable content enters safe cleanup; logs and runtime records remain review-only, while configuration, credentials, sessions, workspaces, skills, persistent plugin data, user output, release folders, and app bundles are excluded.
-- Application Updates scans standard app locations, Spotlight-discoverable bundles, and Homebrew Formulae/Casks, then presents system, App Store, Homebrew, Sparkle, signed official-source, and manual providers in one inventory. Update All executes only currently verifiable automatic items; App Store, website, and in-app workflows preserve their required user-confirmation boundaries.
-- Signed Sparkle self-updates from a public feed, including download verification, safe replacement, relaunch, and a manual Check for Updates command.
-- Toolbox Memory tab with pressure, file cache, and process footprint, avoiding unsafe force-kill behavior.
-- Chinese and English UI, with optional system language following.
-- Light, dark, and system appearance modes.
+- **智能扫描：**按风险分组审阅清理项目；测试文件的清理与“操作记录”恢复已通过。新版默认选择和完成页行为仍待实机复测。
+- **清理：**安全清理与开发工具与产物共用扫描、审阅和回执流程，实测列出的分组可选。清空废纸篓未实测，且属于不可恢复的永久删除。
+- **保护：**系统健康的只读检查与评分已通过；浏览器隐私已验证 Safari、Chrome 历史显示。应用内删除和历史恢复仍为测试版待验证。
+- **性能：**已验证性能测试启动与取消、登录项读取、内存显示与选择，以及能耗测量流程。完整性能测试、登录项管理、内存退出确认和能耗汇总仍保留未测或待复测限制。
+- **应用：**测试应用卸载及恢复、应用更新检查已通过。真实应用卸载、授权与更新安装未在本轮验证。
+- **文件：**文件分析的下钻、搜索与分栏，以及文件搬家的复制校验已通过。文件分析移动、搬家原件恢复、重复文件和相似照片仍为测试版待实机验证。
+- **菜单栏小窗：**已操作六个模块的详情、历史和时间档切换，目前只有一种可用布局。新增读数、缺值修复及硬件写入仍有待验证项，充电控制有已知问题。
+- **设置：**七个分区可打开，小窗草稿取消能恢复原值。设置保存、权限恢复及扫描提醒修复未在本轮逐项验证。
+
+This overview follows the 2.0.0 beta sidebar. Supported scope reflects live results available on October 7, 2026. See [Feature Details](docs/FEATURES.md) for usage, safety boundaries, evidence, and pending validation; a merged fix does not establish installation or a passing live retest.
+
+- **Smart Scan:** groups cleanup candidates by risk; test-file cleanup and Operation History recovery passed. Revised default selection and completion behavior await live retesting.
+- **CLEANUP:** Safe Cleanup and Dev Tools & Artifacts share scanning, review, and receipts; listed groups were selectable in the live test. Empty Trash was not tested and permanently deletes items without recovery.
+- **PROTECTION:** read-only System Health checks and scoring passed; Browser Privacy verified Safari and Chrome history presentation. In-app deletion and history recovery remain Beta pending validation.
+- **PERFORMANCE:** test start/cancel, login-item reading, memory display/selection, and energy measurement were exercised. Full performance runs, login-item management, memory quit confirmation, and energy summaries retain untested or retest limits.
+- **APPLICATIONS:** test-app uninstall/recovery and update checking passed. Real-app removal, authorization, and update installation were not validated this round.
+- **FILES:** File Analysis drill-down, search, and columns, plus File Migration copy verification, passed. File Analysis moves, migration-original recovery, Duplicates, and Similar Photos remain Beta awaiting live validation.
+- **Menu-Bar Panel:** six-module details, history, and range switching were exercised; only one layout is available. Added readings, missing-value fixes, and hardware writes retain validation gaps, with known charging-control issues.
+- **Settings:** all seven sections opened and cancelling a mini-window draft restored its prior value. Saves, grant restoration, and the scan-reminder fix were not individually validated this round.
 
 ## 安全边界 / Safety Boundary
 
@@ -209,11 +185,15 @@ Storage Cleaner Mac is a native macOS SwiftUI app that brings storage usage, aut
 
 ## 发布状态 / Release Status
 
+`2.0.0` 是全新的主窗口和功能版本：智能扫描的每一项都可以勾选、可以恢复，新增项目产物清理，浏览器隐私按页面列出记录，新增 iCloud 释放本地副本，菜单栏小窗打开更快。完整改动见 [更新日志](CHANGELOG.md)。门禁结果、发布包、Sparkle 实测升级和已知问题见 [发行记录](docs/RELEASE_VALIDATION_2.0.0.md)。正式版使用 Apple Development 签名，没有经过公证；访达右键卸载和系统照片图库只在测试版提供。
+
 `1.10.1` 包含浅色界面、小窗响应与后台开销优化、安全回执、M 系列 Core18 草案及独立通道的应用内更新。完整改动见 [更新日志](CHANGELOG.md)，本次更新链路、签名和发布状态见 [发行记录](docs/RELEASE_VALIDATION_1.10.1.md)。按用户要求，本次未运行测试套件，也未运行 GitHub Actions。此前 [初次 Beta 验证记录](docs/RELEASE_VALIDATION_1.10.1-beta.md) 只描述其原始构建，不能视为本次更新改动的测试结果。
 
 Core18 尚无生产参考，只显示原始结果；未完成扩展、其他硬件验证、端到端性能预算和原 49 项视觉验收仍独立保留，不因发布而标记通过。
 
-See the [changelog](CHANGELOG.md) and [release record](docs/RELEASE_VALIDATION_1.10.1.md). Test suites were not run for this update at the user's request; GitHub Actions was not used. Earlier beta results describe only that earlier build. Core18 remains raw-only without a production reference, and pending hardware, performance and visual acceptance remains open.
+2.0.0: see the [changelog](CHANGELOG.md) and [release record](docs/RELEASE_VALIDATION_2.0.0.md) for the local test gate, packaging, the real Sparkle upgrade from 1.10.1, and known issues (benchmark history above 1 MiB cannot save new results; one menu-bar performance test is flaky under heavy load). Finder uninstall and Photos library access remain Beta-only.
+
+1.10.1: see the [changelog](CHANGELOG.md) and [release record](docs/RELEASE_VALIDATION_1.10.1.md). Test suites were not run for this update at the user's request; GitHub Actions was not used. Earlier beta results describe only that earlier build. Core18 remains raw-only without a production reference, and pending hardware, performance and visual acceptance remains open.
 
 本机测试包：
 

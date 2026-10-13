@@ -11,9 +11,9 @@ final class FanCurveEditorInteractionTests: XCTestCase {
 
     #if DEBUG || STORAGE_CLEANER_BETA
     func testDefaultCurveFixtureRemainsDraftAndTemperatureFollowsSelectedSourceWithoutSampling() throws {
-        let suite = "FanCurveEditorInteractionTests.FixtureDraft.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let profile = MiniWindowDemoData.hardwareControlProfile(for: .curveDefault)
         let snapshot = SystemMonitorSnapshot(generatedAt: Date(), metrics: [], networkThroughput: nil,
             fanReadings: profile.fanReadings,
@@ -231,9 +231,9 @@ final class FanCurveEditorInteractionTests: XCTestCase {
     }
 
     func testDragDoesNotTouchStorePersistenceUntilExplicitCommit() throws {
-        let suite = "FanCurveEditorInteractionTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let store = FanCurveStore(defaults: defaults)
         let original = store.draftProfile
         let originalDefaultKeys = Set(defaults.dictionaryRepresentation().keys)

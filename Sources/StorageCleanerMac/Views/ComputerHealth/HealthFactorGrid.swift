@@ -4,37 +4,10 @@ struct HealthFactorGrid: View {
     let evaluation: ComputerHealthEvaluation?
     var snapshot: ComputerHealthSnapshot? = nil
 
-    var usesTwoColumns = false
-
-    private var columns: [GridItem] {
-        if usesTwoColumns { return [GridItem(.flexible()), GridItem(.flexible())] }
-        return [
-        GridItem(
-            .adaptive(minimum: 230, maximum: 360),
-            spacing: AppDesignTokens.Spacing.large,
-            alignment: .top
-        )
-    ]
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(L10n.text("核心健康指标", "Core Health Indicators"), systemImage: "square.grid.2x2")
-                    .font(AppDesignTokens.Typography.sectionTitle)
-                Spacer()
-                Text(L10n.text(
-                    "只显示可验证的四项计分依据",
-                    "Only four verifiable factors affect the score"
-                ))
-                .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
-            }
-
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                ForEach(ComputerHealthScoring.scoredFactors, id: \.self) { factor in
-                    factorRow(factor)
-                }
+        VStack(spacing: 0) {
+            ForEach(Array(ComputerHealthScoring.scoredFactors.enumerated()), id: \.element) { index, factor in
+                factorRow(factor).lightfieldRowEntrance(index)
             }
         }
     }
@@ -42,73 +15,49 @@ struct HealthFactorGrid: View {
     private func factorRow(_ factor: HealthFactor) -> some View {
         let component = component(for: factor)
         let availability = component?.availability ?? .unavailable
-        let color = HealthDashboardVisuals.color(
-            score: component?.score,
-            availability: availability
-        )
-        let progress = progressValue(component)
-
-        return VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 8) {
-                Image(systemName: HealthDashboardVisuals.factorSymbol(factor))
-                    .font(AppDesignTokens.Typography.sectionSymbol)
-                    .foregroundStyle(color)
-                    .frame(width: 30, height: 30)
-
-                Text(HealthDashboardVisuals.factorTitle(factor))
-                    .font(AppDesignTokens.Typography.cardTitle)
-
-                Spacer(minLength: 8)
-
-                Text(scoreText(component))
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(progress == nil ? .secondary : .primary)
-                    .monospacedDigit()
-            }
-
-            Text(primaryValue(for: factor))
-                .font(AppDesignTokens.Typography.compactMetricValue)
-                .foregroundStyle(progress == nil ? .secondary : .primary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            // The source explanation stays available without displacing the measured value.
-            DisclosureGroup(L10n.text("指标来源", "Source")) {
+        let measuredStatus = Self.lightfieldStatus(factor: factor, component: component, smart: snapshot?.disk.smartStatus)
+        let status: FeatureLightfieldStatus = factor == .battery && snapshot?.battery?.condition == .serviceRecommended
+            ? .warning : measuredStatus
+        // D67 status row: the status symbol owns the 20 pt first column, the
+        // short semantic status the last column, and the evidence (availability,
+        // score, source note, time) stays in collapsed tertiary details behind
+        // the row-end disclosure.
+        return FeatureLightfieldStatusDisclosure(title: HealthDashboardVisuals.factorTitle(factor),
+            detail: primaryValue(for: factor), value: statusText(for: factor, status: status), status: status,
+            leadingProbe: "lightfield.health.leading.\(factor.rawValue)",
+            disclosureProbe: "lightfield.health.disclosure.\(factor.rawValue)") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(HealthDashboardVisuals.availabilityText(availability) + " · " + scoreText(component))
                 Text(detail(for: factor))
-                    .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .font(AppDesignTokens.Typography.metadata)
-
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(AppAppearanceColors.ink.opacity(0.10))
-                    if let progress {
-                        Capsule().fill(color.gradient)
-                            .frame(width: proxy.size.width * min(1, max(0, progress / 100)))
-                    }
+                if let checkedAt = component?.evaluatedAt {
+                    Text(checkedAt.formatted(date: .abbreviated, time: .shortened)).monospacedDigit()
                 }
             }
-            .frame(height: 6)
-            .accessibilityHidden(true)
-
-            HStack {
-                Text(HealthDashboardVisuals.availabilityText(availability))
-                    .foregroundStyle(color)
-                Spacer()
-                if let updatedAt = component?.evaluatedAt {
-                    Text(updatedAt.formatted(date: .omitted, time: .shortened))
-                        .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
-                        .monospacedDigit()
-                }
-            }
-            .font(AppTypography.body.weight(.medium))
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 176, alignment: .topLeading)
-        .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppAppearanceColors.ink.opacity(0.12), lineWidth: 1))
-        .accessibilityElement(children: .contain)
+    }
+
+    private func statusText(for factor: HealthFactor, status: FeatureLightfieldStatus) -> String {
+        if factor == .diskReliability && snapshot?.disk.smartStatus == .failing {
+            return L10n.text("故障警告", "Failure")
+        }
+        if factor == .battery && snapshot?.battery?.condition == .serviceRecommended {
+            return L10n.text("需检修", "Service")
+        }
+        switch status {
+        case .normal: return L10n.text("正常", "Normal")
+        case .warning: return L10n.text("需关注", "Attention")
+        case .failure: return L10n.text("异常", "Problem")
+        case .unknown: return L10n.text("未取得", "Unknown")
+        }
+    }
+
+    static func lightfieldStatus(factor: HealthFactor, component: HealthComponentEvaluation?, smart: DiskSMARTStatus?) -> FeatureLightfieldStatus {
+        if factor == .diskReliability && smart == .failing { return .warning }
+        guard let component, component.availability == .available || component.availability == .partial,
+              let score = component.score, score.isFinite else { return .unknown }
+        if score < 60 { return .failure }
+        if score < 85 || component.availability == .partial { return .warning }
+        return .normal
     }
 
     private func primaryValue(for factor: HealthFactor) -> String {
@@ -177,12 +126,12 @@ struct HealthFactorGrid: View {
             guard let total = snapshot.capacity.totalBytes,
                   let available = snapshot.capacity.availableForImportantUsageBytes,
                   total > 0 else {
-                return L10n.text("同时考虑可用比例与绝对余量。", "Uses both available ratio and absolute headroom.")
+                return L10n.text("可用空间未读取。", "Available space not read.")
             }
             let percent = Int((Double(available) / Double(total) * 100).rounded())
             return L10n.text(
-                "占总容量 \(percent)%；同时考虑比例与绝对余量。",
-                "\(percent)% of total; uses both ratio and absolute headroom."
+                "占总容量 \(percent)%；同时考虑可用比例与绝对余量",
+                "\(percent)% of total; considers both free-space ratio and absolute headroom"
             )
         case .stability:
             return L10n.text(

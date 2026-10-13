@@ -52,9 +52,8 @@ final class WindowGlassConfigurationTests: XCTestCase {
             contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/GlassStyle.swift"),
             encoding: .utf8
         )
-        let settingsSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift"),
-            encoding: .utf8
+        let settingsSource = try SettingsSourceContract.source(
+            at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift")
         )
         let mainChromeSource = try String(
             contentsOf: projectRoot.appendingPathComponent(
@@ -86,9 +85,9 @@ final class WindowGlassConfigurationTests: XCTestCase {
         XCTAssertFalse(glassSource.contains("didPlaceMainWindow"))
         XCTAssertFalse(glassSource.contains("window.setFrame"))
         XCTAssertTrue(glassSource.contains("configurationIsScheduled"))
-        XCTAssertTrue(settingsSource.contains("let minimumSize = NSSize(width: 720, height: 500)"))
-        XCTAssertTrue(settingsSource.contains("let maximumSize = NSSize(width: 820"))
-        XCTAssertTrue(settingsSource.contains("let compactWidth: CGFloat = 780"))
+        XCTAssertTrue(settingsSource.contains("let minimumSize = NSSize(width: 560, height: 390)"))
+        XCTAssertTrue(settingsSource.contains("let maximumSize = NSSize(width: CGFloat.greatestFiniteMagnitude"))
+        XCTAssertFalse(settingsSource.contains("let compactWidth:"))
         XCTAssertTrue(settingsSource.contains("SettingsWindowPlacement.requiresRestoration("))
         XCTAssertFalse(settingsSource.contains("didPlaceWindow"))
         XCTAssertFalse(settingsSource.contains("targetSize"))

@@ -48,12 +48,16 @@ struct MemoryRunningApplicationIdentity: Equatable, Sendable {
 /// to manufacture a larger "released" number.
 enum MemoryOptimizerService {
     static func snapshot() async -> MemorySnapshot {
-        await SystemMemoryProbe.shared.snapshot(includeProcesses: true)
+        await MenuBarPresentationTrace.measureAsyncSample("process.memory.libproc") {
+            await SystemMemoryProbe.shared.snapshot(includeProcesses: true)
+        }
     }
 
     static func statusSnapshot() async -> MemorySnapshot {
-        // Skip process enumeration, not the system's read-only pressure query.
-        await SystemMemoryProbe.shared.snapshot(includeProcesses: false)
+        let plan = await MenuBarSamplingContext.shared.plan
+        return await MenuBarMemoryStatusSampler.shared.snapshot(
+            needsRefresh: plan?.primaryKinds.contains(.memoryUsage) ?? true
+        )
     }
 
     static func optimize() async -> MemoryOptimizationResult {
@@ -122,6 +126,21 @@ enum MemoryOptimizerService {
         }
     }
 
+    /// The headroom reading for a free percentage (`kern.memorystatus_level`,
+    /// or the line `memory_pressure -Q` prints).
+    static func pressureSummary(freePercentage percentValue: Int) -> (summary: String, freePercentage: Int?) {
+        (
+            L10n.text("压力余量 \(percentValue)%", "Pressure headroom \(percentValue)%"),
+            min(100, max(0, percentValue))
+        )
+    }
+
+    /// Reads the output of `memory_pressure -Q`. Since D38 the app no longer
+    /// starts that tool (the status reads `kern.memorystatus_level`); the
+    /// parser stays as the reference for tests that compare the kernel value
+    /// with what the tool prints (`MemoryHeadroomSysctlTests`,
+    /// `SystemMonitorServiceTests`) and keeps its own test
+    /// (`SystemUtilitySafetyTests`). No production code calls it.
     static func pressureSummary(from output: String) -> (summary: String, freePercentage: Int?) {
         let trimmed = output.trimmed
         guard !trimmed.isEmpty else {
@@ -135,10 +154,7 @@ enum MemoryOptimizerService {
            let percentage = percentageLine.components(separatedBy: CharacterSet.decimalDigits.inverted)
             .first(where: { !$0.isEmpty }),
            let percentValue = Int(percentage) {
-            return (
-                L10n.text("压力余量 \(percentValue)%", "Pressure headroom \(percentValue)%"),
-                min(100, max(0, percentValue))
-            )
+            return pressureSummary(freePercentage: percentValue)
         }
 
         if let firstLine = trimmed.split(separator: "\n").first.map(String.init),

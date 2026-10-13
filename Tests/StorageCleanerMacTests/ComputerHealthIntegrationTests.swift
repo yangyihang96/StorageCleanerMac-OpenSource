@@ -10,7 +10,8 @@ final class ComputerHealthIntegrationTests: XCTestCase {
         )
         let store = ComputerHealthStore(
             probe: StaticComputerHealthProbe(snapshot: .integrationFixture()),
-            batterySettingsVerifier: verifier
+            batterySettingsVerifier: verifier,
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         XCTAssertEqual(store.batterySettingsAdjustmentState, .idle)
@@ -38,7 +39,8 @@ final class ComputerHealthIntegrationTests: XCTestCase {
         let probe = CountingComputerHealthProbe(snapshot: .integrationFixture())
         let store = ComputerHealthStore(
             probe: probe,
-            batterySettingsVerifier: verifier
+            batterySettingsVerifier: verifier,
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.beginBatterySettingsAdjustment()
@@ -58,7 +60,8 @@ final class ComputerHealthIntegrationTests: XCTestCase {
         )
         let store = ComputerHealthStore(
             probe: StaticComputerHealthProbe(snapshot: .integrationFixture()),
-            batterySettingsVerifier: verifier
+            batterySettingsVerifier: verifier,
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.beginBatterySettingsAdjustment()
@@ -83,7 +86,8 @@ final class ComputerHealthIntegrationTests: XCTestCase {
         )
         let store = ComputerHealthStore(
             probe: StaticComputerHealthProbe(snapshot: .integrationFixture()),
-            batterySettingsVerifier: verifier
+            batterySettingsVerifier: verifier,
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.beginBatterySettingsAdjustment()
@@ -106,7 +110,8 @@ final class ComputerHealthIntegrationTests: XCTestCase {
         )
         let store = ComputerHealthStore(
             probe: StaticComputerHealthProbe(snapshot: .integrationFixture()),
-            batterySettingsVerifier: verifier
+            batterySettingsVerifier: verifier,
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
 
         await store.beginBatterySettingsAdjustment()
@@ -172,6 +177,7 @@ final class ComputerHealthIntegrationTests: XCTestCase {
             probe: StaticComputerHealthProbe(snapshot: snapshot),
             freshnessTTL: 0,
             now: { now },
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController(),
             historyRepository: healthHistory,
             capacityHistoryRepository: capacityHistory,
             thermalReadinessProvider: { .ready }
@@ -204,6 +210,7 @@ final class ComputerHealthIntegrationTests: XCTestCase {
             probe: StaticComputerHealthProbe(snapshot: snapshot),
             freshnessTTL: 0,
             now: { now },
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController(),
             historyRepository: healthHistory,
             capacityHistoryRepository: capacityHistory
         )
@@ -230,6 +237,7 @@ final class ComputerHealthIntegrationTests: XCTestCase {
             probe: StaticComputerHealthProbe(snapshot: snapshot),
             freshnessTTL: 0,
             now: { now },
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController(),
             historyRepository: healthHistory,
             capacityHistoryRepository: capacityHistory
         )
@@ -255,7 +263,8 @@ final class ComputerHealthIntegrationTests: XCTestCase {
         let store = ComputerHealthStore(
             probe: StaticComputerHealthProbe(snapshot: .dashboardFixture(date: now)),
             freshnessTTL: 0,
-            now: { now }
+            now: { now },
+            batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController()
         )
         await store.refresh(force: true)
         let evaluationBeforeNetwork = store.evaluation

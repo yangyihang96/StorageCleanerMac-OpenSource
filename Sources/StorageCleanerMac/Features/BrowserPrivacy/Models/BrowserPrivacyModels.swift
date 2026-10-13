@@ -20,6 +20,12 @@ enum BrowserPrivacyEngine: String, Equatable, Hashable, Sendable {
 
 enum BrowserPrivacyRecordSource: String, CaseIterable, Equatable, Hashable, Sendable {
     case history
+
+    var localizedNames: (chinese: String, english: String) {
+        switch self {
+        case .history: ("浏览记录", "History")
+        }
+    }
 }
 
 enum BrowserPrivacyCategory: String, CaseIterable, Equatable, Hashable, Sendable {
@@ -35,6 +41,30 @@ enum BrowserPrivacyCategory: String, CaseIterable, Equatable, Hashable, Sendable
     case unknown
 
     var isAdultContent: Bool { self == .adult }
+
+    /// Both names, so the result search can match either language whatever
+    /// the interface language is.
+    var localizedNames: (chinese: String, english: String) {
+        switch self {
+        case .adult: ("成人内容", "Adult")
+        case .finance: ("金融与账户", "Finance & Accounts")
+        case .social: ("社交", "Social")
+        case .shopping: ("购物", "Shopping")
+        case .entertainment: ("娱乐", "Entertainment")
+        case .search: ("搜索", "Search")
+        case .productivity: ("效率", "Productivity")
+        case .news: ("新闻", "News")
+        case .other: ("其他", "Other")
+        case .unknown: ("未知", "Unknown")
+        }
+    }
+
+    var title: String {
+        L10n.text(localizedNames.chinese, localizedNames.english)
+    }
+
+    /// "Other" and "unknown" say nothing about a page, so rows leave them out.
+    var isInformative: Bool { self != .other && self != .unknown }
 }
 
 enum BrowserPrivacySelectionConfidence: String, Equatable, Hashable, Sendable {
@@ -64,10 +94,20 @@ enum BrowserPrivacySelectionEligibility: String, Equatable, Hashable, Sendable {
     var canSelect: Bool { self != .forbidden }
 }
 
+/// Orders the listed pages. A history row has no size of its own, so there
+/// is no size order.
 enum BrowserPrivacyResultSort: String, CaseIterable, Equatable, Sendable {
-    case largestFirst
     case newestFirst
+    case mostVisited
     case browser
+
+    var title: String {
+        switch self {
+        case .newestFirst: L10n.text("最近访问", "Newest First")
+        case .mostVisited: L10n.text("访问次数最多", "Most Visited")
+        case .browser: L10n.text("按浏览器", "By Browser")
+        }
+    }
 }
 
 enum BrowserPrivacySelectionState: Equatable, Sendable {
@@ -233,6 +273,8 @@ struct BrowserPrivacyRecord: Identifiable, Equatable, Sendable {
     /// Nil means this result can be reviewed but cannot be passed to the
     /// verified SQLite deletion path.
     let locator: BrowserPrivacyRecordLocator?
+    /// Why `locator` is nil, when the scan could tell.
+    let directDeletionBlocker: BrowserPrivacyDirectDeletionBlocker?
 
     init(
         id: UUID,
@@ -249,7 +291,8 @@ struct BrowserPrivacyRecord: Identifiable, Equatable, Sendable {
         category: BrowserPrivacyCategory,
         selectionConfidence: BrowserPrivacySelectionConfidence,
         sizeBytes: Int64?,
-        locator: BrowserPrivacyRecordLocator? = nil
+        locator: BrowserPrivacyRecordLocator? = nil,
+        directDeletionBlocker: BrowserPrivacyDirectDeletionBlocker? = nil
     ) {
         self.id = id
         self.browser = browser
@@ -266,6 +309,7 @@ struct BrowserPrivacyRecord: Identifiable, Equatable, Sendable {
         self.selectionConfidence = selectionConfidence
         self.sizeBytes = sizeBytes
         self.locator = locator
+        self.directDeletionBlocker = locator == nil ? directDeletionBlocker : nil
     }
 
     var isDefaultSelected: Bool {
@@ -283,6 +327,37 @@ struct BrowserPrivacyRecord: Identifiable, Equatable, Sendable {
 
     var selectionEligibility: BrowserPrivacySelectionEligibility {
         locator == nil ? .browserActionOnly : .selectableWithConfirmation
+    }
+
+    /// The profile's name as the browser shows it; the identifier's last
+    /// component only when the scan found no name.
+    var resolvedProfileDisplayName: String {
+        if let profileDisplayName, !profileDisplayName.isEmpty {
+            return profileDisplayName
+        }
+        return profileID.split(separator: ":").last.map(String.init) ?? profileID
+    }
+
+    /// Everything the result search matches: the address (as stored and
+    /// percent-decoded), title, browser, profile name, the search term in
+    /// the address, and the category and source names in both languages.
+    /// The values stay in memory and are never written anywhere.
+    var searchableFields: [String] {
+        var fields = [browser.displayName, resolvedProfileDisplayName]
+        if let title { fields.append(title) }
+        if let url {
+            fields.append(url)
+            if let decoded = url.removingPercentEncoding, decoded != url {
+                fields.append(decoded)
+            }
+        }
+        if let domain { fields.append(domain) }
+        if let searchKeyword { fields.append(searchKeyword) }
+        fields.append(category.localizedNames.chinese)
+        fields.append(category.localizedNames.english)
+        fields.append(source.localizedNames.chinese)
+        fields.append(source.localizedNames.english)
+        return fields
     }
 
     /// Stable for the lifetime of the underlying history visit. The scanner's
@@ -334,20 +409,25 @@ struct BrowserPrivacyDisplayItemID: Equatable, Hashable, Sendable {
     let normalizedURL: String
 }
 
-/// A compact UI row may aggregate many visits, while every destructive action
-/// still expands back to the exact scan-time records and Visit IDs.
+/// One listed page: every visit of one address in one browser profile. A
+/// destructive action still expands back to the exact scan-time records.
 struct BrowserPrivacyDisplayItem: Identifiable, Equatable, Sendable {
     let id: BrowserPrivacyDisplayItemID
     let browser: BrowserPrivacyBrowser
     let profileID: String
     let profileDisplayName: String
     let domain: String?
+    /// The most recent recorded title; nil when no visit carries one.
+    let title: String?
+    /// The address of the most recent visit, exactly as the browser stored it.
+    let address: String?
     let category: BrowserPrivacyCategory
     let risk: BrowserPrivacyRisk
+    let latestVisitedAt: Date?
+    /// Newest first.
     let records: [BrowserPrivacyRecord]
 
     var visitCount: Int { records.count }
-    var latestVisitedAt: Date? { records.compactMap(\.visitedAt).max() }
     var underlyingSelectionIDs: Set<BrowserPrivacySelectionID> {
         Set(records.map(\.selectionID))
     }
@@ -360,16 +440,35 @@ struct BrowserPrivacyDisplayItem: Identifiable, Equatable, Sendable {
             ? .selectableWithConfirmation
             : .browserActionOnly
     }
+    /// Why the page cannot be deleted directly, when the scan recorded it.
+    var directDeletionBlocker: BrowserPrivacyDirectDeletionBlocker? {
+        records.lazy.compactMap(\.directDeletionBlocker).first
+    }
+    /// Search terms found in the addresses of this page's visits.
+    var searchKeywords: [String] {
+        var seen = Set<String>()
+        return records.compactMap(\.searchKeyword).filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
 
-    static func aggregate(_ records: [BrowserPrivacyRecord]) -> [Self] {
-        Dictionary(grouping: records) { record in
-            BrowserPrivacyDisplayItemID(
-                browserID: record.browser.id,
-                profileID: record.profileID,
-                source: record.source,
-                normalizedURL: normalizedGroupingURL(record.url, domain: record.domain)
-            )
-        }
+    /// How many listed pages `records` form, grouped exactly like `aggregate`.
+    static func pageCount(of records: [BrowserPrivacyRecord]) -> Int {
+        Set(records.map(itemID(for:))).count
+    }
+
+    private static func itemID(for record: BrowserPrivacyRecord) -> BrowserPrivacyDisplayItemID {
+        BrowserPrivacyDisplayItemID(
+            browserID: record.browser.id,
+            profileID: record.profileID,
+            source: record.source,
+            normalizedURL: normalizedGroupingURL(record.url, domain: record.domain)
+        )
+    }
+
+    static func aggregate(
+        _ records: [BrowserPrivacyRecord],
+        sort: BrowserPrivacyResultSort = .newestFirst
+    ) -> [Self] {
+        Dictionary(grouping: records, by: itemID(for:))
         .map { id, rows in
             let sorted = rows.sorted {
                 ($0.visitedAt ?? .distantPast) > ($1.visitedAt ?? .distantPast)
@@ -379,20 +478,44 @@ struct BrowserPrivacyDisplayItem: Identifiable, Equatable, Sendable {
                 id: id,
                 browser: first.browser,
                 profileID: first.profileID,
-                profileDisplayName: first.profileDisplayName
-                    ?? first.profileID.split(separator: ":").last.map(String.init)
-                    ?? first.profileID,
+                profileDisplayName: first.resolvedProfileDisplayName,
                 domain: first.domain,
+                title: sorted.lazy.compactMap { record -> String? in
+                    guard let title = record.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !title.isEmpty else { return nil }
+                    return title
+                }.first,
+                address: sorted.lazy.compactMap(\.url).first { !$0.isEmpty },
                 category: first.category,
                 risk: first.risk,
+                latestVisitedAt: sorted.lazy.compactMap(\.visitedAt).first,
                 records: sorted
             )
         }
-        .sorted {
-            if $0.latestVisitedAt != $1.latestVisitedAt {
-                return ($0.latestVisitedAt ?? .distantPast) > ($1.latestVisitedAt ?? .distantPast)
+        .sorted { lhs, rhs in
+            switch sort {
+            case .newestFirst:
+                break
+            case .mostVisited:
+                if lhs.visitCount != rhs.visitCount {
+                    return lhs.visitCount > rhs.visitCount
+                }
+            case .browser:
+                let browserOrder = lhs.browser.displayName
+                    .localizedCaseInsensitiveCompare(rhs.browser.displayName)
+                if browserOrder != .orderedSame {
+                    return browserOrder == .orderedAscending
+                }
+                let profileOrder = lhs.profileDisplayName
+                    .localizedCaseInsensitiveCompare(rhs.profileDisplayName)
+                if profileOrder != .orderedSame {
+                    return profileOrder == .orderedAscending
+                }
             }
-            return $0.id.normalizedURL < $1.id.normalizedURL
+            if lhs.latestVisitedAt != rhs.latestVisitedAt {
+                return (lhs.latestVisitedAt ?? .distantPast) > (rhs.latestVisitedAt ?? .distantPast)
+            }
+            return lhs.id.normalizedURL < rhs.id.normalizedURL
         }
     }
 
@@ -537,6 +660,14 @@ enum BrowserPrivacyScanError: Error, Equatable, Sendable {
     case readFailed
 }
 
+/// The folding used for every search comparison in this feature.
+enum BrowserPrivacySearchText {
+    static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+}
+
 struct BrowserPrivacyFilters: Equatable, Sendable {
     var query: String
     var browserID: String?
@@ -616,37 +747,68 @@ enum BrowserPrivacyProcessingOutcome: Equatable, Sendable {
     case unsupported
 }
 
+/// Whether an entry covers records the scan allowed to be deleted directly.
+enum BrowserPrivacyDeletionPath: String, Equatable, Hashable, Sendable {
+    case direct
+    case inBrowser
+}
+
 struct BrowserPrivacyProcessingEntry: Identifiable, Equatable, Sendable {
     let browser: BrowserPrivacyBrowser
     let profileID: String
+    /// The profile's name as the browser shows it, when the scan found one.
+    let profileDisplayName: String?
     let recordCount: Int
     let capability: BrowserPrivacyWriteCapability
     let outcome: BrowserPrivacyProcessingOutcome
     let verifiedDeletedRecordIDs: Set<UUID>
     let recoveryBackupID: UUID?
+    /// The stable cause behind `detail`; nil only for entries built without one.
+    let reason: BrowserPrivacyProcessingReason?
+    let deletionPath: BrowserPrivacyDeletionPath
+    /// Localized explanation shown to the user.
     let detail: String
 
     init(
         browser: BrowserPrivacyBrowser,
         profileID: String,
+        profileDisplayName: String? = nil,
         recordCount: Int,
         capability: BrowserPrivacyWriteCapability,
         outcome: BrowserPrivacyProcessingOutcome = .manual,
         verifiedDeletedRecordIDs: Set<UUID> = [],
         recoveryBackupID: UUID? = nil,
+        reason: BrowserPrivacyProcessingReason? = nil,
+        deletionPath: BrowserPrivacyDeletionPath = .inBrowser,
         detail: String = ""
     ) {
         self.browser = browser
         self.profileID = profileID
+        self.profileDisplayName = profileDisplayName
         self.recordCount = recordCount
         self.capability = capability
         self.outcome = outcome
         self.verifiedDeletedRecordIDs = verifiedDeletedRecordIDs
         self.recoveryBackupID = recoveryBackupID
+        self.reason = reason
+        self.deletionPath = deletionPath
         self.detail = detail
     }
 
-    var id: String { "\(browser.id):\(profileID)" }
+    /// One profile can yield a directly deletable part and a part handled in
+    /// the browser, and both can end in manual handling; the path and the
+    /// reason keep them apart in a list.
+    var id: String {
+        [browser.id, profileID, deletionPath.rawValue, reason?.rawValue ?? "-"]
+            .joined(separator: "|")
+    }
+
+    var resolvedProfileDisplayName: String {
+        if let profileDisplayName, !profileDisplayName.isEmpty {
+            return profileDisplayName
+        }
+        return profileID.split(separator: ":").last.map(String.init) ?? profileID
+    }
 }
 
 struct BrowserPrivacyProcessingReport: Equatable, Sendable {

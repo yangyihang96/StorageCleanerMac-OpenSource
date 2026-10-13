@@ -37,15 +37,15 @@ enum PathSafety {
             .path
     }
 
-    static func isLexicallyInsideHome(_ path: String) -> Bool {
+    static func isLexicallyInsideHome(_ path: String, homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
         let lexical = lexicalPath(path)
-        let home = lexicalHomePath
+        let home = lexicalPath(homeDirectory.path)
         return lexical == home || lexical.hasPrefix(home + "/")
     }
 
-    static func isInsideHome(_ path: String) -> Bool {
+    static func isInsideHome(_ path: String, homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
         let normalized = normalizedPath(path)
-        let home = homePath
+        let home = normalizedPath(homeDirectory.path)
         return normalized == home || normalized.hasPrefix(home + "/")
     }
 

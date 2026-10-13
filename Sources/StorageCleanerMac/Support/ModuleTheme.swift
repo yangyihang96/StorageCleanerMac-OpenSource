@@ -68,9 +68,42 @@ enum SidebarGroup: String, CaseIterable, Identifiable {
     }
 }
 
+/// D53 module pigments (UI-V2-SPEC 1.2). The module-to-color mapping is
+/// unchanged (D3, D44①); only the values are new. `bright` drives night
+/// accents, the page glow and chart series. The gradient pair fills icon
+/// tiles and primary buttons; both stops keep white labels at >= 4.5:1 in
+/// both appearances (lighter end top-leading, darker end bottom-trailing).
+struct ModulePigment: Equatable, Sendable {
+    let bright: UInt32
+    let gradientLight: UInt32
+    let gradientDark: UInt32
+
+    static let smartScan = ModulePigment(bright: 0x4C8DFF, gradientLight: 0x2B66F0, gradientDark: 0x1D4ED8)
+    static let cleanup = ModulePigment(bright: 0xFF8A3D, gradientLight: 0xC44A16, gradientDark: 0xA13A0B)
+    static let developer = ModulePigment(bright: 0xFFB547, gradientLight: 0xA85E0C, gradientDark: 0x8A4A06)
+    static let protection = ModulePigment(bright: 0x3FC777, gradientLight: 0x1E8449, gradientDark: 0x136536)
+    static let performance = ModulePigment(bright: 0xFF5FA2, gradientLight: 0xD6266E, gradientDark: 0xAD1653)
+    static let memory = ModulePigment(bright: 0xA285FF, gradientLight: 0x7357E8, gradientDark: 0x5137C7)
+    static let applications = memory
+    static let files = ModulePigment(bright: 0x2CC9DD, gradientLight: 0x0E7C8C, gradientDark: 0x09616E)
+    /// Settings and other neutral surfaces use the shared control blue.
+    static let neutral = ModulePigment(bright: 0x007AFF, gradientLight: 0x006BD6, gradientDark: 0x0057B0)
+
+    /// Destructive actions never take a module color (N19, D49).
+    /// #DE2F38 is the brightest red that keeps a white label at 4.6:1; the
+    /// suggested #FF5A5F would give 3.0:1 (review 6).
+    static let danger = ModulePigment(bright: 0xFF5A5F, gradientLight: 0xDE2F38, gradientDark: 0xB71C28)
+
+    var brightColor: Color { MonitorPalette.color(bright) }
+    var lightStop: Color { MonitorPalette.color(gradientLight) }
+    var darkStop: Color { MonitorPalette.color(gradientDark) }
+    var gradientStops: [Color] { [lightStop, darkStop] }
+}
+
 struct ModuleTheme {
     let featureGroup: FeatureGroup
     let accent: Color
+    let actionFill: Color
     let gradientStart: Color
     let gradientEnd: Color
     let darkGradientStart: Color
@@ -82,20 +115,31 @@ struct ModuleTheme {
     /// Settings and sheets use the neutral default instead.
     let isImmersive: Bool
 
+    /// D53 pigment: tile and button gradient, glow and chart color.
+    var pigment: ModulePigment = .neutral
+
     var identifier: String { featureGroup.rawValue }
     var sidebarIconColor: Color { accent }
-    var actionFill: Color { accent }
+    var iconTint: Color { AppIconPalette.feature(featureGroup, night: accent) }
     var scanProgressColor: Color { accent }
 
+    /// Icon tiles and primary buttons (UI-V2-SPEC 1.2). Both stops are opaque
+    /// and keep the white label above 4.5:1, so the same pair serves both
+    /// appearances.
     func actionGradient(for scheme: ColorScheme) -> [Color] {
-        // A translucent end stop was readable over navy, but washed white
-        // button labels out on the daylight canvas.
-        [accent, scheme == .dark ? accent.opacity(0.58) : accent]
+        isImmersive ? pigment.gradientStops : [actionFill, actionFill]
+    }
+
+    /// The page glow and chart primary series: the bright pigment at night,
+    /// the deeper gradient stop in daylight.
+    var glowColor: Color {
+        AppAppearanceColors.adaptive(light: pigment.gradientLight, dark: pigment.brightColor)
     }
 
     static let neutral = ModuleTheme(
         featureGroup: .settings,
-        accent: .accentColor,
+        accent: AppAppearanceColors.controlAccent,
+        actionFill: AppAppearanceColors.controlFill,
         gradientStart: Color(nsColor: .windowBackgroundColor),
         gradientEnd: Color(nsColor: .windowBackgroundColor),
         darkGradientStart: Color(nsColor: .windowBackgroundColor),
@@ -105,33 +149,34 @@ struct ModuleTheme {
         isImmersive: false
     )
 
+    /// D53: module pages use the v2 canvas; neutral surfaces (Settings)
+    /// keep the pre-D53 canvas until V4.
     func startColor(for colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? darkGradientStart : gradientStart
+        isImmersive ? AppAppearanceColors.canvasTop : AppAppearanceColors.legacyCanvas
     }
 
     func endColor(for colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? darkGradientEnd : gradientEnd
+        isImmersive ? AppAppearanceColors.canvasBottom : AppAppearanceColors.legacyCanvasBottom
     }
 
     var primaryText: Color { isImmersive ? AppAppearanceColors.ink : .primary }
-    var secondaryText: Color { isImmersive ? AppAppearanceColors.secondaryText : .secondary }
+    var secondaryText: Color { isImmersive ? AppAppearanceColors.secondaryText : AppDesignTokens.Palette.secondaryText }
     var tertiaryText: Color {
-        isImmersive ? AppAppearanceColors.tertiaryText : Color(nsColor: .tertiaryLabelColor)
+        isImmersive ? AppAppearanceColors.tertiaryText : AppDesignTokens.Palette.tertiaryText
     }
 
     func panelFill(for colorScheme: ColorScheme, reduceTransparency: Bool) -> Color {
         guard isImmersive else {
             return Color(nsColor: .windowBackgroundColor)
         }
-        if reduceTransparency {
-            return colorScheme == .light ? .white : startColor(for: colorScheme)
-        }
         return AppAppearanceColors.panel
     }
 
     func panelBorder(for contrast: ColorSchemeContrast) -> Color {
         isImmersive
-            ? AppAppearanceColors.border.opacity(contrast == .increased ? 0.65 : 0.20)
+            ? (contrast == .increased
+                ? AppAppearanceColors.ink.opacity(0.65)
+                : AppAppearanceColors.border)
             : Color(nsColor: .separatorColor).opacity(contrast == .increased ? 1 : 0.65)
     }
 }
@@ -151,37 +196,34 @@ enum ModuleThemeCatalog {
     static func theme(for filter: ReviewFilter) -> ModuleTheme {
         if filter == .memory {
             let base = theme(for: FeatureGroup.performance)
-            let accent = AppAppearanceColors.adaptive(light: 0x6A3ACA, dark: Color(red: 0.55, green: 0.36, blue: 0.96))
-            return ModuleTheme(featureGroup: .performance, accent: accent,
-                               gradientStart: base.gradientStart, gradientEnd: base.gradientEnd,
-                               darkGradientStart: base.darkGradientStart, darkGradientEnd: base.darkGradientEnd,
-                               radialHighlight: accent.opacity(0.10), darkRadialHighlight: accent.opacity(0.10),
-                               isImmersive: true)
+            return immersive(
+                .performance,
+                pigment: .memory,
+                tone: .mauve,
+                gradientStart: base.gradientStart, gradientEnd: base.gradientEnd,
+                darkGradientStart: base.darkGradientStart, darkGradientEnd: base.darkGradientEnd
+            )
         }
         if filter == .privacy {
-            return ModuleTheme(
-                featureGroup: .protection,
-                accent: AppAppearanceColors.adaptive(light: 0x15784F, dark: Color(red: 0.20, green: 0.78, blue: 0.55)),
+            return immersive(
+                .protection,
+                pigment: .protection,
+                tone: .sage,
                 gradientStart: Color(red: 0.94, green: 0.98, blue: 0.98),
                 gradientEnd: Color(red: 0.98, green: 0.99, blue: 1.0),
                 darkGradientStart: Color(red: 0.045, green: 0.085, blue: 0.14),
-                darkGradientEnd: Color(red: 0.04, green: 0.075, blue: 0.13),
-                radialHighlight: Color.blue.opacity(0.06),
-                darkRadialHighlight: Color.blue.opacity(0.06),
-                isImmersive: true
+                darkGradientEnd: Color(red: 0.04, green: 0.075, blue: 0.13)
             )
         }
         if filter == .devCaches {
-            return ModuleTheme(
-                featureGroup: .cleanup,
-                accent: AppAppearanceColors.adaptive(light: 0x936000, dark: Color(red: 0.95, green: 0.60, blue: 0.12)),
+            return immersive(
+                .cleanup,
+                pigment: .developer,
+                tone: .ochre,
                 gradientStart: Color(red: 0.99, green: 0.97, blue: 0.92),
                 gradientEnd: Color(red: 1.0, green: 0.99, blue: 0.97),
                 darkGradientStart: Color(red: 0.10, green: 0.09, blue: 0.065),
-                darkGradientEnd: Color(red: 0.045, green: 0.048, blue: 0.055),
-                radialHighlight: Color.orange.opacity(0.10),
-                darkRadialHighlight: Color.orange.opacity(0.10),
-                isImmersive: true
+                darkGradientEnd: Color(red: 0.045, green: 0.048, blue: 0.055)
             )
         }
         return theme(for: filter.featureGroup)
@@ -189,15 +231,16 @@ enum ModuleThemeCatalog {
 
     static func theme(for featureGroup: FeatureGroup) -> ModuleTheme {
         guard featureGroup != .settings else { return .neutral }
-        let accent: Color
+        let pigment: ModulePigment
+        let tone: AppIconTone
         switch featureGroup {
-        case .smartScan: accent = AppAppearanceColors.adaptive(light: 0x255AD4, dark: Color(red: 0.23, green: 0.47, blue: 0.98))
-        case .cleanup: accent = AppAppearanceColors.adaptive(light: 0xA94A08, dark: Color(red: 1.0, green: 0.42, blue: 0.12))
-        case .protection: accent = AppAppearanceColors.adaptive(light: 0x15784F, dark: Color(red: 0.20, green: 0.78, blue: 0.55))
-        case .performance: accent = AppAppearanceColors.adaptive(light: 0xAB287B, dark: Color(red: 0.87, green: 0.31, blue: 0.70))
-        case .applications: accent = AppAppearanceColors.adaptive(light: 0x7041CC, dark: Color(red: 0.58, green: 0.39, blue: 0.95))
-        case .files: accent = AppAppearanceColors.adaptive(light: 0x6A3ACA, dark: Color(red: 0.55, green: 0.36, blue: 0.96))
-        case .settings: accent = .accentColor
+        case .smartScan: pigment = .smartScan; tone = .teal
+        case .cleanup: pigment = .cleanup; tone = .clay
+        case .protection: pigment = .protection; tone = .sage
+        case .performance: pigment = .performance; tone = .mauve
+        case .applications: pigment = .applications; tone = .mauve
+        case .files: pigment = .files; tone = .teal
+        case .settings: pigment = .neutral; tone = .bronze
         }
         let start = featureGroup == .protection
             ? Color(red: 0.055, green: 0.105, blue: 0.125)
@@ -205,9 +248,10 @@ enum ModuleThemeCatalog {
         let end = featureGroup == .protection
             ? Color(red: 0.045, green: 0.075, blue: 0.09)
             : Color(red: 0.04, green: 0.065, blue: 0.16)
-        return ModuleTheme(
-            featureGroup: featureGroup,
-            accent: accent,
+        return immersive(
+            featureGroup,
+            pigment: pigment,
+            tone: tone,
             gradientStart: featureGroup == .protection
                 ? Color(red: 0.94, green: 0.98, blue: 0.97)
                 : Color(red: 0.94, green: 0.96, blue: 1.0),
@@ -215,11 +259,36 @@ enum ModuleThemeCatalog {
                 ? Color(red: 0.98, green: 0.99, blue: 0.98)
                 : Color(red: 0.98, green: 0.98, blue: 1.0),
             darkGradientStart: start,
-            darkGradientEnd: end,
+            darkGradientEnd: end
+        )
+    }
+
+    private static func immersive(
+        _ featureGroup: FeatureGroup,
+        pigment: ModulePigment,
+        tone: AppIconTone,
+        gradientStart: Color,
+        gradientEnd: Color,
+        darkGradientStart: Color,
+        darkGradientEnd: Color
+    ) -> ModuleTheme {
+        let accent = AppIconPalette.color(tone, night: pigment.brightColor)
+        var theme = ModuleTheme(
+            featureGroup: featureGroup,
+            accent: accent,
+            // The lighter gradient stop already keeps white labels readable;
+            // native prominent buttons tint with it.
+            actionFill: pigment.lightStop,
+            gradientStart: gradientStart,
+            gradientEnd: gradientEnd,
+            darkGradientStart: darkGradientStart,
+            darkGradientEnd: darkGradientEnd,
             radialHighlight: accent.opacity(0.10),
             darkRadialHighlight: accent.opacity(0.10),
             isImmersive: true
         )
+        theme.pigment = pigment
+        return theme
     }
 }
 
@@ -257,47 +326,6 @@ extension ReviewFilter {
             .dashboard
         case .devCaches, .largeFiles, .migration, .duplicates, .utilityHub, .startup, .memory, .energy, .uninstall, .updater:
             .management
-        }
-    }
-
-    var pageSubtitle: String {
-        switch self {
-        case .overview:
-            L10n.text(
-                "检查可清理垃圾与需要人工判断的文件",
-                "Check cleanup candidates and files that need review"
-            )
-        case .healthHub:
-            L10n.text("检查磁盘、电池与关键系统状态", "Check disk, battery, and essential system status")
-        case .performance:
-            L10n.text("评估 CPU、图形、媒体与持续性能", "Measure CPU, graphics, media, and sustained performance")
-        case .green:
-            L10n.text("扫描缓存、日志、临时文件与其他可安全清理内容", "Scan caches, logs, temporary files, and other safe-to-clean items")
-        case .privacy:
-            L10n.text("检查本机浏览记录中的隐私足迹", "Review privacy traces in local browser history")
-        case .devCaches:
-            L10n.text(
-                "扫描 AI 开发工具、Agent 缓存、会话与可再生成产物",
-                "Scan AI developer tools, agent caches, sessions, and regenerable artifacts"
-            )
-        case .largeFiles:
-            L10n.text("浏览并定位占用空间的文件", "Browse and locate files using storage")
-        case .duplicates:
-            L10n.text("查找内容完全相同的文件，并在处理前逐组确认", "Find identical files and review each group before handling copies")
-        case .migration:
-            L10n.text("将文件或应用安全迁移到外接硬盘", "Safely move files or applications to an external drive")
-        case .startup:
-            L10n.text("管理登录时打开的应用、后台代理和系统守护进程", "Manage login apps, background agents, and system daemons")
-        case .memory:
-            L10n.text("查看内存占用并安全释放可回收资源", "Review memory usage and safely reclaim resources")
-        case .energy:
-            L10n.text("识别影响续航与发热的应用活动", "Identify app activity affecting battery life and heat")
-        case .uninstall:
-            L10n.text("卸载应用前先审阅相关文件", "Review related files before uninstalling apps")
-        case .updater:
-            L10n.text("从可信来源检查可用更新", "Check trusted sources for available updates")
-        case .utilityHub:
-            L10n.text("系统工具", "System tools")
         }
     }
 

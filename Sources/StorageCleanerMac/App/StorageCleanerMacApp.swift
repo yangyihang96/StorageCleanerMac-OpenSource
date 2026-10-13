@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var requestMemoryOptimizationCancellation: (@MainActor () -> Void)?
     var prepareMetricHistoryForTermination: (@MainActor () async -> Void)?
     var prepareFanControlForTermination: (@MainActor () async -> Void)?
+    var startupApplicationUpdateScheduler = StartupApplicationUpdateScheduler.shared
     var terminationTimeout: Duration = .seconds(3)
     var replyToApplicationShouldTerminate:
         (@MainActor (NSApplication) -> Void)?
@@ -22,15 +23,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var terminationTimeoutTask: Task<Void, Never>?
     private var appAppearanceObservation: NSKeyValueObservation?
 
+    /// D88: the Finder extension opens the selected `.app` files with this
+    /// exact application (an open-documents event; there is no URL scheme).
+    /// On a cold launch this can arrive before the main window exists: the
+    /// request center queues it and presents the window once it attaches.
+    /// Dragging an app onto the Dock icon or "Open With" lands here too and
+    /// only opens the review.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        ExternalUninstallRequestCenter.shared.receive(openedURLs: urls)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Login-item registration is managed separately with SMAppService.
         // Never let macOS Session Restore relaunch an app that was merely left
         // open when the user shut down or logged out.
         NSApp.disableRelaunchOnLogin()
+#if DEBUG || STORAGE_CLEANER_BETA
+        // An isolated latency-script launch stays out of the way: no Dock
+        // icon, no activation, no main window.
+        let isLatencyScript = MenuBarLatencyScript.isRequested
+        NSApp.setActivationPolicy(isLatencyScript ? .accessory : .regular)
+#else
         NSApp.setActivationPolicy(.regular)
+#endif
         Task.detached(priority: .utility) {
             SQLiteSnapshotService().cleanupOrphans()
         }
+        BrowserPrivacyRecoveryMaintenance.enableAndPurge()
+        // BOARD N19: memory quit suggestions skip the app the user works in,
+        // which is the one in front before this app's own window is used.
+        UserFrontmostApplicationTracker.shared.start()
         MainMenuLocalizer.scheduleApply()
         appAppearanceObservation = NSApp.observe(
             \.effectiveAppearance,
@@ -43,6 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AppArtwork.applyDockIcon(for: colorScheme)
             }
         }
+#if DEBUG || STORAGE_CLEANER_BETA
+        guard !isLatencyScript else { return }
+#endif
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -53,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
+        startupApplicationUpdateScheduler.cancelForTermination()
         guard prepareBenchmarkForTermination != nil
                 || prepareApplicationUpdatesForTermination != nil
                 || prepareStartupItemsForTermination != nil
@@ -65,24 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         terminationReplySent = false
         terminationCleanupTask = Task { @MainActor [weak self, weak sender] in
-            if let prepareBenchmarkForTermination = self?.prepareBenchmarkForTermination {
-                await prepareBenchmarkForTermination()
-            }
-            if let prepareApplicationUpdatesForTermination = self?.prepareApplicationUpdatesForTermination {
-                await prepareApplicationUpdatesForTermination()
-            }
-            if let prepareStartupItemsForTermination = self?.prepareStartupItemsForTermination {
-                await prepareStartupItemsForTermination()
-            }
-            if let prepareMemoryOptimizationForTermination = self?.prepareMemoryOptimizationForTermination {
-                await prepareMemoryOptimizationForTermination()
-            }
-            if let prepareMetricHistoryForTermination = self?.prepareMetricHistoryForTermination {
-                await prepareMetricHistoryForTermination()
-            }
-            if let prepareFanControlForTermination = self?.prepareFanControlForTermination {
-                await prepareFanControlForTermination()
-            }
+            await self?.prepareForTermination()
             guard let self, let sender else { return }
             finishDeferredTermination(sender)
         }
@@ -98,7 +107,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
+    /// Shared by the real exit sequence and isolated lifecycle tests.
+    func prepareForTermination() async {
+        startupApplicationUpdateScheduler.cancelForTermination()
+        if let prepareBenchmarkForTermination = prepareBenchmarkForTermination {
+            await prepareBenchmarkForTermination()
+        }
+        if let prepareApplicationUpdatesForTermination = prepareApplicationUpdatesForTermination {
+            await prepareApplicationUpdatesForTermination()
+        }
+        if let prepareStartupItemsForTermination = prepareStartupItemsForTermination {
+            await prepareStartupItemsForTermination()
+        }
+        if let prepareMemoryOptimizationForTermination = prepareMemoryOptimizationForTermination {
+            await prepareMemoryOptimizationForTermination()
+        }
+        if let prepareMetricHistoryForTermination = prepareMetricHistoryForTermination {
+            await prepareMetricHistoryForTermination()
+        }
+        if let prepareFanControlForTermination = prepareFanControlForTermination {
+            await prepareFanControlForTermination()
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        startupApplicationUpdateScheduler.cancelForTermination()
         // Covers forceful or system-driven termination paths that bypassed the
         // deferred reply above. Cancellation is idempotent.
         requestBenchmarkCancellation?()
@@ -270,9 +303,15 @@ struct StorageCleanerMacApp: App {
 
     init() {
         Self.terminateIfDuplicateInstance()
-        let coordinator = HeavyWorkCoordinator()
+        let coordinator = HeavyWorkCoordinator(operationLockDirectory:
+            AppDataDirectories.applicationSupportRoot.appendingPathComponent("OperationLocks"))
         let activityStore = HeavyWorkActivityStore(coordinator: coordinator)
+        StartupApplicationUpdateScheduler.shared.observeCompletion(of: activityStore)
         heavyWorkCoordinator = coordinator
+        // Set before any window appears (a launch may never show the main
+        // window): Sparkle's install relaunch takes its lease from this
+        // coordinator, so it waits for heavy work and blocks new work.
+        AppUpdater.shared.heavyWorkCoordinator = coordinator
         _heavyWorkActivityStore = StateObject(wrappedValue: activityStore)
         let scanStore = ScanStore(
             heavyWorkCoordinator: coordinator,
@@ -304,7 +343,7 @@ struct StorageCleanerMacApp: App {
                 healthStore.recordNetworkSpeedResult(result)
             }
         ))
-#if DEBUG || STORAGE_CLEANER_BETA
+#if DEBUG
         _browserPrivacyStore = StateObject(wrappedValue:
             BrowserPrivacyPreviewFixture.isRequested
                 ? BrowserPrivacyPreviewFixture.makeStore()
@@ -322,10 +361,18 @@ struct StorageCleanerMacApp: App {
             heavyWorkCoordinator: coordinator,
             workloadRunner: SystemMacSustainedBenchmarkWorkloadRunner()
         )
+        let benchmarkTelemetry = MSeriesV11TelemetryBridge(monitor: scanStore.helperPowerMetricsMonitor)
+        var v11Dependencies = MSeriesV11Dependencies()
+        v11Dependencies.telemetry = { await MainActor.run { benchmarkTelemetry.readings.map(\.telemetry) } }
+        v11Dependencies.telemetryReasons = { await MainActor.run { benchmarkTelemetry.missingReasons } }
+        v11Dependencies.beginTelemetrySession = { await benchmarkTelemetry.beginSession(sessionID: $0) }
+        v11Dependencies.finishTelemetry = { await benchmarkTelemetry.finish() }
+        v11Dependencies.onLiveObservation = { await benchmarkTelemetry.present($0) }
         let benchmarkV7Coordinator = BenchmarkV7Coordinator(
             workloadRunner: SystemBenchmarkV7WorkloadRunner(),
             heavyWorkCoordinator: coordinator,
-            sustainedService: sustainedBenchmarkService
+            sustainedService: sustainedBenchmarkService,
+            v11Runner: MSeriesV11Runner(dependencies: v11Dependencies)
         )
         let benchmarkLeaderboardStore = BenchmarkV7LeaderboardStore()
         _macBenchmarkLeaderboardStore = StateObject(
@@ -346,7 +393,8 @@ struct StorageCleanerMacApp: App {
             acceleratorHistoryRepository:
                 MacAcceleratorBenchmarkHistoryRepository(),
             sustainedService: sustainedBenchmarkService,
-            v7Coordinator: benchmarkV7Coordinator
+            v7Coordinator: benchmarkV7Coordinator,
+            v11TelemetryBridge: benchmarkTelemetry
         ))
 #if DEBUG || STORAGE_CLEANER_BETA
         // SwiftUI can defer the only Window scene on a fresh menu-bar launch.
@@ -360,6 +408,22 @@ struct StorageCleanerMacApp: App {
                     store: scanStore,
                     computerHealthStore: healthStore
                 )
+            }
+        }
+        // The latency script measures the menu-bar panel alone: only the
+        // menu-bar part of the main window's launch work runs, here, and the
+        // main window itself is kept hidden (MainWindowReopenBridge).
+        if MenuBarLatencyScript.isRequested {
+            MenuBarLatencyScript.prepareApplicationIfRequested()
+            Task { @MainActor in
+                MenuBarStatusController.shared.install(
+                    store: scanStore,
+                    computerHealthStore: healthStore
+                )
+                scanStore.prepareMenuBarLiveStatusOnLaunch()
+                Task { await healthStore.prepareMenuBarHealthOnLaunch() }
+                scanStore.startSystemEnergyMonitoring()
+                MenuBarLatencyScript.start(store: scanStore)
             }
         }
         // Reaching the advanced-control authorization path normally needs
@@ -444,6 +508,7 @@ struct StorageCleanerMacApp: App {
                         }
                     }
             }
+                .modifier(ExternalUninstallRequestBridge(store: store, center: .shared))
                 .id(languageRawValue)
                 .environment(\.locale, L10n.locale)
                 .preferredColorScheme(preferredColorScheme)
@@ -451,10 +516,15 @@ struct StorageCleanerMacApp: App {
                     [weak benchmarkStore = macBenchmarkStore,
                      store = store,
                      coordinator = heavyWorkCoordinator] in
+#if DEBUG || STORAGE_CLEANER_BETA
+                    // Started from init for the latency script (see above).
+                    guard !MenuBarLatencyScript.isRequested else { return }
+#endif
                     appDelegate.requestBenchmarkCancellation = { [weak benchmarkStore] in
                         benchmarkStore?.cancelAll()
                     }
                     appDelegate.requestApplicationUpdateCancellation = { [weak store] in
+                        StartupApplicationUpdateScheduler.shared.cancelForTermination()
                         store?.requestApplicationUpdateCancellation()
                     }
                     appDelegate.requestStartupItemCancellation = { [weak store] in
@@ -470,6 +540,7 @@ struct StorageCleanerMacApp: App {
                         _ = await coordinator.waitUntilOwnerInactive(.benchmark)
                     }
                     appDelegate.prepareApplicationUpdatesForTermination = { [weak store] in
+                        StartupApplicationUpdateScheduler.shared.cancel()
                         await store?.prepareApplicationUpdatesForTermination()
                     }
                     appDelegate.prepareStartupItemsForTermination = { [weak store] in
@@ -502,7 +573,14 @@ struct StorageCleanerMacApp: App {
 #endif
                     }
                     store.startSystemEnergyMonitoring()
-                    store.prepareApplicationUpdatesOnLaunch()
+                    StartupApplicationUpdateScheduler.shared.scheduleIfDue(
+                        shouldCheck: { ApplicationUpdateCheckSchedule.shouldCheck() },
+                        executionAvailable: { store.canRefreshAppUpdates },
+                        priorityReady: { MenuBarSamplingContext.shared.startupPriorityReady
+                            && store.menuBarMonitorSnapshot?.cpuUsageBreakdown != nil },
+                        operation: { store.prepareApplicationUpdatesOnLaunch() }
+                    )
+                    store.reconcileInterruptedOperationsOnLaunch()
                     Task {
                         await benchmarkStore?.prepareLifecycleOnLaunch()
                         await installationConflictController.checkIfNeeded()
@@ -517,7 +595,13 @@ struct StorageCleanerMacApp: App {
                     Task {
                         await computerHealthStore.verifyBatterySettingsAfterReturn()
                     }
-                    store.prepareApplicationUpdatesOnLaunch()
+                    StartupApplicationUpdateScheduler.shared.scheduleIfDue(
+                        shouldCheck: { ApplicationUpdateCheckSchedule.shouldCheck() },
+                        executionAvailable: { store.canRefreshAppUpdates },
+                        priorityReady: { MenuBarSamplingContext.shared.startupPriorityReady
+                            && store.menuBarMonitorSnapshot?.cpuUsageBreakdown != nil },
+                        operation: { store.prepareApplicationUpdatesOnLaunch() }
+                    )
                 }
                 .onReceive(NSWorkspace.shared.notificationCenter.publisher(
                     for: NSWorkspace.didTerminateApplicationNotification
@@ -602,6 +686,12 @@ struct StorageCleanerMacApp: App {
             }
 
             CommandMenu(L10n.text("工具", "Tools")) {
+                Button(L10n.text("监控小窗", "Monitoring Panel")) {
+                    menuBarStatusController.showMonitoringPanel()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .option])
+                Divider()
+
                 Button(L10n.text("检查权限", "Check Permissions")) {
                     store.checkCurrentPermissionsFromMenu()
                 }
@@ -623,22 +713,16 @@ struct StorageCleanerMacApp: App {
         }
 
         Settings {
+            // Locale and SettingsView's language subscription refresh text in place.
+            // Replacing the split-view root discards drafts and can displace its content.
             SettingsView(cleanupArchitectureMode: store.cleanupFeatureConfiguration.mode, scanStore: store)
-                .id(languageRawValue)
                 .environment(\.locale, L10n.locale)
                 .preferredColorScheme(preferredColorScheme)
         }
     }
 
     private var preferredColorScheme: ColorScheme? {
-        switch AppAppearance(rawValue: appearanceRawValue) ?? .system {
-        case .system:
-            nil
-        case .light:
-            .light
-        case .dark:
-            .dark
-        }
+        (AppAppearance(rawValue: appearanceRawValue) ?? .system).preferredColorScheme
     }
 
     private func localizeMainMenu() {
@@ -658,6 +742,13 @@ private struct MainWindowReopenBridge<Content: View>: View {
 
     var body: some View {
         content
+#if DEBUG || STORAGE_CLEANER_BETA
+            .background {
+                if MenuBarLatencyScript.isRequested {
+                    MenuBarLatencyScriptWindowSuppressor()
+                }
+            }
+#endif
             .onAppear {
                 MainWindowReopenCoordinator.shared.openMainWindow = {
                     openWindow(id: "main", value: "primary")

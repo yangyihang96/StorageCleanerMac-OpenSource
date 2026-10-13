@@ -118,14 +118,17 @@ enum MenuBarDeviceStatusDrawing {
 
     static func image(
         for snapshot: MenuBarDeviceStatusSnapshot,
-        appearance: NSAppearance? = nil, highlighted: Bool = false
+        appearance: NSAppearance? = nil, highlighted: Bool = false,
+        statusPreset: PanelStatusColorPreset = .original,
+        statusCustomDayHex: String = "", statusCustomNightHex: String = ""
     ) -> NSImage {
         let image = NSImage(size: size)
         let appearance = appearance ?? NSAppearance.currentDrawing()
         appearance.performAsCurrentDrawingAppearance {
             image.lockFocus()
             draw(snapshot, dark: appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
-                 highlighted: highlighted)
+                 highlighted: highlighted, statusPreset: statusPreset,
+                 statusCustomDayHex: statusCustomDayHex, statusCustomNightHex: statusCustomNightHex)
             image.unlockFocus()
         }
         // Preserve the battery's semantic color; the digits and dots resolve
@@ -134,13 +137,18 @@ enum MenuBarDeviceStatusDrawing {
         return image
     }
 
-    static func draw(_ snapshot: MenuBarDeviceStatusSnapshot, dark: Bool, highlighted: Bool) {
+    static func draw(_ snapshot: MenuBarDeviceStatusSnapshot, dark: Bool, highlighted: Bool,
+                     statusPreset: PanelStatusColorPreset = .original,
+                     statusCustomDayHex: String = "", statusCustomNightHex: String = "") {
         // macOS highlights a status item with a translucent background, not
         // the blue selection used inside menus. Keep the appearance's ink.
-        let foreground: NSColor = dark ? .white : .black
+        let presetInk = statusPreset.ink(dark: dark, customDayHex: statusCustomDayHex,
+                                          customNightHex: statusCustomNightHex)
+        let foreground: NSColor = presetInk ?? (dark ? .white : .black)
         let center = NSPoint(x: 14, y: 12)
-        let memoryColor = NSColor(srgbRed: dark ? 0.36 : 0.1, green: dark ? 0.69 : 0.46,
-                                  blue: dark ? 1 : 0.86, alpha: 1)
+        let memoryColor = presetInk ?? NSColor(
+            srgbRed: dark ? 0.36 : 0.1, green: dark ? 0.69 : 0.46,
+            blue: dark ? 1 : 0.86, alpha: 1)
         let track = snapshot.showsMemoryRing
             ? memoryColor.withAlphaComponent(dark ? 0.25 : 0.2)
             : NSColor(srgbRed: 0.98, green: 0.88, blue: 0.55, alpha: dark ? 0.32 : 0.55)

@@ -183,13 +183,15 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
         do {
             let provider = registry.provider(id: profile.browser.id)
             let adapter = provider?.historyWriteAdapter
-            let candidateLocatorIdentity: [BrowserPrivacyPathIdentity]
-            let locatorTrustedParentURL: URL?
+            var candidateLocatorIdentity: [BrowserPrivacyPathIdentity] = []
+            var locatorTrustedParentURL: URL?
+            // Recorded whenever no locator can be minted, so the interface
+            // can tell the user what is actually in the way.
+            var deletionBlocker: BrowserPrivacyDirectDeletionBlocker?
             if let adapter,
                adapter.engine == profile.browser.engine,
                (adapter == BrowserPrivacySQLiteWriteAdapter.verified(for: profile.browser.engine)
-                   || adapter == .chromiumProduction),
-               Self.hasWriteAccess(profile) {
+                   || adapter == .chromiumProduction) {
                 let productionRoot = adapter == .chromiumProduction
                     ? provider?.descriptor.productionWriteRoot(
                         browser: profile.browser,
@@ -198,34 +200,42 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
                         profileParentURL: profile.sourceTrustedParentURL
                     )
                     : profile.sourceTrustedParentURL
-                let locatorIdentity: [SecureSourceFile.Identity]? = productionRoot.flatMap { trustedRoot in
-                    guard adapter != .chromiumProduction
-                            || Self.productionSidecarsAreAbsent(
-                                databaseURL: profile.historyDatabaseURL
-                            ) else {
-                        return nil
-                    }
-                    return try? SecureSourceFile.identityChain(
+                if !Self.hasWriteAccess(profile) {
+                    deletionBlocker = .databaseNotWritable
+                } else if let productionRoot {
+                    // Journal and WAL files next to the database are not
+                    // looked at here. They come and go while the browser
+                    // runs, and a scan usually happens while it runs; the
+                    // processor checks them after the browser has quit,
+                    // immediately before it opens the database for writing.
+                    if let locatorIdentity = try? SecureSourceFile.identityChain(
                         for: profile.historyDatabaseURL,
-                        trustedParent: trustedRoot,
+                        trustedParent: productionRoot,
                         expectedFinalKind: .regularFile
-                    )
+                    ) {
+                        candidateLocatorIdentity = locatorIdentity.map {
+                            BrowserPrivacyPathIdentity(
+                                device: $0.device,
+                                inode: $0.inode,
+                                kind: UInt32($0.kind)
+                            )
+                        }
+                        locatorTrustedParentURL = productionRoot
+                    } else {
+                        deletionBlocker = .pathNotTrusted
+                    }
+                } else {
+                    deletionBlocker = .applicationNotVerified
                 }
-                candidateLocatorIdentity = (locatorIdentity ?? []).map {
-                    BrowserPrivacyPathIdentity(
-                        device: $0.device,
-                        inode: $0.inode,
-                        kind: UInt32($0.kind)
-                    )
-                }
-                locatorTrustedParentURL = locatorIdentity == nil ? nil : productionRoot
             } else {
                 // A non-canonical or provider-mismatched adapter is never
                 // enough evidence to mint a write locator. Keep this profile
                 // reviewable, but route it to the manual browser flow.
-                candidateLocatorIdentity = []
-                locatorTrustedParentURL = nil
+                deletionBlocker = .browserNotSupported
             }
+            let scanTimeBlocker = deletionBlocker
+            let scanTimeLocatorIdentity = candidateLocatorIdentity
+            let scanTimeTrustedParentURL = locatorTrustedParentURL
             let read = try await snapshotService.withSnapshot(
                 source: SQLiteSnapshotSource(
                     databaseURL: profile.historyDatabaseURL,
@@ -244,8 +254,9 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
                     snapshot,
                     profile: profile,
                     adapter: adapter,
-                    candidateLocatorIdentity: candidateLocatorIdentity,
-                    locatorTrustedParentURL: locatorTrustedParentURL,
+                    candidateLocatorIdentity: scanTimeLocatorIdentity,
+                    locatorTrustedParentURL: scanTimeTrustedParentURL,
+                    deletionBlocker: scanTimeBlocker,
                     maximumRecords: maximumRecords,
                     classifier: classifier
                 )
@@ -291,22 +302,13 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
             && FileManager.default.isWritableFile(atPath: profile.sourceTrustedParentURL.path)
     }
 
-    private static func productionSidecarsAreAbsent(databaseURL: URL) -> Bool {
-        for suffix in ["-wal", "-shm", "-journal"] {
-            var metadata = stat()
-            if lstat(databaseURL.path + suffix, &metadata) == 0 || errno != ENOENT {
-                return false
-            }
-        }
-        return true
-    }
-
     private static func readSnapshot(
         _ snapshot: SQLiteSnapshotDatabase,
         profile: BrowserPrivacyProfile,
         adapter: BrowserPrivacySQLiteWriteAdapter?,
         candidateLocatorIdentity: [BrowserPrivacyPathIdentity],
         locatorTrustedParentURL: URL?,
+        deletionBlocker: BrowserPrivacyDirectDeletionBlocker?,
         maximumRecords: Int,
         classifier: BrowserPrivacyLocalClassifier
     ) throws -> SnapshotRead {
@@ -322,6 +324,10 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
                 database: database,
                 snapshot: snapshot
             )
+            // The path was trusted but the database itself is not the
+            // audited schema version.
+            let profileBlocker = deletionBlocker
+                ?? (locatorIdentity.isEmpty ? .schemaNotSupported : nil)
             let sql = try historyQuery(
                 database: database,
                 engine: profile.browser.engine,
@@ -380,6 +386,7 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
                         : Int(exactly: sqlite3_column_int64(statement, 3))
                     let visitRowID = sqlite3_column_int64(statement, 4)
                     let parentRowID = sqlite3_column_int64(statement, 5)
+                    let isSynced = sqlite3_column_int64(statement, 6) != 0
                     nextCursor = min(nextCursor, visitRowID)
                     rowsInBatch += 1
                     let classification = classifier.classify(
@@ -389,6 +396,7 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
                     )
                     let locator: BrowserPrivacyRecordLocator?
                     if !locatorIdentity.isEmpty,
+                       !isSynced,
                        let locatorTrustedParentURL,
                        let visitTimestampIdentity,
                        visitTimestampIdentity.doubleValue.isFinite,
@@ -424,7 +432,9 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
                         category: classification.category,
                         selectionConfidence: classification.confidence,
                         sizeBytes: nil,
-                        locator: locator
+                        locator: locator,
+                        directDeletionBlocker: profileBlocker
+                            ?? (isSynced ? .syncedWithAccount : .recordIncomplete)
                     ))
                 }
                 guard rowsInBatch == batchLimit, nextCursor < cursor else { break }
@@ -476,20 +486,57 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
             let visitCount = try hasColumn("urls", "visit_count")
                 ? "urls.visit_count"
                 : "NULL"
+            // A visit the browser's sync service knows about also exists
+            // in the account and on other devices. The same test guards
+            // the write in the processor.
+            let syncColumns = [
+                "is_known_to_sync", "originator_cache_guid", "originator_visit_id",
+                "originator_from_visit", "originator_opener_visit",
+            ]
+            let visitColumns = try SQLiteRuntime.tableColumns(
+                "visits",
+                database: database,
+                control: snapshot.control,
+                busyDeadlineNanoseconds: snapshot.busyDeadlineNanoseconds
+            )
+            let synced = Set(syncColumns).isSubset(of: visitColumns)
+                ? """
+                (visits.is_known_to_sync != 0
+                    OR COALESCE(visits.originator_cache_guid, '') != ''
+                    OR COALESCE(visits.originator_visit_id, 0) != 0
+                    OR COALESCE(visits.originator_from_visit, 0) != 0
+                    OR COALESCE(visits.originator_opener_visit, 0) != 0)
+                """
+                : "0"
             return """
-            SELECT urls.url, \(title), visits.visit_time, \(visitCount), visits.rowid, urls.id
+            SELECT urls.url, \(title), visits.visit_time, \(visitCount), visits.rowid, urls.id,
+                   \(synced)
             FROM visits JOIN urls ON visits.url = urls.id
             WHERE visits.rowid < ?1
             ORDER BY visits.rowid DESC
             LIMIT ?2
             """
         case .safari:
-            let title = try hasColumn("history_items", "title")
-                ? "history_items.title"
-                : "NULL"
+            // Safari stores the page title on every visit row
+            // (`history_visits.title`); `history_items` has no title column.
+            // Other WebKit-layout databases may only carry one on the item.
+            let title: String
+            switch (
+                try hasColumn("history_visits", "title"),
+                try hasColumn("history_items", "title")
+            ) {
+            case (true, true):
+                title = "COALESCE(NULLIF(history_visits.title, ''), history_items.title)"
+            case (true, false):
+                title = "history_visits.title"
+            case (false, true):
+                title = "history_items.title"
+            case (false, false):
+                title = "NULL"
+            }
             return """
             SELECT history_items.url, \(title), history_visits.visit_time, NULL,
-                   history_visits.rowid, history_items.id
+                   history_visits.rowid, history_items.id, 0
             FROM history_visits
             JOIN history_items ON history_visits.history_item = history_items.id
             WHERE history_visits.rowid < ?1
@@ -503,7 +550,7 @@ struct BrowserPrivacyRecordScanner: BrowserPrivacyScanning, Sendable {
                 : "NULL"
             return """
             SELECT moz_places.url, \(title), moz_historyvisits.visit_date, \(visitCount),
-                   moz_historyvisits.rowid, moz_places.id
+                   moz_historyvisits.rowid, moz_places.id, 0
             FROM moz_historyvisits
             JOIN moz_places ON moz_historyvisits.place_id = moz_places.id
             WHERE moz_historyvisits.rowid < ?1

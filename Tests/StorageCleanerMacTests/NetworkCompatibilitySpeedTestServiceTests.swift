@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import XCTest
 @testable import StorageCleanerMac
@@ -527,13 +528,36 @@ final class NetworkCompatibilitySpeedTestServiceTests: XCTestCase {
     }
 
     func testCancellationStopsPendingURLSessionTasks() async {
-        let service = makeService { _ in
+        let protocolState = ServiceCancellationURLProtocol.states.beginRun()
+        let invalidator = ControlledCompatibilitySessionInvalidator()
+        let deadline = ManualCompatibilityShutdownDeadline()
+        let service = makeService(
+            sessionInvalidationController: invalidator,
+            shutdownDeadline: deadline,
+            protocolClasses: [ServiceCancellationURLProtocol.self],
+            protocolState: protocolState
+        ) { _ in
             .pending
         }
         let task = Task { try await service.test() }
-        await waitUntil { CompatibilityURLProtocolState.shared.pendingCount > 0 }
+        let releaseAfterWaitFailure: @Sendable () -> Void = {
+            task.cancel()
+            invalidator.releasePendingInvalidationAndPassThroughFutureRequests()
+            deadline.fire()
+        }
+        defer { releaseAfterWaitFailure() }
+        guard await protocolState.pendingStarted.wait("pending request start", onFailure: releaseAfterWaitFailure) else { return }
+        XCTAssertGreaterThan(protocolState.pendingCount, 0)
 
         task.cancel()
+        for (event, signal) in [
+            ("URLProtocol stopLoading", protocolState.stopped),
+            ("session invalidation request", invalidator.requested),
+            ("manual shutdown deadline registration", deadline.scheduled),
+        ] {
+            guard await signal.wait(event, onFailure: releaseAfterWaitFailure) else { return }
+        }
+        invalidator.releasePendingInvalidationAndPassThroughFutureRequests()
 
         do {
             _ = try await task.value
@@ -544,10 +568,55 @@ final class NetworkCompatibilitySpeedTestServiceTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
         XCTAssertGreaterThan(
-            CompatibilityURLProtocolState.shared.stopCount,
+            protocolState.stopCount,
             0,
             "The service must not return before URLSession has stopped pending protocol work"
         )
+        // A deadline delivered after the real callback must be harmless.
+        deadline.fire()
+    }
+
+    func testCancellationProtocolInstancesKeepTheirOwnedCountersAcrossSharedResets() {
+        let serviceState = ServiceCancellationURLProtocol.states.beginRun()
+        let storeState = StoreCancellationURLProtocol.states.beginRun()
+        serviceState.install { _ in .pending }
+        storeState.install { _ in .pending }
+        let request = URLRequest(url: URL(string: "https://speed.cloudflare.com/__down")!)
+        let serviceProtocol = ServiceCancellationURLProtocol(
+            request: request, cachedResponse: nil, client: nil
+        )
+        let storeProtocol = StoreCancellationURLProtocol(
+            request: request, cachedResponse: nil, client: nil
+        )
+        serviceProtocol.startLoading()
+        storeProtocol.startLoading()
+
+        // A previous shared protocol may call back after reset/install. Its
+        // start/stop must not become evidence about either cancellation run.
+        let oldSharedProtocol = CompatibilityStubURLProtocol(
+            request: request, cachedResponse: nil, client: nil
+        )
+        CompatibilityURLProtocolState.shared.reset()
+        CompatibilityURLProtocolState.shared.install { _ in .pending }
+        oldSharedProtocol.startLoading()
+        oldSharedProtocol.stopLoading()
+        XCTAssertEqual(serviceState.pendingCount, 1)
+        XCTAssertEqual(storeState.pendingCount, 1)
+        XCTAssertEqual(serviceState.stopCount, 0)
+        XCTAssertEqual(storeState.stopCount, 0)
+
+        // Even replacing a dedicated run must not retarget an existing
+        // instance's real stop callback into the new run's counters.
+        let nextServiceState = ServiceCancellationURLProtocol.states.beginRun()
+        let nextStoreState = StoreCancellationURLProtocol.states.beginRun()
+        serviceProtocol.stopLoading()
+        storeProtocol.stopLoading()
+        XCTAssertEqual(serviceState.stopCount, serviceState.pendingCount)
+        XCTAssertEqual(storeState.stopCount, storeState.pendingCount)
+        XCTAssertEqual(nextServiceState.pendingCount, 0)
+        XCTAssertEqual(nextServiceState.stopCount, 0)
+        XCTAssertEqual(nextStoreState.pendingCount, 0)
+        XCTAssertEqual(nextStoreState.stopCount, 0)
     }
 
     func testShutdownReturnsBoundedCleanupContextWhenInvalidationCallbackNeverArrives() async {
@@ -653,47 +722,120 @@ final class NetworkCompatibilitySpeedTestServiceTests: XCTestCase {
             .serviceUnavailable,
             .serviceUnavailable,
         ])
-        let service = makeService { _ in .pending }
+        let protocolState = StoreCancellationURLProtocol.states.beginRun()
+        let invalidator = ControlledCompatibilitySessionInvalidator()
+        let deadline = ManualCompatibilityShutdownDeadline()
+        let service = makeService(
+            sessionInvalidationController: invalidator,
+            shutdownDeadline: deadline,
+            protocolClasses: [StoreCancellationURLProtocol.self],
+            protocolState: protocolState
+        ) { _ in .pending }
         let store = NetworkSpeedTestStore(
             heavyWorkCoordinator: coordinator,
             runner: nativeRunner,
             compatibilityService: service
         )
+        let releaseAfterWaitFailure: @Sendable () -> Void = {
+            invalidator.releasePendingInvalidationAndPassThroughFutureRequests()
+            deadline.fire()
+        }
+        defer { store.cancel(); releaseAfterWaitFailure() }
         store.start(consentGranted: true)
         await store.waitUntilIdle()
         XCTAssertEqual(store.state, .compatibilityAvailable)
 
         store.startCompatibility(consentGranted: true)
-        var didStartRequest = false
-        for _ in 0..<5_000 {
-            if CompatibilityURLProtocolState.shared.pendingCount > 0 {
-                didStartRequest = true
-                break
-            }
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        XCTAssertTrue(didStartRequest)
-        guard didStartRequest else {
-            store.cancel()
-            await store.waitUntilIdle()
-            return
-        }
-        let pendingBeforeCancellation = CompatibilityURLProtocolState.shared.pendingCount
+        guard await protocolState.pendingStarted.wait("pending request start", onFailure: releaseAfterWaitFailure) else { return }
+        XCTAssertGreaterThan(protocolState.pendingCount, 0)
+        let pendingBeforeCancellation = protocolState.pendingCount
         let ownerWhileRunning = await coordinator.activeOwner
         XCTAssertEqual(ownerWhileRunning, .networkTest)
 
         store.cancel()
+        for (event, signal) in [
+            ("URLProtocol stopLoading", protocolState.stopped),
+            ("session invalidation request", invalidator.requested),
+            ("manual shutdown deadline registration", deadline.scheduled),
+        ] {
+            guard await signal.wait(event, onFailure: releaseAfterWaitFailure) else { return }
+        }
+        let ownerBeforeInvalidation = await coordinator.activeOwner
+        XCTAssertEqual(ownerBeforeInvalidation, .networkTest,
+            "Stopped protocol work alone must not release the lease before verified invalidation")
+        XCTAssertEqual(store.state, .running)
+        invalidator.releasePendingInvalidationAndPassThroughFutureRequests()
         await store.waitUntilIdle()
 
         let ownerAfterCancellation = await coordinator.activeOwner
         XCTAssertEqual(store.state, .cancelled)
         XCTAssertNil(ownerAfterCancellation)
         XCTAssertGreaterThanOrEqual(
-            CompatibilityURLProtocolState.shared.stopCount,
+            protocolState.stopCount,
             pendingBeforeCancellation
         )
         let benchmarkLease = try await coordinator.acquire(owner: .benchmark)
         await coordinator.release(benchmarkLease)
+        deadline.fire()
+    }
+
+    @MainActor
+    func testCancellationDeadlineQuarantinesLeaseUntilRealInvalidation() async throws {
+        let coordinator = HeavyWorkCoordinator()
+        let protocolState = StoreCancellationURLProtocol.states.beginRun()
+        let invalidator = ControlledCompatibilitySessionInvalidator()
+        let deadline = ManualCompatibilityShutdownDeadline()
+        let service = makeService(
+            sessionInvalidationController: invalidator,
+            shutdownDeadline: deadline,
+            protocolClasses: [StoreCancellationURLProtocol.self],
+            protocolState: protocolState
+        ) { _ in .pending }
+        let store = NetworkSpeedTestStore(
+            heavyWorkCoordinator: coordinator,
+            runner: StoreNativeRunner(steps: [.serviceUnavailable, .serviceUnavailable]),
+            compatibilityService: service
+        )
+        let releaseAfterWaitFailure: @Sendable () -> Void = {
+            invalidator.releasePendingInvalidationAndPassThroughFutureRequests()
+            deadline.fire()
+        }
+        defer { store.cancel(); releaseAfterWaitFailure() }
+        store.start(consentGranted: true)
+        await store.waitUntilIdle()
+        XCTAssertEqual(store.state, .compatibilityAvailable)
+        store.startCompatibility(consentGranted: true)
+        guard await protocolState.pendingStarted.wait("pending request start", onFailure: releaseAfterWaitFailure) else { return }
+        store.cancel()
+        for (event, signal) in [
+            ("URLProtocol stopLoading", protocolState.stopped),
+            ("session invalidation request", invalidator.requested),
+            ("manual shutdown deadline registration", deadline.scheduled),
+        ] {
+            guard await signal.wait(event, onFailure: releaseAfterWaitFailure) else { return }
+        }
+
+        // Force the deadline to win while the real callback is held back.
+        XCTAssertEqual(deadline.delaySeconds, 1)
+        deadline.fire()
+        await store.waitUntilIdle()
+        XCTAssertEqual(store.state, .failed)
+        let quarantinedOwner = await coordinator.activeOwner
+        XCTAssertEqual(quarantinedOwner, .networkTest)
+        do {
+            let lease = try await coordinator.acquire(owner: .benchmark)
+            await coordinator.release(lease)
+            XCTFail("A cancelled session awaiting invalidation must block other heavy work")
+        } catch let error as HeavyWorkCoordinator.Error {
+            XCTAssertEqual(error, .busy(activeOwner: .networkTest))
+        }
+
+        invalidator.releasePendingInvalidationAndPassThroughFutureRequests()
+        let becameInactive = await coordinator.waitUntilOwnerInactive(.networkTest)
+        XCTAssertTrue(becameInactive)
+        XCTAssertGreaterThanOrEqual(protocolState.stopCount, protocolState.pendingCount)
+        let lease = try await coordinator.acquire(owner: .benchmark)
+        await coordinator.release(lease)
     }
 
     func testLatencyStatisticsUseP50P95AndMedianAbsoluteDeviation() throws {
@@ -820,11 +962,14 @@ final class NetworkCompatibilitySpeedTestServiceTests: XCTestCase {
         reportsUploadProgress: Bool = true,
         shutdownGraceSeconds: TimeInterval = 1,
         sessionInvalidationController: ControlledCompatibilitySessionInvalidator? = nil,
+        shutdownDeadline: ManualCompatibilityShutdownDeadline? = nil,
+        protocolClasses: [AnyClass]? = nil,
+        protocolState: CompatibilityURLProtocolState = .shared,
         handler: @escaping @Sendable (URLRequest) -> CompatibilityStubResponse = {
             .defaultSuccess(for: $0)
         }
     ) -> NetworkCompatibilitySpeedTestService {
-        CompatibilityURLProtocolState.shared.install(handler)
+        protocolState.install(handler)
         let clock = CompatibilityStepClock(step: 0.010)
         let resolvedParameters = parameters ?? testParameters
         let resolvedUploadBytes = reportedUploadBytes ?? Int64(resolvedParameters.uploadBytes)
@@ -834,7 +979,7 @@ final class NetworkCompatibilitySpeedTestServiceTests: XCTestCase {
             downloadEndpoint: downloadEndpoint,
             uploadEndpoint: uploadEndpoint,
             interfaceName: interfaceName,
-            protocolClasses: [CompatibilityStubURLProtocol.self],
+            protocolClasses: protocolClasses ?? [CompatibilityStubURLProtocol.self],
             now: { Date(timeIntervalSince1970: 1_000) },
             monotonicSeconds: { clock.next() },
             sentByteCount: { task in
@@ -845,6 +990,13 @@ final class NetworkCompatibilitySpeedTestServiceTests: XCTestCase {
             shutdownGraceSeconds: shutdownGraceSeconds,
             sessionInvalidator: sessionInvalidationController.map { controller in
                 { @Sendable session in controller.requestInvalidation(for: session) }
+            },
+            shutdownTimeoutScheduler: { seconds, expire in
+                if let shutdownDeadline {
+                    shutdownDeadline.schedule(after: seconds, expire: expire)
+                } else {
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds, execute: expire)
+                }
             },
             uploadProgressObservationForTesting: { task in
                 reportsUploadProgress && task.originalRequest?.httpMethod == "POST"
@@ -912,6 +1064,8 @@ private enum CompatibilityStubResponse: Sendable {
 
 private final class CompatibilityURLProtocolState: @unchecked Sendable {
     static let shared = CompatibilityURLProtocolState()
+    let pendingStarted = CompatibilityTestSignal()
+    let stopped = CompatibilityTestSignal()
 
     private let lock = NSLock()
     private var responseHandler: (@Sendable (URLRequest) -> CompatibilityStubResponse)?
@@ -949,10 +1103,12 @@ private final class CompatibilityURLProtocolState: @unchecked Sendable {
 
     func markPending() {
         withLock { recordedPending += 1 }
+        pendingStarted.signal()
     }
 
     func markStopped() {
         withLock { recordedStops += 1 }
+        stopped.signal()
     }
 
     func deferResponse(_ response: @escaping @Sendable () -> Void) {
@@ -976,7 +1132,9 @@ private final class CompatibilityURLProtocolState: @unchecked Sendable {
     }
 }
 
-private final class CompatibilityStubURLProtocol: URLProtocol, @unchecked Sendable {
+private class CompatibilityStubURLProtocol: URLProtocol, @unchecked Sendable {
+    var protocolState: CompatibilityURLProtocolState { .shared }
+
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.scheme == "https" || request.url?.scheme == "http"
     }
@@ -986,7 +1144,7 @@ private final class CompatibilityStubURLProtocol: URLProtocol, @unchecked Sendab
     }
 
     override func startLoading() {
-        switch CompatibilityURLProtocolState.shared.response(for: request) {
+        switch protocolState.response(for: request) {
         case let .success(statusCode, data):
             let headers = ["Content-Length": String(data.count)]
             let response = HTTPURLResponse(
@@ -1001,7 +1159,7 @@ private final class CompatibilityStubURLProtocol: URLProtocol, @unchecked Sendab
             }
             client?.urlProtocolDidFinishLoading(self)
         case let .deferredSuccess(statusCode, data):
-            CompatibilityURLProtocolState.shared.deferResponse { [self] in
+            protocolState.deferResponse { [self] in
                 sendResponse(statusCode: statusCode, data: data, headers: [
                     "Content-Length": String(data.count)
                 ])
@@ -1057,7 +1215,7 @@ private final class CompatibilityStubURLProtocol: URLProtocol, @unchecked Sendab
         case let .failure(code):
             client?.urlProtocol(self, didFailWithError: URLError(code))
         case .pending:
-            CompatibilityURLProtocolState.shared.markPending()
+            protocolState.markPending()
         }
     }
 
@@ -1080,8 +1238,46 @@ private final class CompatibilityStubURLProtocol: URLProtocol, @unchecked Sendab
     }
 
     override func stopLoading() {
-        CompatibilityURLProtocolState.shared.markStopped()
+        protocolState.markStopped()
     }
+}
+
+/// Test-only ownership slots. Each cancellation case has a distinct protocol
+/// class, so unrelated sessions cannot capture its run; already-created
+/// instances retain the original state even after a later run replaces it.
+private final class CancellationProtocolStates: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state = CompatibilityURLProtocolState()
+
+    var current: CompatibilityURLProtocolState {
+        lock.lock()
+        defer { lock.unlock() }
+        return state
+    }
+
+    func beginRun() -> CompatibilityURLProtocolState {
+        lock.lock()
+        defer { lock.unlock() }
+        let next = CompatibilityURLProtocolState()
+        state = next
+        return next
+    }
+}
+
+private final class ServiceCancellationURLProtocol:
+    CompatibilityStubURLProtocol, @unchecked Sendable
+{
+    static let states = CancellationProtocolStates()
+    private let ownedState = ServiceCancellationURLProtocol.states.current
+    override var protocolState: CompatibilityURLProtocolState { ownedState }
+}
+
+private final class StoreCancellationURLProtocol:
+    CompatibilityStubURLProtocol, @unchecked Sendable
+{
+    static let states = CancellationProtocolStates()
+    private let ownedState = StoreCancellationURLProtocol.states.current
+    override var protocolState: CompatibilityURLProtocolState { ownedState }
 }
 
 private final class CompatibilityStepClock: @unchecked Sendable {
@@ -1102,6 +1298,7 @@ private final class CompatibilityStepClock: @unchecked Sendable {
 }
 
 private final class ControlledCompatibilitySessionInvalidator: @unchecked Sendable {
+    let requested = CompatibilityTestSignal()
     private let lock = NSLock()
     private weak var pendingSession: URLSession?
     private var shouldPassThrough = false
@@ -1124,6 +1321,7 @@ private final class ControlledCompatibilitySessionInvalidator: @unchecked Sendab
             pendingSession = session
             return false
         }
+        requested.signal()
         if passThrough {
             session.finishTasksAndInvalidate()
         }
@@ -1144,6 +1342,129 @@ private final class ControlledCompatibilitySessionInvalidator: @unchecked Sendab
         lock.lock()
         defer { lock.unlock() }
         return operation()
+    }
+}
+
+/// A latched event: signalling before a waiter registers cannot lose a wakeup.
+/// It suspends the task and never blocks URLSession's or Swift's worker threads.
+/// The wall-clock watchdog diagnoses a missing test event only; product timeout
+/// ordering is still decided exclusively by ManualCompatibilityShutdownDeadline.
+private final class CompatibilityTestSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signalled = false
+    private var waiters: [Waiter] = []
+
+    func signal() {
+        let pending = lock.withLock {
+            signalled = true
+            let pending = waiters
+            waiters.removeAll()
+            return pending
+        }
+        pending.forEach { $0.finish(succeeded: true) }
+    }
+
+    func wait(
+        _ event: String,
+        onFailure: @escaping @Sendable () -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> Bool {
+        let waiter = Waiter(event: event, onFailure: onFailure, file: file, line: line)
+        defer { lock.withLock { waiters.removeAll { $0 === waiter } } }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waiter.register(continuation)
+                let resumeNow = lock.withLock {
+                    if signalled { return true }
+                    waiters.append(waiter)
+                    return false
+                }
+                if resumeNow { waiter.finish(succeeded: true) }
+            }
+        } onCancel: {
+            waiter.finish(succeeded: false, failure: "Cancelled while waiting for \(event)")
+        }
+    }
+
+    private final class Waiter: @unchecked Sendable {
+        private let lock = NSLock()
+        private let event: String
+        private let onFailure: @Sendable () -> Void
+        private let file: StaticString
+        private let line: UInt
+        private var result: Bool?
+        private var continuation: CheckedContinuation<Bool, Never>?
+        private var watchdog: DispatchWorkItem?
+
+        init(event: String, onFailure: @escaping @Sendable () -> Void, file: StaticString, line: UInt) {
+            self.event = event
+            self.onFailure = onFailure
+            self.file = file
+            self.line = line
+        }
+
+        func register(_ continuation: CheckedContinuation<Bool, Never>) {
+            let watchdog = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                finish(succeeded: false, failure: "Diagnostic watchdog: no \(event) within 10 seconds")
+            }
+            let completedResult: Bool? = lock.withLock {
+                if let result { return result }
+                self.continuation = continuation
+                self.watchdog = watchdog
+                return nil
+            }
+            if let completedResult {
+                continuation.resume(returning: completedResult)
+            } else {
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10, execute: watchdog)
+            }
+        }
+
+        func finish(succeeded: Bool, failure: String? = nil) {
+            let pending: (CheckedContinuation<Bool, Never>?, DispatchWorkItem?)? = lock.withLock {
+                guard result == nil else { return nil }
+                result = succeeded
+                let pending = (continuation, watchdog)
+                continuation = nil
+                watchdog = nil
+                return pending
+            }
+            guard let pending else { return }
+            pending.1?.cancel()
+            if let failure {
+                XCTFail(failure, file: file, line: line)
+                onFailure()
+            }
+            pending.0?.resume(returning: succeeded)
+        }
+    }
+}
+
+private final class ManualCompatibilityShutdownDeadline: @unchecked Sendable {
+    let scheduled = CompatibilityTestSignal()
+    private let lock = NSLock()
+    private var expiration: (@Sendable () -> Void)?
+    private var recordedDelay: TimeInterval?
+
+    var delaySeconds: TimeInterval? { lock.withLock { recordedDelay } }
+
+    func schedule(after seconds: TimeInterval, expire: @escaping @Sendable () -> Void) {
+        lock.withLock {
+            recordedDelay = seconds
+            expiration = expire
+        }
+        scheduled.signal()
+    }
+
+    func fire() {
+        let expire = lock.withLock {
+            let expire = expiration
+            expiration = nil
+            return expire
+        }
+        expire?()
     }
 }
 

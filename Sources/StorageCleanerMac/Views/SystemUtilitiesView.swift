@@ -85,7 +85,12 @@ struct StartupItemsView: View {
 
     var body: some View {
         Group {
-            if !store.hasScannedStartupItems && !store.isLoadingStartupItems {
+            if store.isLoadingStartupItems {
+                StartupItemsRunningPage(
+                    title: store.startupScanProgress?.title ?? L10n.text("正在读取启动项", "Reading Startup Items"),
+                    discoveredCount: store.startupScanProgress?.discoveredCount ?? store.startupDomainItems.count,
+                    onCancel: store.cancelStartupScan)
+            } else if !store.hasScannedStartupItems {
                 startupLanding
             } else {
                 StartupItemsDashboardView(
@@ -129,10 +134,12 @@ struct StartupItemsView: View {
                         pasteboard.clearContents()
                         pasteboard.setString(text, forType: .string)
                     },
-                    onOpenSystemSettings: { SMAppService.openSystemSettingsLoginItems() }
+                    onOpenSystemSettings: { SMAppService.openSystemSettingsLoginItems() },
+                    onUndo: store.canUndoLastStartupOperation ? { store.undoLastStartupOperation() } : nil
                 )
             }
         }
+        .featureFlowTransition(value: store.isLoadingStartupItems)
         .toolbar {
             if store.canUndoLastStartupOperation {
                 ToolbarItem {
@@ -148,33 +155,17 @@ struct StartupItemsView: View {
     }
 
     private var startupLanding: some View {
-        HeroScanPage(
-            title: ReviewFilter.startup.sidebarTitle,
-            subtitle: ReviewFilter.startup.pageSubtitle,
-            headerSystemImage: ReviewFilter.startup.systemImage,
-            actionTitle: L10n.text("读取启动项", "Read Startup Items"),
-            actionDetail: L10n.text(
-                "检查登录项、后台代理与系统守护进程",
-                "Check login items, background agents, and system daemons"
-            ),
-            actionSystemImage: "magnifyingglass",
-            status: .idle(L10n.text("尚未读取启动项", "Startup items not read")),
-            trustText: L10n.text(
-                "只读检查 · 更改前逐项确认并保留撤销记录",
-                "Read-only check · Changes require confirmation and keep an undo record"
-            ),
-            action: { store.refreshStartupItems() }
-        )
+        LightfieldStartupLandingView(items: store.startupDomainItems, canRefresh: store.canRefreshStartupItems,
+            onStart: { store.refreshStartupItems() })
     }
 
     private var startupCoverageAction: some View {
-        GlassToolbarButton(
-            title: startupCoverageActionTitle,
-            systemImage: startupCoverageActionSymbol,
-            isDisabled: !store.canRefreshStartupItems
-        ) {
+        Button(startupCoverageActionTitle) {
             store.refreshStartupItems(includeBackgroundTaskDiagnostic: true)
         }
+        .buttonStyle(FeatureLightfieldRowButtonStyle())
+        .font(.system(size: 13))
+        .disabled(!store.canRefreshStartupItems)
         .help(startupCoverageActionHelp)
     }
 
@@ -222,11 +213,31 @@ struct StartupItemsView: View {
     }
 }
 
+/// Value-driven production presentation, also used by Debug captures.
+struct StartupItemsRunningPage: View {
+    let title: String
+    let discoveredCount: Int
+    let onCancel: () -> Void
+    var body: some View {
+        FeatureRunningTemplate(module: .startup, title: title,
+            metrics: [.init(title: L10n.text("已发现", "Items Found"), value: String(discoveredCount))],
+            trustText: L10n.text("只读检查 · 更改前逐项确认并保留撤销记录", "Read-only check · Changes require confirmation and keep an undo record"),
+            canCancel: true, cancelTitle: L10n.text("取消读取", "Cancel Reading"), onCancel: onCancel
+        ) { EmptyView() } actions: { EmptyView() }
+    }
+}
+
 struct MemoryOptimizerView: View {
+#if DEBUG
+    @Environment(\.featurePresentationIsFixture) private var isPresentationFixture
+#endif
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.windowLayoutMetrics) private var layout
+    @Environment(\.pageLayout) private var pageLayout
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var store: ScanStore
     @ObservedObject private var monitorState: MenuBarMonitorState
+    @State private var showsMemoryProcesses = false
 
     init(store: ScanStore) {
         self.store = store
@@ -240,98 +251,30 @@ struct MemoryOptimizerView: View {
         return store.memorySnapshot
     }
 
-    private func memoryPanels(snapshot: MemorySnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            MemoryReleasePanel(
-                snapshot: store.menuBarDisplayMemorySnapshot ?? snapshot,
-                processSnapshot: snapshot,
-                trendPoints: monitorState.memoryHistory(within: 120),
-                store: store
-            )
-            .fixedSize(horizontal: false, vertical: true)
-            MemoryProcessSelectionPanel(snapshot: snapshot, store: store, minimumListHeight: 64)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+    private var page: PageLayout {
+        pageLayout ?? PageLayout.approximated(from: layout)
     }
 
+    /// D70 separates the live pressure preview and the grouped process result.
     var body: some View {
-        VStack(spacing: 0) {
-            AppPageHeader(
-                title: L10n.text("内存管理", "Memory Management"),
-                subtitle: ReviewFilter.memory.pageSubtitle,
-                systemImage: AppSymbols.Navigation.memory, isHero: true
-            ) {
-                if layout.density != .compact, let image = GoldenLandingAsset.memory.image {
-                    GoldenLandingArtwork(image: image)
-                        .frame(width: 96, height: 96)
-                        .accessibilityHidden(true)
-                }
-                Button {
-                    store.refreshMemory()
-                } label: {
-                    Label(L10n.text("刷新", "Refresh"), systemImage: "arrow.clockwise")
-                }
-                .appButtonChrome(.secondary)
-                .disabled(!store.canRefreshMemory)
+        Group {
+            if store.isOptimizingMemory || store.isLoadingMemory {
+                memoryRunningPage
+            } else {
+                LightfieldMemoryPage(store: store, snapshot: processSnapshot,
+                    displaySnapshot: store.menuBarDisplayMemorySnapshot,
+                    trendPoints: monitorState.memoryHistory(within: 120), showsResultsWhenSampled: true,
+                    showsProcesses: $showsMemoryProcesses)
             }
-            .padding(.horizontal, UtilitySizing.pagePadding)
-            .padding(.bottom, AppDesignTokens.Spacing.small)
-
-            VStack(alignment: .leading, spacing: 12) {
-                if store.isOptimizingMemory || store.isLoadingMemory {
-                    VStack(alignment: .trailing, spacing: 8) {
-                        LoadingPanel(title: store.isOptimizingMemory
-                            ? L10n.text("正在执行并验证内存操作", "Running and verifying memory action")
-                            : L10n.text("正在读取内存状态", "Reading memory status"))
-                        if store.isOptimizingMemory {
-                            Button(L10n.text("取消", "Cancel"), role: .cancel) {
-                                store.cancelMemoryOptimization()
-                            }
-                        }
-                    }
-                    .transition(AppMotionTokens.listTransition(reduceMotion: reduceMotion))
-                }
-
-                if let result = store.memoryOptimizationResult {
-                    MemoryOptimizationResultPanel(result: result)
-                        .transition(AppMotionTokens.listTransition(reduceMotion: reduceMotion))
-                }
-
-                if let snapshot = processSnapshot {
-                    if layout.density == .compact {
-                        ScrollView {
-                            memoryPanels(snapshot: snapshot)
-                                .frame(minHeight: 720)
-                        }
-                    } else {
-                        memoryPanels(snapshot: snapshot)
-                    }
-                } else {
-                    EmptyUtilityPanel(
-                        systemImage: "memorychip",
-                        title: L10n.text("刷新以读取内存状态", "Refresh to inspect memory")
-                    )
-                    .transition(AppMotionTokens.listTransition(reduceMotion: reduceMotion))
-                }
-            }
-            .padding(.horizontal, UtilitySizing.pagePadding)
-            .padding(.bottom, UtilitySizing.pagePadding)
-            .frame(maxWidth: UtilitySizing.pageMaxWidth, maxHeight: .infinity, alignment: .topLeading)
-            .animation(
-                AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-                value: store.isOptimizingMemory
-            )
-            .animation(
-                AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-                value: store.memoryOptimizationResult != nil
-            )
-            .animation(
-                AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-                value: processSnapshot != nil
-            )
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .featureFlowTransition(value: store.isOptimizingMemory || store.isLoadingMemory)
+        .onChange(of: store.memoryOptimizationResult?.snapshot.generatedAt) { _, date in
+            if date != nil { showsMemoryProcesses = true }
+        }
         .task {
+#if DEBUG
+            guard !FeaturePresentationDemo.isEnabled, !isPresentationFixture else { return }
+#endif
             do {
                 try await Task.sleep(for: .milliseconds(200))
             } catch {
@@ -345,6 +288,42 @@ struct MemoryOptimizerView: View {
         }
     }
 
+    private var memoryRunningPage: some View {
+        let cancelAction: (() -> Void)?
+        if store.isOptimizingMemory { cancelAction = { store.cancelMemoryOptimization() } }
+        else { cancelAction = nil }
+        return MemoryRunningPage(isOptimizing: store.isOptimizingMemory, onCancel: cancelAction)
+    }
+
+}
+
+/// §3.2.8: placeholders with a sheen while the first sample loads, instead
+/// of a text-only "loading" line.
+private struct MemoryLoadingPlaceholder: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SurfaceCard {
+                HStack(spacing: 20) {
+                    SkeletonBlock(width: 96, height: 96, cornerRadius: 48)
+                    SkeletonBlock(width: 72, height: 72, cornerRadius: 36)
+                    VStack(alignment: .leading, spacing: 10) {
+                        SkeletonBlock(width: 120, height: 14)
+                        SkeletonBlock(width: 180, height: 22)
+                        SkeletonBlock(width: 160, height: 12)
+                    }
+                    SkeletonBlock(height: 96, cornerRadius: 12)
+                }
+            }
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(0..<5, id: \.self) { _ in
+                        SkeletonBlock(height: 18)
+                    }
+                }
+            }
+        }
+        .accessibilityLabel(L10n.text("正在读取内存状态", "Reading memory status"))
+    }
 }
 
 struct EnergyImpactView: View {
@@ -353,109 +332,16 @@ struct EnergyImpactView: View {
     @State private var sortMode: EnergyImpactSortMode = .estimatedEnergy
 
     var body: some View {
-        if store.hasScannedEnergyImpact, let snapshot = store.energyImpactSnapshot {
-            resultContent(snapshot: snapshot)
-        } else {
-            EnergyImpactScanLandingView(store: store)
-        }
-    }
-
-    private func resultContent(snapshot: EnergyImpactSnapshot) -> some View {
-        VStack(spacing: 0) {
-            UtilityHeader(
-                title: L10n.text("能耗", "Energy"),
-                subtitle: ReviewFilter.energy.pageSubtitle,
-                systemImage: AppSymbols.Navigation.energy
-            ) {
-                if store.isEnergyImpactPageScanActive {
-                    ProgressView()
-                        .controlSize(.small)
+        Group {
+            if store.hasScannedEnergyImpact, !store.isEnergyImpactPageScanActive, let snapshot = store.energyImpactSnapshot {
+                LightfieldEnergyPage(snapshot: snapshot, searchText: $searchText, sortMode: $sortMode,
+                    canRefresh: store.canRefreshEnergyImpact, refresh: { store.scanEnergyImpact() }) {
+                    HelperPowerMetricsView(monitor: store.helperPowerMetricsMonitor, lightfield: true)
                 }
-                AppButton(
-                    title: store.isEnergyImpactPageScanActive
-                        ? L10n.text("正在扫描", "Scanning")
-                        : L10n.text("重新扫描", "Rescan"),
-                    systemImage: "arrow.clockwise",
-                    isDisabled: !store.canRefreshEnergyImpact
-                ) {
-                    store.scanEnergyImpact()
-                }
-            }
-            .padding(.horizontal, UtilitySizing.pagePadding)
-            .padding(.bottom, AppDesignTokens.Spacing.small)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if store.isEnergyImpactPageScanActive {
-                        EnergyImpactScanProgressPanel(phase: store.energyImpactScanPhase)
-                            .appMotionEntrance(delay: 0.02, distance: 4)
-                    }
-
-                    let presentation = EnergyImpactListPresenter.presentation(
-                        apps: snapshot.apps,
-                        query: searchText,
-                        sortMode: sortMode
-                    )
-
-                    EnergyImpactSummaryGrid(
-                        snapshot: snapshot,
-                        systemEnergy: store.systemEnergySnapshot
-                    )
-                    .appMotionEntrance(delay: 0.035)
-                    EnergyImpactMeasurementBar(
-                        snapshot: snapshot,
-                        systemEnergy: store.systemEnergySnapshot
-                    )
-                    .appMotionEntrance(delay: 0.05)
-
-                    UtilitySearchField(
-                        placeholder: L10n.text("搜索应用、Bundle ID 或路径", "Search app, bundle ID, or path"),
-                        text: $searchText,
-                        tint: AppDesignTokens.Palette.information
-                    )
-                    .appMotionEntrance(delay: 0.065)
-
-                    EnergyImpactControlsBar(
-                        sortMode: $sortMode,
-                        visibleCount: presentation.apps.count,
-                        snapshot: snapshot
-                    )
-                    .appMotionEntrance(delay: 0.08)
-
-                    if presentation.apps.isEmpty {
-                        EmptyUtilityPanel(
-                            systemImage: "bolt.batteryblock",
-                            title: searchText.trimmed.isEmpty
-                                ? L10n.text("没有可展示的运行应用", "No running apps to show")
-                                : L10n.text("没有匹配应用", "No matching app")
-                        )
-                    } else {
-                        LazyVStack(spacing: 0) {
-                            EnergyImpactTableHeader()
-                            ForEach(presentation.apps) { app in
-                                EnergyImpactAppRow(
-                                    app: app,
-                                    sortMode: sortMode,
-                                    maxEstimatedEnergyWh: presentation.maxEstimatedEnergyWh,
-                                    maxCurrentPowerWatts: presentation.maxCurrentPowerWatts,
-                                    maxAveragePowerWatts: presentation.maxAveragePowerWatts
-                                )
-                                if app.id != presentation.lastID {
-                                    Divider()
-                                        .padding(.leading, 72)
-                                }
-                            }
-                        }
-                        .glassPanel(cornerRadius: UtilitySizing.listCornerRadius)
-                        .appMotionEntrance(delay: 0.10)
-                    }
-                }
-                .padding(.horizontal, UtilitySizing.pagePadding)
-                .padding(.bottom, UtilitySizing.pagePadding)
-                .frame(maxWidth: UtilitySizing.pageMaxWidth, alignment: .leading)
+            } else {
+                EnergyImpactScanLandingView(store: store)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -540,25 +426,29 @@ private struct EnergyImpactSummaryGrid: View {
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())], spacing: 12) {
+            // BOARD N16-5: what was recorded, for the period it covers; a
+            // session with nothing recorded is not shown as 0 kWh.
             UtilityMetricCard(
-                title: systemEnergy?.isEstimated == false
-                    ? L10n.text("本次开机耗电", "Energy Since Boot")
-                    : L10n.text("本次开机估算耗电", "Estimated Energy Since Boot"),
-                value: systemEnergy?.totalKilowattHoursText ?? "—",
-                detail: systemEnergy?.sourceBreakdownText
+                title: systemEnergy?.energyTitle(uptimeSeconds: snapshot.uptimeSeconds)
+                    ?? L10n.text("监测期间耗电", "Energy While Monitored"),
+                value: systemEnergy?.recordedEnergyText ?? "—",
+                detail: systemEnergy?.recordedEnergyDetail
                     ?? L10n.text("正在建立监测会话", "Starting monitoring session"),
                 systemImage: "battery.100.bolt",
                 tint: AppDesignTokens.Palette.information
             )
-            UtilityMetricCard(
-                title: L10n.text("当前功率", "Current Power"),
-                value: systemEnergy?.currentPowerText ?? snapshot.currentPowerWattsText,
-                detail: systemEnergy?.lastSample?.confidence == .measured
-                    ? L10n.text("电池电压与电流实测", "Measured battery voltage and current")
-                    : L10n.text("应用进程归属估算", "Attributed-process estimate"),
-                systemImage: "bolt.fill",
-                tint: AppDesignTokens.Palette.secondary
-            )
+            // Review P2-6: only a recent reading is current; redrawn while
+            // shown, so a reading that stopped does not stay on screen.
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                UtilityMetricCard(
+                    title: L10n.text("当前功率", "Current Power"),
+                    value: systemEnergy?.currentPowerText(now: context.date) ?? snapshot.currentPowerWattsText,
+                    detail: systemEnergy?.currentPowerDetail(now: context.date)
+                        ?? L10n.text("应用进程归属估算", "Attributed-process estimate"),
+                    systemImage: "bolt.fill",
+                    tint: AppDesignTokens.Palette.secondary
+                )
+            }
             UtilityMetricCard(
                 title: L10n.text("监测覆盖率", "Monitoring Coverage"),
                 value: coveragePercentText,
@@ -844,11 +734,11 @@ private struct EnergyImpactAppRow: View {
 
             Spacer(minLength: 10)
 
-            EnergyImpactValueColumn(title: L10n.text("累计能耗", "Energy"), value: app.estimatedEnergyText)
+            EnergyImpactValueColumn(title: L10n.text("累计能耗", "Energy"), value: app.estimatedEnergyText, evidence: app.cumulativeEvidence)
                 .frame(width: 92, alignment: .trailing)
-            EnergyImpactValueColumn(title: L10n.text("当前功率", "Current power"), value: app.currentPowerWattsText)
+            EnergyImpactValueColumn(title: L10n.text("当前功率", "Current power"), value: app.currentEvidence.source == .unknown ? "—" : app.currentPowerWattsText, evidence: app.currentEvidence)
                 .frame(width: 92, alignment: .trailing)
-            EnergyImpactValueColumn(title: L10n.text("平均功率", "Average power"), value: app.averagePowerWattsText)
+            EnergyImpactValueColumn(title: L10n.text("平均功率", "Average power"), value: app.averagePowerWattsText, evidence: app.averageEvidence)
                 .frame(width: 92, alignment: .trailing)
 
             AppIconButton(
@@ -863,40 +753,11 @@ private struct EnergyImpactAppRow: View {
 
     private var compactLayout: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.regular) {
-            HStack(alignment: .top, spacing: 12) {
-                ProcessIcon(path: app.iconPath, fallbackSystemImage: "app.fill")
-
-                VStack(alignment: .leading, spacing: 6) {
-                    appName
-                    measurementPills
-                    runtimeLabel
-                }
-
-                Spacer(minLength: AppDesignTokens.Spacing.small)
-
-                AppIconButton(
-                    title: L10n.text("切换到应用", "Switch to app"),
-                    systemImage: "arrow.up.forward.app",
-                    kind: .toolbar,
-                    action: activateApplication
-                )
-                .frame(width: 28)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 12) { evidenceColumns }
+                VStack(alignment: .leading, spacing: 8) { evidenceColumns }
             }
 
-            HStack(alignment: .top, spacing: AppDesignTokens.Spacing.medium) {
-                compactValueColumn(
-                    title: L10n.text("累计能耗", "Energy"),
-                    value: app.estimatedEnergyText
-                )
-                compactValueColumn(
-                    title: L10n.text("当前功率", "Current power"),
-                    value: app.currentPowerWattsText
-                )
-                compactValueColumn(
-                    title: L10n.text("平均功率", "Average power"),
-                    value: app.averagePowerWattsText
-                )
-            }
 
             usageBar
         }
@@ -911,11 +772,6 @@ private struct EnergyImpactAppRow: View {
 
     private var measurementPills: some View {
         HStack(spacing: AppDesignTokens.Spacing.small) {
-            MetadataPill(
-                text: app.measurementTitle,
-                systemImage: measurementSystemImage,
-                tint: measurementTint
-            )
             if app.processCount > 1 {
                 MetadataPill(
                     text: L10n.text("\(app.processCount) 进程", "\(app.processCount) processes"),
@@ -942,20 +798,11 @@ private struct EnergyImpactAppRow: View {
             .frame(maxWidth: 330)
     }
 
-    private func compactValueColumn(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.micro) {
-            Text(title)
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(value)
-                .font(AppDesignTokens.Typography.inlineTitle)
-                .monospacedDigit()
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title) \(value)")
+    @ViewBuilder
+    private var evidenceColumns: some View {
+        EnergyImpactValueColumn(title: L10n.text("累计能耗", "Energy"), value: app.estimatedEnergyText, evidence: app.cumulativeEvidence)
+        EnergyImpactValueColumn(title: L10n.text("当前功率", "Current power"), value: app.currentEvidence.source == .unknown ? "—" : app.currentPowerWattsText, evidence: app.currentEvidence)
+        EnergyImpactValueColumn(title: L10n.text("平均功率", "Average power"), value: app.averagePowerWattsText, evidence: app.averageEvidence)
     }
 
     private func activateApplication() {
@@ -972,13 +819,18 @@ private struct EnergyImpactAppRow: View {
 private struct EnergyImpactValueColumn: View {
     let title: String
     let value: String
+    let evidence: EnergyMetricEvidence
 
     var body: some View {
-        Text(value)
-            .font(AppDesignTokens.Typography.inlineTitle)
-            .monospacedDigit()
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityLabel("\(title) \(value)")
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+            Text(value).font(AppDesignTokens.Typography.inlineTitle).monospacedDigit()
+            Text(evidence.source.title).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .help(evidence.detail)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title) \(value) · \(evidence.detail)")
     }
 }
 
@@ -1000,19 +852,21 @@ private struct EnergyImpactUsageBar: View {
 }
 
 struct AppUninstallerView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var store: ScanStore
     @State private var searchText = ""
     @State private var listFilter: AppUninstallListFilter = .all
     @State private var sortMode: AppUninstallSortMode = .recommendation
     @State private var selectedApplicationID: String?
+    @State private var showsResidualFileEvidence = false
+    @State private var showsUninstallHistory = false
 
     private let sortModes: [AppUninstallSortMode] = [.recommendation, .bundleSize, .lastUsed, .modified, .name]
 
     private func listSummaryText(for presentation: AppUninstallListPresentation) -> String {
-        let formattedTotal = ByteFormat.string(presentation.apps.reduce(0) { $0 + $1.sizeBytes })
         return L10n.text(
-            "显示 \(presentation.count) 个应用 · 合计 \(formattedTotal) · 按\(sortMode.title)排序",
-            "\(presentation.count) apps shown · \(formattedTotal) total · sorted by \(sortMode.title.lowercased())"
+            "显示 \(presentation.count) 个应用 · 按\(sortMode.title)排序",
+            "\(presentation.count) apps shown · sorted by \(sortMode.title.lowercased())"
         )
     }
 
@@ -1041,125 +895,132 @@ struct AppUninstallerView: View {
     }
 
     var body: some View {
-        if !store.hasScannedInstalledApps || (store.isLoadingInstalledApps && store.installedApps.isEmpty) {
-            AppUninstallScanLandingView(store: store)
-        } else {
-            resultContent
+        Group {
+            if store.isLoadingInstalledApps {
+                AppUninstallScanLandingView(store: store)
+            } else if !store.hasScannedInstalledApps {
+                AppUninstallScanLandingView(store: store)
+            } else {
+                resultContent
+            }
+        }
+        .sheet(isPresented: $showsUninstallHistory) {
+            ReversibleOperationsView(store: store, resumeUninstall: { store.prepareResidualUninstall($0) })
+        }
+        .sheet(isPresented: $showsResidualFileEvidence) {
+            ResidualFileEvidenceView(
+                installedBundleIdentifiers: Set(store.installedApps.map(\.bundleIdentifier)),
+                inventoryComplete: store.installedAppsScanCoverage?.isComplete == true
+            )
         }
     }
 
     private var resultContent: some View {
-        let manageableApps = store.installedApps.filter(\.canMoveToTrash)
-        let presentation = AppUninstallListPresentation.make(
+        let manageableApps: [InstalledAppItem] = store.installedApps.filter(\.canMoveToTrash)
+        let presentation: AppUninstallListPresentation = AppUninstallListPresentation.make(
             apps: manageableApps,
             query: searchText,
             filter: listFilter,
             sortMode: sortMode
         )
-
-        return ManagementListPage(
-            title: L10n.text("卸载", "Uninstall"),
-            subtitle: ReviewFilter.uninstall.pageSubtitle,
-            systemImage: AppSymbols.Navigation.uninstall
-        ) {
-            Button {
-                store.refreshInstalledApps()
-            } label: {
-                Label(L10n.text("刷新应用列表", "Refresh App List"), systemImage: "arrow.clockwise")
-            }
-            .disabled(!store.canRefreshInstalledApps)
-        } controls: {
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                if store.isLoadingInstalledApps {
-                    RuntimeInlineStatus(
-                        title: L10n.text("正在刷新应用列表", "Refreshing App List"),
-                        detail: L10n.text("当前保留上次扫描结果", "Previous scan results remain visible")
-                    )
-                }
-                if let coverage = store.installedAppsScanCoverage, !coverage.isComplete {
-                    Label(incompleteScanText(coverage), systemImage: "exclamationmark.triangle.fill")
-                        .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(AppDesignTokens.Palette.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if shouldShowListControls(hasManageableApps: !manageableApps.isEmpty) {
-                    HStack(spacing: AppDesignTokens.Spacing.small) {
-                        TaskSearchField(
-                            placeholder: L10n.text("搜索应用或路径", "Search Apps or Paths"),
-                            text: $searchText,
-                            tint: AppDesignTokens.Palette.information
-                        )
-                        Picker(L10n.text("筛选", "Filter"), selection: $listFilter) {
-                            ForEach(AppUninstallListFilter.allCases) { filter in
-                                Text(filter.title).tag(filter)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        uninstallSortMenu
-                    }
-                }
-            }
-        } content: {
-            VStack(spacing: 0) {
-                HStack {
-                    Text(L10n.text("名称与位置", "Name and Location"))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(L10n.text("应用大小", "App Size"))
-                        .frame(width: 100, alignment: .trailing)
-                    Text(L10n.text("操作", "Actions"))
-                        .frame(width: 130, alignment: .trailing)
-                }
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
-                Divider()
-                if presentation.apps.isEmpty {
-                    if store.isLoadingInstalledApps {
-                        LoadingPanel(title: L10n.text("正在读取应用列表", "Reading Applications"))
-                            .frame(maxHeight: .infinity)
-                    } else {
-                        EmptyUtilityPanel(systemImage: "trash", title: emptyTitle)
-                            .frame(maxHeight: .infinity)
-                    }
-                } else {
-                    ScrollViewReader { proxy in
-                        List(selection: $selectedApplicationID) {
-                            ForEach(presentation.apps) { app in
-                                InstalledAppRow(app: app, store: store)
-                                    .tag(app.id)
-                                    .id(app.id)
-                            }
-                        }
-                        .listStyle(.inset)
-                        .scrollContentBackground(.hidden)
-                        .onChange(of: selectedApplicationID) { _, id in
-                            if let id { proxy.scrollTo(id) }
-                        }
-                        .accessibilityLabel(L10n.text("可卸载应用列表", "Uninstallable Applications"))
-                    }
-                }
-                Divider()
-                Text(listSummaryText(for: presentation))
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-            }
-            .dropDestination(for: URL.self) { urls, _ in
-                guard let app = presentation.apps.first(where: { app in
-                    urls.contains { $0.isFileURL && PathSafety.lexicalPath($0.path) == PathSafety.lexicalPath(app.path) }
-                }) else { return false }
-                selectedApplicationID = app.id
-                return true
-            }
-            .help(L10n.text("拖入列表中的应用可选中它；查看计划后才会确认卸载。", "Drop an application from this list to select it; uninstalling requires plan review and confirmation."))
+        let totalBytes: Int64 = presentation.apps.reduce(Int64(0)) {
+            CleanupByteCount.adding($1.sizeBytes, to: $0)
         }
+        let amount: FeatureLightfieldAmount = FeatureLightfieldAmount.parse(ByteFormat.storageString(totalBytes))
+        let status: String = store.isLoadingInstalledApps
+            ? L10n.text("正在刷新应用列表 · 保留上次结果", "Refreshing App List · Previous results retained")
+            : listSummaryText(for: presentation)
+        return FeatureLightfieldPage(module: .uninstall, phase: .result,
+            title: L10n.text("卸载", "Uninstall"), status: status,
+            safety: L10n.text("移到废纸篓 · 默认只选应用，确认后执行", "Move to Trash · App only by default; confirm before proceeding"),
+            actionTitle: L10n.text("卸载所选", "Uninstall Selected"),
+            actionEnabled: selectedApplicationID != nil && !store.isUninstallingApp && !store.isRestoringRecordedOperation,
+            action: {
+                if let app = presentation.apps.first(where: { $0.id == selectedApplicationID }) { store.requestUninstall(app) }
+            }) {
+            FeatureLightfieldResults(module: .uninstall, label: L10n.text("可审阅总量", "Total to Review"),
+                value: amount.value, unit: amount.unit, precision: amount.precision,
+                secondary: [.init(id: "apps", label: L10n.text("应用与相关文件", "Apps and Related Files"),
+                    value: String(presentation.count), unit: L10n.text("个应用", "apps"))]) {
+                lightfieldResultControls
+                LightfieldApplicationListHeader(kind: .uninstall)
+                lightfieldResultRows(presentation: presentation)
+            }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let app = presentation.apps.first(where: { app in
+                urls.contains { $0.isFileURL && PathSafety.lexicalPath($0.path) == PathSafety.lexicalPath(app.path) }
+            }) else { return false }
+            selectedApplicationID = app.id
+            return true
+        }
+        .sheet(isPresented: uninstallPreviewBinding) {
+            if let app = store.pendingUninstallApp {
+                UninstallPreviewSheet(store: store, app: app)
+            }
+        }
+        // D67 review (round 6): clicking a row or moving with the arrow keys
+        // only changes the selection; the primary action opens the preview,
+        // and closing the preview keeps the selection.
         .onChange(of: presentation.apps.map(\.id)) { _, ids in
-            if let selectedApplicationID, !ids.contains(selectedApplicationID) {
-                self.selectedApplicationID = nil
+            if let selectedApplicationID, !ids.contains(selectedApplicationID) { self.selectedApplicationID = nil }
+        }
+    }
+
+    private var lightfieldResultControls: some View {
+        HStack(spacing: 12) {
+            TextField(L10n.text("搜索应用名称或路径", "Search App Name or Path"), text: $searchText)
+                .textFieldStyle(.plain).frame(maxWidth: 220)
+            Picker(L10n.text("筛选", "Filter"), selection: $listFilter) {
+                ForEach(AppUninstallListFilter.allCases) { filter in Text(filter.title).tag(filter) }
+            }.pickerStyle(.menu)
+            uninstallSortMenu
+            Menu(L10n.text("更多", "More")) {
+                Button(L10n.text("刷新", "Refresh")) { store.refreshInstalledApps() }.disabled(!store.canRefreshInstalledApps)
+                Button(L10n.text("卸载记录", "Uninstall History")) { showsUninstallHistory = true }
+                Button(L10n.text("查找残留", "Find Leftovers")) { showsResidualFileEvidence = true }
             }
         }
+        .font(.system(size: 13))
+        .padding(.vertical, 6)
+#if DEBUG
+        .layoutProbe("lightfield.results.toolbar")
+#endif
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(FeatureLightfieldRowButtonStyle())
+    }
+
+    @ViewBuilder
+    private func lightfieldResultRows(presentation: AppUninstallListPresentation) -> some View {
+        if store.isLoadingInstalledApps {
+            Text(L10n.text("正在刷新应用列表 · 当前保留上次扫描结果", "Refreshing App List · Previous scan results remain visible"))
+        }
+        if let coverage = store.installedAppsScanCoverage, !coverage.isComplete {
+            Text(incompleteScanText(coverage)).font(.system(size: 13))
+                .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).warningColor)
+        }
+        if store.isPreparingUninstall && store.pendingUninstallApp == nil {
+            Text(L10n.text("正在检查残留文件", "Checking Leftover Files"))
+        } else if presentation.apps.isEmpty {
+            Text(emptyTitle).frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,
+                select: { selectedApplicationID = $0.id },
+                review: { app in
+                    selectedApplicationID = app.id
+                    guard !store.isUninstallingApp, !store.isRestoringRecordedOperation else { return }
+                    store.requestUninstall(app)
+                }, copyPath: { store.copyPath($0.path) }, reveal: { store.reveal($0.path) })
+                .disabled(store.isUninstallingApp || store.isRestoringRecordedOperation)
+        }
+    }
+
+    private var uninstallPreviewBinding: Binding<Bool> {
+        Binding(get: { store.pendingUninstallApp != nil }, set: { shown in
+            if !shown && !store.isUninstallingApp && !store.isRestoringRecordedOperation {
+                store.cancelUninstall()
+            }
+        })
     }
 
     private var uninstallSortMenu: some View {
@@ -1176,10 +1037,7 @@ struct AppUninstallerView: View {
                 }
             }
         } label: {
-            Label(
-                L10n.text("排序 \(sortMode.title)", "Sort \(sortMode.title)"),
-                systemImage: "arrow.up.arrow.down"
-            )
+            Text(L10n.text("排序 \(sortMode.title)", "Sort \(sortMode.title)"))
             .foregroundStyle(AppDesignTokens.Palette.information)
             .fixedSize(horizontal: false, vertical: true)
         }
@@ -1189,94 +1047,113 @@ struct AppUninstallerView: View {
     }
 }
 
-struct UninstallPreviewSheet: View {
+struct RelatedAppFilesReviewSheet: View {
     let app: InstalledAppItem
-    let canConfirm: Bool
     let isProcessing: Bool
     let cancel: () -> Void
-    let confirm: () -> Void
+    let confirm: (Set<String>) -> Void
+    @State private var selectedPaths = Set<String>()
+
+    private var items: [InstalledAppRelatedItem] {
+        AppUninstallService.reviewableRelatedItems(for: app)
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 16) {
-                UninstallPreviewAppIcon(path: app.path)
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(L10n.text("确认卸载", "Confirm Uninstall"))
-                        .font(AppDesignTokens.Typography.sheetTitle)
-                    Text(app.name)
-                        .font(AppDesignTokens.Typography.inlineTitle)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(app.bundleIdentifier.isEmpty ? app.path : app.bundleIdentifier)
-                        .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(ByteFormat.string(app.sizeBytes))
-                        .font(AppDesignTokens.Typography.secondary.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 12)
-            }
-            .padding(22)
-
-            Text(L10n.text(
-                "应用会先移到废纸篓，清空废纸篓前仍可恢复。",
-                "The app will be moved to Trash and remains recoverable until Trash is emptied."
-            ))
-            .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 22)
-            .padding(.bottom, app.externalManagementProviderName == nil ? 18 : 10)
-
-            if let provider = app.externalManagementProviderName {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L10n.text("关联文件由你决定", "You Decide About Related Files"))
+                    .font(AppDesignTokens.Typography.sheetTitle)
                 Text(L10n.text(
-                    "此应用来自 \(provider)。存储清理助手会在此完成卸载，但不会修改 \(provider) 中的订阅或安装记录。",
-                    "This app comes from \(provider). Storage Cleaner will uninstall it here without changing its subscription or installation records in \(provider)."
+                    "\(app.name) 已移入废纸篓。这些文件默认保留，勾选后才会移动。",
+                    "\(app.name) is in Trash. These files stay unless you select them."
                 ))
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(AppDesignTokens.Palette.warning)
+                .foregroundStyle(AppAppearanceColors.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 22)
-                .padding(.bottom, 18)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+
+            Label(
+                L10n.text("精确 Bundle ID 只提供候选线索，不能证明专属归属；应用数据可能含个人内容。", "An exact bundle ID only suggests candidates, not exclusive ownership. App data may contain personal content."),
+                systemImage: "info.circle"
+            )
+            .font(AppDesignTokens.Typography.metadata)
+            .foregroundStyle(AppAppearanceColors.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppAppearanceColors.secondarySurface, in: RoundedRectangle(cornerRadius: 9))
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+
+            if items.isEmpty {
+                ContentUnavailableView(
+                    L10n.text("没有可逐项处理的文件", "No Files to Review"),
+                    systemImage: "folder"
+                )
+                .frame(maxWidth: .infinity, minHeight: 160)
+            } else {
+                List(items) { item in
+                    Toggle(isOn: Binding(
+                        get: { selectedPaths.contains(item.path) },
+                        set: { enabled in
+                            if enabled { selectedPaths.insert(item.path) }
+                            else { selectedPaths.remove(item.path) }
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(URL(fileURLWithPath: item.path).lastPathComponent)
+                                    .font(AppDesignTokens.Typography.secondary.weight(.medium))
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(ByteFormat.string(item.sizeBytes))
+                                    .font(AppDesignTokens.Typography.metadata.monospacedDigit())
+                                    .foregroundStyle(AppAppearanceColors.secondaryText)
+                            }
+                            Text(item.path)
+                                .font(AppDesignTokens.Typography.metadata)
+                                .foregroundStyle(AppAppearanceColors.tertiaryText)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                                .help(item.path)
+                        }
+                    }
+                    .disabled(isProcessing)
+                }
+                .listStyle(.inset)
+                .frame(minHeight: 160, maxHeight: 320)
             }
 
             Divider()
-
-            HStack {
-                Button(L10n.text("取消", "Cancel"), role: .cancel) {
-                    cancel()
-                }
-                .keyboardShortcut(.cancelAction)
-                .disabled(isProcessing)
-
-                Spacer()
-
+            HStack(spacing: 10) {
+                Button(L10n.text("保留所有文件", "Keep All Files"), role: .cancel, action: cancel)
+                    .disabled(isProcessing)
+                    .keyboardShortcut(.cancelAction)
+                Spacer(minLength: 10)
                 Button(role: .destructive) {
-                    confirm()
+                    confirm(selectedPaths)
                 } label: {
                     if isProcessing {
-                        ProgressView()
-                            .controlSize(.small)
+                        Label(L10n.text("正在移动…", "Moving…"), systemImage: "hourglass")
                     } else {
-                        Label(L10n.text("卸载", "Uninstall"), systemImage: "trash")
+                        Label(L10n.text("将所选 \(selectedPaths.count) 项移入废纸篓", "Move \(selectedPaths.count) to Trash"), systemImage: "trash")
                     }
                 }
                 .appButtonChrome(.primary)
                 .tint(AppDesignTokens.Palette.destructive)
-                .disabled(!canConfirm || isProcessing)
+                .disabled(isProcessing || selectedPaths.isEmpty)
             }
             .padding(16)
         }
-        .frame(width: 520, alignment: .topLeading)
-        .background(AppDesignTokens.Palette.contentBackground)
+        .frame(width: 590, alignment: .topLeading)
+        .background(AppAppearanceColors.panel)
         .interactiveDismissDisabled(isProcessing)
     }
-
 }
-private struct UninstallPreviewAppIcon: View {
+struct UninstallPreviewAppIcon: View {
     let path: String
 
     var body: some View {
@@ -1302,7 +1179,7 @@ struct OneClickUpdatePreviewSheet: View {
     @State private var reopensUpdatedApplications = true
 
     private var allApps: [AppUpdateItem] {
-        plan.automaticApps
+        plan.applications
     }
 
     var body: some View {
@@ -1385,9 +1262,34 @@ struct OneClickUpdatePreviewSheet: View {
                 .glassPanel(cornerRadius: AppDesignTokens.Radius.settingsPanel, tint: AppDesignTokens.Palette.information, prominence: .quiet)
             }
 
+            if plan.manualReviewCount > 0 {
+                Label(
+                    L10n.text(
+                        "应用内和手动项目会打开各自的更新入口；打开入口不等于安装完成，返回后需复查版本。已核实的官网项目会加入可恢复的引导队列。",
+                        "In-app and manual items open their own update entry. Opening it does not complete installation; recheck the version afterwards. Verified website items join a resumable guided queue."
+                    ),
+                    systemImage: "hand.raised"
+                )
+                .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .glassPanel(cornerRadius: AppDesignTokens.Radius.settingsPanel, tint: AppDesignTokens.Palette.warning, prominence: .quiet)
+            }
+
                     VStack(spacing: 0) {
                     ForEach(allApps) { app in
-                        OneClickUpdatePreviewRow(app: app)
+                        OneClickUpdatePreviewRow(
+                            app: app,
+                            automaticallyUpdated: plan.automaticApps.contains { $0.id == app.id },
+                            guidedWebsite: plan.guidedWebsiteApps.contains { $0.id == app.id },
+                            onOpen: {
+                                if app.primaryUpdateProvider == .macAppStore {
+                                    store.requestAppStoreUpdate(app)
+                                } else {
+                                    store.openUpdateEntry(app)
+                                }
+                            }
+                        )
                         if app.id != allApps.last?.id {
                             Divider()
                         }
@@ -1413,13 +1315,13 @@ struct OneClickUpdatePreviewSheet: View {
 
                 Spacer()
 
-                if plan.automaticCount > 0 {
+                if plan.automaticCount > 0 || !plan.guidedWebsiteApps.isEmpty {
                     Button {
                         store.confirmOneClickAppUpdates(
                             reopensUpdatedApplications: reopensUpdatedApplications
                         )
                     } label: {
-                        Label(L10n.text("更新全部可自动更新项目", "Update All Automatic Items"), systemImage: "arrow.down.circle")
+                        Label(L10n.text("开始安全更新与官网引导", "Start Safe Updates and Website Guidance"), systemImage: "arrow.down.circle")
                     }
                     .appButtonChrome(.primary)
                     .controlSize(.large)
@@ -1462,37 +1364,51 @@ private struct OneClickPlanMetric: View {
 
 private struct OneClickUpdatePreviewRow: View {
     let app: AppUpdateItem
+    let automaticallyUpdated: Bool
+    let guidedWebsite: Bool
+    let onOpen: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            InstalledAppIcon(path: app.path)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .center, spacing: 12) {
+                InstalledAppIcon(path: app.path)
+                VStack(alignment: .leading, spacing: AppDesignTokens.Layout.textTightSpacing) {
+                    Text(app.name)
+                        .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                    Text(app.source.trimmed.nonEmpty ?? app.primaryUpdateProvider.rawValue)
+                        .font(AppDesignTokens.Typography.secondary)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .leading, spacing: AppDesignTokens.Layout.textTightSpacing) {
-                Text(app.name)
-                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(app.source.trimmed.nonEmpty ?? app.primaryUpdateProvider.rawValue)
-                    .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if app.isRunning || app.requiresApplicationQuit {
+                    Label(L10n.text("应用退出后更新", "Update After App Quits"), systemImage: "power")
+                        .foregroundStyle(AppDesignTokens.Palette.warning)
+                } else if app.requiresAdministratorAuthorization {
+                    Label(L10n.text("需要管理员授权", "Administrator Authorization Required"), systemImage: "lock.shield")
+                        .foregroundStyle(AppDesignTokens.Palette.warning)
+                }
             }
-
-            Spacer(minLength: 10)
-
-            Text(L10n.text("当前 \(app.currentVersionDisplay) → 最新 \(app.latestVersionDisplay)", "Current \(app.currentVersionDisplay) -> Latest \(app.latestVersionDisplay)"))
-                .font(AppDesignTokens.Typography.secondary)
+            HStack(spacing: 10) {
+                Text(L10n.text(
+                    "当前 \(app.currentVersionDisplay) → 最新 \(app.latestVersionDisplay)",
+                    "Current \(app.currentVersionDisplay) → Latest \(app.latestVersionDisplay)"
+                ))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if app.isRunning || app.requiresApplicationQuit {
-                Label(L10n.text("应用退出后更新", "Update After App Quits"), systemImage: "power")
-                    .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(AppDesignTokens.Palette.warning)
-            } else if app.requiresAdministratorAuthorization {
-                Label(L10n.text("需要管理员授权", "Administrator Authorization Required"), systemImage: "lock.shield")
-                    .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(AppDesignTokens.Palette.warning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if !automaticallyUpdated && !guidedWebsite {
+                    AppButton(
+                        title: L10n.text("打开入口", "Open Entry"),
+                        systemImage: "arrow.up.right",
+                        kind: .secondary,
+                        action: onOpen
+                    )
+                } else if guidedWebsite {
+                    Text(L10n.text("官网引导", "Website Guidance"))
+                        .foregroundStyle(.secondary)
+                }
             }
+            .font(AppDesignTokens.Typography.compactLabel)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -1504,10 +1420,21 @@ struct DuplicateFilesView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var store: ScanStore
     @ObservedObject private var workspace: DuplicateFilesStore
+    private let presentationFilter: DuplicateResultFilter?
+    @State private var usesSystemPhotoLibrary = false
+    @StateObject private var photoLibrary = PhotoLibraryStore.live()
+    @AppSurfaces private var surfaces
 
-    init(store: ScanStore) {
+    init(store: ScanStore, presentationFilter: DuplicateResultFilter? = nil) {
+        self.presentationFilter = presentationFilter
         self.store = store
         _workspace = ObservedObject(wrappedValue: store.duplicateFilesWorkspace)
+    }
+
+    private var effectiveResultFilter: DuplicateResultFilter { presentationFilter ?? workspace.resultFilter }
+    private var resultFilterBinding: Binding<DuplicateResultFilter> {
+        if let presentationFilter { return .constant(presentationFilter) }
+        return $workspace.resultFilter
     }
 
     private var allItems: [StorageItem] {
@@ -1522,7 +1449,7 @@ struct DuplicateFilesView: View {
         DuplicateFilesPresenter.groups(
             from: allItems,
             matching: workspace.searchText,
-            filter: workspace.resultFilter,
+            filter: effectiveResultFilter,
             sort: workspace.resultSort
         )
     }
@@ -1548,9 +1475,24 @@ struct DuplicateFilesView: View {
         workspace.selectedItems(from: allItems)
     }
 
+    private var isSimilarPhotosRoute: Bool {
+        effectiveResultFilter == .similarImage
+    }
+
+    private var pageTitle: String {
+        isSimilarPhotosRoute
+            ? L10n.text("相似照片", "Similar Photos")
+            : ReviewFilter.duplicates.sidebarTitle
+    }
+
     var body: some View {
+        // The photo-source switch lives inside the D-locked skeleton (landing
+        // status action / result toolbar), never above the page: a row above
+        // FeatureLightfieldPage shifts title, content and status frames.
         Group {
-            if workspace.isScanning && !workspace.hasScanned {
+            if isSimilarPhotosRoute && usesSystemPhotoLibrary && PhotoLibraryAvailability.isEnabledInMainBundle {
+                PhotoLibraryLightfieldView(model: photoLibrary) { usesSystemPhotoLibrary = false }
+            } else if workspace.isScanning {
                 duplicateRuntimePage
             } else if !workspace.hasScanned {
                 duplicateScanHero
@@ -1560,6 +1502,7 @@ struct DuplicateFilesView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .id(workspace.hasScanned)
+        .featureFlowTransition(value: workspace.isScanning)
         .transition(AppMotionTokens.pageTransition(reduceMotion: reduceMotion))
         .animation(
             AppMotionTokens.resolved(AppMotionTokens.navigation, reduceMotion: reduceMotion),
@@ -1582,6 +1525,10 @@ struct DuplicateFilesView: View {
                     plan: store.pendingDuplicateCleanPlan,
                     preflight: store.pendingDuplicateCleanPreflight
                 ),
+                facts: store.pendingDuplicateCleanPlan.map {
+                    .cleanupPlan($0, preflight: store.pendingDuplicateCleanPreflight, surface: .duplicateFiles,
+                                 appsToQuit: [], permission: .from(store.scanReadinessSummary))
+                },
                 onCancel: store.cancelVerifiedDuplicateCleanupConfirmation,
                 onConfirm: store.confirmVerifiedDuplicateCleanup
             )
@@ -1619,38 +1566,81 @@ struct DuplicateFilesView: View {
     }
 
     private var duplicateScanHero: some View {
-        FileToolLandingPage(
-            title: ReviewFilter.duplicates.sidebarTitle,
-            subtitle: ReviewFilter.duplicates.pageSubtitle,
-            systemImage: ReviewFilter.duplicates.systemImage,
-            configurationTitle: L10n.text("扫描位置", "Scan Locations"),
-            actionTitle: scanButtonTitle,
-            actionDetail: "",
-            actionSystemImage: scanButtonSystemImage,
-            status: duplicateScanStatus,
-            isLoading: workspace.isScanning,
-            isActionDisabled: !workspace.canScan,
-            trustText: L10n.text(
-                "只读扫描 · 不会自动删除文件",
-                "Read-only scan · Files are never deleted automatically"
-            ),
-            action: store.scanDuplicateFiles
-        ) { duplicateScanAccessory }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        FeatureLightfieldPage(module: .duplicates, phase: .landing, title: pageTitle,
+            status: duplicateScanStatus.title, safety: L10n.text("只读扫描 · 不会自动删除文件", "Read-only scan · Files are never deleted automatically"),
+            actionTitle: scanButtonTitle, actionEnabled: workspace.canScan,
+            artwork: isSimilarPhotosRoute ? .similarPhotos : nil,
+            statusActionTitle: L10n.text("改用系统照片图库", "Use System Photo Library"),
+            statusAction: systemPhotoLibraryAction, action: store.scanDuplicateFiles) {
+            FeatureLightfieldOptions(title: L10n.text("扫描位置", "Scan Locations")) {
+                duplicateLightfieldOptions
+            }
+        }
+    }
+
+    private var duplicateLightfieldOptions: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if isSimilarPhotosRoute {
+                // These are facts about the existing user-files scope, not fake
+                // per-folder controls: the store has no independent photo scope.
+                LightfieldOptionRow(title: L10n.text("图片", "Pictures"), icon: .duplicatesPhotos, module: .duplicates,
+                    metadata: workspace.scanScope == .selectedLocations ? L10n.text("仅所选位置", "Selected only") : L10n.text("随用户文件范围", "User-files scope"))
+                LightfieldOptionRow(title: L10n.text("下载", "Downloads"), icon: .migrationSourceFolder, module: .duplicates,
+                    metadata: workspace.scanScope == .selectedLocations ? L10n.text("仅所选位置", "Selected only") : L10n.text("随用户文件范围", "User-files scope"))
+                Menu {
+                    ForEach(DuplicateFileScanScope.allCases) { scope in
+                        Button(scope.title) { workspace.scanScope = scope }.disabled(workspace.scopeUnavailableReason(scope) != nil)
+                    }
+                } label: { Text(workspace.scanScope.title).font(.system(size: 13)) }
+                    .menuStyle(.borderlessButton).frame(height: 40)
+            } else {
+                ForEach(DuplicateFileScanScope.allCases) { scope in
+                    LightfieldOptionRow(title: scope.title, icon: duplicateScopeIcon(scope), module: .duplicates,
+                        selection: Binding(get: { workspace.scanScope == scope }, set: { if $0 { workspace.scanScope = scope } }),
+                        metadata: workspace.scopeUnavailableReason(scope) ?? "", probeID: "lightfield.duplicates.scope." + scope.rawValue)
+                        .disabled(workspace.scopeUnavailableReason(scope) != nil).help(scopeDetail(scope))
+                }
+            }
+            Button { chooseDuplicateRoot(externalVolume: false) } label: {
+                HStack(spacing: 14) {
+                    LightfieldOptionIconView(icon: .duplicatesAddFolder)
+                    Text(L10n.text("添加文件夹", "Add Folder")).font(.system(size: 16))
+                }.frame(height: 56).frame(maxWidth: .infinity, alignment: .leading)
+            }.buttonStyle(FeatureLightfieldRowButtonStyle())
+                .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+            Menu {
+                Button(L10n.text("选择外接卷", "Choose External Volume")) { chooseDuplicateRoot(externalVolume: true) }
+                ForEach(workspace.customRootPaths, id: \.self) { path in
+                    Button(L10n.text("移除：", "Remove: ") + path) { workspace.removeCustomRoot(path) }
+                }
+                ForEach(workspace.externalRootPaths, id: \.self) { path in
+                    Button(L10n.text("移除：", "Remove: ") + path) { workspace.removeExternalRoot(path) }
+                }
+            } label: { Text(L10n.text("已添加 \(workspace.configuredAdditionalRoots.count) 个位置", "\(workspace.configuredAdditionalRoots.count) added locations")).font(.system(size: 13)) }
+                .menuStyle(.borderlessButton).frame(height: 40)
+        }
+    }
+
+    private func duplicateScopeIcon(_ scope: DuplicateFileScanScope) -> LightfieldOptionIcon {
+        switch scope {
+        case .userFiles: .duplicatesUserFiles
+        case .wholeComputer: .duplicatesUserData
+        case .selectedLocations: .duplicatesSelectedLocation
+        }
     }
 
     private var duplicateDataPage: some View {
-        FeatureDataPageShell(
-            title: ReviewFilter.duplicates.sidebarTitle,
-            subtitle: ReviewFilter.duplicates.pageSubtitle,
-            systemImage: ReviewFilter.duplicates.systemImage
-        ) {
-            duplicateToolbarActions
-        } controls: {
-            duplicateResultControls
-        } content: {
-            duplicateDataContent
-        }
+        DuplicateFilesLightfieldView(store: store, workspace: workspace, groups: groups, allGroups: allGroups,
+            allItems: allItems, isSimilarPhotos: isSimilarPhotosRoute, title: pageTitle, resultFilter: resultFilterBinding,
+            details: AnyView(VStack(alignment: .leading, spacing: 16) { duplicateCoveragePanel; duplicateCleanupReportPanel }),
+            onUseSystemPhotoLibrary: systemPhotoLibraryAction)
+    }
+
+    /// Only the similar-photos route of a bundle that declares Photos access
+    /// offers the system library; other duplicate pages keep their layout.
+    private var systemPhotoLibraryAction: (() -> Void)? {
+        guard isSimilarPhotosRoute, PhotoLibraryAvailability.isEnabledInMainBundle else { return nil }
+        return { usesSystemPhotoLibrary = true }
     }
 
     private var duplicateResultControls: some View {
@@ -1678,13 +1668,13 @@ struct DuplicateFilesView: View {
     private var duplicateFilterControls: some View {
         HStack(spacing: AppDesignTokens.Spacing.small) {
             Menu {
-                Picker(L10n.text("结果", "Results"), selection: $workspace.resultFilter) {
+                Picker(L10n.text("结果", "Results"), selection: resultFilterBinding) {
                     ForEach(DuplicateResultFilter.allCases) { filter in
                         Text(filter.title).tag(filter)
                     }
                 }
             } label: {
-                Label(workspace.resultFilter.title, systemImage: "line.3.horizontal.decrease.circle")
+                Label(effectiveResultFilter.title, systemImage: "line.3.horizontal.decrease.circle")
             }
             .appButtonChrome(.secondary)
 
@@ -1729,7 +1719,11 @@ struct DuplicateFilesView: View {
                 Picker(L10n.text("扫描范围", "Scan Scope"), selection: $workspace.scanScope) {
                     ForEach(DuplicateFileScanScope.allCases) { scope in
                         Text(scope.title).tag(scope)
+                            .disabled(!workspace.canSelectScanScope(scope))
                     }
+                }
+                if let reason = workspace.scopeUnavailableReason(.selectedLocations) {
+                    Text(reason)
                 }
                 Divider()
                 Button(L10n.text("添加自定义文件夹", "Add Custom Folder")) {
@@ -1804,35 +1798,54 @@ struct DuplicateFilesView: View {
             }
         } else {
             VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                HStack(spacing: 2) {
-                    ForEach(DuplicateFileScanScope.allCases) { scope in
-                        Button { workspace.scanScope = scope } label: {
-                            Text(scope.title)
-                                .font(.system(size: 15, weight: .medium))
-                                .frame(maxWidth: .infinity, minHeight: GoldenLandingMetrics.scopeControlHeight)
-                                .background(workspace.scanScope == scope ? theme.accent.opacity(0.40) : .clear,
-                                            in: RoundedRectangle(cornerRadius: 7))
-                                .overlay(RoundedRectangle(cornerRadius: 7)
-                                    .strokeBorder(workspace.scanScope == scope ? theme.accent : .clear))
-                        }
-                        .buttonStyle(ResponsivePlainButtonStyle())
-                        .accessibilityLabel(scope.title)
-                        .accessibilityAddTraits(workspace.scanScope == scope ? [.isSelected] : [])
-                    }
+                CapsuleSegmentedControl(selection: Binding(
+                    get: { workspace.scanScope },
+                    set: { scope in
+                        guard workspace.scopeUnavailableReason(scope) == nil else { return }
+                        workspace.scanScope = scope
+                    }), options: DuplicateFileScanScope.allCases, title: { $0.title },
+                    label: L10n.text("扫描范围", "Scan Scope"), pigment: nil,
+                    isOptionDisabled: { workspace.scopeUnavailableReason($0) != nil },
+                    optionHelp: { workspace.scopeUnavailableReason($0) ?? scopeDetail($0) })
+                    .help(duplicateScanScopeDetail)
+                    .padding(.bottom, 8)
+
+                if let reason = workspace.scopeUnavailableReason(.selectedLocations) {
+                    let blocksScan = workspace.scanScope == .selectedLocations
+                    Label(reason, systemImage: blocksScan ? "exclamationmark.triangle" : "info.circle")
+                        .font(AppDesignTokens.Typography.secondary)
+                        .foregroundStyle(blocksScan ? AppDesignTokens.Palette.warning : theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, 8)
                 }
-                .padding(2)
-                .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(AppAppearanceColors.ink.opacity(0.15)))
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel(L10n.text("扫描范围", "Scan Scope"))
-                .help(duplicateScanScopeDetail)
-                .padding(.bottom, 8)
 
                 duplicateLocationButtons
                 additionalLocationCount
                     .padding(.top, 8)
             }
         }
+    }
+
+    private func duplicateScopeButton(_ scope: DuplicateFileScanScope) -> some View {
+        let unavailableReason = workspace.scopeUnavailableReason(scope)
+        return Button { workspace.scanScope = scope } label: {
+            Text(scope.title)
+                .font(.system(size: 15, weight: .medium))
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, minHeight: GoldenLandingMetrics.scopeControlHeight)
+                .background(workspace.scanScope == scope ? AppAppearanceColors.selectedSurface : .clear,
+                            in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(workspace.scanScope == scope ? AppAppearanceColors.controlAccent : .clear))
+        }
+        .buttonStyle(ResponsivePlainButtonStyle())
+        // N17: "Selected only" needs an added location first.
+        .disabled(unavailableReason != nil)
+        .help(unavailableReason ?? scopeDetail(scope))
+        .accessibilityLabel(scope.title)
+        .accessibilityHint(unavailableReason ?? scopeDetail(scope))
+        .accessibilityAddTraits(workspace.scanScope == scope ? [.isSelected] : [])
     }
 
     private var duplicateLocationButtons: some View {
@@ -1856,9 +1869,8 @@ struct DuplicateFilesView: View {
                     .font(.system(size: 15, weight: .medium))
             }
             .frame(maxWidth: .infinity, minHeight: GoldenLandingMetrics.locationButtonHeight)
-            .foregroundStyle(theme.primaryText)
-            .background(theme.accent.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(AppAppearanceColors.ink.opacity(0.24)))
+            .foregroundStyle(surfaces.textPrimary)
+            .surfaceBackground(.inset, cornerRadius: AppDesignTokens.Corner.row)
         }
         .buttonStyle(ResponsivePlainButtonStyle())
     }
@@ -1939,9 +1951,10 @@ struct DuplicateFilesView: View {
                 ) {
                     store.scanDuplicateFiles()
                 }
+                .help(workspace.scanUnavailableReason ?? "")
             }
 
-            if !selectedItems.isEmpty {
+            if !isSimilarPhotosRoute && !selectedItems.isEmpty {
                 Menu {
                     Button {
                         store.requestVerifiedDuplicateCleanup(disposition: .quarantine, workspace: workspace)
@@ -2061,17 +2074,36 @@ struct DuplicateFilesView: View {
     }
 
     private var duplicateSummaryPanel: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 18) {
-                duplicatePrimarySummary
-                Divider()
-                    .frame(height: 52)
-                duplicateSummaryMetrics
-            }
+        Group {
+            if isSimilarPhotosRoute {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.text("相似照片候选", "Similar Photo Candidates"))
+                        .font(AppDesignTokens.Typography.compactLabel)
+                        .foregroundStyle(.secondary)
+                    Text(L10n.text("\(groups.count) 组", "\(groups.count) groups"))
+                        .font(AppDesignTokens.Typography.metricValue)
+                        .monospacedDigit()
+                    Text(L10n.text(
+                        "仅供人工对照；视觉相近不等于内容完全相同。",
+                        "For manual review only; visual similarity does not prove identical content."
+                    ))
+                    .font(AppDesignTokens.Typography.secondary)
+                    .foregroundStyle(.secondary)
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 18) {
+                        duplicatePrimarySummary
+                        Divider()
+                            .frame(height: 52)
+                        duplicateSummaryMetrics
+                    }
 
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-                duplicatePrimarySummary
-                duplicateSummaryMetrics
+                    VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
+                        duplicatePrimarySummary
+                        duplicateSummaryMetrics
+                    }
+                }
             }
         }
         .padding(AppDesignTokens.Spacing.large)
@@ -2124,29 +2156,32 @@ struct DuplicateFilesView: View {
     }
 
     private var duplicateRuntimeTitle: String {
-        if workspace.phase == .paused { return L10n.text("重复文件扫描已暂停", "Duplicate Scan Paused") }
+        if workspace.phase == .paused {
+            return isSimilarPhotosRoute
+                ? L10n.text("相似照片扫描已暂停", "Similar Photo Scan Paused")
+                : L10n.text("重复文件扫描已暂停", "Duplicate Scan Paused")
+        }
         if workspace.phase == .cancelling { return L10n.text("正在停止扫描", "Stopping Scan") }
         return switch workspace.scanProgress?.phase ?? .discovering {
         case .discovering: L10n.text("正在查找候选文件", "Discovering Candidate Files")
         case .fingerprinting: L10n.text("正在比对文件指纹", "Comparing File Fingerprints")
         case .hashing: L10n.text("正在确认文件内容", "Verifying File Contents")
-        case .paused: L10n.text("重复文件扫描已暂停", "Duplicate Scan Paused")
+        case .paused: isSimilarPhotosRoute
+            ? L10n.text("相似照片扫描已暂停", "Similar Photo Scan Paused")
+            : L10n.text("重复文件扫描已暂停", "Duplicate Scan Paused")
         case .finished: L10n.text("正在整理重复组", "Preparing Duplicate Groups")
         }
     }
 
     private var duplicateRuntimePage: some View {
         let progress = workspace.scanProgress ?? .initial
-        return FeatureRuntimePage(
-            module: .duplicates, title: duplicateRuntimeTitle, state: duplicateRuntimeState,
-            metrics: [
-                .init(title: L10n.text("已扫描文件", "Files Scanned"), value: String(progress.scannedFiles)),
-                .init(title: L10n.text("已完整比对", "Fully Verified"), value: String(progress.hashedFiles)),
-                .init(title: L10n.text("已读取内容", "Content Read"), value: ByteFormat.string(progress.hashedBytes))
-            ],
-            currentItem: progress.currentPath,
-            trustText: L10n.text("只读扫描 · 保留原件，清理前确认", "Read-only scan · Originals retained until cleanup is confirmed")
-        ) { EmptyView() } actions: { duplicateRuntimeActions }
+        return DuplicateFilesRunningPage(progress: progress, state: duplicateRuntimeState,
+            title: duplicateRuntimeTitle, pageTitle: pageTitle, isSimilarPhotos: isSimilarPhotosRoute,
+            canCancel: workspace.phase != .cancelling, onCancel: store.cancelDuplicateFileScan,
+            onPauseOrResume: {
+                if workspace.phase == .paused { store.resumeDuplicateFileScan() }
+                else { store.pauseDuplicateFileScan() }
+            })
     }
 
     private var duplicateRuntimeActions: some View {
@@ -2191,6 +2226,7 @@ struct DuplicateFilesView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
+                    let addedRoots = workspace.lastScanSelectedRootPaths
                     ForEach(Array(coverage.roots.enumerated()), id: \.offset) { _, root in
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: root.status == .scanned ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -2201,6 +2237,12 @@ struct DuplicateFilesView: View {
                                 Text(root.rootPath)
                                     .font(AppDesignTokens.Typography.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
+                                if addedRoots.contains(PathSafety.lexicalPath(root.rootPath)) {
+                                    // N17: added locations are walked first with their own quota.
+                                    Text(L10n.text("你添加的位置 · 先扫描、单独计数", "Added location · scanned first with its own quota"))
+                                        .font(AppDesignTokens.Typography.compactLabel)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Text(root.status == .scanned
                                     ? L10n.text(
                                         "扫描 \(root.scannedDirectories) 个目录、\(root.scannedFiles) 个文件（\(ByteFormat.string(root.scannedBytes))）",
@@ -2209,11 +2251,33 @@ struct DuplicateFilesView: View {
                                     : duplicateSkipReasonTitle(root.skipReason))
                                     .font(AppDesignTokens.Typography.compactLabel)
                                     .foregroundStyle(.secondary)
+                                if let cloudOnly = root.cloudOnlyFiles, cloudOnly > 0 {
+                                    Text(L10n.text(
+                                        "其中 \(cloudOnly) 个文件仅在云端，未下载比对",
+                                        "\(cloudOnly) of them are cloud-only and were not compared"
+                                    ))
+                                    .font(AppDesignTokens.Typography.compactLabel)
+                                    .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
 
-                    if coverage.reachedTimeLimit || coverage.reachedFileLimit
+                    if let cloudOnly = coverage.cloudOnlySummary {
+                        Label(cloudOnly, systemImage: "icloud")
+                            .font(AppDesignTokens.Typography.secondary)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if coverage.contentReadUnresponsive == true {
+                        Label(
+                            L10n.text("磁盘或网络无响应，已停止等待部分文件；结果为部分覆盖，请检查连接后重试。", "The disk or network is unresponsive. Waiting for some files stopped; coverage is partial. Check the connection and retry."),
+                            systemImage: "exclamationmark.circle"
+                        )
+                        .font(AppDesignTokens.Typography.secondary)
+                        .foregroundStyle(AppDesignTokens.Palette.warning)
+                    } else if coverage.reachedTimeLimit || coverage.reachedFileLimit
                         || coverage.reachedDirectoryLimit || coverage.reachedResultLimit {
                         Label(
                             L10n.text("本次扫描达到保护上限，结果为部分覆盖。", "This scan reached a safety limit and has partial coverage."),
@@ -2285,6 +2349,8 @@ struct DuplicateFilesView: View {
                     ))
                     .font(AppDesignTokens.Typography.secondary)
                     .foregroundStyle(.secondary)
+                    // D93: four groups with reasons; moved copies are not freed space.
+                    OperationCompletionTallyView(tally: OperationCompletionTally(report: report))
                 }
                 Spacer()
                 if !report.restorableReceipts.isEmpty {
@@ -2321,14 +2387,21 @@ struct DuplicateFilesView: View {
         case .fileLimit: L10n.text("达到文件数量上限", "File count limit reached")
         case .directoryLimit: L10n.text("达到目录数量上限", "Folder count limit reached")
         case .cancelled: L10n.text("扫描已取消", "Scan cancelled")
+        case .cloudPlaceholder: L10n.text("仅在云端，未下载比对", "Cloud-only; not downloaded to compare")
         case nil: L10n.text("未扫描", "Not scanned")
         }
     }
 
     private var duplicateEmptyState: some View {
-        EmptyStateView(
-            title: L10n.text("未发现内容相同文件", "No Identical Files Found"),
-            detail: scanTimeText,
+        // With cloud-only files skipped, "nothing found" covers only what was compared.
+        let cloudOnly = workspace.scanCoverage?.cloudOnlySummary
+        return EmptyStateView(
+            title: isSimilarPhotosRoute
+                ? L10n.text("未发现相似照片候选", "No Similar Photo Candidates Found")
+                : cloudOnly == nil
+                    ? L10n.text("未发现内容相同文件", "No Identical Files Found")
+                    : L10n.text("已比对的文件中未发现内容相同文件", "No Identical Files Among Compared Files"),
+            detail: [scanTimeText, cloudOnly].compactMap { $0 }.joined(separator: "\n"),
             systemImage: "checkmark.seal.fill",
             density: .workspace
         )
@@ -2355,13 +2428,22 @@ struct DuplicateFilesView: View {
         if workspace.isScanning {
             return L10n.text("扫描中", "Scanning")
         }
+        if isSimilarPhotosRoute {
+            return workspace.hasScanned
+                ? L10n.text("重新扫描相似照片", "Rescan Similar Photos")
+                : L10n.text("扫描相似照片", "Scan Similar Photos")
+        }
         return workspace.hasScanned
             ? L10n.text("重新扫描重复文件", "Rescan Duplicate Files")
             : L10n.text("扫描重复文件", "Scan Duplicates")
     }
 
     private var duplicateScanScopeDetail: String {
-        switch workspace.scanScope {
+        scopeDetail(workspace.scanScope)
+    }
+
+    private func scopeDetail(_ scope: DuplicateFileScanScope) -> String {
+        switch scope {
         case .userFiles:
             L10n.text(
                 "扫描常用用户文件夹和你明确选择的位置。",
@@ -2372,11 +2454,16 @@ struct DuplicateFilesView: View {
                 "扫描用户数据区和你明确选择的卷。",
                 "Scans user data areas and volumes you select."
             )
+        case .selectedLocations:
+            L10n.text(
+                "只扫描你添加的文件夹和外接卷，不碰默认位置。",
+                "Scans only the folders and volumes you add, never the default folders."
+            )
         }
     }
 
     private var scanButtonSystemImage: String {
-        if !workspace.canScan {
+        if workspace.isBusy {
             return "hourglass"
         }
         return workspace.hasScanned ? "arrow.clockwise" : "viewfinder"
@@ -2390,6 +2477,14 @@ struct DuplicateFilesView: View {
     }
 
     private var emptyTitle: String {
+        if isSimilarPhotosRoute {
+            if !workspace.searchText.trimmed.isEmpty {
+                return L10n.text("没有匹配的相似照片", "No matching similar photos")
+            }
+            return workspace.hasScanned
+                ? L10n.text("未发现相似照片候选", "No similar photo candidates found")
+                : L10n.text("尚未扫描相似照片", "Similar photos have not been scanned")
+        }
         if !workspace.searchText.trimmed.isEmpty {
             return L10n.text("没有匹配的重复文件", "No matching duplicate files")
         }
@@ -2466,6 +2561,8 @@ struct DuplicateCleanupConfirmationPresentation: Equatable {
 
 private struct DuplicateCleanupConfirmationSheet: View {
     let presentation: DuplicateCleanupConfirmationPresentation?
+    /// D93: the six fixed confirmation fields.
+    let facts: OperationConfirmationFacts?
     let onCancel: () -> Void
     let onConfirm: () -> Void
 
@@ -2485,6 +2582,9 @@ private struct DuplicateCleanupConfirmationSheet: View {
             .foregroundStyle(.secondary)
 
             if let presentation {
+                if let facts {
+                    OperationConfirmationFactsView(facts: facts, showsItemList: false)
+                }
                 HStack(spacing: AppDesignTokens.Spacing.medium) {
                     Label(
                         L10n.text("可执行 \(presentation.readyCount) 个", "\(presentation.readyCount) ready"),
@@ -2706,17 +2806,25 @@ private struct DuplicateGroupCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 7) {
                         MetadataPill(text: L10n.items(group.items.count), systemImage: "number", tint: AppDesignTokens.Palette.tertiary)
-                        MetadataPill(text: ByteFormat.string(group.sizeBytes), systemImage: "doc", tint: .secondary)
+                        MetadataPill(
+                            text: ByteFormat.string(group.candidateRule == .similarImage
+                                ? group.items.reduce(Int64(0)) { $0 + max(0, $1.sizeBytes) }
+                                : group.sizeBytes),
+                            systemImage: "doc", tint: .secondary
+                        )
                         MetadataPill(
                             text: group.isContentConfirmed
                                 ? group.relationship.title
-                                : L10n.text("兼容数据待复核", "Legacy result to review"),
+                                : group.candidateRule == .similarImage
+                                    ? L10n.text("仅视觉候选", "Visual candidate only")
+                                    : L10n.text("人工候选", "Review candidate"),
                             systemImage: group.isContentConfirmed ? "checkmark.seal" : "exclamationmark.triangle",
                             tint: group.isContentConfirmed && group.relationship != .unknown
                                 ? AppDesignTokens.Palette.success
                                 : AppDesignTokens.Palette.warning
                         )
-                        MetadataPill(
+                        if group.isContentConfirmed {
+                            MetadataPill(
                             text: group.relationship == .apfsClone
                                 ? L10n.text("物理释放空间待删除后确认", "Physical reclaimable space confirmed after deletion")
                                 : group.physicalReclaimableBytes.map {
@@ -2724,7 +2832,8 @@ private struct DuplicateGroupCard: View {
                                 } ?? L10n.text("物理可释放待确认", "Physical savings unknown"),
                             systemImage: "internaldrive",
                             tint: AppDesignTokens.Palette.warning
-                        )
+                            )
+                        }
                     }
                 }
 
@@ -2734,21 +2843,131 @@ private struct DuplicateGroupCard: View {
 
             Divider()
 
-            ForEach(group.items) { item in
-                DuplicateFileRow(
-                    item: item,
-                    allItems: allItems,
-                    store: store,
-                    workspace: workspace
-                )
-                if item.id != group.items.last?.id {
-                    Divider()
-                        .padding(.leading, 76)
+            if group.candidateRule == .similarImage {
+                VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
+                    Label(
+                        L10n.text(
+                            "仅供并排比对；相似不代表文件相同，无法直接安全清理。",
+                            "Compare side by side. Similarity does not prove identical files or permit safe cleanup."
+                        ),
+                        systemImage: "eye"
+                    )
+                    .font(AppDesignTokens.Typography.secondary)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 190, maximum: 280), spacing: 12)],
+                        alignment: .leading,
+                        spacing: 12
+                    ) {
+                        ForEach(group.items) { item in
+                            SimilarImageReviewTile(item: item, store: store)
+                        }
+                    }
+                }
+                .padding(AppDesignTokens.Spacing.medium)
+            } else {
+                ForEach(group.items) { item in
+                    DuplicateFileRow(
+                        item: item,
+                        allItems: allItems,
+                        store: store,
+                        workspace: workspace
+                    )
+                    if item.id != group.items.last?.id {
+                        Divider()
+                            .padding(.leading, 76)
+                    }
                 }
             }
         }
         .glassPanel(cornerRadius: AppDesignTokens.Radius.settingsPanel, tint: AppDesignTokens.Palette.tertiary, prominence: .quiet)
         .accessibilityElement(children: .contain)
+    }
+}
+
+private struct SimilarImageReviewTile: View {
+    let item: StorageItem
+    @ObservedObject var store: ScanStore
+    @State private var thumbnail: NSImage?
+    @State private var previewUnavailableReason: String?
+    @State private var quickLookURL: URL?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl)
+                    .fill(AppDesignTokens.Palette.tertiary.opacity(0.08))
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .scaledToFit()
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 27))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 146)
+            .clipShape(RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl))
+
+            Text(item.title)
+                .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(item.path)
+                .font(AppDesignTokens.Typography.metadata)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .help(item.path)
+            Text(ByteFormat.string(item.sizeBytes))
+                .font(AppDesignTokens.Typography.metadata)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+
+            if let previewUnavailableReason {
+                Text(previewUnavailableReason)
+                    .font(AppDesignTokens.Typography.metadata)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    quickLookURL = URL(fileURLWithPath: item.path)
+                } label: {
+                    Label(L10n.text("预览原件", "Quick Look"), systemImage: "eye")
+                }
+                .appButtonChrome(.secondary)
+                Button {
+                    store.reveal(item.path)
+                } label: {
+                    Label(L10n.text("访达", "Finder"), systemImage: "folder")
+                }
+                .appButtonChrome(.secondary)
+            }
+            .disabled(item.status != .available)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: AppDesignTokens.Radius.settingsPanel)
+                .fill(.quaternary.opacity(0.35))
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.text("相似图片候选：\(item.title)", "Similar image candidate: \(item.title)"))
+        .quickLookPreview($quickLookURL)
+        .task(id: item.id) {
+            guard item.status == .available else { return }
+            let loaded = await SimilarImagePreviewCache.shared.loadedIcon(for: item.path)
+            guard !Task.isCancelled else { return }
+            thumbnail = loaded.image
+            previewUnavailableReason = loaded.unavailableReason
+        }
     }
 }
 
@@ -3020,15 +3239,20 @@ private struct MemoryOptimizationResultPanel: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            ArtworkIconTile(
-                systemImage: statusImage,
-                filter: nil,
-                tint: statusTint,
-                size: UtilitySizing.supportIcon,
-                glyphSize: UtilitySizing.supportGlyph,
-                showsGlass: true,
-                showsGlow: result.status == .completed
-            )
+            // D58: finished, nothing needed, restricted and failed actions
+            // show their state picture; others keep the status tile.
+            GeneratedArtView(art: statusArt, variant: .header) {
+                ArtworkIconTile(
+                    systemImage: statusImage,
+                    filter: nil,
+                    tint: statusTint,
+                    size: UtilitySizing.supportIcon,
+                    glyphSize: UtilitySizing.supportGlyph,
+                    showsGlass: true,
+                    showsGlow: result.status == .completed
+                )
+            }
+            .frame(width: UtilitySizing.supportIcon, height: UtilitySizing.supportIcon)
 
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
@@ -3173,6 +3397,16 @@ private struct MemoryOptimizationResultPanel: View {
         value == Int64.min ? Int64.max : abs(value)
     }
 
+    private var statusArt: GeneratedArt? {
+        switch result.status {
+        case .completed: .stateSuccess
+        case .notNeeded: .stateAllClear
+        case .partial, .restricted: .statePermission
+        case .timedOut, .verificationFailed, .unavailable: .stateError
+        case .cancelled: nil
+        }
+    }
+
     private var statusImage: String {
         switch result.status {
         case .completed:
@@ -3207,11 +3441,18 @@ private struct MemoryOptimizationResultPanel: View {
 private struct MemoryReleasePanel: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.windowLayoutMetrics) private var layout
-    @State private var renderedUsedRatio: Double = 0
+    @Environment(\.pageLayout) private var pageLayout
+    @Environment(\.moduleTheme) private var moduleTheme
+    @AppSurfaces private var surfaces
     let snapshot: MemorySnapshot
     let processSnapshot: MemorySnapshot
     let trendPoints: [MenuBarTelemetryPoint]
     @ObservedObject var store: ScanStore
+    @State private var showsMetricDetails = false
+    var isLandingSummary = false
+    var compactLandingSummary = false
+    var landingTrendHeight: CGFloat = 48
+    var integratesWithCanvas = false
 
     private var usedRatio: Double? {
         snapshot.measuredUsedRatio
@@ -3270,218 +3511,303 @@ private struct MemoryReleasePanel: View {
             : L10n.text("预计应用占用减少", "estimated app reduction")
     }
 
+    private var page: PageLayout {
+        pageLayout ?? PageLayout.approximated(from: layout)
+    }
+
+    private var isShort: Bool { page.height == .short }
+
+    /// The pressure ring leads at 104 pt in wide windows, 92 pt in regular
+    /// ones (so the trend keeps ~260 pt), 74 pt in short ones.
+    private var pressureRingSide: CGFloat {
+        isLandingSummary ? 64 : (isShort ? 66 : (page.width >= .wide ? 104 : 92))
+    }
+
+    private var usageRingSide: CGFloat {
+        isLandingSummary ? 48 : (isShort ? 56 : (page.width >= .wide ? 80 : 70))
+    }
+
+    /// D53 V0: the overview in one row — the pressure ring leads, the usage
+    /// ring follows, the recommendation, then the trend filling the rest.
     var body: some View {
-        ContentPanel {
-            VStack(alignment: .leading, spacing: 12) {
+        if isLandingSummary {
+            VStack(alignment: .leading, spacing: 8) {
+                if compactLandingSummary {
+                    compactDashboardSummary
+                } else {
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(L10n.text("内存摘要", "Memory Summary"))
+                                .font(AppDesignTokens.TypeScale.sectionTitle)
+                                .accessibilityAddTraits(.isHeader)
+                            rings
+                        }
+                        recommendationSummary(includesAction: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    memoryTrendRegion
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+        SurfaceCard(padding: integratesWithCanvas ? 0 : (isShort ? 10 : 16), isIntegrated: integratesWithCanvas) {
+            VStack(alignment: .leading, spacing: 10) {
 #if DEBUG || STORAGE_CLEANER_BETA
                 if MiniWindowDemoData.isEnabled {
                     Text("FIXTURE · " + L10n.text("内存摘要与历史", "Memory summary and history"))
-                        .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .font(AppDesignTokens.TypeScale.caption)
+                        .foregroundStyle(surfaces.textTertiary)
                 }
 #endif
-                if layout.density == .compact {
-                    compactContent
+                if isShort {
+                    // Short windows keep the list visible: no trend, and the
+                    // action moves to the trailing edge of the same row.
+                    HStack(alignment: .center, spacing: 16) {
+                        rings
+                        recommendationSummary(includesAction: false)
+                            .layoutPriority(1)
+                        Spacer(minLength: 8)
+                        if !isObserving {
+                            // Narrow and short: the icon, with its title as help.
+                            if page.width == .compact {
+                                recommendedActionButton.labelStyle(.iconOnly).fixedSize()
+                            } else {
+                                recommendedActionButton.fixedSize()
+                            }
+                        }
+                    }
+                } else if page.width >= .regular {
+                    HStack(alignment: .center, spacing: page.width >= .wide ? 22 : 16) {
+                        rings
+                        recommendationSummary(includesAction: true)
+                            .fixedSize(horizontal: true, vertical: false)
+                        memoryTrendRegion
+                            .frame(minWidth: 220, maxWidth: .infinity)
+                    }
                 } else {
-                    regularContent
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .center, spacing: 16) {
+                            rings
+                            recommendationSummary(includesAction: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        memoryTrendRegion
+                    }
+                }
+            }
+        }
+    }
+    }
+
+    private var compactDashboardSummary: some View {
+        HStack(spacing: 8) {
+            MetricRing(fraction: snapshot.reportablePressureLevel == nil ? nil : 1,
+                       colors: [releaseTint.opacity(0.75), releaseTint], lineWidth: 3) {
+                Image(systemName: "gauge.with.dots.needle.67percent")
+                    .font(AppDesignTokens.TypeScale.caption)
+                    .foregroundStyle(releaseTint)
+            }
+            .frame(width: 32, height: 32)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(L10n.text("内存压力", "Memory Pressure"))
+            .accessibilityValue(snapshot.reportablePressureLevel?.title ?? L10n.text("不可用", "Unavailable"))
+            MetricRing(fraction: usedRatio, colors: ModulePigment.memory.gradientStops, lineWidth: 3) {
+                Text(usedPercentText).font(AppDesignTokens.TypeScale.caption).monospacedDigit()
+            }
+            .frame(width: 32, height: 32)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(L10n.text("内存占用", "Memory used"))
+            .accessibilityValue(usedPercentText)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(L10n.text("内存摘要", "Memory Summary"))
+                    .font(AppDesignTokens.TypeScale.sectionTitle)
+                    .accessibilityAddTraits(.isHeader)
+                Text((snapshot.reportablePressureLevel?.title ?? "—") + " · " + summaryValue)
+                    .font(AppDesignTokens.TypeScale.caption)
+                    .foregroundStyle(surfaces.textSecondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            metricDetailsButton
+        }
+        .frame(height: 32)
+        .help(pressureHeadroomText + " · " + summaryTitle + ": " + summaryValue + " · " + summaryCaption)
+    }
+
+    private var rings: some View {
+        HStack(alignment: .center, spacing: 14) {
+            pressureSummary
+            // A short, narrow window keeps the pressure ring only; usage is
+            // still in "已用 / 总量" beside it.
+            if !(isShort && page.width == .compact) {
+                usageSummary
+            }
+        }
+    }
+
+    /// The metric notes open in a popover instead of a disclosure row, so
+    /// the overview stays one row high (D53 V0).
+    private var metricDetailsButton: some View {
+        AppIconButton(
+            title: L10n.text("指标说明", "Metric details"),
+            systemImage: "info.circle"
+        ) {
+            showsMetricDetails.toggle()
+        }
+        .popover(isPresented: $showsMetricDetails, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.text("指标说明", "Metric details"))
+                    .font(AppDesignTokens.TypeScale.sectionTitle)
+                // D28: the level is the system's; only this percentage is estimated.
+                Text(L10n.text(
+                    "压力等级取自 macOS 系统（与活动监视器一致），系统未给出等级时按百分比估算（85% 起为升高、95% 起为高）。压力趋势估算 = 100 − 系统压力余量，仅用于趋势，不是占用率。",
+                    "The pressure level comes from macOS (the same source as Activity Monitor); when macOS reports no level, it is estimated from the percentage (Elevated from 85%, High from 95%). Pressure estimate = 100 − system pressure headroom, for trends only; it is not memory usage."
+                ))
+                .font(AppDesignTokens.TypeScale.secondary)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                if compactLandingSummary {
+                    recommendationSummary(includesAction: true)
+                    // The popover uses the pure chart, without another details
+                    // control. Reusing memoryTrendRegion here would recursively
+                    // include this popover in its own opaque View type.
+                    MemoryTrendChartView(
+                        trendPoints: trendPoints,
+                        updatedAt: snapshot.generatedAt,
+                        chartHeight: memoryTrendHeight
+                    )
                 }
             }
             .padding(14)
-        }
-        .task(id: usedRatio) {
-            guard let usedRatio else {
-                renderedUsedRatio = 0
-                return
-            }
-            guard AppMotionPolicy.shouldAnimate(reduceMotion: reduceMotion) else {
-                renderedUsedRatio = usedRatio
-                return
-            }
-
-            if renderedUsedRatio == 0 {
-                await Task.yield()
-            }
-            withAnimation(AppMotionTokens.progress) {
-                renderedUsedRatio = usedRatio
-            }
+            .frame(width: 320, alignment: .leading)
         }
     }
 
-    private var regularContent: some View {
-        HStack(alignment: .center, spacing: 18) {
-            HStack(spacing: 12) {
-                pressureSummary
-                usageSummary
-            }
-            recommendationSummary
-                .frame(width: 268, alignment: .leading)
-            VStack(alignment: .leading, spacing: 4) {
-                if !isObserving { recommendedActionButton }
-                memoryTrend
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
+    private var memoryTrendHeight: CGFloat {
+        isLandingSummary ? landingTrendHeight : (page.height == .tall ? 170 : 118)
     }
 
-    private var compactContent: some View {
-        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.large) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: AppDesignTokens.Spacing.large) {
-                    pressureSummary
-                        .frame(width: 96, alignment: .leading)
-                    usageSummary
-                        .frame(width: 96, alignment: .leading)
-                    recommendationSummary
-                        .frame(minWidth: 240, alignment: .leading)
-                }
-
-                VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.large) {
-                    HStack(spacing: AppDesignTokens.Spacing.large) {
-                        pressureSummary
-                        usageSummary
-                    }
-                    recommendationSummary
-                }
+    private var memoryTrendRegion: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                MemoryTrendHeader(updatedAt: snapshot.generatedAt)
+                metricDetailsButton
             }
-
-            if !isObserving {
-                recommendedActionButton
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            memoryTrend
-        }
-    }
-
-    private var memoryTrend: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: AppDesignTokens.Spacing.small) {
-                Label(
-                    L10n.text("内存使用趋势", "Memory Usage Trend"),
-                    systemImage: "waveform.path.ecg"
-                )
-                .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                .foregroundStyle(AppChartPalette.memory)
-
-                Spacer(minLength: AppDesignTokens.Spacing.small)
-
-                Text(snapshot.generatedAt, format: .dateTime.hour().minute().second())
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .accessibilityLabel(L10n.text("最近更新", "Last updated"))
-            }
-
-            GeekPrecisionLineChart(
-                points: trendPoints,
-                series: [
-                    MenuBarTelemetrySeries(
-                        id: "memory-management-usage",
-                        title: L10n.text("内存占用", "Memory Usage"),
-                        channel: .memory,
-                        color: AppChartPalette.memory
-                    ),
-                    MenuBarTelemetrySeries(
-                        id: "memory-management-pressure",
-                        title: L10n.text("压力趋势估算", "Pressure estimate"),
-                        channel: .memoryPressure,
-                        color: AppDesignTokens.Palette.caution
-                    ),
-                ],
-                valueRange: 0...100,
-                unit: .percent,
-                accessibilityLabel: L10n.text(
-                    "最近两分钟的内存占用与压力趋势估算",
-                    "Memory usage and estimated pressure trend over the last two minutes"
-                ),
-                duration: 120,
-                showsTimelineLabels: true,
-                showsTooltip: true,
-                showsValueLabels: true,
-                lineWidth: 1.6,
-                fillOpacity: 0.08
+            MemoryTrendChartView(
+                trendPoints: trendPoints,
+                updatedAt: snapshot.generatedAt,
+                chartHeight: memoryTrendHeight,
+                showsHeader: false
             )
-            .frame(height: layout.density == .compact ? 112 : 90)
-
-            DisclosureGroup(L10n.text("指标说明", "Metric details")) {
-                Text(L10n.text(
-                    "压力趋势估算 = 100 − 系统压力余量；不是占用率，也不等同于压力等级。",
-                    "Pressure estimate = 100 − system pressure headroom; it is neither memory usage nor the pressure grade."
-                ))
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
         }
-        .padding(AppDesignTokens.Spacing.small)
-
     }
 
+    /// §1.5 MetricRing: the macOS pressure level is the leading, larger ring
+    /// (its color is the level, D28); usage is the smaller ring (audit 4.8).
     private var pressureSummary: some View {
-        GeekCombinedRing(
-            title: L10n.text("内存压力", "Memory Pressure"),
-            value: snapshot.reportablePressureLevel?.title ?? L10n.text("不可用", "Unavailable"),
-            progress: nil,
-            tint: releaseTint,
-            size: layout.density == .compact ? 96 : 80,
-            fixedValueFontSize: 20,
-            strokeWidth: 6,
-            isStatusOnly: snapshot.reportablePressureLevel != nil
-        )
+        let side = pressureRingSide
+        return MetricRing(
+            fraction: snapshot.reportablePressureLevel == nil ? nil : 1,
+            colors: [releaseTint.opacity(0.75), releaseTint],
+            lineWidth: isShort ? 7 : 9
+        ) {
+            VStack(spacing: 1) {
+                // English level names are longer ("Unavailable"): step the
+                // size down instead of truncating or scaling the label.
+                ViewThatFits(in: .horizontal) {
+                    pressureLevelText(size: isShort ? 14 : 18)
+                    pressureLevelText(size: isShort ? 12 : 14)
+                    pressureLevelText(size: 11)
+                }
+                // The 66 pt short-window ring has room for the short label.
+                ViewThatFits(in: .horizontal) {
+                    Text(L10n.text("内存压力", "Pressure"))
+                    Text(L10n.text("压力", "Pressure"))
+                }
+                .font(AppDesignTokens.TypeScale.caption)
+                .foregroundStyle(surfaces.textSecondary)
+                .lineLimit(1)
+            }
+            .padding(.horizontal, isShort ? 4 : 10)
+        }
+        .frame(width: side, height: side)
         .help(pressureHeadroomText + L10n.text(
-            "；环颜色表示评估等级，不是压力百分比或可用内存比例。",
-            "; ring color shows the assessed grade, not a pressure percentage or available memory ratio."
+            "；环颜色表示 macOS 报告的内存压力等级（与活动监视器同源），不是压力百分比或可用内存比例；系统未给出等级时按百分比估算（85% 起为升高、95% 起为高）。",
+            "; ring color shows the memory pressure level macOS reports (the source Activity Monitor uses), not a pressure percentage or available memory ratio; when macOS reports no level, it is estimated from the percentage (Elevated from 85%, High from 95%)."
         ))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(L10n.text("内存压力", "Memory Pressure"))
+        .accessibilityValue(snapshot.reportablePressureLevel?.title ?? L10n.text("不可用", "Unavailable"))
+    }
+
+    private func pressureLevelText(size: CGFloat) -> some View {
+        Text(snapshot.reportablePressureLevel?.title ?? L10n.text("不可用", "Unavailable"))
+            .font(.system(size: size, weight: .bold))
+            .foregroundStyle(releaseTint)
+            .lineLimit(1)
+            .fixedSize()
     }
 
     private var usageSummary: some View {
-        GeekCombinedRing(
-            title: L10n.text("内存占用", "Memory Used"),
-            value: usedPercentText,
-            progress: usedRatio,
-            tint: AppChartPalette.memory,
-            size: layout.density == .compact ? 96 : 80,
-            fixedValueFontSize: 20,
-            strokeWidth: 6
-        )
+        let side = usageRingSide
+        return MetricRing(
+            fraction: usedRatio,
+            colors: [ModulePigment.memory.lightStop, ModulePigment.memory.brightColor],
+            lineWidth: 6
+        ) {
+            VStack(spacing: 0) {
+                // A live value: no rolling digits on every refresh (audit 5.2).
+                Text(usedPercentText)
+                    .font(.system(size: isShort ? 13 : 16, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                Text(L10n.text("占用", "Used"))
+                    .font(AppDesignTokens.TypeScale.caption)
+                    .foregroundStyle(surfaces.textSecondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(width: side, height: side)
         .help(usedRatio == nil
             ? (snapshot.measurements.availableBytes.unavailableDetail
                 ?? snapshot.measurements.physicalBytes.unavailableDetail
                 ?? L10n.text("数据不可用", "Data unavailable"))
             : L10n.text("实测使用量 / 物理总内存；容量明细见下方", "Measured used / total physical memory; capacity details below"))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(L10n.text("内存占用", "Memory used"))
         .accessibilityValue(usedPercentText)
     }
 
-    private var recommendationSummary: some View {
+    private func recommendationSummary(includesAction: Bool) -> some View {
         let usedGiB = snapshot.measuredUsedBytes.map {
             String(format: "%.1f", Double($0) / 1_073_741_824)
         } ?? "—"
         let totalGiB = snapshot.measurements.physicalBytes.value.map {
             String(format: "%.1f", Double($0) / 1_073_741_824)
         } ?? "—"
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: isShort || isLandingSummary ? 4 : 8) {
             HStack(spacing: 8) {
                 Text(summaryTitle)
-                    .font(AppDesignTokens.Typography.sheetTitle)
+                    .font(AppDesignTokens.TypeScale.sectionTitle)
+                    .foregroundStyle(surfaces.textPrimary)
                 Label(
                     snapshot.reportablePressureLevel?.title ?? L10n.text("不可用", "Unavailable"),
                     systemImage: "gauge.with.dots.needle.67percent"
                 )
-                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                    .font(AppDesignTokens.TypeScale.captionEmphasis)
                     .foregroundStyle(releaseTint)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(summaryValue)
-                    .font(AppDesignTokens.Typography.pageTitle)
-                    .monospacedDigit()
+                    .font(AppDesignTokens.TypeScale.metricCard)
+                    .foregroundStyle(surfaces.textPrimary)
                     .fixedSize(horizontal: true, vertical: false)
                     .appNumericTransition(value: summaryValue)
                 Text(summaryCaption)
-                    .font(AppDesignTokens.Typography.inlineTitle)
-                    .foregroundStyle(.secondary)
+                    .font(AppDesignTokens.TypeScale.secondary)
+                    .foregroundStyle(surfaces.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -3501,6 +3827,8 @@ private struct MemoryReleasePanel: View {
                     value: byteText(snapshot.measurements.swapUsedBytes)
                 )
             }
+
+            if includesAction, !isObserving { recommendedActionButton }
         }
     }
 
@@ -3516,23 +3844,123 @@ private struct MemoryReleasePanel: View {
                     ? "xmark.circle.fill"
                     : "checkmark.circle"
             )
-                .frame(minWidth: 118)
         }
-        .appButtonChrome(.primary)
-        .controlSize(.large)
-        .tint(store.isRecommendedMemorySelectionPrepared
-            ? AppDesignTokens.Palette.destructive
-            : releaseTint)
+        // BOARD N19 / D49: a quit never takes a safe or module color. Picking
+        // the suggestions is the module's secondary step; once apps are
+        // selected the same button quits (after confirmation) in red.
+        .buttonStyle(GradientButtonStyle(
+            kind: store.isRecommendedMemorySelectionPrepared ? .destructive : .secondary,
+            size: .small
+        ))
         .disabled(!store.canOptimizeMemory)
         .help(store.isRecommendedMemorySelectionPrepared
             ? L10n.text(
-                "再次点击将正常退出已选中的高占用应用",
-                "Click again to quit the selected high-usage apps normally"
+                "确认后正常退出已选中的高占用应用；确认框会列出这些应用",
+                "Quits the selected high-usage apps normally after a confirmation that lists them"
             )
             : L10n.text(
                 "先选中建议退出的高占用应用，不会立即退出",
                 "Select suggested high-usage apps first without quitting them"
             ))
+    }
+}
+
+/// A read-only trend with optional header. It owns no actions, presentation
+/// state, or store, so a details popover cannot nest another details popover.
+private struct MemoryTrendChartView: View {
+    let trendPoints: [MenuBarTelemetryPoint]
+    let updatedAt: Date
+    let chartHeight: CGFloat
+    var showsHeader = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if showsHeader {
+                MemoryTrendHeader(updatedAt: updatedAt)
+            }
+            // §1.5 TrendChart: preserve both measured series, unknown values,
+            // the two-minute window, readouts and the existing data animation.
+            TrendChart(
+                samples: trendPoints.map { TrendChart.Sample(date: $0.date, value: $0.memory) },
+                secondarySamples: trendPoints.map { TrendChart.Sample(date: $0.date, value: $0.memoryPressure) },
+                secondaryColor: AppDesignTokens.Palette.caution,
+                range: 0...100,
+                duration: 120,
+                color: ModulePigment.memory.brightColor,
+                accessibilityLabel: L10n.text(
+                    "最近两分钟的内存占用与压力趋势估算",
+                    "Memory usage and estimated pressure trend over the last two minutes"
+                ),
+                title: L10n.text("内存占用", "Memory Usage"),
+                secondaryTitle: L10n.text("压力趋势估算", "Pressure estimate")
+            )
+            .frame(height: chartHeight)
+        }
+    }
+}
+
+/// Shared by the page and the pure popover chart, without a details button.
+private struct MemoryTrendHeader: View {
+    @AppSurfaces private var surfaces
+    let updatedAt: Date
+
+    var body: some View {
+        // §2.4: drop the title, then the time, before the header wraps.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                Label(
+                    L10n.text("内存使用趋势", "Memory Usage Trend"),
+                    systemImage: "waveform.path.ecg"
+                )
+                .font(AppDesignTokens.TypeScale.secondaryEmphasis)
+                .foregroundStyle(surfaces.textPrimary)
+                .lineLimit(1)
+                .fixedSize()
+                legend.fixedSize()
+                Spacer(minLength: AppDesignTokens.Spacing.small)
+                timestamp.fixedSize()
+            }
+            HStack(spacing: 12) {
+                legend.fixedSize()
+                Spacer(minLength: AppDesignTokens.Spacing.small)
+                timestamp.fixedSize()
+            }
+            legend
+        }
+    }
+
+    private var legend: some View {
+        HStack(spacing: 12) {
+            legendItem(title: L10n.text("内存占用", "Memory Usage"), color: ModulePigment.memory.brightColor, dashed: false)
+            legendItem(title: L10n.text("压力趋势估算", "Pressure estimate"), color: AppDesignTokens.Palette.caution, dashed: true)
+        }
+    }
+
+    private var timestamp: some View {
+        Text(updatedAt, format: .dateTime.hour().minute().second())
+            .font(AppDesignTokens.TypeScale.caption)
+            .foregroundStyle(surfaces.textTertiary)
+            .monospacedDigit()
+            .lineLimit(1)
+            .accessibilityLabel(L10n.text("最近更新", "Last updated"))
+    }
+
+    private func legendItem(title: String, color: Color, dashed: Bool) -> some View {
+        HStack(spacing: 5) {
+            Capsule()
+                .fill(color)
+                .frame(width: dashed ? 6 : 12, height: 3)
+                .overlay(alignment: .trailing) {
+                    if dashed {
+                        Capsule().fill(color).frame(width: 4, height: 3).offset(x: 6)
+                    }
+                }
+                .frame(width: 12, alignment: .leading)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(AppDesignTokens.TypeScale.caption)
+                .foregroundStyle(surfaces.textSecondary)
+        }
     }
 }
 
@@ -3558,9 +3986,12 @@ private struct MemoryInlineMetric: View {
 
 struct MemoryProcessSelectionPanel: View {
     @Environment(\.windowLayoutMetrics) private var layout
+    @Environment(\.pageLayout) private var pageLayout
+    @AppSurfaces private var surfaces
     let snapshot: MemorySnapshot
     @ObservedObject var store: ScanStore
     var minimumListHeight: CGFloat = 140
+    var isLandingDashboard = false
 
     var sampledProcesses: [MemoryProcess] {
         snapshot.processesByResidentUsage
@@ -3576,8 +4007,27 @@ struct MemoryProcessSelectionPanel: View {
         ByteFormat.string(store.selectedMemoryAppEstimatedBytes)
     }
 
+    private var isShortHeight: Bool {
+        pageLayout?.height == .short
+    }
+
+    /// Below 960 pt of detail width the secondary selection commands show
+    /// their icons only (their titles stay in help and accessibility).
+    private var showsCommandTitles: Bool {
+        if isLandingDashboard { return false }
+        guard let pageLayout else { return layout.density == .regular }
+        return pageLayout.size.width >= 960
+    }
+
+    /// §3.3: selecting or clearing changes every row of the list at once.
+    private var listScope: BulkUpdateScope {
+        BulkUpdateScope(rowCount: apps.count)
+    }
+
     private func selectAllApps() {
-        apps.forEach { store.setMemoryAppUsageSelection($0, isSelected: true) }
+        listScope.perform {
+            apps.forEach { store.setMemoryAppUsageSelection($0, isSelected: true) }
+        }
     }
 
     var body: some View {
@@ -3585,53 +4035,62 @@ struct MemoryProcessSelectionPanel: View {
         let recommendedAppIDs = Set(snapshot.recommendedQuitApps.map(\.id))
         let lastAppID = apps.last?.id
 
-        VStack(alignment: .leading, spacing: 10) {
-            Picker(L10n.text("进程列表范围", "Process list scope"), selection: $store.memoryShowsAllProcesses) {
-                Text(L10n.text("已采样进程 (\(sampledProcesses.count))", "Sampled Processes (\(sampledProcesses.count))"))
-                    .tag(true)
-                Text(L10n.text("可退出应用 (\(apps.count))", "Quittable Apps (\(apps.count))"))
-                    .tag(false)
-            }
-            .pickerStyle(.segmented)
-
-            HStack(spacing: 4) {
-#if DEBUG || STORAGE_CLEANER_BETA
-                if MiniWindowDemoData.isEnabled { Text("FIXTURE ·") }
-#endif
-                Text(L10n.text("进程快照", "Process snapshot"))
+        VStack(alignment: .leading, spacing: isLandingDashboard ? 2 : (isShortHeight ? 6 : 10)) {
+            HStack(alignment: .center, spacing: 12) {
+                CapsuleSegmentedControl(
+                    selection: $store.memoryShowsAllProcesses,
+                    options: [true, false],
+                    title: { showsAll in
+                        showsAll
+                            ? L10n.text("已采样进程 (\(sampledProcesses.count))", "Sampled Processes (\(sampledProcesses.count))")
+                            : L10n.text("可退出应用 (\(apps.count))", "Quittable Apps (\(apps.count))")
+                    },
+                    label: L10n.text("进程列表范围", "Process list scope")
+                )
+                if !isLandingDashboard {
                 Spacer(minLength: 6)
-                Text(L10n.text("采样于", "Sampled at"))
-                Text(snapshot.generatedAt, format: .dateTime.year().month().day().hour().minute().second())
-                    .monospacedDigit()
+                HStack(spacing: 4) {
+#if DEBUG || STORAGE_CLEANER_BETA
+                    if MiniWindowDemoData.isEnabled { Text("FIXTURE ·") }
+#endif
+                    Text(L10n.text("进程快照", "Process snapshot"))
+                    Text(L10n.text("采样于", "Sampled at"))
+                    Text(snapshot.generatedAt, format: .dateTime.year().month().day().hour().minute().second())
+                        .monospacedDigit()
+                }
+                .font(AppDesignTokens.TypeScale.caption)
+                .foregroundStyle(surfaces.textTertiary)
+                .lineLimit(1)
+                .listColumn(.p2)
+                }
             }
-            .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
 
             if store.memoryShowsAllProcesses {
                 sampledProcessList
             } else {
-                selectionHeader(
-                    visibleCount: apps.count,
-                    selectedAppCount: selectedAppCount
-                )
-
-                if !apps.isEmpty {
-                    selectionActions(
-                        hasRecommendedApps: !recommendedAppIDs.isEmpty,
-                        selectedAppCount: selectedAppCount
-                    )
-                }
-
                 if apps.isEmpty {
-                    Label(L10n.text("没有可退出的运行应用", "No quittable running apps"), systemImage: "checkmark.circle")
-                        .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(AppDesignTokens.Palette.success)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 8)
+                    HStack(spacing: 12) {
+                        // D58: nothing to quit is an all-clear state.
+                        GeneratedArtView(art: .stateAllClear, variant: .header) {
+                            Image(systemName: "checkmark.circle")
+                                .font(AppDesignTokens.TypeScale.sectionTitle)
+                                .foregroundStyle(AppDesignTokens.Palette.success)
+                        }
+                        .frame(width: 44, height: 44)
+                        Text(L10n.text("没有可退出的运行应用", "No quittable running apps"))
+                            .font(AppDesignTokens.TypeScale.secondaryEmphasis)
+                            .foregroundStyle(surfaces.textPrimary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
+                    .accessibilityElement(children: .combine)
                 } else {
                     VStack(spacing: 0) {
-                        MemoryAppSelectionTableHeader()
-                        ScrollView {
+                        // Short windows give the header row to the list.
+                        if !isShortHeight && !isLandingDashboard {
+                            MemoryAppSelectionTableHeader()
+                        }
+                        memoryListViewport(probePrefix: "memory.apps") {
                             LazyVStack(spacing: 0) {
                                 ForEach(apps) { app in
                                     MemorySelectableAppRow(
@@ -3646,20 +4105,103 @@ struct MemoryProcessSelectionPanel: View {
                                 }
                             }
                         }
+                        .scrollTopFade(height: 8)
                         .frame(minHeight: minimumListHeight, maxHeight: .infinity)
+#if DEBUG
+                        .layoutProbe("memory.list")
+#endif
+                    }
+                    .appBulkAnimationGuard(listScope)
+                }
+
+                if !apps.isEmpty {
+                    // §2.4: the selection and the quit action stay pinned at
+                    // the bottom of the list instead of scrolling away.
+                    if isLandingDashboard {
+                        dashboardSelectionBar(selectedAppCount: selectedAppCount,
+                            hasRecommendedApps: !recommendedAppIDs.isEmpty)
+                    } else {
+                    PinnedActionBar {
+                        selectionSummary(
+                            selectedAppCount: selectedAppCount,
+                            alignment: .leading,
+                            textAlignment: .leading
+                        )
+                    } actions: {
+                        selectionActions(
+                            hasRecommendedApps: !recommendedAppIDs.isEmpty,
+                            selectedAppCount: selectedAppCount
+                        )
+                    }
+#if DEBUG
+                    .layoutProbe("memory.pinnedActionBar")
+#endif
                     }
                 }
             }
         }
-        .padding(14)
+        .padding(isLandingDashboard ? 0 : (isShortHeight ? 10 : 14))
+        .background {
+            if !isLandingDashboard {
+                SurfaceBackground(level: .card, cornerRadius: AppDesignTokens.Corner.card)
+            }
+        }
         .fullBleedSection()
+    }
+
+    private func dashboardSelectionBar(selectedAppCount: Int, hasRecommendedApps: Bool) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                selectionSummary(selectedAppCount: selectedAppCount,
+                    alignment: .leading, textAlignment: .leading)
+                Spacer(minLength: 0)
+                selectionActions(hasRecommendedApps: hasRecommendedApps, selectedAppCount: selectedAppCount)
+            }
+            selectionActions(hasRecommendedApps: hasRecommendedApps, selectedAppCount: selectedAppCount)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 4)
+        .frame(height: isShortHeight ? 44 : 56)
+        .surfaceBackground(.inset)
+        .accessibilityElement(children: .contain)
+        .accessibilityValue(selectionDetail(selectedAppCount: selectedAppCount))
+        .help(selectionDetail(selectedAppCount: selectedAppCount))
+#if DEBUG
+        .layoutProbe("memory.pinnedActionBar")
+#endif
+    }
+
+    @ViewBuilder
+    private func memoryListViewport<Content: View>(probePrefix: String,
+        @ViewBuilder content: () -> Content) -> some View {
+        if isLandingDashboard {
+            FeatureOptionsScrollView(probePrefix: probePrefix, balancesContent: false) { content() }
+        } else {
+            ScrollView { content() }
+        }
+    }
+
+    private var sampledListHeader: some View {
+        HStack(spacing: 12) {
+            Text(L10n.text("进程 · 按占用排序", "Process · by memory use"))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("PID")
+                .frame(width: 60, alignment: .trailing)
+                .listColumn(.p2)
+            Text(L10n.text("内存占用", "Memory Use"))
+                .frame(width: 110, alignment: .trailing)
+        }
+        .font(AppDesignTokens.TypeScale.captionEmphasis)
+        .foregroundStyle(surfaces.textSecondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var sampledProcessList: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(L10n.text("只读 · Top 256 可读进程", "Read-only · Top 256 readable processes"), systemImage: "info.circle")
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .font(AppDesignTokens.TypeScale.caption)
+                .foregroundStyle(surfaces.textSecondary)
                 .help(L10n.text(
                     "本次快照仅包含可读取且物理内存足迹大于 0 的进程，最多 256 项；不代表全部系统 PID。",
                     "The snapshot includes readable processes with a positive physical footprint, up to 256; it is not every system PID."
@@ -3667,27 +4209,18 @@ struct MemoryProcessSelectionPanel: View {
 
             if sampledProcesses.isEmpty {
                 Text(L10n.text("本次没有可读的进程样本", "No readable process samples in this snapshot"))
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .font(AppDesignTokens.TypeScale.secondary)
+                    .foregroundStyle(surfaces.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
             } else {
                 VStack(spacing: 0) {
-                    HStack(spacing: 12) {
-                        Text(L10n.text("进程 · 按占用排序", "Process · by memory use"))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("PID")
-                            .frame(width: 60, alignment: .trailing)
-                        Text(L10n.text("内存占用", "Memory Use"))
-                            .frame(width: 110, alignment: .trailing)
+                    if !isShortHeight && !isLandingDashboard {
+                        sampledListHeader
+                        Divider()
                     }
-                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    Divider()
 
-                    ScrollView {
+                    memoryListViewport(probePrefix: "memory.sampled") {
                         // The snapshot is capped at 256 rows. Eager layout avoids the
                         // macOS 27 lazy-layout accessibility scroll assertion.
                         VStack(spacing: 0) {
@@ -3697,51 +4230,15 @@ struct MemoryProcessSelectionPanel: View {
                             }
                         }
                     }
+                    .scrollTopFade(height: 8)
                     .frame(minHeight: minimumListHeight, maxHeight: .infinity)
+#if DEBUG
+                    .layoutProbe("memory.list")
+#endif
+                    // §3.3: a refresh replaces up to 256 rows at once.
+                    .appBulkAnimationGuard(rowCount: sampledProcesses.count)
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private func selectionHeader(
-        visibleCount: Int,
-        selectedAppCount: Int
-    ) -> some View {
-        if layout.density == .compact {
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                selectionTitle(visibleCount: visibleCount)
-                if visibleCount > 0 {
-                    selectionSummary(
-                        selectedAppCount: selectedAppCount,
-                        alignment: .leading,
-                        textAlignment: .leading
-                    )
-                }
-            }
-        } else {
-            HStack(alignment: .center, spacing: 12) {
-                selectionTitle(visibleCount: visibleCount)
-                Spacer(minLength: 8)
-                if visibleCount > 0 {
-                    selectionSummary(
-                        selectedAppCount: selectedAppCount,
-                        alignment: .trailing,
-                        textAlignment: .trailing
-                    )
-                    .frame(minWidth: 118, alignment: .trailing)
-                }
-            }
-        }
-    }
-
-    private func selectionTitle(visibleCount: Int) -> some View {
-        HStack(spacing: 8) {
-            Text(L10n.text("可退出应用", "Quittable Apps"))
-                .font(AppDesignTokens.Typography.inlineTitle)
-            Text(L10n.text("\(visibleCount) 个", "\(visibleCount) apps"))
-                .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -3750,79 +4247,88 @@ struct MemoryProcessSelectionPanel: View {
         alignment: HorizontalAlignment,
         textAlignment: TextAlignment
     ) -> some View {
-        VStack(alignment: alignment, spacing: AppDesignTokens.Layout.textTightSpacing) {
+        let detail = selectionDetail(selectedAppCount: selectedAppCount)
+        return VStack(alignment: alignment, spacing: AppDesignTokens.Layout.textTightSpacing) {
             Text(
                 selectedAppCount == 0
                     ? L10n.text("未选择", "None selected")
                     : L10n.text("已选 \(selectedAppCount) 个应用", "\(selectedAppCount) apps selected")
             )
-            .font(AppDesignTokens.Typography.compactLabelEmphasis)
+            .font(AppDesignTokens.TypeScale.bodyEmphasis)
             .monospacedDigit()
-            .appNumericTransition(value: selectedAppCount)
+            .appDataTransition(value: selectedAppCount)
 
-            Text(
-                selectedAppCount == 0
-                    ? L10n.text("选择后显示合计", "Total appears after selection")
-                    : L10n.text(
-                        "目前约占 \(selectedBytesText) · 预计释放以刷新重测为准",
-                        "Uses about \(selectedBytesText) · release remeasured after refresh"
-                    )
-            )
-            .font(AppDesignTokens.Typography.compactLabel)
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
-            .appNumericTransition(value: selectedBytesText)
-            .multilineTextAlignment(textAlignment)
-            .fixedSize(horizontal: false, vertical: true)
+            // Short windows keep the bar to one line; the detail stays in
+            // the help text.
+            if !isShortHeight && !isLandingDashboard {
+                Text(detail)
+                    .font(AppDesignTokens.TypeScale.caption)
+                    .foregroundStyle(surfaces.textSecondary)
+                    .monospacedDigit()
+                    .appDataTransition(value: selectedBytesText)
+                    .multilineTextAlignment(textAlignment)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .help(detail)
     }
 
+    private func selectionDetail(selectedAppCount: Int) -> String {
+        selectedAppCount == 0
+            ? L10n.text("选择后显示合计", "Total appears after selection")
+            : L10n.text(
+                "目前约占 \(selectedBytesText) · 预计释放以刷新重测为准",
+                "Uses about \(selectedBytesText) · release remeasured after refresh"
+            )
+    }
+
+    /// The selection commands keep their conditions from before V0 (review
+    /// P2-1): "Select Suggested Apps" (when there are suggestions) and
+    /// "Select All" are offered whatever is already selected; "Clear
+    /// Selection" and the quit action appear once something is selected; all
+    /// of them are disabled only by `canRequestMemoryQuitActions`. Narrow
+    /// windows show the three secondary commands as icons; the quit action
+    /// always keeps its title.
     @ViewBuilder
     private func selectionActions(
         hasRecommendedApps: Bool,
         selectedAppCount: Int
     ) -> some View {
-        if layout.density == .compact {
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                HStack(spacing: 8) {
-                    if hasRecommendedApps {
-                        recommendedSelectionButton
-                    }
-                    selectAllButton
-                }
-                if selectedAppCount > 0 {
-                    HStack(spacing: 8) {
-                        clearSelectionButton
-                        quitSelectionButton(selectedAppCount: selectedAppCount)
-                    }
-                }
+        let commands = HStack(spacing: 8) {
+            if hasRecommendedApps {
+                recommendedSelectionButton
             }
-            .controlSize(.regular)
-            .font(AppDesignTokens.Typography.secondary)
-        } else {
-            HStack(spacing: 8) {
-                if hasRecommendedApps {
-                    recommendedSelectionButton
-                }
-                selectAllButton
-                Spacer(minLength: 8)
-                if selectedAppCount > 0 {
-                    clearSelectionButton
-                    quitSelectionButton(selectedAppCount: selectedAppCount)
-                }
+            selectAllButton
+            if selectedAppCount > 0 {
+                clearSelectionButton
             }
-            .controlSize(.regular)
-            .font(AppDesignTokens.Typography.secondary)
+        }
+        HStack(spacing: 8) {
+            if showsCommandTitles {
+                commands.labelStyle(.titleAndIcon)
+            } else {
+                commands.labelStyle(.iconOnly)
+            }
+            if selectedAppCount > 0 {
+                quitSelectionButton(selectedAppCount: selectedAppCount)
+                    .labelStyle(.titleAndIcon)
+            }
         }
     }
 
     private var recommendedSelectionButton: some View {
         Button {
-            _ = store.selectRecommendedMemoryApps()
+            _ = listScope.perform { store.selectRecommendedMemoryApps() }
         } label: {
-            Label(L10n.text("选择建议退出项", "Select Suggested Apps"), systemImage: "checkmark.circle")
+            Label(L10n.text("选择建议退出项", "Select Suggested Apps"), systemImage: "sparkles")
         }
+        .buttonStyle(GradientButtonStyle(kind: .secondary, size: .small))
+        .help(L10n.text("选择建议退出项", "Select Suggested Apps"))
+        .accessibilityLabel(L10n.text("选择建议退出项", "Select Suggested Apps"))
         .disabled(!store.canRequestMemoryQuitActions)
+#if DEBUG
+        .layoutProbe("memory.command.suggested")
+#endif
     }
 
     private var selectAllButton: some View {
@@ -3831,16 +4337,28 @@ struct MemoryProcessSelectionPanel: View {
         } label: {
             Label(L10n.text("全选", "Select All"), systemImage: "checkmark.circle")
         }
+        .buttonStyle(GradientButtonStyle(kind: .ghost, size: .small))
+        .help(L10n.text("全选", "Select All"))
+        .accessibilityLabel(L10n.text("全选", "Select All"))
         .disabled(!store.canRequestMemoryQuitActions)
+#if DEBUG
+        .layoutProbe("memory.command.selectAll")
+#endif
     }
 
     private var clearSelectionButton: some View {
         Button {
-            store.clearMemoryProcessSelection()
+            listScope.perform { store.clearMemoryProcessSelection() }
         } label: {
             Label(L10n.text("清空选择", "Clear Selection"), systemImage: "xmark.circle")
         }
+        .buttonStyle(GradientButtonStyle(kind: .ghost, size: .small))
+        .help(L10n.text("清空选择", "Clear Selection"))
+        .accessibilityLabel(L10n.text("清空选择", "Clear Selection"))
         .disabled(!store.canRequestMemoryQuitActions)
+#if DEBUG
+        .layoutProbe("memory.command.clear")
+#endif
     }
 
     private func quitSelectionButton(selectedAppCount: Int) -> some View {
@@ -3855,8 +4373,14 @@ struct MemoryProcessSelectionPanel: View {
                 systemImage: "xmark.circle.fill"
             )
         }
-        .appButtonChrome(.primary)
+        // N19 / D49: quitting is destructive and always asks first.
+        .buttonStyle(GradientButtonStyle(kind: .destructive, size: .medium))
+        .help(L10n.text("退出前会列出这些应用并请你确认", "Lists these apps and asks before quitting"))
+        .accessibilityLabel(L10n.text("退出 \(selectedAppCount) 个应用", "Quit \(selectedAppCount) Apps"))
         .disabled(!store.canRequestMemoryQuitActions)
+#if DEBUG
+        .layoutProbe("memory.command.quit")
+#endif
     }
 }
 
@@ -3879,14 +4403,16 @@ private struct MemoryReadOnlyProcessRow: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(width: 60, alignment: .trailing)
+                .listColumn(.p2)
             Text(process.availability == .available ? ByteFormat.string(process.residentBytes) : process.availability.title)
                 .monospacedDigit()
                 .lineLimit(1)
                 .frame(width: 110, alignment: .trailing)
         }
-        .font(AppDesignTokens.Typography.secondary)
+        .font(AppDesignTokens.TypeScale.body)
         .padding(.horizontal, 12)
         .frame(minHeight: 34)
+        .listRowHover()
         .help("\(process.path)\n\(sourceTitle) · \(process.capturedAt.formatted(date: .numeric, time: .standard))")
         .accessibilityElement(children: .combine)
         .accessibilityHint(L10n.text("只读进程样本", "Read-only process sample") + " · " + sourceTitle)
@@ -3903,12 +4429,12 @@ private struct MemoryAppSelectionTableHeader: View {
                 .frame(width: UtilitySizing.rowIconFrame)
 
             Text(L10n.text("应用", "Application"))
-                .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                .font(AppDesignTokens.TypeScale.captionEmphasis)
 
             Spacer(minLength: 10)
 
             Text(L10n.text("内存", "Memory"))
-                .font(AppDesignTokens.Typography.compactLabelEmphasis)
+                .font(AppDesignTokens.TypeScale.captionEmphasis)
                 .foregroundStyle(.secondary)
                 .frame(width: 94, alignment: .trailing)
         }
@@ -3922,12 +4448,13 @@ private struct MemoryAppSelectionTableHeader: View {
 }
 
 private struct MemorySelectableAppRow: View {
+    @Environment(\.pageLayout) private var pageLayout
     let app: MemoryAppUsage
     let isSuggested: Bool
     @ObservedObject var store: ScanStore
 
     private var rowTint: Color {
-        isSuggested ? AppDesignTokens.Palette.warning : AppDesignTokens.Palette.steadyChrome
+        isSuggested ? AppDesignTokens.Palette.warning : ModulePigment.memory.brightColor
     }
 
     private var selectionBinding: Binding<Bool> {
@@ -3945,7 +4472,9 @@ private struct MemorySelectableAppRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             Toggle("", isOn: selectionBinding)
-                .toggleStyle(.checkbox)
+                // D53: animated box; quitting stays destructive, so the box
+                // takes the danger color (N19, D49).
+                .toggleStyle(AnimatedCheckboxToggleStyle(tint: ModulePigment.danger.lightStop))
                 .labelsHidden()
                 .frame(width: 22)
                 .help(L10n.text("选择后可统一退出", "Select to quit together"))
@@ -3956,49 +4485,48 @@ private struct MemorySelectableAppRow: View {
             ProcessIcon(path: app.iconPath, fallbackSystemImage: "app.fill")
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(app.name)
-                    .font(AppDesignTokens.Typography.inlineTitle)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if app.processCount > 1 || isSuggested || app.isActive {
-                    HStack(spacing: 8) {
-                        if app.processCount > 1 {
-                            Label("x\(app.processCount)", systemImage: "square.stack.3d.up")
-                                .foregroundStyle(.secondary)
-                        }
-                        if isSuggested {
-                            Label(L10n.text("建议", "Suggested"), systemImage: "sparkles")
-                                .foregroundStyle(AppDesignTokens.Palette.warning)
-                        } else if app.isActive {
-                            Label(L10n.text("正在使用", "Active"), systemImage: "circle.fill")
-                                .foregroundStyle(AppDesignTokens.Palette.information)
-                        }
+                HStack(spacing: 8) {
+                    Text(app.name)
+                        .font(AppDesignTokens.TypeScale.bodyEmphasis)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if isSuggested {
+                        Label(L10n.text("建议", "Suggested"), systemImage: "sparkles")
+                            .font(AppDesignTokens.TypeScale.captionEmphasis)
+                            .foregroundStyle(AppDesignTokens.Palette.warning)
+                    } else if app.isActive {
+                        Label(L10n.text("正在使用", "Active"), systemImage: "circle.fill")
+                            .font(AppDesignTokens.TypeScale.caption)
+                            .foregroundStyle(AppDesignTokens.Palette.information)
                     }
-                    .font(AppDesignTokens.Typography.compactLabel)
-                    .fixedSize(horizontal: false, vertical: true)
+                    if app.processCount > 1 {
+                        Label("x\(app.processCount)", systemImage: "square.stack.3d.up")
+                            .font(AppDesignTokens.TypeScale.caption)
+                            .foregroundStyle(.secondary)
+                            .listColumn(.p2)
+                    }
                 }
 
                 MemoryProcessUsageBar(percent: app.percent, tint: rowTint)
-                    .frame(maxWidth: 240)
+                    .frame(maxWidth: 280)
             }
 
             Spacer(minLength: 10)
 
             VStack(alignment: .trailing, spacing: 3) {
                 Text(ByteFormat.string(app.bytes))
-                    .font(AppDesignTokens.Typography.inlineTitle)
+                    .font(AppDesignTokens.TypeScale.bodyEmphasis)
                     .monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
-                    .appNumericTransition(value: app.bytes)
                 Text(String(format: "%.1f%%", app.percent))
-                    .font(AppDesignTokens.Typography.compactLabel)
+                    .font(AppDesignTokens.TypeScale.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
             .frame(width: 94, alignment: .trailing)
         }
         .padding(.horizontal, AppDesignTokens.Spacing.medium)
-        .padding(.vertical, 9)
+        .padding(.vertical, pageLayout?.height == .short ? 5 : 8)
+        .listRowHover(isSelected: isSelected, tint: ModulePigment.danger.brightColor)
     }
 }
 
@@ -4054,72 +4582,30 @@ private struct ProcessIcon: View {
 private struct InstalledAppRow: View {
     let app: InstalledAppItem
     @ObservedObject var store: ScanStore
-
+    let select: () -> Void
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
+        Button(action: select) {
+        HStack(spacing: 10) {
             InstalledAppIcon(path: app.path)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(app.name)
-                    .font(AppDesignTokens.Typography.inlineTitle)
-                    .lineLimit(1)
-                    .help(app.name)
-                Text(app.path)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(app.name).font(AppDesignTokens.Typography.compactLabelEmphasis)
+                    .lineLimit(2).help(app.name)
+                Text(app.versionDisplay).font(AppDesignTokens.Typography.metadata)
+                    .foregroundStyle(.secondary).lineLimit(1)
+                Text((app.path as NSString).abbreviatingWithTildeInPath)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(app.path)
-                    .accessibilityLabel(app.path)
-                HStack(spacing: 8) {
-                    if !app.versionDisplay.trimmed.isEmpty {
-                        Text(app.versionDisplay)
-                            .help(app.versionDisplay)
-                    }
-                    if let provider = app.externalManagementProviderName {
-                        Label(
-                            L10n.text("来源：\(provider)", "Source: \(provider)"),
-                            systemImage: "shippingbox.fill"
-                        )
-                        .foregroundStyle(AppDesignTokens.Palette.tertiary)
-                        .help(L10n.text("来源：\(provider)", "Source: \(provider)"))
-                    }
-                    if let reason = app.uninstallSuggestionReason {
-                        Label(
-                            L10n.text("建议卸载：\(reason)", "Suggested Uninstall: \(reason)"),
-                            systemImage: "lightbulb.fill"
-                        )
-                        .foregroundStyle(AppDesignTokens.Palette.warning)
-                        .help(reason)
-                        .accessibilityValue(reason)
-                    }
-                }
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-            .layoutPriority(1)
-
-            Spacer(minLength: 12)
-
-            Text(ByteFormat.string(app.sizeBytes))
-                .font(AppDesignTokens.Typography.compactLabel)
-                .monospacedDigit()
-                .frame(width: 100, alignment: .trailing)
-
-            Button {
-                store.requestUninstall(app)
-            } label: {
-                Label(L10n.text("查看卸载计划", "Review Uninstall Plan"), systemImage: "list.clipboard")
-            }
-            .appButtonChrome(.secondary)
-            .controlSize(.regular)
-            .disabled(!store.canRequestUninstall(app))
-            .frame(width: 130, alignment: .trailing)
+                    .foregroundStyle(AppAppearanceColors.tertiaryText)
+                    .lineLimit(1).truncationMode(.middle).help(app.path)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            Text(ByteFormat.string(app.sizeBytes)).font(AppDesignTokens.Typography.metadata)
+                .monospacedDigit().foregroundStyle(.secondary).fixedSize()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .frame(minHeight: 60)
+        .padding(.vertical, 8).padding(.horizontal, 4)
+        .contentShape(Rectangle()).help(app.path)
+        }
+        .appButtonChrome(.selectionRow)
+        .accessibilityLabel("\(app.name), \(ByteFormat.string(app.sizeBytes))")
+        .accessibilityHint(L10n.text("选择应用并查看关联文件", "Select application and review related files"))
         .contextMenu {
             Button(L10n.text("在访达中显示", "Show in Finder")) { store.reveal(app.path) }
             Button(L10n.text("复制路径", "Copy Path")) { store.copyPath(app.path) }
@@ -4168,5 +4654,39 @@ private struct EmptyUtilityPanel: View {
             density: .inline
         )
         .appMotionEntrance(distance: 5)
+    }
+}
+
+/// Shared with Debug data fixtures; mode title and capabilities remain owned
+/// by the existing duplicate workspace and its published phase.
+struct DuplicateFilesRunningPage: View {
+    let progress: DuplicateFileScanProgress
+    let state: RuntimeWorkflowState
+    let title: String
+    let pageTitle: String
+    let isSimilarPhotos: Bool
+    let canCancel: Bool
+    let onCancel: () -> Void
+    let onPauseOrResume: () -> Void
+    var body: some View {
+        FeatureRuntimePage(module: .duplicates, title: title, state: state,
+            metrics: [
+                .init(title: L10n.text("已扫描文件", "Files Scanned"), value: String(progress.scannedFiles)),
+                .init(title: L10n.text("已完整比对", "Fully Verified"), value: String(progress.hashedFiles)),
+                .init(title: L10n.text("已读取内容", "Content Read"), value: ByteFormat.string(progress.hashedBytes))
+            ], currentItem: progress.currentPath,
+            pageTitle: pageTitle,
+            pageSystemImage: isSimilarPhotos ? GeneratedArt.similarPhotosSystemImage : ReviewFilter.duplicates.systemImage,
+            trustText: isSimilarPhotos
+                ? L10n.text("只读扫描 · 相似候选须人工确认，不会自动清理", "Read-only scan · Review similar candidates; no automatic cleanup")
+                : L10n.text("只读扫描 · 保留原件，清理前确认", "Read-only scan · Originals retained until cleanup is confirmed"),
+            canCancel: canCancel, onCancel: onCancel
+        ) { EmptyView() } actions: {
+            Button(action: onPauseOrResume) {
+                Label(state == .paused ? L10n.text("继续", "Resume") : L10n.text("暂停", "Pause"),
+                    systemImage: state == .paused ? "play.fill" : "pause.fill")
+            }
+            .appButtonChrome(.secondary).disabled(state == .stopping)
+        }
     }
 }

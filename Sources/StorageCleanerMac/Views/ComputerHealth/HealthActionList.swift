@@ -8,7 +8,7 @@ enum HealthDashboardSafeAction: String, Hashable, Sendable {
     case openDiagnosticReports
 }
 
-enum HealthDashboardActionReason: Int, Hashable, Sendable {
+enum HealthDashboardActionReason: Int, CaseIterable, Hashable, Sendable {
     case smartFailing
     case currentCapacityPressure
     case batteryService
@@ -17,6 +17,26 @@ enum HealthDashboardActionReason: Int, Hashable, Sendable {
     case forecastWithinThirtyDays
     case lowComponentScore
     case attentionComponentScore
+
+    var severity: HealthDashboardActionSeverity {
+        switch self {
+        case .smartFailing, .currentCapacityPressure, .batteryService: .critical
+        case .backupStaleOrUnconfigured, .recentPanicOrRestart, .forecastWithinThirtyDays, .lowComponentScore: .warning
+        case .attentionComponentScore: .information
+        }
+    }
+}
+
+enum HealthDashboardActionSeverity: CaseIterable, Equatable, Sendable {
+    case critical, warning, information
+
+    var title: String {
+        switch self {
+        case .critical: L10n.text("需处理", "Action required")
+        case .warning: L10n.text("需关注", "Needs attention")
+        case .information: L10n.text("留意", "Review")
+        }
+    }
 }
 
 struct HealthDashboardAction: Identifiable, Equatable, Sendable {
@@ -193,28 +213,20 @@ struct HealthActionList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Label(L10n.text("需要核对", "Needs Review"), systemImage: "checklist")
+                Text(L10n.text("需要核对", "Needs Review"))
                     .font(AppDesignTokens.Typography.sectionTitle)
                 Spacer()
-                Text(L10n.text("最多 3 项", "Up to 3"))
-                    .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.tertiary)
             }
 
             ForEach(Array(actions.enumerated()), id: \.element.id) { item in
                 let action = item.element
                 let control = controlPresentation(for: action)
                 HStack(alignment: .center, spacing: 12) {
-                    Image(systemName: HealthDashboardVisuals.factorSymbol(action.factor))
-                        .font(.title3.weight(.semibold))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(tint(action))
-                        .frame(width: 24)
-                        .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(title(action))
+                        Text("\(action.reason.severity.title) · \(title(action))")
                             .font(AppDesignTokens.Typography.cardTitle)
+                            .foregroundStyle(tint(action))
                         Text(detail(action))
                             .font(AppDesignTokens.Typography.secondary)
                             .foregroundStyle(.secondary)
@@ -234,15 +246,11 @@ struct HealthActionList: View {
 
                 if item.offset < actions.count - 1 {
                     Divider()
-                        .padding(.leading, 36)
                 }
             }
         }
         .padding(16)
-        .glassPanel(
-            cornerRadius: AppDesignTokens.Layout.cardRadius,
-            tint: AppDesignTokens.Palette.warning.opacity(0.045)
-        )
+        .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
     }
 
     private func title(_ action: HealthDashboardAction) -> String {
@@ -256,7 +264,7 @@ struct HealthActionList: View {
         case .lowComponentScore:
             L10n.text("\(HealthDashboardVisuals.factorTitle(action.factor))需要处理", "\(HealthDashboardVisuals.factorTitle(action.factor)) Needs Action")
         case .attentionComponentScore:
-            L10n.text("留意\(HealthDashboardVisuals.factorTitle(action.factor))", "Review \(HealthDashboardVisuals.factorTitle(action.factor))")
+            L10n.text("\(HealthDashboardVisuals.factorTitle(action.factor))建议复核", "Review suggested for \(HealthDashboardVisuals.factorTitle(action.factor))")
         }
     }
 
@@ -302,10 +310,10 @@ struct HealthActionList: View {
     }
 
     private func tint(_ action: HealthDashboardAction) -> Color {
-        switch action.reason {
-        case .smartFailing, .currentCapacityPressure, .batteryService: AppDesignTokens.Palette.destructive
-        case .backupStaleOrUnconfigured, .recentPanicOrRestart, .forecastWithinThirtyDays, .lowComponentScore: AppDesignTokens.Palette.warning
-        case .attentionComponentScore: AppDesignTokens.Palette.information
+        switch action.reason.severity {
+        case .critical: AppDesignTokens.Palette.destructive
+        case .warning: AppDesignTokens.Palette.warning
+        case .information: AppDesignTokens.Palette.information
         }
     }
 }

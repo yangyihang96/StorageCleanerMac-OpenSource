@@ -29,14 +29,8 @@ struct ScanCoverageSummary: Equatable, Sendable {
         }
     }
 
-    var estimatedCoveragePercent: Int {
-        switch level {
-        case .complete:
-            100
-        case .partial, .limited:
-            max(55, 100 - deniedCount * 10 - highImpactDeniedCount * 5)
-        }
-    }
+    /// Denials alone do not provide a denominator or prove full-disk access.
+    var estimatedCoveragePercent: Int? { nil }
 
     var scorePenalty: Int {
         ScanCoverageService.scorePenalty(deniedPaths: deniedPaths)

@@ -34,12 +34,48 @@ enum CleanupRuleAction: String, Codable, Sendable {
     case moveToTrashAfterReview
     case moveToTrashAfterProtectedReview
     case revealOnly
+    /// D23: permanently deletes the top-level Trash entries frozen at scan
+    /// time. Never preselected and confirmed separately from Trash moves.
+    case emptyTrash
 
     var movesToTrash: Bool {
         self == .moveToTrash
             || self == .moveToTrashAfterReview
             || self == .moveToTrashAfterProtectedReview
     }
+
+    var permanentlyDeletes: Bool {
+        self == .emptyTrash
+    }
+
+    /// Whether a plan item with this action changes the file system.
+    var isExecutable: Bool {
+        movesToTrash || permanentlyDeletes
+    }
+}
+
+/// How a container rule (one row per child, such as `~/Library/Caches`)
+/// finds the app that owns each row (D22).
+enum CleanupOwnerInference: String, Codable, Sendable {
+    /// The child name, or its reverse-DNS prefix, is the bundle identifier of
+    /// an installed app. Rows whose owner cannot be found stay unresolved.
+    case candidateName
+}
+
+/// The owner used for the running-app check before preselection (D22, D47)
+/// and again before cleanup.
+enum CleanupOwnerResolution: String, Codable, Hashable, Sendable {
+    /// The rule names the owning apps (`requiredClosedBundleIDs`).
+    case declared
+    /// Found from the row name through an installed app's bundle identifier.
+    case inferredFromName
+    /// The row is an app bundle (a duplicate copy).
+    case applicationBundle
+    /// No app owns the row (system logs, command-line tools, downloads).
+    case noApplication
+    /// The row has an owner, but it could not be identified. D47 preselects
+    /// it anyway; the row says the app is unknown.
+    case unresolved
 }
 
 enum CleanupCloudPolicy: String, Codable, Sendable {
@@ -102,6 +138,10 @@ enum DeveloperTool: String, Codable, CaseIterable, Hashable, Sendable {
     case npm
     case codex
     case claudeCode
+    case claudeDesktop
+    case visualStudioCode
+    case lmStudio
+    case rodBrowser
     case cursor
     case githubCopilot
     case openCode
@@ -118,6 +158,10 @@ enum DeveloperTool: String, Codable, CaseIterable, Hashable, Sendable {
         case .npm: "npm"
         case .codex: "Codex"
         case .claudeCode: "Claude Code"
+        case .claudeDesktop: "Claude"
+        case .visualStudioCode: "VS Code（含 Copilot）"
+        case .lmStudio: "LM Studio"
+        case .rodBrowser: "Rod 浏览器工具"
         case .cursor: "Cursor"
         case .githubCopilot: "GitHub Copilot"
         case .openCode: "OpenCode"
@@ -158,6 +202,18 @@ struct CleanupRuleSet: Codable, Sendable {
     let schemaVersion: Int
     let rulesVersion: String
     let rules: [CleanupRule]
+    /// A scoped scan retains the fingerprint of the complete loaded set.
+    var fullSetProvenance: CleanupRuleSetProvenance? = nil
+
+    var effectiveProvenance: CleanupRuleSetProvenance {
+        if let fullSetProvenance, rules.allSatisfy({ rule in
+            fullSetProvenance.rules.contains { reference in
+                reference.ruleID == rule.id && reference.revision == rule.maintenance?.revision
+                    && reference.contentHash == (try? CleanupRuleFingerprint.contentHash(for: rule))
+            }
+        }) { return fullSetProvenance }
+        return CleanupRuleFingerprint.provenance(for: self)
+    }
 }
 
 struct CleanupRule: Codable, Identifiable, Sendable {
@@ -188,9 +244,20 @@ struct CleanupRule: Codable, Identifiable, Sendable {
     var developerArtifactKind: DeveloperArtifactKind? = nil
     var includedBundleIdentifiers: Set<String>? = nil
     var requiresDuplicateBundleIdentifier: Bool? = nil
+    var ownerInference: CleanupOwnerInference? = nil
+    var maintenance: CleanupRuleMaintenance? = nil
+    var projectArtifact: ProjectArtifactRequirement? = nil
 
     var effectiveCandidateScope: CleanupRuleCandidateScope {
         candidateScope ?? .immediateChildren
+    }
+
+    /// A rule that lists every child of its root as its own row, such as one
+    /// row per app under `~/Library/Caches`.
+    var isContainerRule: Bool {
+        root.kind == .homeRelative
+            && effectiveCandidateScope == .immediateChildren
+            && include.nameMatcher.mode == .any
     }
 
     var effectiveIncludedBundleIdentifiers: Set<String> {
@@ -228,14 +295,28 @@ struct CleanupNameMatcher: Codable, Sendable {
 }
 
 struct CleanupRuleExclusion: Codable, Sendable {
+    /// Child names (or `name/…` paths) excluded from an immediate-children rule.
     let relativePrefixes: [String]
     let extensions: Set<String>
+    /// Child names starting with one of these values are excluded.
+    var namePrefixes: [String]? = nil
+
+    func excludes(childName name: String) -> Bool {
+        let normalized = name.precomposedStringWithCanonicalMapping
+        return relativePrefixes.contains { value in
+            let excluded = value.precomposedStringWithCanonicalMapping
+            return normalized == excluded || normalized.hasPrefix(excluded + "/")
+        } || (namePrefixes ?? []).contains {
+            normalized.hasPrefix($0.precomposedStringWithCanonicalMapping)
+        }
+    }
 }
 
 enum DeveloperArtifactCleanupPolicy: Equatable, Sendable {
+    /// Caches and temporary files; graded by the activity bands.
     case regenerable
-    case reviewOnly
-    case referenceOnly
+    /// Tool logs; not graded by activity (D19, D22).
+    case disposableLogs
 }
 
 struct DeveloperToolArtifactDefinition: Sendable {
@@ -248,26 +329,24 @@ struct DeveloperToolArtifactDefinition: Sendable {
     let minimumBytes: Int64
     var maximumDepth = 32
     var requiredClosedBundleIDs: [String] = []
+    var revision = 1
+    var checkedAt = "2026-10-12"
+    var evidenceURLs: [String] = []
 
     var cleanupRule: CleanupRule {
-        let isRegenerable = policy == .regenerable
-        let isReferenceOnly = policy == .referenceOnly
-        let reasonKey: String
-        switch policy {
-        case .regenerable: reasonKey = "cleanup.reason.regenerableDeveloperCache"
-        case .reviewOnly: reasonKey = "cleanup.reason.developerToolLogs"
-        case .referenceOnly: reasonKey = "cleanup.reason.developerToolState"
-        }
+        let isLog = policy == .disposableLogs
+        // Logs are preselected while their app is closed (D22, D47); caches
+        // and temporary files are graded by the developer activity bands.
         return CleanupRule(
             id: id,
-            selectionPolicyVersion: 1,
+            selectionPolicyVersion: isLog ? 2 : 1,
             categoryID: "developer",
             categoryTitleKey: "cleanup.category.developer",
             titleKey: "cleanup.rule.developerToolArtifact.title",
             root: CleanupRuleRoot(kind: .homeRelative, path: rootPath),
-            maximumDepth: isReferenceOnly ? 0 : maximumDepth,
+            maximumDepth: maximumDepth,
             minimumAgeDays: 0,
-            minimumBytes: isReferenceOnly ? 0 : minimumBytes,
+            minimumBytes: minimumBytes,
             include: CleanupRuleMatch(
                 entryKinds: [.directory],
                 extensions: [],
@@ -275,17 +354,26 @@ struct DeveloperToolArtifactDefinition: Sendable {
             ),
             exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
             cloudPolicy: .excludeCloudRoots,
-            risk: isRegenerable ? .safe : .reviewOnly,
-            recommendation: isRegenerable ? .optional : .advisoryOnly,
-            defaultSelection: isRegenerable ? .unselected : .forbidden,
-            executionEligibility: isRegenerable ? .eligible : .advisoryOnly,
-            measurementRequirement: isRegenerable ? .complete : .bestEffort,
-            allowsManualSelection: isRegenerable,
-            action: isRegenerable ? .moveToTrash : .revealOnly,
+            risk: .safe,
+            recommendation: isLog ? .recommended : .optional,
+            defaultSelection: isLog ? .selected : .unselected,
+            executionEligibility: .eligible,
+            measurementRequirement: .complete,
+            allowsManualSelection: true,
+            action: .moveToTrash,
             requiredClosedBundleIDs: requiredClosedBundleIDs,
-            reasonKey: reasonKey,
+            reasonKey: isLog
+                ? "cleanup.reason.developerToolLogs"
+                : "cleanup.reason.regenerableDeveloperCache",
             developerTool: tool,
-            developerArtifactKind: kind
+            developerArtifactKind: kind,
+            maintenance: CleanupRuleMaintenance(
+                source: .developerCatalog,
+                revision: revision,
+                checkedAt: checkedAt,
+                impact: isLog ? "工具会重新生成日志，旧诊断记录将移入废纸篓" : "工具会重新生成缓存，首次使用可能稍慢或需要联网",
+                evidenceURLs: evidenceURLs
+            )
         )
     }
 }
@@ -295,58 +383,59 @@ enum DeveloperToolArtifactCatalog {
     private static let cursorBundleID = "com.todesktop.230313mzl4w4u92"
     private static let claudeBundleID = "com.anthropic.claudefordesktop"
 
+    /// Agent sessions, checkpoints, histories, project state and the Codex
+    /// runtime folder `.codex/.tmp` are not junk and are not listed (D19);
+    /// File Analysis still shows the space they use.
     static let definitions: [DeveloperToolArtifactDefinition] = [
         .init(id: "developer.codex-cache", rootPath: ".codex", candidateNames: ["cache"], tool: .codex, kind: .cache, policy: .regenerable, minimumBytes: 256 * kib),
         .init(id: "developer.codex-plugin-cache", rootPath: ".codex/plugins", candidateNames: ["cache"], tool: .codex, kind: .pluginCache, policy: .regenerable, minimumBytes: 256 * kib),
         .init(id: "developer.codex-temporary-files", rootPath: ".codex", candidateNames: ["tmp"], tool: .codex, kind: .temporaryFiles, policy: .regenerable, minimumBytes: 256 * kib),
-        .init(id: "developer.codex-logs", rootPath: ".codex", candidateNames: ["logs"], tool: .codex, kind: .logs, policy: .reviewOnly, minimumBytes: 64 * kib),
-        .init(id: "developer.codex-runtime-temporary-files", rootPath: ".codex", candidateNames: [".tmp"], tool: .codex, kind: .temporaryFiles, policy: .referenceOnly, minimumBytes: 0),
-        .init(id: "developer.codex-agent-data", rootPath: ".codex", candidateNames: ["sessions", "archived_sessions", "generated_images", "visualizations"], tool: .codex, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
+        .init(id: "developer.codex-logs", rootPath: ".codex", candidateNames: ["logs"], tool: .codex, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib),
 
         .init(id: "developer.claude-code-cache", rootPath: ".claude", candidateNames: ["cache"], tool: .claudeCode, kind: .cache, policy: .regenerable, minimumBytes: 256 * kib),
         .init(id: "developer.claude-code-plugin-cache", rootPath: ".claude/plugins", candidateNames: ["cache"], tool: .claudeCode, kind: .pluginCache, policy: .regenerable, minimumBytes: 256 * kib),
         .init(id: "developer.claude-code-temporary-files", rootPath: ".claude", candidateNames: ["tmp"], tool: .claudeCode, kind: .temporaryFiles, policy: .regenerable, minimumBytes: 256 * kib),
         .init(id: "developer.claude-code-app-cache", rootPath: "Library/Caches", candidateNames: ["Claude", "claude-code"], tool: .claudeCode, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: [claudeBundleID]),
-        .init(id: "developer.claude-code-logs", rootPath: ".claude", candidateNames: ["debug", "logs"], tool: .claudeCode, kind: .logs, policy: .reviewOnly, minimumBytes: 64 * kib),
-        .init(id: "developer.claude-code-agent-data", rootPath: ".claude", candidateNames: ["projects", "sessions", "file-history", "plans"], tool: .claudeCode, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
+        // D47 supplement (review P1-1a): the command-line tool's own cache,
+        // graded by activity like the other developer caches.
+        .init(id: "developer.claude-code-cli-cache", rootPath: "Library/Caches", candidateNames: ["claude-cli-nodejs"], tool: .claudeCode, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib),
+        .init(id: "developer.claude-code-logs", rootPath: ".claude", candidateNames: ["debug", "logs"], tool: .claudeCode, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib),
 
         .init(id: "developer.cursor-cache", rootPath: "Library/Application Support/Cursor", candidateNames: ["Cache", "CachedData", "Code Cache", "GPUCache"], tool: .cursor, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: [cursorBundleID]),
         .init(id: "developer.cursor-app-cache", rootPath: "Library/Caches", candidateNames: [cursorBundleID], tool: .cursor, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: [cursorBundleID]),
-        .init(id: "developer.cursor-logs", rootPath: "Library/Application Support/Cursor", candidateNames: ["logs"], tool: .cursor, kind: .logs, policy: .reviewOnly, minimumBytes: 64 * kib),
-        .init(id: "developer.cursor-agent-data", rootPath: "Library/Application Support/Cursor", candidateNames: ["snapshots"], tool: .cursor, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
+        .init(id: "developer.cursor-logs", rootPath: "Library/Application Support/Cursor", candidateNames: ["logs"], tool: .cursor, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib, requiredClosedBundleIDs: [cursorBundleID]),
 
         .init(id: "developer.github-copilot-cache", rootPath: ".cache", candidateNames: ["github-copilot"], tool: .githubCopilot, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib),
         .init(id: "developer.github-copilot-app-cache", rootPath: "Library/Caches", candidateNames: ["GitHub Copilot"], tool: .githubCopilot, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib),
-        .init(id: "developer.github-copilot-logs", rootPath: "Library/Logs", candidateNames: ["GitHub Copilot"], tool: .githubCopilot, kind: .logs, policy: .reviewOnly, minimumBytes: 64 * kib),
+        .init(id: "developer.github-copilot-logs", rootPath: "Library/Logs", candidateNames: ["GitHub Copilot"], tool: .githubCopilot, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib),
 
         .init(id: "developer.opencode-cache", rootPath: ".cache", candidateNames: ["opencode"], tool: .openCode, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib),
-        .init(id: "developer.opencode-logs", rootPath: ".local/share/opencode", candidateNames: ["log", "logs"], tool: .openCode, kind: .logs, policy: .reviewOnly, minimumBytes: 64 * kib),
-        .init(id: "developer.opencode-agent-data", rootPath: ".local/share/opencode", candidateNames: ["project", "storage", "session", "repos"], tool: .openCode, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
+        .init(id: "developer.opencode-logs", rootPath: ".local/share/opencode", candidateNames: ["log", "logs"], tool: .openCode, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib),
 
         .init(id: "developer.openclaw-cache", rootPath: ".openclaw", candidateNames: ["cache"], tool: .openClaw, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib),
         .init(id: "developer.openclaw-temporary-files", rootPath: ".openclaw", candidateNames: ["tmp"], tool: .openClaw, kind: .temporaryFiles, policy: .regenerable, minimumBytes: 64 * kib),
         .init(id: "developer.openclaw-app-cache", rootPath: "Library/Caches", candidateNames: ["OpenClaw"], tool: .openClaw, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib),
-        .init(id: "developer.openclaw-logs", rootPath: ".openclaw", candidateNames: ["logs"], tool: .openClaw, kind: .logs, policy: .reviewOnly, minimumBytes: 64 * kib),
-        .init(id: "developer.openclaw-app-logs", rootPath: "Library/Logs", candidateNames: ["OpenClaw"], tool: .openClaw, kind: .logs, policy: .reviewOnly, minimumBytes: 64 * kib),
+        .init(id: "developer.openclaw-logs", rootPath: ".openclaw", candidateNames: ["logs"], tool: .openClaw, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib),
+        .init(id: "developer.openclaw-app-logs", rootPath: "Library/Logs", candidateNames: ["OpenClaw"], tool: .openClaw, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib),
 
-        .init(id: "developer.gemini-cli-data", rootPath: ".gemini", candidateNames: ["tmp", "history"], tool: .geminiCLI, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
+        // `.workbuddy/audit-log` holds audit records, not disposable logs (P2-7).
+        .init(id: "developer.workbuddy-logs", rootPath: ".workbuddy", candidateNames: ["logs", "traces"], tool: .workBuddy, kind: .logs, policy: .disposableLogs, minimumBytes: 1 * kib, maximumDepth: 2),
 
-        .init(id: "developer.workbuddy-logs", rootPath: ".workbuddy", candidateNames: ["logs", "traces", "audit-log"], tool: .workBuddy, kind: .logs, policy: .reviewOnly, minimumBytes: 1 * kib, maximumDepth: 2),
-        .init(id: "developer.workbuddy-agent-data", rootPath: ".workbuddy", candidateNames: ["tasks", "sessions", "artifact-index", "file-history", "projects", "workspace"], tool: .workBuddy, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-
-        .init(id: "developer.windsurf-agent-data", rootPath: ".codeium/windsurf", candidateNames: ["cascade"], tool: .windsurf, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-        .init(id: "developer.windsurf-logs", rootPath: "Library/Application Support/Windsurf", candidateNames: ["logs"], tool: .windsurf, kind: .logs, policy: .reviewOnly, minimumBytes: 1 * kib, maximumDepth: 2),
+        .init(id: "developer.windsurf-logs", rootPath: "Library/Application Support/Windsurf", candidateNames: ["logs"], tool: .windsurf, kind: .logs, policy: .disposableLogs, minimumBytes: 1 * kib, maximumDepth: 2),
 
         .init(id: "developer.continue-index", rootPath: ".continue", candidateNames: ["index"], tool: .continueDev, kind: .contentCache, policy: .regenerable, minimumBytes: 64 * kib),
 
-        .init(id: "developer.cline-sdk-data", rootPath: ".cline/data", candidateNames: ["sessions"], tool: .cline, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-        .init(id: "developer.cline-vscode-data", rootPath: "Library/Application Support/Code/User/globalStorage", candidateNames: ["saoudrizwan.claude-dev"], tool: .cline, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-        .init(id: "developer.cline-cursor-data", rootPath: "Library/Application Support/Cursor/User/globalStorage", candidateNames: ["saoudrizwan.claude-dev"], tool: .cline, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-        .init(id: "developer.cline-windsurf-data", rootPath: "Library/Application Support/Windsurf/User/globalStorage", candidateNames: ["saoudrizwan.claude-dev"], tool: .cline, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-
-        .init(id: "developer.roo-code-vscode-data", rootPath: "Library/Application Support/Code/User/globalStorage", candidateNames: ["rooveterinaryinc.roo-cline"], tool: .rooCode, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-        .init(id: "developer.roo-code-cursor-data", rootPath: "Library/Application Support/Cursor/User/globalStorage", candidateNames: ["rooveterinaryinc.roo-cline"], tool: .rooCode, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
-        .init(id: "developer.roo-code-windsurf-data", rootPath: "Library/Application Support/Windsurf/User/globalStorage", candidateNames: ["rooveterinaryinc.roo-cline"], tool: .rooCode, kind: .agentData, policy: .referenceOnly, minimumBytes: 0),
+        // D83: only the runtime's generated cache directories, never its
+        // userData root, Local Storage, IndexedDB, sessions or model storage.
+        .init(id: "developer.claude-desktop-web-cache", rootPath: "Library/Application Support/Claude", candidateNames: ["Cache", "Code Cache", "GPUCache"], tool: .claudeDesktop, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: [claudeBundleID], evidenceURLs: ["https://www.electronjs.org/docs/latest/api/app#appgetpathname", "https://www.electronjs.org/docs/latest/api/session#sesclearcache"]),
+        .init(id: "developer.codex-desktop-web-cache", rootPath: "Library/Application Support/Codex", candidateNames: ["Cache", "Code Cache", "GPUCache"], tool: .codex, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: ["com.openai.codex"], evidenceURLs: ["https://www.electronjs.org/docs/latest/api/app#appgetpathname", "https://www.electronjs.org/docs/latest/api/session#sesclearcache"]),
+        .init(id: "developer.vscode-web-cache", rootPath: "Library/Application Support/Code", candidateNames: ["Cache", "Code Cache", "GPUCache"], tool: .visualStudioCode, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: ["com.microsoft.VSCode"], evidenceURLs: ["https://www.electronjs.org/docs/latest/api/app#appgetpathname", "https://www.electronjs.org/docs/latest/api/session#sesclearcache"]),
+        .init(id: "developer.vscode-logs", rootPath: "Library/Application Support/Code", candidateNames: ["logs"], tool: .visualStudioCode, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib, requiredClosedBundleIDs: ["com.microsoft.VSCode"], revision: 2, evidenceURLs: ["https://github.com/microsoft/vscode/blob/main/src/vs/platform/environment/common/environmentService.ts"]),
+        // The observed Electron cache layout is known; a verified LM Studio
+        // bundle identifier is not available in this directory-only audit.
+        // Its activity and pre-execution write checks still apply (D52).
+        .init(id: "developer.lmstudio-web-cache", rootPath: "Library/Application Support/LM Studio", candidateNames: ["Cache", "Code Cache", "GPUCache"], tool: .lmStudio, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, evidenceURLs: ["https://www.electronjs.org/docs/latest/api/app#appgetpathname", "https://www.electronjs.org/docs/latest/api/session#sesclearcache"]),
+        .init(id: "developer.rod-browser-downloads", rootPath: ".cache/rod", candidateNames: ["browser"], tool: .rodBrowser, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, evidenceURLs: ["https://github.com/go-rod/rod/blob/main/lib/launcher/browser.go"]),
     ]
 
     static var cleanupRules: [CleanupRule] {
@@ -355,11 +444,11 @@ enum DeveloperToolArtifactCatalog {
 
     static func permitsAutomaticRule(_ rule: CleanupRule) -> Bool {
         definitions.contains {
-            $0.policy == .regenerable
-                && $0.id == rule.id
+            $0.id == rule.id
                 && $0.rootPath == rule.root.path
                 && Set($0.candidateNames) == Set(rule.include.nameMatcher.values)
                 && rule.include.nameMatcher.mode == .exact
+                && rule.effectiveCandidateScope == .immediateChildren
         }
     }
 }
@@ -376,6 +465,7 @@ enum CleanupRuleValidationError: Error, Equatable, LocalizedError {
     case invalidNameMatcher(ruleID: String)
     case invalidDeveloperArtifactMetadata(ruleID: String)
     case invalidAttributionMetadata(ruleID: String)
+    case overlappingRules(ruleID: String)
 
     var errorDescription: String? {
         switch self {
@@ -401,6 +491,8 @@ enum CleanupRuleValidationError: Error, Equatable, LocalizedError {
             L10n.text("开发工具残留标识不完整：\(ruleID)", "Incomplete developer artifact metadata: \(ruleID)")
         case let .invalidAttributionMetadata(ruleID):
             L10n.text("清理规则归属无效：\(ruleID)", "Invalid cleanup rule attribution: \(ruleID)")
+        case let .overlappingRules(ruleID):
+            L10n.text("清理规则会重复列出同一位置：\(ruleID)", "Cleanup rule would list the same location twice: \(ruleID)")
         }
     }
 }
@@ -469,6 +561,8 @@ enum SelectionEligibility: String, Codable, Sendable {
     case selectable
     case selectableWithReview
     case selectableWithProtectedReview
+    /// Emptying the Trash: selectable, confirmed separately and irreversibly.
+    case selectableWithPermanentDeletionReview
     case reviewRequired
     case protected
     case readOnly
@@ -508,6 +602,10 @@ enum DeveloperCleanupAgeBand: String, Codable, Sendable {
     case inactiveYear
     case inactiveReview
     case recent
+    /// Part of the folder could not be read (permission or depth limit), so
+    /// its latest activity cannot be fully verified. A folder holding a user
+    /// exclusion is not listed at all, because cleanup would skip it.
+    case activityUnverified
     case unknown
 }
 
@@ -532,6 +630,8 @@ enum DeveloperCleanupAgePolicy {
         min(max(days, minimumThresholdDays), maximumThresholdDays)
     }
 
+    /// Developer caches and temporary files are graded by activity. Tool logs
+    /// are not: they are preselected while their app is closed (D22, D47).
     static func applies(to rule: CleanupRule) -> Bool {
         rule.categoryID == "developer"
             && rule.root.kind == .homeRelative
@@ -540,6 +640,15 @@ enum DeveloperCleanupAgePolicy {
             && rule.executionEligibility == .eligible
             && rule.measurementRequirement == .complete
             && rule.allowsManualSelection
+            && rule.developerArtifactKind != .logs
+    }
+
+    /// Skipped symbolic links are not followed and are not moved with their
+    /// target, so they do not hide activity of the moved folder. Any other
+    /// incomplete measurement leaves part of the folder unread.
+    static func verifiesActivity(_ measurementCompleteness: MeasurementCompleteness) -> Bool {
+        measurementCompleteness.isComplete
+            || measurementCompleteness == .lowerBound(reason: .symbolicLinkSkipped)
     }
 
     static func decision(
@@ -550,8 +659,9 @@ enum DeveloperCleanupAgePolicy {
         thresholdDays: Int
     ) -> DeveloperCleanupAgeDecision? {
         guard applies(to: rule) else { return nil }
-        guard measurementCompleteness.isComplete,
+        guard !measurementCompleteness.isFailed,
               let latestModificationTimeNanoseconds else {
+            // Not listed: the scanner drops results that cannot be acted on.
             return DeveloperCleanupAgeDecision(
                 band: .unknown,
                 risk: .protected,
@@ -561,6 +671,19 @@ enum DeveloperCleanupAgePolicy {
                 allowsManualSelection: false,
                 action: .revealOnly,
                 reasonCode: "cleanup.reason.developerActivityUnknown"
+            )
+        }
+        guard verifiesActivity(measurementCompleteness) else {
+            // D19: still selectable, but only with the red two-step review.
+            return DeveloperCleanupAgeDecision(
+                band: .activityUnverified,
+                risk: .protected,
+                recommendation: .notRecommended,
+                defaultSelection: .unselected,
+                executionEligibility: .eligibleAfterProtectedReview,
+                allowsManualSelection: true,
+                action: .moveToTrashAfterProtectedReview,
+                reasonCode: "cleanup.reason.developerActivityUnverified"
             )
         }
 
@@ -654,6 +777,11 @@ enum DeveloperCleanupAgePolicy {
                 "目录内最近一次可读修改距扫描约 \(days) 天，仍在设置的 \(normalizedThresholdDays(thresholdDays)) 天以内，可能正在使用；默认不选。确认用途和备份后可逐项选择，执行前需要双重确认。",
                 "The latest readable modification inside this folder was about \(days) days before the scan, within the \(normalizedThresholdDays(thresholdDays))-day setting, so it may still be active. It is off by default and requires individual selection plus two confirmations."
             )
+        case .activityUnverified:
+            return L10n.text(
+                "目录内有部分内容无法读取（权限或深度上限），最近一次可读修改距扫描约 \(days) 天，但不能确认其余部分是否仍在使用；默认不选，可逐项选择，执行前需要双重确认。清理时只把该目录本身移入废纸篓。",
+                "Part of this folder could not be read (permission or depth limit). The latest readable change was about \(days) days before the scan, but the rest may still be in use. It is off by default, can be selected individually, and needs two confirmations. Cleanup moves only this folder itself to Trash."
+            )
         case .unknown:
             return L10n.text(
                 "无法完整确认目录内最近一次修改时间，因此按红色保护且不能加入清理计划。",
@@ -663,7 +791,57 @@ enum DeveloperCleanupAgePolicy {
     }
 }
 
+/// Item 10 (D22 supplement): when a log row was last written. Since D47 it
+/// no longer decides preselection; the row shows it as a hint.
+enum CleanupLogWriteState: String, Sendable {
+    /// Nothing written in the last 7 days.
+    case quiet
+    /// Written within the last 7 days, so the app may still be using it.
+    case recent
+    /// Part of the row could not be read, so recent writes cannot be ruled out.
+    case unverified
+}
+
+/// Item 10 (D22 supplement, D40): records whether a user, diagnostic or
+/// developer tool log row was written in the 7 days before the scan. D47
+/// replaced the 7-day preselection rule: every green log row is preselected
+/// unless its app is running, and a recent or unconfirmed write is shown on
+/// the row (`CleanupCandidateRowHint`).
+enum CleanupLogPreselectionPolicy {
+    static let quietDays = 7
+    static let evidencePrefix = "log-write-window:"
+
+    static func applies(to rule: CleanupRule) -> Bool {
+        if rule.developerArtifactKind == .logs { return true }
+        guard rule.root.kind == .homeRelative else { return false }
+        return rule.root.path == "Library/Logs" || rule.root.path.hasPrefix("Library/Logs/")
+    }
+
+    /// Skipped links do not hide writes to the row itself; any other part
+    /// left unread might.
+    static func state(
+        latestWriteNanoseconds: Int64?,
+        measurementCompleteness: MeasurementCompleteness,
+        referenceDate: Date
+    ) -> CleanupLogWriteState {
+        guard let latestWriteNanoseconds,
+              DeveloperCleanupAgePolicy.verifiesActivity(measurementCompleteness) else {
+            return .unverified
+        }
+        let age = referenceDate.timeIntervalSince1970 - Double(latestWriteNanoseconds) / 1_000_000_000
+        return age > Double(quietDays) * 86_400 ? .quiet : .recent
+    }
+
+    static func evidenceCode(for state: CleanupLogWriteState) -> String {
+        evidencePrefix + state.rawValue
+    }
+}
+
 enum CleanupSelectionPolicy {
+    /// D19: a lower-bound measurement no longer blocks selection. Cleanup moves
+    /// only the item's own root (internal symbolic links are never followed),
+    /// so the size is shown as "at least". A failed measurement (the root
+    /// itself could not be listed) stays unavailable and is not listed.
     static func eligibility(
         risk: CleanupRisk,
         isManuallySelectable: Bool,
@@ -671,7 +849,7 @@ enum CleanupSelectionPolicy {
         executionEligibility: CleanupExecutionEligibility,
         measurementCompleteness: MeasurementCompleteness
     ) -> SelectionEligibility {
-        guard measurementCompleteness.isComplete else { return .unavailable }
+        guard !measurementCompleteness.isFailed else { return .unavailable }
         switch executionEligibility {
         case .eligible:
             guard risk == .safe,
@@ -684,6 +862,10 @@ enum CleanupSelectionPolicy {
                   action == .moveToTrashAfterReview else { return .reviewRequired }
             return .selectableWithReview
         case .eligibleAfterProtectedReview:
+            if action == .emptyTrash {
+                guard risk == .protected, isManuallySelectable else { return .protected }
+                return .selectableWithPermanentDeletionReview
+            }
             guard risk == .protected,
                   isManuallySelectable,
                   action == .moveToTrashAfterProtectedReview else { return .protected }
@@ -722,6 +904,38 @@ struct ScanCandidate: Identifiable, Sendable {
     var latestContentModificationTimeNanoseconds: Int64? = nil
     var developerTool: DeveloperTool? = nil
     var developerArtifactKind: DeveloperArtifactKind? = nil
+    /// D22: the app that owns this item and whether it was running when the
+    /// scan finished. `ownerBundleIdentifiers` is checked again before cleanup.
+    var ownerResolution: CleanupOwnerResolution = .noApplication
+    var ownerBundleIdentifiers: [String] = []
+    var runningOwnerBundleIdentifiers: [String] = []
+    /// D23: the top-level Trash entries frozen at scan time. Only these are
+    /// deleted; anything put into the Trash later is left alone.
+    var permanentDeletionEntries: [FileSnapshot]? = nil
+    var ruleRevision: Int? = nil
+    var rulesProvenance: CleanupRuleSetProvenance? = nil
+    var ruleOwnerDisplayName: String? = nil
+    var cleanupImpactText: String? = nil
+
+    /// D82: prepared for the result-row view batch; no selection decisions here.
+    var applicationOwnershipText: String {
+        if let developerTool { return developerTool.displayName }
+        if let ruleOwnerDisplayName { return ruleOwnerDisplayName }
+        if !ownerBundleIdentifiers.isEmpty { return ownerBundleIdentifiers.joined(separator: "、") }
+        return ownerResolution == .unresolved ? "未识别所属应用" : "系统或命令行工具"
+    }
+
+    /// D82 的中文记录；判断只在 `preselectionReason`（D93），界面用其本地化标题。
+    var preselectionExplanationText: String {
+        switch preselectionReason {
+        case .ownerRunning: "所属应用正在运行，本次不预选"
+        case .preselected: "绿色项目符合本次安全策略，按默认规则预选；执行前仍会复查"
+        case .permanentDeletion: "永久删除需要单独确认，不预选"
+        case .protected: "最近仍在使用或风险较高，需要两次确认，不预选"
+        case .reviewRequired: "需要判断是否仍有用途，不预选"
+        case .notReady: "测量或执行条件尚不满足，不预选"
+        }
+    }
 
     var developerArtifactSummary: String? {
         guard let developerTool, let developerArtifactKind else { return nil }
@@ -742,11 +956,108 @@ struct ScanCandidate: Identifiable, Sendable {
         selectionEligibility == .selectable
             || selectionEligibility == .selectableWithReview
             || selectionEligibility == .selectableWithProtectedReview
+            || selectionEligibility == .selectableWithPermanentDeletionReview
     }
 
     var requiresExplicitReview: Bool {
         selectionEligibility == .selectableWithReview
             || selectionEligibility == .selectableWithProtectedReview
+            || selectionEligibility == .selectableWithPermanentDeletionReview
+    }
+
+    var isOwnerRunning: Bool {
+        !runningOwnerBundleIdentifiers.isEmpty
+    }
+
+    /// D47 (replaces D22's unidentified-owner rule and D40's 7-day log rule):
+    /// the only check that holds back a green row is a running owner app,
+    /// because cleanup would skip that row anyway. A cache whose owner is
+    /// unknown and a log written in the last 7 days are preselected; the row
+    /// says so (`CleanupCandidateRowHint`).
+    var isHeldBackFromPreselection: Bool {
+        isOwnerRunning
+    }
+
+    /// D47: every green row (selectable without extra review, moved to Trash)
+    /// is preselected unless its app is running. Yellow and red rows and
+    /// "Empty Trash" (D23) never are, whatever their rule says.
+    var isPreselectedByDefault: Bool {
+        selectionEligibility == .selectable
+            && defaultSelection != .forbidden
+            && !isHeldBackFromPreselection
+    }
+
+    /// "Select Recommended" takes the rows whose rule recommends them, with the
+    /// same owner check as preselection (D47). Every green row of the bundled
+    /// rules is recommended, so in the product it matches the preselection.
+    var isRecommendedForSelection: Bool {
+        isSelectable
+            && defaultSelection != .forbidden
+            && recommendation.level == .recommended
+            && !isHeldBackFromPreselection
+    }
+
+    var duplicateApplicationGroupCode: String? {
+        recommendation.evidenceCodes.first { $0.hasPrefix("duplicate-bundle-group:") }
+    }
+
+    /// P2-1: the version and build of a duplicate app copy, shown on its row.
+    var applicationVersionSummary: String? {
+        guard duplicateApplicationGroupCode != nil else { return nil }
+        let version = evidenceValue(prefix: "app-short-version:")
+        let build = evidenceValue(prefix: "app-build:")
+        switch (version, build) {
+        case let (version?, build?):
+            return L10n.text("版本 \(version)（构建 \(build)）", "Version \(version) (build \(build))")
+        case let (version?, nil):
+            return L10n.text("版本 \(version)", "Version \(version)")
+        case let (nil, build?):
+            return L10n.text("构建 \(build)", "Build \(build)")
+        case (nil, nil):
+            return L10n.text("未标注版本号", "No version number")
+        }
+    }
+
+    /// P2-1: the copy `xcode-select` uses as the active developer directory.
+    var isActiveDeveloperDirectory: Bool {
+        recommendation.evidenceCodes.contains("active-developer-directory")
+    }
+
+    private func evidenceValue(prefix: String) -> String? {
+        recommendation.evidenceCodes.first { $0.hasPrefix(prefix) }
+            .map { String($0.dropFirst(prefix.count)) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// Item 10 (D22 supplement): whether a log row was written recently;
+    /// nil for rows that are not logs. Shown on the row (D47).
+    var logWriteState: CleanupLogWriteState? {
+        recommendation.evidenceCodes
+            .first { $0.hasPrefix(CleanupLogPreselectionPolicy.evidencePrefix) }
+            .flatMap {
+                CleanupLogWriteState(rawValue: String($0.dropFirst(
+                    CleanupLogPreselectionPolicy.evidencePrefix.count
+                )))
+            }
+    }
+
+    /// D22: records which owner apps are running in `applications`. A
+    /// duplicate copy counts as running only when that exact bundle runs.
+    func withRunningOwners(from applications: CleanupApplicationSnapshot) -> ScanCandidate {
+        var updated = self
+        switch ownerResolution {
+        case .applicationBundle:
+            updated.runningOwnerBundleIdentifiers = applications.runningBundlePaths
+                .contains(PathSafety.lexicalPath(sourceURL.path))
+                ? ownerBundleIdentifiers
+                : []
+        case .declared, .inferredFromName:
+            updated.runningOwnerBundleIdentifiers = ownerBundleIdentifiers
+                .filter(applications.runningBundleIdentifiers.contains)
+        case .noApplication, .unresolved:
+            updated.runningOwnerBundleIdentifiers = []
+        }
+        return updated
     }
 
     /// `du -sk`, used by storage-analyzer, reports disk blocks. Prefer the
@@ -764,7 +1075,11 @@ struct ScanCandidate: Identifiable, Sendable {
 
 enum CleanupRecommendationDisplayPolicy {
     static func level(for candidate: ScanCandidate) -> CleanupRecommendationLevel {
-        candidate.isSelectable ? candidate.recommendation.level : .advisoryOnly
+        guard candidate.isSelectable else { return .advisoryOnly }
+        // D47: a cache whose owner could not be identified is preselected like
+        // any green row, so it is no longer shown as merely optional; the row
+        // says that its app is unknown instead.
+        return candidate.recommendation.level
     }
 
     static func level(
@@ -772,6 +1087,96 @@ enum CleanupRecommendationDisplayPolicy {
         fallback: CleanupRecommendationLevel
     ) -> CleanupRecommendationLevel {
         candidates.contains(where: \.isSelectable) ? fallback : .advisoryOnly
+    }
+}
+
+/// D47: a large cache row says that cleaning it has a cost — the app or tool
+/// downloads or generates it again, which can take a while.
+enum CleanupRebuildCostPolicy {
+    /// One row of at least 5 GiB.
+    static let largeCacheThresholdBytes: Int64 = 5 * 1_024 * 1_024 * 1_024
+
+    static func showsHint(for candidate: ScanCandidate) -> Bool {
+        isRebuildableCache(candidate)
+            && candidate.estimatedSizeBytes >= largeCacheThresholdBytes
+    }
+
+    /// Caches and temporary files that apps and tools rebuild: not logs,
+    /// downloads, mail attachment copies, duplicate app copies or the Trash.
+    static func isRebuildableCache(_ candidate: ScanCandidate) -> Bool {
+        guard candidate.action.movesToTrash,
+              candidate.logWriteState == nil,
+              candidate.duplicateApplicationGroupCode == nil else { return false }
+        switch candidate.categoryID {
+        case "browser-cache", "application-cache", "system", "developer":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// Row hints that depend only on the candidate. D47 preselects these rows, so
+/// the row says why the user might still want to clear the check.
+enum CleanupCandidateRowHint {
+    enum Tone: Equatable {
+        case warning
+        case secondary
+    }
+
+    struct Line: Equatable {
+        let text: String
+        let systemImage: String
+        let tone: Tone
+    }
+
+    /// Item 10 (kept by D47): a log row still written in the last 7 days, or
+    /// one that could not be read completely. D47: a cache row whose app could
+    /// not be identified, so the running-app check cannot protect it.
+    static func ownerStatus(for candidate: ScanCandidate) -> Line? {
+        switch candidate.logWriteState {
+        case .recent:
+            return Line(
+                text: L10n.text("最近 7 天内仍有写入", "Written within the last 7 days"),
+                systemImage: "clock.arrow.circlepath",
+                tone: .warning
+            )
+        case .unverified:
+            return Line(
+                text: L10n.text("无法确认最近 7 天内是否有写入", "Cannot confirm whether it was written in the last 7 days"),
+                systemImage: "questionmark.circle",
+                tone: .warning
+            )
+        case .quiet:
+            // Logs never depended on their owner being identified (D40).
+            return nil
+        case nil:
+            break
+        }
+        guard candidate.ownerResolution == .unresolved else { return nil }
+        return Line(
+            text: L10n.text(
+                "未识别所属应用，清理前无法确认它是否在运行",
+                "Its app could not be identified, so whether it is running cannot be checked"
+            ),
+            systemImage: "questionmark.app",
+            // Review P2-8: a safety note (no running-app check can protect
+            // this row), so it uses the warning colour like the log hints.
+            tone: .warning
+        )
+    }
+
+    /// D47: large caches cost time or downloads to rebuild.
+    static func rebuildCost(for candidate: ScanCandidate) -> Line? {
+        guard CleanupRebuildCostPolicy.showsHint(for: candidate) else { return nil }
+        return Line(
+            text: L10n.text(
+                "体积较大：重建需要重新下载或生成，可能较慢",
+                "Large cache: rebuilding it means downloading or generating it again, which may be slow"
+            ),
+            systemImage: "hourglass",
+            tone: .secondary
+        )
     }
 }
 
@@ -792,6 +1197,15 @@ enum ScanIssueKind: String, Codable, Sendable {
     case volumeUnavailable
     case outsideAllowedRoot
     case timedOut
+    /// D19: found, but it could not be selected and removed, so it is not
+    /// listed. Counted under "some scopes were safely skipped".
+    case candidateNotActionable
+    /// Found, but it contains a path the user excluded. Cleanup would always
+    /// skip it, so it is not listed; counted as not listed with this reason.
+    case candidateContainsExcludedPath
+    /// Found, but it holds the user's own data kept among caches, such as an
+    /// IDE's local edit history. Not junk, so it is not listed; counted.
+    case candidateContainsProtectedData
 }
 
 struct ScanIssue: Identifiable, Sendable {
@@ -836,6 +1250,12 @@ struct ScanMetrics: Sendable {
     let timedOutRuleCount: Int
     let truncatedCandidateCount: Int
     let duration: TimeInterval
+    /// Found but not listed because they could not be acted on (D19).
+    let notActionableCandidateCount: Int
+    /// Of those, items that contain a path the user excluded.
+    let excludedPathCandidateCount: Int
+    /// Of those, items that hold protected data such as IDE local history.
+    let protectedDataCandidateCount: Int
 
     init(
         visitedEntryCount: Int,
@@ -850,8 +1270,14 @@ struct ScanMetrics: Sendable {
         cloudSkippedCount: Int = 0,
         timedOutRuleCount: Int = 0,
         truncatedCandidateCount: Int = 0,
-        duration: TimeInterval
+        duration: TimeInterval,
+        notActionableCandidateCount: Int = 0,
+        excludedPathCandidateCount: Int = 0,
+        protectedDataCandidateCount: Int = 0
     ) {
+        self.notActionableCandidateCount = notActionableCandidateCount
+        self.excludedPathCandidateCount = excludedPathCandidateCount
+        self.protectedDataCandidateCount = protectedDataCandidateCount
         self.visitedEntryCount = visitedEntryCount
         self.visitedDirectoryCount = visitedDirectoryCount
         self.candidateCount = candidateCount
@@ -917,6 +1343,10 @@ struct ScanSession: Identifiable, Sendable {
     let developerInactivityThresholdDays: Int
     let includedCategoryIDs: Set<String>?
     let includedRuleIDs: Set<String>?
+    let smartScanScopes: Set<SmartScanScope>?
+    let smartScanHealthSnapshot: ComputerHealthSnapshot?
+    let smartScanHealthStatus: SmartScanHealthStatus?
+    let rulesProvenance: CleanupRuleSetProvenance?
 
     init(
         id: ScanSessionID,
@@ -931,7 +1361,11 @@ struct ScanSession: Identifiable, Sendable {
         system: SystemSnapshot? = nil,
         developerInactivityThresholdDays: Int = DeveloperCleanupAgePolicy.defaultThresholdDays,
         includedCategoryIDs: Set<String>? = nil,
-        includedRuleIDs: Set<String>? = nil
+        includedRuleIDs: Set<String>? = nil,
+        smartScanScopes: Set<SmartScanScope>? = nil,
+        smartScanHealthSnapshot: ComputerHealthSnapshot? = nil,
+        smartScanHealthStatus: SmartScanHealthStatus? = nil,
+        rulesProvenance: CleanupRuleSetProvenance? = nil
     ) {
         self.id = id
         self.rulesVersion = rulesVersion
@@ -948,10 +1382,92 @@ struct ScanSession: Identifiable, Sendable {
         )
         self.includedCategoryIDs = includedCategoryIDs
         self.includedRuleIDs = includedRuleIDs
+        self.smartScanScopes = smartScanScopes
+        self.smartScanHealthSnapshot = smartScanHealthSnapshot
+        self.smartScanHealthStatus = smartScanHealthStatus
+        // Existing Store wrappers rebuild sessions. Preserve scanner evidence
+        // from their rows without requiring a change to ScanStore.swift.
+        let rows = categories.flatMap(\.candidates)
+        let first = rows.first?.rulesProvenance
+        self.rulesProvenance = rulesProvenance ?? (rows.allSatisfy { $0.rulesProvenance == first } ? first : nil)
     }
 
     var candidates: [ScanCandidate] {
         categories.flatMap(\.candidates)
+    }
+
+    /// D68: only a Smart Scan that requested junk can update the app-wide
+    /// cleanup summary. Dedicated Safe Cleanup and Developer Files results
+    /// remain available on their own pages.
+    var coversCleanupCandidates: Bool {
+        smartScanScopes?.contains(.cleanupCandidates) == true
+    }
+
+    /// The same session with every candidate rebuilt by `transform`; a nil
+    /// result removes the candidate. Identifiers, rules and counts stay
+    /// consistent so a later plan from this session is still valid.
+    func mappingCandidates(
+        _ transform: (ScanCandidate) -> ScanCandidate?
+    ) -> ScanSession {
+        let mapped = categories.map { category in
+            CleanupScanCategory(
+                id: category.id,
+                title: category.title,
+                subcategories: category.subcategories.map { subcategory in
+                    CleanupScanSubcategory(
+                        id: subcategory.id,
+                        title: subcategory.title,
+                        risk: subcategory.risk,
+                        recommendation: subcategory.recommendation,
+                        reason: subcategory.reason,
+                        candidates: subcategory.candidates.compactMap(transform)
+                    )
+                }
+            )
+        }
+        let remaining = mapped.flatMap(\.candidates)
+        return ScanSession(
+            id: id,
+            rulesVersion: rulesVersion,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            outcome: outcome,
+            categories: mapped,
+            issues: issues,
+            permissions: permissions,
+            metrics: ScanMetrics(
+                visitedEntryCount: metrics.visitedEntryCount,
+                visitedDirectoryCount: metrics.visitedDirectoryCount,
+                candidateCount: remaining.count,
+                deduplicatedIdentityCount: metrics.deduplicatedIdentityCount,
+                estimatedCandidateBytes: CleanupByteCount.sum(remaining.map(\.estimatedSizeBytes)),
+                completeMeasurementCandidateCount: remaining.filter { $0.measurementCompleteness.isComplete }.count,
+                lowerBoundMeasurementCandidateCount: remaining.filter { $0.measurementCompleteness.isLowerBound }.count,
+                failedMeasurementCandidateCount: remaining.filter { $0.measurementCompleteness.isFailed }.count,
+                permissionFailureCount: metrics.permissionFailureCount,
+                cloudSkippedCount: metrics.cloudSkippedCount,
+                timedOutRuleCount: metrics.timedOutRuleCount,
+                truncatedCandidateCount: metrics.truncatedCandidateCount,
+                duration: metrics.duration,
+                notActionableCandidateCount: metrics.notActionableCandidateCount,
+                excludedPathCandidateCount: metrics.excludedPathCandidateCount,
+                protectedDataCandidateCount: metrics.protectedDataCandidateCount
+            ),
+            system: system,
+            developerInactivityThresholdDays: developerInactivityThresholdDays,
+            includedCategoryIDs: includedCategoryIDs,
+            includedRuleIDs: includedRuleIDs,
+            smartScanScopes: smartScanScopes,
+            smartScanHealthSnapshot: smartScanHealthSnapshot,
+            smartScanHealthStatus: smartScanHealthStatus,
+            rulesProvenance: rulesProvenance
+        )
+    }
+
+    /// D22: refreshes which owner apps are running, for example when an app
+    /// quits after the scan. Preselection and row labels follow the result.
+    func updatingRunningOwners(from applications: CleanupApplicationSnapshot) -> ScanSession {
+        mappingCandidates { $0.withRunningOwners(from: applications) }
     }
 
     func candidates(with risk: CleanupRisk) -> [ScanCandidate] {
@@ -974,6 +1490,32 @@ struct ScanSession: Identifiable, Sendable {
         .prefix(5)
         .map { $0 }
     }
+}
+
+/// The three tiers a scan's results page counts (D19, D23): the items that
+/// can be selected and moved to Trash, without the separately confirmed
+/// "清空废纸篓". The results page and the scan history (BOARD N20) count with
+/// this one definition.
+struct CleanupScanTierTotals {
+    /// Every countable item, in the scan's order.
+    let all: [ScanCandidate]
+    let safe: [ScanCandidate]
+    let review: [ScanCandidate]
+    let protected: [ScanCandidate]
+
+    init(categories: [CleanupScanCategory]) {
+        let tiers = categories.flatMap(\.candidates).filter {
+            !$0.action.permanentlyDeletes && $0.isSelectable
+        }
+        all = tiers
+        safe = tiers.filter { $0.risk == .safe }
+        review = tiers.filter { $0.risk == .reviewOnly }
+        protected = tiers.filter { $0.risk == .protected }
+    }
+
+    var safeBytes: Int64 { CleanupByteCount.sum(safe.map(\.estimatedSizeBytes)) }
+    var reviewBytes: Int64 { CleanupByteCount.sum(review.map(\.estimatedSizeBytes)) }
+    var protectedBytes: Int64 { CleanupByteCount.sum(protected.map(\.estimatedSizeBytes)) }
 }
 
 enum CleanupScanPhase: String, Sendable {
@@ -1078,6 +1620,8 @@ enum SafeCleanupScanScope: String, CaseIterable, Identifiable, Hashable, Sendabl
     case temporaryFiles
     case downloadResidue
 
+    static let defaultSelection: Set<SafeCleanupScanScope> = Set(allCases)
+
     var id: String { rawValue }
 
     func includes(_ rule: CleanupRule) -> Bool {
@@ -1127,11 +1671,7 @@ struct CleanupSelection: Sendable {
         preservingExplicitReviewFrom current: CleanupSelection = CleanupSelection()
     ) -> CleanupSelection {
         guard session.outcome != .cancelled else { return CleanupSelection() }
-        let recommendedIDs = Set(session.candidates.filter {
-            $0.isSelectable
-                && $0.defaultSelection != .forbidden
-                && $0.recommendation.level == .recommended
-        }.map(\.id))
+        let recommendedIDs = Set(session.candidates.filter(\.isRecommendedForSelection).map(\.id))
         let explicitReviewIDs = Set(session.candidates.filter {
             $0.requiresExplicitReview
                 && $0.isSelectable
@@ -1144,11 +1684,14 @@ struct CleanupSelection: Sendable {
         )
     }
 
+    /// D47: every green row (caches, logs, developer caches unused for over a
+    /// year) is checked unless its app is running. Yellow and red items and
+    /// emptying the Trash (D23) never are.
     static func defaults(in session: ScanSession) -> CleanupSelection {
         guard session.outcome != .cancelled else { return CleanupSelection() }
         return CleanupSelection(selectedCandidateIDs: Set(
             session.candidates
-                .filter { $0.isSelectable && $0.defaultSelection == .selected }
+                .filter(\.isPreselectedByDefault)
                 .map(\.id)
         ))
     }
@@ -1167,6 +1710,15 @@ struct CleanupSelection: Sendable {
             return
         }
         if selected {
+            // D25: the last unchecked copy of a duplicate app stays unchecked;
+            // it is the copy that will be kept.
+            if DuplicateApplicationRetentionPolicy.wouldSelectEveryCopy(
+                adding: candidate,
+                to: selectedCandidateIDs,
+                in: session
+            ) {
+                return
+            }
             selectedCandidateIDs.insert(candidateID)
             explicitlySelectedCandidateIDs.insert(candidateID)
         } else {
@@ -1206,10 +1758,26 @@ struct CleanupSelection: Sendable {
         if selected {
             selectedCandidateIDs.formUnion(validIDs)
             explicitlySelectedCandidateIDs.formUnion(validIDs)
+            // D25: checking a whole duplicate-app group keeps one copy.
+            let keepers = DuplicateApplicationRetentionPolicy.keepers(
+                forFullySelectedGroupsIn: selectedCandidateIDs,
+                session: session
+            )
+            selectedCandidateIDs.subtract(keepers)
+            explicitlySelectedCandidateIDs.subtract(keepers)
         } else {
             selectedCandidateIDs.subtract(validIDs)
             explicitlySelectedCandidateIDs.subtract(validIDs)
         }
+    }
+
+    /// Checkbox state for a group of rows. Copies of a duplicate app that are
+    /// always kept do not hold the group in the mixed state.
+    func groupState(
+        for candidateIDs: [ScanCandidateID],
+        in session: ScanSession
+    ) -> TriStateSelection {
+        state(for: DuplicateApplicationRetentionPolicy.selectableTargets(candidateIDs, in: session))
     }
 
     func state(for candidateIDs: [ScanCandidateID]) -> TriStateSelection {
@@ -1246,6 +1814,115 @@ struct CleanupSelection: Sendable {
         CleanupByteCount.sum(
             selectedCandidates(in: session).map(\.estimatedSizeBytes)
         )
+    }
+}
+
+/// D25: a duplicate-app group always keeps one copy. When every copy would be
+/// selected, the copy kept is, in order: a copy that was running when the scan
+/// finished, the most recently modified bundle, the shorter path, then the
+/// path that sorts first. The kept copy is the retained copy the executor
+/// re-verifies before moving the others.
+enum DuplicateApplicationRetentionPolicy {
+    /// Round 3 (P2-7): a copy that is running, or that the command line tools
+    /// use (`/var/db/xcode_select_link`), is always kept and cannot be
+    /// selected. When both exist and differ, both are kept.
+    static func isProtected(_ candidate: ScanCandidate) -> Bool {
+        candidate.duplicateApplicationGroupCode != nil
+            && (candidate.isOwnerRunning || candidate.isActiveDeveloperDirectory)
+    }
+
+    /// The copy kept when every copy of a group without a protected copy is
+    /// checked: one directly in /Applications, then the most recently
+    /// modified, then the shorter path. (Running and command-line-tools
+    /// copies come first, but they are protected and never in such a group.)
+    static func keeper(among members: [ScanCandidate]) -> ScanCandidate? {
+        members.min { lhs, rhs in
+            if lhs.isOwnerRunning != rhs.isOwnerRunning {
+                return lhs.isOwnerRunning
+            }
+            if lhs.isActiveDeveloperDirectory != rhs.isActiveDeveloperDirectory {
+                return lhs.isActiveDeveloperDirectory
+            }
+            let leftAtRoot = isDirectlyInAllowedRoot(lhs)
+            let rightAtRoot = isDirectlyInAllowedRoot(rhs)
+            if leftAtRoot != rightAtRoot {
+                return leftAtRoot
+            }
+            let leftModified = lhs.snapshot.modificationTimeNanoseconds ?? .min
+            let rightModified = rhs.snapshot.modificationTimeNanoseconds ?? .min
+            if leftModified != rightModified {
+                return leftModified > rightModified
+            }
+            let leftPath = lhs.snapshot.standardizedPath
+            let rightPath = rhs.snapshot.standardizedPath
+            if leftPath.count != rightPath.count {
+                return leftPath.count < rightPath.count
+            }
+            return leftPath < rightPath
+        }
+    }
+
+    private static func isDirectlyInAllowedRoot(_ candidate: ScanCandidate) -> Bool {
+        PathSafety.lexicalPath(candidate.sourceURL.deletingLastPathComponent().path)
+            == PathSafety.lexicalPath(candidate.allowedRootURL.path)
+    }
+
+    static func members(of groupCode: String, in session: ScanSession) -> [ScanCandidate] {
+        session.candidates.filter { $0.duplicateApplicationGroupCode == groupCode }
+    }
+
+    /// Whether checking `candidate` is refused: it is protected, or it is the
+    /// last unchecked copy of a group without a protected copy.
+    static func wouldSelectEveryCopy(
+        adding candidate: ScanCandidate,
+        to selectedIDs: Set<ScanCandidateID>,
+        in session: ScanSession
+    ) -> Bool {
+        guard let groupCode = candidate.duplicateApplicationGroupCode else { return false }
+        if isProtected(candidate) { return true }
+        let members = members(of: groupCode, in: session)
+        guard !members.contains(where: isProtected) else { return false }
+        return members.count > 1 && members.allSatisfy {
+            $0.id == candidate.id || selectedIDs.contains($0.id)
+        }
+    }
+
+    /// The IDs a group checkbox can actually select: checking every copy of a
+    /// duplicate app keeps one, so the kept copies are left out when deciding
+    /// whether the group counts as fully checked.
+    static func selectableTargets(
+        _ candidateIDs: [ScanCandidateID],
+        in session: ScanSession
+    ) -> [ScanCandidateID] {
+        let keepers = keepers(forFullySelectedGroupsIn: Set(candidateIDs), session: session)
+        guard !keepers.isEmpty else { return candidateIDs }
+        return candidateIDs.filter { !keepers.contains($0) }
+    }
+
+    /// The copies to leave out of `selectedIDs`: every protected copy in it,
+    /// and for a group without a protected copy whose copies are all in it,
+    /// the keeper.
+    static func keepers(
+        forFullySelectedGroupsIn selectedIDs: Set<ScanCandidateID>,
+        session: ScanSession
+    ) -> Set<ScanCandidateID> {
+        var groups = [String: [ScanCandidate]]()
+        for candidate in session.candidates {
+            guard let groupCode = candidate.duplicateApplicationGroupCode else { continue }
+            groups[groupCode, default: []].append(candidate)
+        }
+        var kept = Set<ScanCandidateID>()
+        for members in groups.values {
+            let protected = members.filter(isProtected)
+            if !protected.isEmpty {
+                kept.formUnion(protected.map(\.id).filter(selectedIDs.contains))
+            } else if members.count > 1,
+                      members.allSatisfy({ selectedIDs.contains($0.id) }),
+                      let keeper = keeper(among: members) {
+                kept.insert(keeper.id)
+            }
+        }
+        return kept
     }
 }
 

@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "ruleID": "project.npm.package.json.Projects/sample.node_modules",
+      "revision": 1,
+      "contentHash": "6518bcc8aaad57e5123bbd6806a01a952b14bf9de2775cceb1467425c3dddf8b"
+    },
+    {
+      "ruleID": "project.npm.package.json.Projects/sample..next",
+      "revision": 1,
+      "contentHash": "7e3da76bb69352834dbdc6dc8cdaf9434b98a1a6806f7be7a3187014f0d89771"
+    },
+    {
+      "ruleID": "project.npm.package.json.Projects/sample.dist",
+      "revision": 1,
+      "contentHash": "bbb4733ccf291a7face1b5fffb4a2ccf8e9285b81b26fa64007ffb5a2296edea"
+    },
+    {
+      "ruleID": "project.npm.package.json.Projects/sample.build",
+      "revision": 1,
+      "contentHash": "99415dcc24760cebfd386263e3ea26455c7705568ede295e4ac4d82859c9a287"
+    },
+    {
+      "ruleID": "project.Cargo.Cargo.toml.Projects/sample.target",
+      "revision": 1,
+      "contentHash": "77e4dcbfbcccf847191b2f9a226b0e78fdfd3549158e76b59869596bbf138497"
+    },
+    {
+      "ruleID": "project.Python.pyproject.toml.Projects/sample..venv",
+      "revision": 1,
+      "contentHash": "1009a81283f999d2c7be2f4907ac640921e392e11eccff2483b3caf609fc5efa"
+    },
+    {
+      "ruleID": "project.Python.pyproject.toml.Projects/sample.venv",
+      "revision": 1,
+      "contentHash": "83ed08ac5a9b7b9a95cb247c9d709e14ba9d124da69cff2741cc2d5082a6a59d"
+    },
+    {
+      "ruleID": "project.Python.pyproject.toml.Projects/sample.__pycache__",
+      "revision": 1,
+      "contentHash": "c69f4678af1b64009d2684c643b6218dcad415d240e9d87fbb5943263e3ad39a"
+    },
+    {
+      "ruleID": "project.Python.pyproject.toml.Projects/sample..pytest_cache",
+      "revision": 1,
+      "contentHash": "e965aa30c98e0875852be04ca42db7f7ab710e4f3867d2d935a14b2dd07452bc"
+    },
+    {
+      "ruleID": "project.Python.pyproject.toml.Projects/sample..mypy_cache",
+      "revision": 1,
+      "contentHash": "d1afc8b7114cfd048579292fd6455d6cb2523ccc98d41bf903ab73380ec07226"
+    },
+    {
+      "ruleID": "project.Swift.Package.swift.Projects/sample..build",
+      "revision": 1,
+      "contentHash": "14f303fb43b682cd06d0ece647444c8f59b7a614b54b604443f65bd07f34b89f"
+    },
+    {
+      "ruleID": "project.Gradle.build.gradle.Projects/sample.build",
+      "revision": 1,
+      "contentHash": "92f14c93aa0737c9546d9bd988b656a510d5877fb961b5ac23faccea54900081"
+    },
+    {
+      "ruleID": "project.Gradle.build.gradle.Projects/sample..gradle",
+      "revision": 1,
+      "contentHash": "c234cd1e458501ec428e2fa9b34dcae26cfcbf3a17bc255e4e19a72640cec9ce"
+    },
+    {
+      "ruleID": "project.Maven.pom.xml.Projects/sample.target",
+      "revision": 1,
+      "contentHash": "344b25518ae14fba1c6e43d5e9238714802344dfaa16b2688cb935d79dc5e881"
+    },
+    {
+      "ruleID": "project.Bundler.Gemfile.Projects/sample.vendor/bundle",
+      "revision": 1,
+      "contentHash": "dbcea9d84072a6064eaec10ebd79097e61f97801cafaaad2db64f9b796fe9fc3"
+    },
+    {
+      "ruleID": "project.Composer.composer.json.Projects/sample.vendor",
+      "revision": 1,
+      "contentHash": "b8c243d998b664e09c61b94c0bcca89a39db76a9bdea781070f22ae347c237d4"
+    },
+    {
+      "ruleID": "project.Dart.pubspec.yaml.Projects/sample..dart_tool",
+      "revision": 1,
+      "contentHash": "334cfbd0cdcb9b4d1b04f3c55218ca83b6c1c90e38325e32053503d07c1399d1"
+    },
+    {
+      "ruleID": "project.Dart.pubspec.yaml.Projects/sample.build",
+      "revision": 1,
+      "contentHash": "a672de48435e033e5e35152469830b815af9995bfd27dd29feb71cb6c0ae8768"
+    }
+  ],
+  "legacyRules": []
+}

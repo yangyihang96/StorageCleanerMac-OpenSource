@@ -20,7 +20,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         XCTAssertEqual(PanelDensity.geek.minimumSize, PanelDensity.geek.idealSize)
 
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         for density in PanelDensity.allCases {
             fixture.defaults.set(density.rawValue, forKey: PanelDensity.defaultsKey)
             XCTAssertEqual(PanelDensity.stored(in: fixture.defaults), .geek)
@@ -198,7 +198,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         XCTAssertEqual(layout.childFrames[1].maxY, parent.maxY - 260, accuracy: 0.001)
     }
 
-    func testAttachedPanelsKeepGoldenGapAndConsistentRoundedChrome() {
+    func testTouchingPanelsShareOneStraightBorderAndKeepEveryCornerRounded() {
         XCTAssertEqual(MiniWindowStyleTokens.outerCornerRadius, 12)
         XCTAssertEqual(MiniWindowStyleTokens.cardCornerRadius, 10)
         XCTAssertEqual(MiniWindowStyleTokens.anchorGap, 0)
@@ -245,7 +245,21 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             neighbors: [detail]
         )
         XCTAssertEqual(detailEdges.trailing, [CGFloat.zero ... 1])
-        XCTAssertEqual(overviewEdges.leading, [CGFloat.zero ... 1])
+        XCTAssertEqual(overviewEdges.leading, [CGFloat(0) ... MiniWindowStyleTokens.outerCornerExtent / 553, (553 - MiniWindowStyleTokens.outerCornerExtent) / 553 ... 1])
+    }
+
+    func testPartialSharedSeamsKeepExposedSegmentsAndDetachedCorners() {
+        let frame = CGRect(x: 100, y: 0, width: 100, height: 200)
+        let left = CGRect(x: 0, y: 50, width: 100, height: 100)
+        let edges = GeekAttachedPanelChromeGeometry.exposedBorderEdges(for: frame, neighbors: [left])
+        XCTAssertEqual(edges.leading, [CGFloat(0) ... (50 + MiniWindowStyleTokens.outerCornerExtent) / 200,
+                                             (150 - MiniWindowStyleTokens.outerCornerExtent) / 200 ... 1])
+        XCTAssertEqual(edges.trailing, [CGFloat(0) ... 1])
+        let radii = GeekAttachedPanelChromeGeometry.cornerRadii(for: frame, neighbors: [left], radius: 12)
+        XCTAssertEqual(radii.topLeading, 12)
+        XCTAssertEqual(radii.bottomLeading, 12)
+        let detached = left.offsetBy(dx: -6, dy: 0)
+        XCTAssertEqual(GeekAttachedPanelChromeGeometry.exposedBorderEdges(for: frame, neighbors: [detached]), .all)
     }
 
     func testPracticalOverviewGroupsFitTheFixedPanelWithoutScrolling() {
@@ -269,7 +283,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         )
     }
 
-    func testAttachedPanelChromeKeepsRoundedCornersWhenStacked() {
+    func testStackedPanelsKeepFourCornersAndShareOnlyTheirStraightBorder() {
         let overview = CGRect(x: 0, y: 0, width: 304, height: 553)
         let detail = CGRect(x: 0, y: 553, width: 312, height: 400)
 
@@ -297,10 +311,10 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             neighbors: [overview]
         )
         XCTAssertEqual(overviewEdges.bottom, [CGFloat.zero ... 1])
-        XCTAssertEqual(detailEdges.top, [CGFloat.zero ... 1])
+        XCTAssertEqual(detailEdges.top, [CGFloat(0) ... MiniWindowStyleTokens.outerCornerExtent / 312, (304 - MiniWindowStyleTokens.outerCornerExtent) / 312 ... 1])
     }
 
-    func testAttachedPanelChromeKeepsIndependentTertiaryBorders() {
+    func testTertiarySeamHasOneOwnerAndPreservesDetailBelowHistory() {
         let history = CGRect(x: 0, y: 0, width: 368, height: 220)
         let detail = CGRect(x: 368, y: 0, width: 312, height: 561)
         let overview = CGRect(x: 680, y: 0, width: 304, height: 553)
@@ -314,9 +328,43 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             neighbors: [history, detail]
         )
 
-        XCTAssertEqual(detailEdges.leading, [CGFloat.zero ... 1])
+        XCTAssertEqual(detailEdges.leading, [CGFloat(0) ... MiniWindowStyleTokens.outerCornerExtent / 561, (220 - MiniWindowStyleTokens.outerCornerExtent) / 561 ... 1])
         XCTAssertEqual(detailEdges.trailing, [CGFloat.zero ... 1])
-        XCTAssertEqual(overviewEdges.leading, [CGFloat.zero ... 1])
+        XCTAssertEqual(overviewEdges.leading, [CGFloat(0) ... MiniWindowStyleTokens.outerCornerExtent / 553, (553 - MiniWindowStyleTokens.outerCornerExtent) / 553 ... 1])
+    }
+
+    func testAttachedThreeLevelCornersStayUniformAcrossHistorySizesAndDirections() {
+        let radius = MiniWindowStyleTokens.outerCornerRadius
+        for historyHeight: CGFloat in [216, 280, 480] {
+            for direction: MenuBarCascadeDirection in [.left, .right] {
+                let frames: [CGRect]
+                if direction == .left {
+                    frames = [
+                        CGRect(x: 0, y: 0, width: 380, height: historyHeight),
+                        CGRect(x: 380, y: 0, width: 312, height: 561),
+                        CGRect(x: 692, y: 0, width: 304, height: 553),
+                    ]
+                } else {
+                    frames = [
+                        CGRect(x: 0, y: 0, width: 304, height: 553),
+                        CGRect(x: 304, y: 0, width: 312, height: 561),
+                        CGRect(x: 616, y: 0, width: 380, height: historyHeight),
+                    ]
+                }
+                for frame in frames {
+                    let radii = GeekAttachedPanelChromeGeometry.cornerRadii(
+                        for: frame,
+                        neighbors: frames.filter { $0 != frame },
+                        radius: radius
+                    )
+                    for corner in [radii.topLeading, radii.topTrailing,
+                                   radii.bottomLeading, radii.bottomTrailing] {
+                        XCTAssertEqual(corner, radius,
+                                       "Touching panels must retain the same complete corner as detached panels")
+                    }
+                }
+            }
+        }
     }
 
     func testInlineTertiarySizesStayContentDrivenWithinSafeBounds() {
@@ -352,7 +400,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
     func testStoredOriginNeverOverridesTheCurrentStatusItemAnchor() throws {
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let visible = NSRect(x: 0, y: 0, width: 1_200, height: 900)
         let legacyFrames: [(PanelDensity, NSRect)] = [
             (.simple, NSRect(x: 10, y: 20, width: 500, height: 330)),
@@ -397,7 +445,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
     func testGeometryStoreRoundTripsIndependentFramesForAllDensities() throws {
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let expectedFrames: [(PanelDensity, NSRect)] = [
             (.simple, NSRect(x: 20, y: 30, width: 470, height: 320)),
             (.complex, NSRect(x: 80, y: 90, width: 540, height: 620)),
@@ -415,7 +463,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
     func testGeometryStoreRejectsInvalidFramesWithoutOverwritingValidValue() throws {
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let valid = NSRect(x: 40, y: 50, width: 470, height: 310)
         fixture.store.save(frame: valid, for: .simple)
 
@@ -437,7 +485,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
     func testResolvedFrameUsesTheDisplayContainingTheCurrentAnchor() throws {
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let preferred = NSRect(x: 0, y: 0, width: 1_200, height: 900)
         let secondary = NSRect(x: -1_440, y: -120, width: 1_440, height: 900)
         let stored = NSRect(x: -1_400, y: 500, width: 700, height: 500)
@@ -458,7 +506,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
     func testResolvedFrameClampsFullyOffscreenFrameToPreferredDisplay() throws {
         let fixture = try makeGeometryFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let preferred = NSRect(x: 100, y: 50, width: 1_100, height: 800)
         fixture.store.save(
             frame: NSRect(x: 9_000, y: 8_000, width: 2_000, height: 1_500),
@@ -869,9 +917,8 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         defaults: UserDefaults,
         suiteName: String
     ) {
-        let suiteName = "MenuBarPanelPlacementTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.removePersistentDomain(forName: suiteName)
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
         return (PanelGeometryStore(defaults: defaults), defaults, suiteName)
     }
 }

@@ -22,6 +22,8 @@ struct ScanHistoryEntry: Codable, Identifiable, Equatable, Sendable {
         case actionableGreenBytes
         case actionableGreenCount
         case scanWasLimited
+        case smartScanScopes
+        case smartScanHealthStatus
     }
 
     let id: UUID
@@ -44,6 +46,8 @@ struct ScanHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     let actionableGreenBytes: Int64?
     let actionableGreenCount: Int?
     let scanWasLimited: Bool?
+    let smartScanScopes: Set<SmartScanScope>?
+    let smartScanHealthStatus: SmartScanHealthStatus?
 
     init(
         id: UUID = UUID(),
@@ -65,7 +69,9 @@ struct ScanHistoryEntry: Codable, Identifiable, Equatable, Sendable {
         scoreModelVersion: Int? = nil,
         actionableGreenBytes: Int64? = nil,
         actionableGreenCount: Int? = nil,
-        scanWasLimited: Bool? = nil
+        scanWasLimited: Bool? = nil,
+        smartScanScopes: Set<SmartScanScope>? = nil,
+        smartScanHealthStatus: SmartScanHealthStatus? = nil
     ) {
         self.id = id
         self.date = date
@@ -87,6 +93,8 @@ struct ScanHistoryEntry: Codable, Identifiable, Equatable, Sendable {
         self.actionableGreenBytes = actionableGreenBytes
         self.actionableGreenCount = actionableGreenCount
         self.scanWasLimited = scanWasLimited
+        self.smartScanScopes = smartScanScopes
+        self.smartScanHealthStatus = smartScanHealthStatus
     }
 
     init(from decoder: Decoder) throws {
@@ -115,6 +123,10 @@ struct ScanHistoryEntry: Codable, Identifiable, Equatable, Sendable {
         actionableGreenBytes = try container.decodeIfPresent(Int64.self, forKey: .actionableGreenBytes)
         actionableGreenCount = try container.decodeIfPresent(Int.self, forKey: .actionableGreenCount)
         scanWasLimited = try container.decodeIfPresent(Bool.self, forKey: .scanWasLimited)
+        smartScanScopes = try container.decodeIfPresent([String].self, forKey: .smartScanScopes)
+            .map { Set($0.compactMap(SmartScanScope.init(rawValue:))) }
+        smartScanHealthStatus = try container.decodeIfPresent(String.self, forKey: .smartScanHealthStatus)
+            .flatMap(SmartScanHealthStatus.init(rawValue:))
     }
 
     func encode(to encoder: Encoder) throws {
@@ -139,15 +151,46 @@ struct ScanHistoryEntry: Codable, Identifiable, Equatable, Sendable {
         try container.encodeIfPresent(actionableGreenBytes, forKey: .actionableGreenBytes)
         try container.encodeIfPresent(actionableGreenCount, forKey: .actionableGreenCount)
         try container.encodeIfPresent(scanWasLimited, forKey: .scanWasLimited)
+        try container.encodeIfPresent(smartScanScopes?.map(\.rawValue).sorted(), forKey: .smartScanScopes)
+        try container.encodeIfPresent(smartScanHealthStatus?.rawValue, forKey: .smartScanHealthStatus)
     }
 
     var usesCurrentScoreModel: Bool {
         scoreModelVersion == ScanHistoryService.currentScoreModelVersion
     }
+
+    /// Records predating selectable scopes came from a full scan.
+    var completedScopes: Set<SmartScanScope> {
+        smartScanScopes ?? SmartScanScope.defaultSelection
+    }
+
+    var coversCleanupCandidates: Bool {
+        // Old entries without an explicit Smart Scan scope remain in history
+        // for trends and reminders, but cannot supply an app-wide junk total.
+        smartScanScopes?.contains(.cleanupCandidates) == true
+    }
 }
 
 struct ScanHistorySummary: Equatable, Sendable {
     let entries: [ScanHistoryEntry]
+    let lastCompletedScanAt: Date?
+
+    init(entries: [ScanHistoryEntry], lastCompletedScanAt: Date? = nil) {
+        self.entries = entries
+        self.lastCompletedScanAt = lastCompletedScanAt
+    }
+
+    /// Reminders include health-only runs, which do not create file history.
+    var latestScanAt: Date? {
+        // The scalar is written by every completed scan. Only old preferences
+        // lack it; taking max with history would resurrect a future-dated row
+        // after recordCompletedScan corrected the clock.
+        lastCompletedScanAt ?? latest?.date
+    }
+
+    var latestCleanupEntry: ScanHistoryEntry? {
+        entries.first { $0.coversCleanupCandidates }
+    }
 
     var latest: ScanHistoryEntry? {
         entries.first
@@ -155,6 +198,11 @@ struct ScanHistorySummary: Equatable, Sendable {
 
     var previous: ScanHistoryEntry? {
         entries.dropFirst().first
+    }
+
+    var comparablePrevious: ScanHistoryEntry? {
+        guard let latest else { return nil }
+        return entries.dropFirst().first { $0.completedScopes == latest.completedScopes }
     }
 
     var averageScore: Int {
@@ -167,13 +215,19 @@ struct ScanHistorySummary: Equatable, Sendable {
     }
 
     var usedDeltaBytes: Int64? {
-        guard let latest, let previous else { return nil }
+        guard let latest, let previous = comparablePrevious else { return nil }
         return latest.diskUsedBytes - previous.diskUsedBytes
     }
 
     var trend: ScanHistoryTrend? {
-        guard let latest, let previous else { return nil }
+        guard let latest, let previous = comparablePrevious else { return nil }
         return ScanHistoryTrend(latest: latest, previous: previous)
+    }
+
+    func latestCleanupStatus(referenceDate: Date = Date()) -> LastScanStatusSummary? {
+        guard let entry = latestCleanupEntry else { return nil }
+        return LastScanStatusSummary(entry: entry, freshness: ScanFreshnessService.summary(
+            generatedAt: entry.date, referenceDate: referenceDate))
     }
 
     func latestStatus(referenceDate: Date = Date()) -> LastScanStatusSummary? {
@@ -529,6 +583,7 @@ struct CleanupFollowUpSummary: Equatable, Sendable {
 
 enum ScanHistoryService {
     static let defaultsKey = "scan.history"
+    static let lastCompletedScanKey = "scan.history.last-completed-at"
     static let currentScoreModelVersion = 2
     private static let maxEntries = 60
 
@@ -541,6 +596,7 @@ enum ScanHistoryService {
         var entries = load(defaults: defaults)
         entries.insert(entry, at: 0)
         save(Array(entries.prefix(maxEntries)), defaults: defaults)
+        recordCompletedScan(at: entry.date, defaults: defaults)
     }
 
     static func entry(from result: ScanResult, date: Date? = nil) -> ScanHistoryEntry {
@@ -569,6 +625,77 @@ enum ScanHistoryService {
         )
     }
 
+    /// BOARD N20: a Smart Scan (the product's `startCleanupV2Scan`) recorded
+    /// like the old full-disk scan, counted the way its results page counts.
+    static func record(_ session: ScanSession, scanMode: ScanMode? = nil, defaults: UserDefaults = .standard) {
+        record(entry(from: session, scanMode: scanMode), defaults: defaults)
+    }
+
+    static func record(_ entry: ScanHistoryEntry, defaults: UserDefaults = .standard) {
+        var entries = load(defaults: defaults)
+        entries.insert(entry, at: 0)
+        save(Array(entries.prefix(maxEntries)), defaults: defaults)
+        recordCompletedScan(at: entry.date, defaults: defaults)
+    }
+
+    static func recordCompletedScan(at date: Date, defaults: UserDefaults = .standard,
+                                    referenceDate: Date = Date()) {
+        let previous = defaults.object(forKey: lastCompletedScanKey) as? Date
+        let previousInPresent = previous.flatMap { $0 <= referenceDate ? $0 : nil }
+        defaults.set(max(previousInPresent ?? date, date), forKey: lastCompletedScanKey)
+    }
+
+    /// The tiers are the results page's (`CleanupScanTierTotals`); every
+    /// listed item can be moved to Trash (D19), so all safe items are
+    /// actionable. Rules the scan could not read for lack of permission are
+    /// the denied count; a partial outcome, a timed-out rule or truncated
+    /// results mark the scan as limited.
+    static func entry(from session: ScanSession, scanMode: ScanMode? = nil) -> ScanHistoryEntry {
+        let totals = CleanupScanTierTotals(categories: session.categories)
+        let deniedCount = session.permissions.filter { $0.status == .permissionDenied }.count
+        let scanWasLimited = session.outcome != .complete
+            || session.metrics.timedOutRuleCount > 0
+            || session.metrics.truncatedCandidateCount > 0
+        let breakdown = scoreBreakdown(
+            diskTotalBytes: session.system?.diskTotalBytes ?? 0,
+            diskUsedBytes: session.system?.diskUsedBytes ?? 0,
+            greenBytes: totals.safeBytes,
+            yellowBytes: totals.reviewBytes,
+            redBytes: totals.protectedBytes,
+            greenCount: totals.safe.count,
+            actionableGreenBytes: totals.safeBytes,
+            actionableGreenCount: totals.safe.count,
+            yellowCount: totals.review.count,
+            redCount: totals.protected.count,
+            deniedCount: deniedCount,
+            scanMode: scanMode ?? .standard,
+            scanWasLimited: scanWasLimited
+        )
+        return ScanHistoryEntry(
+            date: session.completedAt,
+            scanSeconds: max(0, session.completedAt.timeIntervalSince(session.startedAt)),
+            score: breakdown.score,
+            diskUsedBytes: session.system?.diskUsedBytes ?? 0,
+            diskFreeBytes: session.system?.diskFreeBytes ?? 0,
+            greenBytes: totals.safeBytes,
+            yellowBytes: totals.reviewBytes,
+            redBytes: totals.protectedBytes,
+            itemCount: totals.safe.count + totals.review.count + totals.protected.count,
+            greenCount: totals.safe.count,
+            yellowCount: totals.review.count,
+            redCount: totals.protected.count,
+            deniedCount: deniedCount,
+            scanMode: scanMode,
+            permissionPenalty: breakdown.permissionPenalty,
+            scoreModelVersion: currentScoreModelVersion,
+            actionableGreenBytes: totals.safeBytes,
+            actionableGreenCount: totals.safe.count,
+            scanWasLimited: scanWasLimited,
+            smartScanScopes: session.smartScanScopes,
+            smartScanHealthStatus: session.smartScanHealthStatus
+        )
+    }
+
     static func load(defaults: UserDefaults = .standard) -> [ScanHistoryEntry] {
         guard let data = defaults.data(forKey: defaultsKey),
               let entries = try? JSONDecoder().decode([ScanHistoryEntry].self, from: data) else {
@@ -581,11 +708,13 @@ enum ScanHistoryService {
     }
 
     static func summary(defaults: UserDefaults = .standard) -> ScanHistorySummary {
-        ScanHistorySummary(entries: load(defaults: defaults))
+        ScanHistorySummary(entries: load(defaults: defaults),
+            lastCompletedScanAt: defaults.object(forKey: lastCompletedScanKey) as? Date)
     }
 
     static func clear(defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: defaultsKey)
+        defaults.removeObject(forKey: lastCompletedScanKey)
     }
 
     private static func save(_ entries: [ScanHistoryEntry], defaults: UserDefaults) {
@@ -811,7 +940,9 @@ enum ScanHistoryService {
             scoreModelVersion: entry.scoreModelVersion,
             actionableGreenBytes: entry.actionableGreenBytes,
             actionableGreenCount: entry.actionableGreenCount,
-            scanWasLimited: entry.scanWasLimited
+            scanWasLimited: entry.scanWasLimited,
+            smartScanScopes: entry.smartScanScopes,
+            smartScanHealthStatus: entry.smartScanHealthStatus
         )
     }
 }

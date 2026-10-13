@@ -1,0 +1,2236 @@
+{
+  "batch": "r2-energy-powermetrics",
+  "base_commit": "0bd131b2f6e4debb24e1ffeed9bb9aaba71dd6fc",
+  "executed": true,
+  "status": "RED 40/40",
+  "policy": "主会话在隔离反证副本执行；不删除断言、不放宽阈值、不改硬件设置。",
+  "cases": [
+    {
+      "id": "request-strings",
+      "test": "PowermetricsProtocolSafetyTests.testWireRequestHasExactlyAnOperationAndVersion",
+      "input": "向采样信封加入 arguments、executable、samplers、interval、timeout 或风扇字段；使用 v3/v5。",
+      "expected": "全部拒绝，无子进程。",
+      "red_mutation": "移除严格键集合或版本检查。",
+      "status": "RED 2/2",
+      "mutations": [
+        {
+          "id": "request-keys",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testWireRequestHasExactlyAnOperationAndVersion",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "Set(object.keys) == [\"protocolVersion\", \"operation\"] else {",
+              "after": "!object.isEmpty else {"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "7"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testWireRequestHasExactlyAnOperationAndVersion"
+          ]
+        },
+        {
+          "id": "request-version",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testWireRequestHasExactlyAnOperationAndVersion",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "guard HardwareControlProtocol.accepts(request.protocolVersion) else {\n            throw PowermetricsFailure.invalidRequest",
+              "after": "guard request.protocolVersion > 0 else {\n            throw PowermetricsFailure.invalidRequest"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "3"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testWireRequestHasExactlyAnOperationAndVersion"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "caller-identity",
+      "test": "PowermetricsProtocolSafetyTests.testCallerPolicyRejectsWrongTeamIdentityAndRelocation",
+      "input": "其他团队、bundle id、移动副本、不同可执行文件、不同 helper 安装 app。",
+      "expected": "unauthorized；未消耗节流名额。",
+      "red_mutation": "从 permits 中移除团队或安装路径条件。",
+      "live_followup": "主会话验证真实 audit-token 签名错误/移动副本/符号链接拒绝。",
+      "status": "RED 4/4",
+      "mutations": [
+        {
+          "id": "caller-team",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testCallerPolicyRejectsWrongTeamIdentityAndRelocation",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "            && team == teamIdentifier\n",
+              "after": ""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testCallerPolicyRejectsWrongTeamIdentityAndRelocation"
+          ]
+        },
+        {
+          "id": "caller-path",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testCallerPolicyRejectsWrongTeamIdentityAndRelocation",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "            && executableURL.standardizedFileURL.path == executable\n            && executableURL.resolvingSymlinksInPath().path == executable\n",
+              "after": ""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "4"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testCallerPolicyRejectsWrongTeamIdentityAndRelocation"
+          ]
+        },
+        {
+          "id": "caller-helper-app",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testCallerPolicyRejectsWrongTeamIdentityAndRelocation",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "            && helperApplicationURL.standardizedFileURL.path == application\n            && helperApplicationURL.resolvingSymlinksInPath().path == application\n",
+              "after": ""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testCallerPolicyRejectsWrongTeamIdentityAndRelocation"
+          ]
+        },
+        {
+          "id": "unauthorized-consumes",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testUnauthorizedCallerCannotConsumeThrottleOrLaunch",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "        guard authorized else { return .failure(.unauthorized) }\n        guard waiters < Self.maximumWaiters else { return .failure(.busy) }",
+              "after": "        guard waiters < Self.maximumWaiters else { return .failure(.busy) }"
+            },
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "        lastStart = time\n        let task = Task { await run() }",
+              "after": "        lastStart = time\n        let task = Task { authorized ? await run() : .failure(.unauthorized) }"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testUnauthorizedCallerCannotConsumeThrottleOrLaunch"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "throttle",
+      "test": "PowermetricsSamplingTests.testGlobalTwoSecondThrottleIncludesFailedSamplesAndClockRegression",
+      "input": "失败后在 1.999 秒、回退时钟、NaN 时重试；到 2 秒再试。",
+      "expected": "前者无新启动，2 秒允许。",
+      "red_mutation": "把 minimumInterval 从 2 改为 1 或忽略失败节流。",
+      "status": "RED 2/2",
+      "mutations": [
+        {
+          "id": "throttle-1s",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testGlobalTwoSecondThrottleIncludesFailedSamplesAndClockRegression",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "public static let minimumInterval: TimeInterval = 2",
+              "after": "public static let minimumInterval: TimeInterval = 1"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testGlobalTwoSecondThrottleIncludesFailedSamplesAndClockRegression"
+          ]
+        },
+        {
+          "id": "throttle-ignores-failures",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testGlobalTwoSecondThrottleIncludesFailedSamplesAndClockRegression",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "        lastStart = time\n        let task = Task { await run() }",
+              "after": "        let task = Task { await run() }"
+            },
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "        defer { waiters -= 1; inFlight = nil }\n        return await task.value",
+              "after": "        defer { waiters -= 1; inFlight = nil }\n        let result = await task.value\n        if case .sample = result { lastStart = time }\n        return result"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "3"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testGlobalTwoSecondThrottleIncludesFailedSamplesAndClockRegression"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coalescing",
+      "test": "PowermetricsSamplingTests.testConcurrentRequestsShareOneFlightAndBoundWaiters",
+      "input": "32 并发等待者，追加第 33 个。",
+      "expected": "一个 runner，前 32 个共享结果，第 33 个 busy。",
+      "red_mutation": "取消 inFlight 合并或等待者上限。",
+      "status": "RED 2/2",
+      "mutations": [
+        {
+          "id": "no-coalescing",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testConcurrentRequestsShareOneFlightAndBoundWaiters",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "        if let inFlight {",
+              "after": "        if false, let inFlight {"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testConcurrentRequestsShareOneFlightAndBoundWaiters"
+          ]
+        },
+        {
+          "id": "no-waiter-bound",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testConcurrentRequestsShareOneFlightAndBoundWaiters",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "        guard waiters < Self.maximumWaiters else { return .failure(.busy) }\n",
+              "after": ""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testConcurrentRequestsShareOneFlightAndBoundWaiters"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deadline",
+      "test": "PowermetricsSamplingTests.testTimeoutKillsEvenAChildThatNeverExitsAtFiveSeconds",
+      "input": "子进程永不退出/EOF；虚拟时钟推进到 5 秒。",
+      "expected": "一次强制 kill，timedOut，不等待无限结束。",
+      "red_mutation": "把 timeoutSeconds 改为 6 或不调用 kill。",
+      "live_followup": "主会话检查实际 SIGKILL 与助手退出期间无残留子进程。",
+      "status": "RED 2/2",
+      "mutations": [
+        {
+          "id": "timeout-6s",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testTimeoutKillsEvenAChildThatNeverExitsAtFiveSeconds",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "public static let timeoutSeconds: TimeInterval = 5",
+              "after": "public static let timeoutSeconds: TimeInterval = 6"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "3"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testTimeoutKillsEvenAChildThatNeverExitsAtFiveSeconds"
+          ]
+        },
+        {
+          "id": "timeout-no-kill",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testTimeoutKillsEvenAChildThatNeverExitsAtFiveSeconds",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "        // No grace period: even a SIGTERM-ignoring child is killed at 5 s.\n        kill()\n",
+              "after": ""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testTimeoutKillsEvenAChildThatNeverExitsAtFiveSeconds"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "output-flood",
+      "test": "PowermetricsSamplingTests.testOutputBudgetCountsBothPipesAndDropsOversizedResult",
+      "input": "stdout 或 stderr 洪水；stdout 恰好 512 KiB，再加 stderr 1 字节。",
+      "expected": "全部 outputTooLarge，终止子进程，不返回部分数据。",
+      "red_mutation": "不计算 stderr 或放大限额。",
+      "status": "RED 2/2",
+      "mutations": [
+        {
+          "id": "stderr-uncounted",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testOutputBudgetCountsBothPipesAndDropsOversizedResult",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "chunk.stderr.count <= remaining - chunk.stdout.count else {",
+              "after": "true else {"
+            },
+            {
+              "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+              "before": "byteCount += chunk.stdout.count + chunk.stderr.count",
+              "after": "byteCount += chunk.stdout.count"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "4"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testOutputBudgetCountsBothPipesAndDropsOversizedResult"
+          ]
+        },
+        {
+          "id": "budget-1MiB",
+          "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testOutputBudgetCountsBothPipesAndDropsOversizedResult",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "public static let maximumOutputBytes = 512 * 1_024",
+              "after": "public static let maximumOutputBytes = 1_024 * 1_024"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "4"
+          ],
+          "failing_tests": [
+            "PowermetricsSamplingTests testOutputBudgetCountsBothPipesAndDropsOversizedResult"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parse-framing-units",
+      "tests": [
+        "PowermetricsParserTests.testFramingIsOneNULTerminatedPlistAndBounded",
+        "PowermetricsParserTests.testExplicitPowerAndEnergyUnitsAreConvertedOrRejected",
+        "PowermetricsParserTests.testInvalidNumbersAndUnknownFrequencyUnitsAreNeverZeroFilled"
+      ],
+      "input": "两份 NUL 分隔 plist、文本输出、缺 elapsed、负值/Boolean、未知单位、歧义 GPU 范围。",
+      "expected": "拒绝文档或该字段保持 nil；不将未知补零。",
+      "red_mutation": "拼接多文档、删单位拒绝、用 0 填缺失值。",
+      "status": "RED 4/4",
+      "mutations": [
+        {
+          "id": "multi-document",
+          "filter": "StorageCleanerMacTests.PowermetricsParserTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "        guard frames.count == 1,",
+              "after": "        guard frames.count >= 1,"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "6",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsParserTests testFramingIsOneNULTerminatedPlistAndBounded"
+          ]
+        },
+        {
+          "id": "unknown-energy-unit",
+          "filter": "StorageCleanerMacTests.PowermetricsParserTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "case \"mJ\": 1; case \"J\": 1_000; case \"uJ\", \"µJ\", \"μJ\": 0.001; default: nil",
+              "after": "case \"mJ\": 1; case \"J\": 1_000; case \"uJ\", \"µJ\", \"μJ\": 0.001; default: 1"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "6",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsParserTests testExplicitPowerAndEnergyUnitsAreConvertedOrRejected"
+          ]
+        },
+        {
+          "id": "missing-zero-fill",
+          "filter": "StorageCleanerMacTests.PowermetricsParserTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "            cpuMilliwatts: power(processor, prefix: \"cpu\", seconds: seconds),",
+              "after": "            cpuMilliwatts: power(processor, prefix: \"cpu\", seconds: seconds) ?? 0,"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "6",
+            "4"
+          ],
+          "failing_tests": [
+            "PowermetricsParserTests testExplicitPowerAndEnergyUnitsAreConvertedOrRejected",
+            "PowermetricsParserTests testInvalidNumbersAndUnknownFrequencyUnitsAreNeverZeroFilled"
+          ]
+        },
+        {
+          "id": "cluster-name-unbounded",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testReplyDTOCarriesOnlyStructuredFields",
+          "edits": [
+            {
+              "path": "Sources/FanControlShared/PowermetricsSample.swift",
+              "before": "guard (2...4).contains(name.count), let first = name.first,",
+              "after": "guard let first = name.first,"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testReplyDTOCarriesOnlyStructuredFields"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "minimized-hidden",
+      "tests": [
+        "HelperPowerMetricsMonitorTests.testClosingOrSleepingDuringRequestDiscardsLateReplyAndReopenIsThrottled",
+        "HelperPowerMetricsMonitorTests.testMultipleVisibleModulesShareOneStreamAndRespectTwoSeconds"
+      ],
+      "input": "移除最后一个消费者，在途回复后重新展开；多个可见页面/模块同时请求。",
+      "expected": "旧 generation 回复丢弃；关闭后无请求；重新展开保留 2 秒限制。",
+      "red_mutation": "删除 demand/generation 或 lastRequestStart 检查。",
+      "live_followup": "切页、收起、隐藏、最小化、关闭、遮蔽、睡眠后至少观察两个采样间隔。",
+      "status": "RED 3/3",
+      "mutations": [
+        {
+          "id": "late-reply-published",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+              "before": "        guard hasDemand, generation == expectedGeneration, !Task.isCancelled else { return }",
+              "after": "        guard !Task.isCancelled else { return }"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "9",
+            "1"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testClosingOrSleepingDuringRequestDiscardsLateReplyAndReopenIsThrottled"
+          ]
+        },
+        {
+          "id": "reopen-bypasses-throttle",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+              "before": "            generation &+= 1\n            worker?.cancel()",
+              "after": "            generation &+= 1\n            lastRequestStart = nil\n            worker?.cancel()"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "9",
+            "1"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testClosingOrSleepingDuringRequestDiscardsLateReplyAndReopenIsThrottled"
+          ]
+        },
+        {
+          "id": "request-without-demand",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+              "before": "        guard hasDemand, !requestInFlight, !Task.isCancelled else { return }",
+              "after": "        guard !requestInFlight, !Task.isCancelled else { return }"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "9",
+            "3"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testMultipleVisibleModulesShareOneStreamAndRespectTwoSeconds",
+            "HelperPowerMetricsMonitorTests testNoDemandAndUnavailableHelpersNeverRequest"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fallback-stale",
+      "tests": [
+        "HelperPowerMetricsMonitorTests.testFallbackMeasuredZeroSourceAndExpirationAreDistinct",
+        "HelperPowerMetricsMonitorTests.testApprovalRevokedWhileInFlightDiscardsTheResult",
+        "PowermetricsProtocolSafetyTests.testUnapprovedAndMissingHelpersNeverSendOrAuthorize"
+      ],
+      "input": "未登记/未批准、在途撤销批准、超时、6.01 秒旧读数、真实 ANE 0。",
+      "expected": "未知显示 —；未批准说明需要系统助手，授权调用为零；真实 0.00 W 保留，过期数值隐藏。",
+      "red_mutation": "自动 prepare/register、删过期检查或以 0 补未知。",
+      "status": "RED 6/6",
+      "mutations": [
+        {
+          "id": "stale-shown",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Support/HelperPowerMetricsPresentation.swift",
+              "before": "(0...HelperPowerMetricsMonitor.maximumReadingAge).contains(now.timeIntervalSince(at)) else { return nil }",
+              "after": "true else { return nil }"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "9",
+            "2"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testFallbackMeasuredZeroSourceAndExpirationAreDistinct"
+          ]
+        },
+        {
+          "id": "unknown-as-zero",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Support/HelperPowerMetricsPresentation.swift",
+              "before": "milliwatts.map { HardwareReadingText.watts($0 / 1_000) } ?? \"—\"",
+              "after": "milliwatts.map { HardwareReadingText.watts($0 / 1_000) } ?? \"0.00 W\""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "9",
+            "9"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testFailureReplacesEarlierLiveNumbersAndDoesNotInventZero",
+            "HelperPowerMetricsMonitorTests testFallbackMeasuredZeroSourceAndExpirationAreDistinct",
+            "HelperPowerMetricsMonitorTests testScanStoreWiringDegradesWithoutRequestingOrAuthorizing",
+            "HelperPowerMetricsMonitorTests testUnavailableAndUnauthorizedRepliesShowNeedsHelperWithoutNumbers"
+          ]
+        },
+        {
+          "id": "revoked-in-flight-published",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+              "before": "        // Approval/version may have changed while the XPC call was in flight.\n        switch availability() {\n        case .needsHelper: state = .needsHelper; return\n        case .needsUpdate: state = .needsUpdate; return\n        case .ready: break\n        }\n",
+              "after": ""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "9",
+            "1"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testApprovalRevokedWhileInFlightDiscardsTheResult"
+          ]
+        },
+        {
+          "id": "unapproved-sends",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testUnapprovedAndMissingHelpersNeverSendOrAuthorize",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+              "before": "        guard helperStatus == .enabled, !isChangingMacMiniMode, !isPreparingHelper,",
+              "after": "        guard !isChangingMacMiniMode, !isPreparingHelper,"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "3"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testUnapprovedAndMissingHelpersNeverSendOrAuthorize"
+          ]
+        },
+        {
+          "id": "store-wiring-sends",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests/testScanStoreWiringDegradesWithoutRequestingOrAuthorizing",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Stores/ScanStore.swift",
+              "before": "            return helper.helperStatus == .enabled && !helper.isDataOnlyFixture ? .ready : .needsHelper",
+              "after": "            return .ready"
+            },
+            {
+              "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+              "before": "        guard helperStatus == .enabled, !isChangingMacMiniMode, !isPreparingHelper,",
+              "after": "        guard !isChangingMacMiniMode, !isPreparingHelper,"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testScanStoreWiringDegradesWithoutRequestingOrAuthorizing"
+          ]
+        },
+        {
+          "id": "view-prompts-authorization",
+          "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests/testEverySurfaceUsesTheSameMonitorAndWindowVisibilityControlsDemand",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Views/HelperPowerMetricsView.swift",
+              "before": "                    openSettings()\n",
+              "after": "                    openSettings()\n                    FanControlCoordinator.shared.openApprovalSettings()\n"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "HelperPowerMetricsMonitorTests testEverySurfaceUsesTheSameMonitorAndWindowVisibilityControlsDemand"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "helper-process-guard",
+      "test": "PowermetricsHelperSourceGuardTests.testGuardRejectsThirdProcessDynamicFlagsPathChangesAndPMSetBypass",
+      "input": "加入第三个 Process、/bin/sh、请求决定参数、500 ms 参数或跳过 pmset 白名单。",
+      "expected": "源码守卫失败。",
+      "red_mutation": "在隔离副本做上述任一突变。",
+      "status": "RED 6/6",
+      "mutations": [
+        {
+          "id": "helper-interval-500",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+              "before": "\"-i\", \"1000\"",
+              "after": "\"-i\", \"500\""
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testEveryHelperProcessIsAnAllowedFixedCommand"
+          ]
+        },
+        {
+          "id": "helper-extra-flag",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+              "before": "        process.arguments = Self.arguments\n",
+              "after": "        process.arguments = Self.arguments + [\"--show-process-energy\"]\n"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testEveryHelperProcessIsAnAllowedFixedCommand"
+          ]
+        },
+        {
+          "id": "helper-third-process",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+              "before": "    func stopForTermination() {",
+              "after": "    func probe() { let other = Process(); other.executableURL = URL(fileURLWithPath: \"/bin/sh\") }\n\n    func stopForTermination() {"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testEveryHelperProcessIsAnAllowedFixedCommand"
+          ]
+        },
+        {
+          "id": "pmset-arguments-suffix",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/main.swift",
+              "before": "        process.arguments = arguments\n",
+              "after": "        process.arguments = arguments + [\"-a\", \"sleep\", \"0\"]\n"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testEveryHelperProcessIsAnAllowedFixedCommand",
+            "PowermetricsHelperSourceGuardTests testGuardRejectsThirdProcessDynamicFlagsPathChangesAndPMSetBypass"
+          ]
+        },
+        {
+          "id": "powermetrics-url-chain",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+              "before": "URL(fileURLWithPath: \"/usr/bin/powermetrics\")\n",
+              "after": "URL(fileURLWithPath: \"/usr/bin/powermetrics\").deletingLastPathComponent().appendingPathComponent(\"sh\")\n"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testEveryHelperProcessIsAnAllowedFixedCommand"
+          ]
+        },
+        {
+          "id": "pmset-whitelist-bypass",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/main.swift",
+              "before": "guard HelperPMSetWhitelist.permits(arguments) else",
+              "after": "guard true || HelperPMSetWhitelist.permits(arguments) else"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testEveryHelperProcessIsAnAllowedFixedCommand"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "old-helper-removal",
+      "tests": [
+        "PowermetricsProtocolSafetyTests.testVersion3RemovalVerifiesSleepOffBeforeRestoringFansAndUnregistering",
+        "PowermetricsProtocolSafetyTests.testVersion3UnconfirmedSleepRecoveryBlocksUnregistration",
+        "PowermetricsProtocolSafetyTests.testVersion3CompatibilityOnlyPermitsRemovalAndCannotSampleOrEnable"
+      ],
+      "input": "v3 回报 OFF 但仍 ownsSleepDisabled；兼容请求用于开启/采样。",
+      "expected": "不注销；兼容仅 OFF/自动恢复，顺序经验证后才注销。",
+      "red_mutation": "删除 OFF/恢复责任门槛、放宽 v3 兼容或交换恢复和注销顺序。",
+      "status": "RED 3/3",
+      "mutations": [
+        {
+          "id": "v3-owns-sleep-unregisters",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testVersion3UnconfirmedSleepRecoveryBlocksUnregistration",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+              "before": "                    guard sleepReply.success, sleepReply.macMiniModeStatus?.mode == .off,\n                          sleepReply.macMiniModeStatus?.ownsSleepDisabled == false else {",
+              "after": "                    guard sleepReply.success, sleepReply.macMiniModeStatus?.mode == .off else {"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testVersion3UnconfirmedSleepRecoveryBlocksUnregistration"
+          ]
+        },
+        {
+          "id": "v3-restore-before-off",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testVersion3RemovalVerifiesSleepOffBeforeRestoringFansAndUnregistering",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+              "before": "                    let sleepReply = try await send(.disableMacMiniModeForVersion3)",
+              "after": "                    _ = try? await send(.restoreAutomaticForVersion3)\n                    let sleepReply = try await send(.disableMacMiniModeForVersion3)"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testVersion3RemovalVerifiesSleepOffBeforeRestoringFansAndUnregistering"
+          ]
+        },
+        {
+          "id": "v3-sample-compat",
+          "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testVersion3CompatibilityOnlyPermitsRemovalAndCannotSampleOrEnable",
+          "edits": [
+            {
+              "path": "Sources/StorageCleanerMac/Models/FanControlModels.swift",
+              "before": "                || (protocolVersion == 3 && request.isVersion3RemovalOnly) else {",
+              "after": "                || protocolVersion == 3 else {"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "1",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsProtocolSafetyTests testVersion3CompatibilityOnlyPermitsRemovalAndCannotSampleOrEnable"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "control-isolation",
+      "test": "PowermetricsHelperSourceGuardTests.testSamplingCannotBypassAuthenticationOrReachControlQueues",
+      "input": "绕过 audit token/路径验证或在采样中调用 runPMSet/smcQueue/commandQueue.sync。",
+      "expected": "守卫失败；独立安全复核不通过。",
+      "red_mutation": "删除调用方校验或把采样执行移到原控制队列。",
+      "status": "RED 4/4",
+      "mutations": [
+        {
+          "id": "caller-check-removed",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/main.swift",
+              "before": "(try? CodeSigningCheck.powerSamplingClientMatchesHelper(auditToken: token)) == true else {",
+              "after": "true else {"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testCallerVerificationPrecedesTheOnlySamplingEntryAndReplyIsStructured",
+            "PowermetricsHelperSourceGuardTests testSamplingCannotBypassAuthenticationOrReachControlQueues"
+          ]
+        },
+        {
+          "id": "caller-check-after-run",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/main.swift",
+              "before": "        guard (try? PowermetricsSamplingRequest.decode(data)) != nil else {\n            finish(.failure(.invalidRequest)); return\n        }\n",
+              "after": "        guard (try? PowermetricsSamplingRequest.decode(data)) != nil else {\n            finish(.failure(.invalidRequest)); return\n        }\n        Task { _ = await powerSampling.request(authorized: true) }\n"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testCallerVerificationPrecedesTheOnlySamplingEntryAndReplyIsStructured"
+          ]
+        },
+        {
+          "id": "sampling-on-command-queue",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/main.swift",
+              "before": "        Task { [self] in\n            let result = await powerSampling.request(authorized: true)",
+              "after": "        Task { [self] in\n            commandQueue.sync {}\n            let result = await powerSampling.request(authorized: true)"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "2"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testCallerVerificationPrecedesTheOnlySamplingEntryAndReplyIsStructured",
+            "PowermetricsHelperSourceGuardTests testSamplingCannotBypassAuthenticationOrReachControlQueues"
+          ]
+        },
+        {
+          "id": "sampling-stderr-in-reply",
+          "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+          "edits": [
+            {
+              "path": "Sources/FanControlHelper/main.swift",
+              "before": "success: succeeded, message: \"Read-only power sampling result.\",\n                appliedTargetRPMByFan: [:], powerSampleResult: result)))\n            requestLock",
+              "after": "success: succeeded, message: \"Read-only power sampling result. \\(result)\",\n                appliedTargetRPMByFan: [:], powerSampleResult: result)))\n            requestLock"
+            }
+          ],
+          "result": "PASS",
+          "executed_failed": [
+            "4",
+            "1"
+          ],
+          "failing_tests": [
+            "PowermetricsHelperSourceGuardTests testCallerVerificationPrecedesTheOnlySamplingEntryAndReplyIsStructured"
+          ]
+        }
+      ]
+    }
+  ],
+  "executed_by": "Claude 主会话验证轮（2026-10-09）",
+  "runner": "多处编辑突变：应用 edits → swift test --filter → 逐文件恢复并核对 SHA-256；PASS = 过滤测试实际运行且至少一条断言失败、无编译错误",
+  "spec": "/Users/developer/Developer/.sc-build/r2-energy-powermetrics/mut/mutations.json",
+  "logs": "/Users/developer/Developer/.sc-build/r2-energy-powermetrics/logs/mutations-final",
+  "historical_result_scope": "原始实现及主会话验证轮（安全复核修复前）；不得作为本轮最终源码通过证据。",
+  "security_fix_round": {
+    "base_commit": "c002414b166d42e959ee9a770729b2a29177e2ee",
+    "executed": false,
+    "status": "NOT RUN",
+    "spec_count": 96,
+    "policy": "主会话执行全部突变；本轮只顺序核对每条编辑锚点，不改源码执行突变。",
+    "spec_file": "~/Developer/.sc-build/r2-energy-powermetrics/mut/mutations.json",
+    "generator": "mut/build-spec.py（含 additions-r3.py、additions-security.py）",
+    "historical_r3_result": "logs/mutations-r3/summary.json 是前任验证者历史记录，76/78；popen 为 SDK 不可用导致编译失败、shared-module 只留构建片段；两条规格已修正，尚未重跑。",
+    "mutations": [
+      {
+        "id": "request-keys",
+        "case": "request-strings",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testWireRequestHasExactlyAnOperationAndVersion",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "Set(object.keys) == [\"protocolVersion\", \"operation\"] else {",
+            "after": "!object.isEmpty else {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "request-version",
+        "case": "request-strings",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testWireRequestHasExactlyAnOperationAndVersion",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "guard HardwareControlProtocol.accepts(request.protocolVersion) else {\n            throw PowermetricsFailure.invalidRequest",
+            "after": "guard request.protocolVersion > 0 else {\n            throw PowermetricsFailure.invalidRequest"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "caller-team",
+        "case": "caller-identity",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testCallerPolicyRejectsWrongTeamIdentityAndRelocation",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "            && team == teamIdentifier\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "caller-path",
+        "case": "caller-identity",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testCallerPolicyRejectsWrongTeamIdentityAndRelocation",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "            && executableURL.standardizedFileURL.path == executable\n            && executableURL.resolvingSymlinksInPath().path == executable\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "caller-helper-app",
+        "case": "caller-identity",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testCallerPolicyRejectsWrongTeamIdentityAndRelocation",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "            && helperApplicationURL.standardizedFileURL.path == application\n            && helperApplicationURL.resolvingSymlinksInPath().path == application\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "caller-check-removed",
+        "case": "control-isolation",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "cheapCheck: { try CodeSigningCheck.powerSamplingClientIdentityMatches(auditToken: token) },",
+            "after": "cheapCheck: { true },"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "caller-check-after-run",
+        "case": "control-isolation",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "        guard (try? PowermetricsSamplingRequest.decode(data)) != nil else {\n            finish(.failure(.invalidRequest)); return\n        }\n",
+            "after": "        guard (try? PowermetricsSamplingRequest.decode(data)) != nil else {\n            finish(.failure(.invalidRequest)); return\n        }\n        Task { _ = await powerSampling.request(authorized: true) }\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "unauthorized-consumes",
+        "case": "caller-identity",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testUnauthorizedCallerCannotConsumeThrottleOrLaunch",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        guard authorized else { return .failure(.unauthorized) }\n        guard waiters < Self.maximumWaiters else { return .failure(.busy) }",
+            "after": "        guard waiters < Self.maximumWaiters else { return .failure(.busy) }"
+          },
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        lastStart = time\n        let task = Task { await run() }",
+            "after": "        lastStart = time\n        let task = Task { authorized ? await run() : .failure(.unauthorized) }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "throttle-1s",
+        "case": "throttle",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testGlobalTwoSecondThrottleIncludesFailedSamplesAndClockRegression",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "public static let minimumInterval: TimeInterval = 2",
+            "after": "public static let minimumInterval: TimeInterval = 1"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "throttle-ignores-failures",
+        "case": "throttle",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testGlobalTwoSecondThrottleIncludesFailedSamplesAndClockRegression",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        lastStart = time\n        let task = Task { await run() }",
+            "after": "        let task = Task { await run() }"
+          },
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        defer { waiters -= 1; inFlight = nil }\n        return await task.value",
+            "after": "        defer { waiters -= 1; inFlight = nil }\n        let result = await task.value\n        if case .sample = result { lastStart = time }\n        return result"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "no-coalescing",
+        "case": "coalescing",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testConcurrentRequestsShareOneFlightAndBoundWaiters",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        if let inFlight {",
+            "after": "        if false, let inFlight {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "no-waiter-bound",
+        "case": "coalescing",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testConcurrentRequestsShareOneFlightAndBoundWaiters",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        guard waiters < Self.maximumWaiters else { return .failure(.busy) }\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "timeout-6s",
+        "case": "deadline",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testTimeoutKillsEvenAChildThatNeverExitsAtFiveSeconds",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "public static let timeoutSeconds: TimeInterval = 5",
+            "after": "public static let timeoutSeconds: TimeInterval = 6"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "timeout-no-kill",
+        "case": "deadline",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testTimeoutKillsEvenAChildThatNeverExitsAtFiveSeconds",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        // No grace period: even a SIGTERM-ignoring child is killed at 5 s.\n        kill()\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "stderr-uncounted",
+        "case": "output-flood",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testOutputBudgetCountsBothPipesAndDropsOversizedResult",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "chunk.stderr.count <= remaining - chunk.stdout.count else {",
+            "after": "true else {"
+          },
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "byteCount += chunk.stdout.count + chunk.stderr.count",
+            "after": "byteCount += chunk.stdout.count"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "budget-1MiB",
+        "case": "output-flood",
+        "filter": "StorageCleanerMacTests.PowermetricsSamplingTests/testOutputBudgetCountsBothPipesAndDropsOversizedResult",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "public static let maximumOutputBytes = 512 * 1_024",
+            "after": "public static let maximumOutputBytes = 1_024 * 1_024"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "multi-document",
+        "case": "parse-framing-units",
+        "filter": "StorageCleanerMacTests.PowermetricsParserTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "        guard frames.count == 1,",
+            "after": "        guard frames.count >= 1,"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "unknown-energy-unit",
+        "case": "parse-framing-units",
+        "filter": "StorageCleanerMacTests.PowermetricsParserTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "case \"mJ\": 1; case \"J\": 1_000; case \"uJ\", \"µJ\", \"μJ\": 0.001; default: nil",
+            "after": "case \"mJ\": 1; case \"J\": 1_000; case \"uJ\", \"µJ\", \"μJ\": 0.001; default: 1"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "missing-zero-fill",
+        "case": "parse-framing-units",
+        "filter": "StorageCleanerMacTests.PowermetricsParserTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "            cpuMilliwatts: power(processor, prefix: \"cpu\", seconds: seconds),",
+            "after": "            cpuMilliwatts: power(processor, prefix: \"cpu\", seconds: seconds) ?? 0,"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "cluster-name-unbounded",
+        "case": "parse-framing-units",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testReplyDTOCarriesOnlyStructuredFields",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "guard (2...4).contains(name.count), let first = name.first,",
+            "after": "guard let first = name.first,"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "late-reply-published",
+        "case": "minimized-hidden",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+            "before": "        guard hasDemand, generation == expectedGeneration, !Task.isCancelled else { return }",
+            "after": "        guard !Task.isCancelled else { return }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "reopen-bypasses-throttle",
+        "case": "minimized-hidden",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+            "before": "            generation &+= 1\n            worker?.cancel()",
+            "after": "            generation &+= 1\n            lastRequestStart = nil\n            worker?.cancel()"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "request-without-demand",
+        "case": "minimized-hidden",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+            "before": "        guard hasDemand, !requestInFlight, !Task.isCancelled else { return }",
+            "after": "        guard !requestInFlight, !Task.isCancelled else { return }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "stale-shown",
+        "case": "fallback-stale",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Support/HelperPowerMetricsPresentation.swift",
+            "before": "(0...HelperPowerMetricsMonitor.maximumReadingAge).contains(now.timeIntervalSince(at)) else { return nil }",
+            "after": "true else { return nil }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "unknown-as-zero",
+        "case": "fallback-stale",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Support/HelperPowerMetricsPresentation.swift",
+            "before": "milliwatts.map { HardwareReadingText.watts($0 / 1_000) } ?? \"—\"",
+            "after": "milliwatts.map { HardwareReadingText.watts($0 / 1_000) } ?? \"0.00 W\""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "revoked-in-flight-published",
+        "case": "fallback-stale",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Services/HelperPowerMetricsMonitor.swift",
+            "before": "        // Approval/version may have changed while the XPC call was in flight.\n        switch availability() {\n        case .needsHelper: state = .needsHelper; return\n        case .needsUpdate: state = .needsUpdate; return\n        case .ready: break\n        }\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "unapproved-sends",
+        "case": "fallback-stale",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testUnapprovedAndMissingHelpersNeverSendOrAuthorize",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+            "before": "        guard helperStatus == .enabled, !isChangingMacMiniMode, !isPreparingHelper,",
+            "after": "        guard !isChangingMacMiniMode, !isPreparingHelper,"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "store-wiring-sends",
+        "case": "fallback-stale",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests/testScanStoreWiringDegradesWithoutRequestingOrAuthorizing",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Stores/ScanStore.swift",
+            "before": "            return helper.helperStatus == .enabled && !helper.isDataOnlyFixture ? .ready : .needsHelper",
+            "after": "            return .ready"
+          },
+          {
+            "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+            "before": "        guard helperStatus == .enabled, !isChangingMacMiniMode, !isPreparingHelper,",
+            "after": "        guard !isChangingMacMiniMode, !isPreparingHelper,"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "view-prompts-authorization",
+        "case": "fallback-stale",
+        "filter": "StorageCleanerMacTests.HelperPowerMetricsMonitorTests/testEverySurfaceUsesTheSameMonitorAndWindowVisibilityControlsDemand",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Views/HelperPowerMetricsView.swift",
+            "before": "                    openSettings()\n",
+            "after": "                    openSettings()\n                    FanControlCoordinator.shared.openApprovalSettings()\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "helper-interval-500",
+        "case": "helper-process-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "\"-i\", \"1000\"",
+            "after": "\"-i\", \"500\""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "helper-extra-flag",
+        "case": "helper-process-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "Self.arguments).map { strdup($0) } + [nil]",
+            "after": "Self.arguments).map { strdup($0) } + [strdup(\"--show-process-energy\"), nil]"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "helper-third-process",
+        "case": "helper-process-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    func probe() { let other = Process(); other.executableURL = URL(fileURLWithPath: \"/bin/sh\") }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "pmset-arguments-suffix",
+        "case": "helper-process-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "        process.arguments = arguments\n",
+            "after": "        process.arguments = arguments + [\"-a\", \"sleep\", \"0\"]\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "powermetrics-spawn-literal-path",
+        "case": "helper-process-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "posix_spawn(&spawnedPID, Self.executablePath,",
+            "after": "posix_spawn(&spawnedPID, \"/bin/sh\","
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "pmset-whitelist-bypass",
+        "case": "helper-process-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "guard HelperPMSetWhitelist.permits(arguments) else",
+            "after": "guard true || HelperPMSetWhitelist.permits(arguments) else"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "sampling-on-command-queue",
+        "case": "control-isolation",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "            Task { [self] in\n                // An unauthorized caller",
+            "after": "            Task { [self] in\n                commandQueue.sync {}\n                // An unauthorized caller"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "sampling-stderr-in-reply",
+        "case": "control-isolation",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "success: succeeded, message: \"Read-only power sampling result.\",",
+            "after": "success: succeeded, message: \"Read-only power sampling result. \\(result)\","
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "v3-owns-sleep-unregisters",
+        "case": "old-helper-removal",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testVersion3UnconfirmedSleepRecoveryBlocksUnregistration",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+            "before": "                    guard sleepReply.success, sleepReply.macMiniModeStatus?.mode == .off,\n                          sleepReply.macMiniModeStatus?.ownsSleepDisabled == false else {",
+            "after": "                    guard sleepReply.success, sleepReply.macMiniModeStatus?.mode == .off else {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "v3-restore-before-off",
+        "case": "old-helper-removal",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testVersion3RemovalVerifiesSleepOffBeforeRestoringFansAndUnregistering",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Services/FanControlCoordinator.swift",
+            "before": "                    let sleepReply = try await send(.disableMacMiniModeForVersion3)",
+            "after": "                    _ = try? await send(.restoreAutomaticForVersion3)\n                    let sleepReply = try await send(.disableMacMiniModeForVersion3)"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "v3-sample-compat",
+        "case": "old-helper-removal",
+        "filter": "StorageCleanerMacTests.PowermetricsProtocolSafetyTests/testVersion3CompatibilityOnlyPermitsRemovalAndCannotSampleOrEnable",
+        "edits": [
+          {
+            "path": "Sources/StorageCleanerMac/Models/FanControlModels.swift",
+            "before": "                || (protocolVersion == 3 && request.isVersion3RemovalOnly) else {",
+            "after": "                || protocolVersion == 3 else {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "p1-beta-name",
+        "case": "p1-executable-name",
+        "filter": "StorageCleanerMacTests.BuildIdentityPackagingTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/StorageCleanerBuildIdentity.swift",
+            "before": "public static let betaExecutableName = \"StorageCleanerMacBeta\"",
+            "after": "public static let betaExecutableName = \"StorageCleanerMac\""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "p1-hardcoded-executable",
+        "case": "p1-executable-name",
+        "filter": "StorageCleanerMacTests.BuildIdentityPackagingTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/StorageCleanerBuildIdentity.swift",
+            "before": "installedApplicationPath(beta: beta) + \"/Contents/MacOS/\" + executableName(beta: beta)",
+            "after": "installedApplicationPath(beta: beta) + \"/Contents/MacOS/StorageCleanerMac\""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "p1-policy-literal",
+        "case": "p1-executable-name",
+        "filter": "StorageCleanerMacTests.BuildIdentityPackagingTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "        let executable = StorageCleanerBuildIdentity.installedExecutablePath\n",
+            "after": "        let executable = application + \"/Contents/MacOS/StorageCleanerMac\"\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "p1-beta-path",
+        "case": "p1-executable-name",
+        "filter": "StorageCleanerMacTests.BuildIdentityPackagingTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/StorageCleanerBuildIdentity.swift",
+            "before": "public static let betaInstalledApplicationPath = \"/Applications/测试版.app\"",
+            "after": "public static let betaInstalledApplicationPath = \"/Applications/StorageCleanerMacBeta.app\""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-seal-every-time",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        if cached { return true }\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-cache-ignores-pidversion",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "return state.sealed == process",
+            "after": "return state.sealed?.pid == process.pid"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-cache-before-cheap",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        guard (try? cheapCheck()) == true else { return false }\n",
+            "after": ""
+          },
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        if cached { return true }\n",
+            "after": "        if cached { return true }\n        guard (try? cheapCheck()) == true else { return false }\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-refused-not-counted",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "            let previous = state.lastAttempt\n            state.lastAttempt = now\n            connections[connection] = state\n            guard previous.map({ now - $0 >= Self.minimumAttemptInterval }) ?? true else { return nil }\n",
+            "after": "            let previous = state.lastAttempt\n            guard previous.map({ now - $0 >= Self.minimumAttemptInterval }) ?? true else { return nil }\n            state.lastAttempt = now\n            connections[connection] = state\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-interval-zero",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "public static let minimumAttemptInterval: TimeInterval = 1",
+            "after": "public static let minimumAttemptInterval: TimeInterval = 0"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-forget-keeps-cache",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "        lock.withLock { connections[connection] = nil }",
+            "after": "        lock.withLock { connections[connection]?.lastAttempt = nil }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "forget-not-called",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "                powerSamplingClients.forget(connection: ObjectIdentifier(newConnection))\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "seal-on-xpc-thread",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "        let client = CodeSigningCheck.clientProcess(of: token)\n",
+            "after": "        _ = try? CodeSigningCheck.powerSamplingClientSealIsValid(auditToken: token)\n        let client = CodeSigningCheck.clientProcess(of: token)\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "cheap-check-validates-seal",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "        try check(SecCodeCheckValidity(code, [], nil))\n        var information: CFDictionary?",
+            "after": "        try check(SecCodeCheckValidity(code, [], nil))\n        try check(SecStaticCodeCheckValidity(staticCode, SecCSFlags(rawValue: kSecCSCheckNestedCode), nil))\n        var information: CFDictionary?"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "admission-interval-skipped",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "        guard let admission = powerSamplingClients.admitAttempt(connection: connectionID,\n                                                               now: PowermetricsMonotonicClock.seconds) else {\n            finish(.failure(.throttled)); return\n        }\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "audit-pidversion-field",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "pidVersion: Int32(bitPattern: auditToken.val.7)",
+            "after": "pidVersion: Int32(bitPattern: auditToken.val.6)"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-posix-spawnp",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        var pid: pid_t = 0; _ = posix_spawnp(&pid, \"sh\", nil, nil, nil, nil)\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-execv",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        _ = execv(\"/bin/sh\", nil)\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-dlsym",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        _ = dlsym(UnsafeMutableRawPointer(bitPattern: -2), \"posix_spawn\")\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-popen",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = popen(\"/bin/sh\", \"r\")\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-process-run",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        _ = try? Process.run(URL(fileURLWithPath: \"/bin/sh\"), arguments: [])\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-typed-init",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        let other: Process = .init(); _ = other\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-process-init",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        _ = Process.init()\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-nsclassfromstring",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        _ = NSClassFromString(\"NSTask\")\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-setenv",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        setenv(\"DYLD_INSERT_LIBRARIES\", \"/tmp/x\", 1)\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-shared-module",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSample.swift",
+            "before": "public enum PowermetricsClientPolicy {",
+            "after": "nonisolated func injectedSharedBypass() { _ = Process() }\n\npublic enum PowermetricsClientPolicy {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-subdirectory-file",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/Injected/Bypass.swift",
+            "before": "",
+            "after": "import Foundation\n\nfunc injectedSubdirectoryBypass() { _ = Process() }\n",
+            "create": true
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "runner-environment-extra",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "\"PATH=/usr/bin:/bin:/usr/sbin:/sbin\"]",
+            "after": "\"PATH=/usr/bin:/bin:/usr/sbin:/sbin\", \"DYLD_INSERT_LIBRARIES=/tmp/x\"]"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "runner-environment-inherited",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "= Self.environment.map { strdup($0) } + [nil]",
+            "after": "= ProcessInfo.processInfo.environment.map { strdup($0.key + \"=\" + $0.value) } + [nil]"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "runner-extra-file-action",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "posix_spawn_file_actions_addchdir_np(&actions, \"/\") == 0 else {",
+            "after": "posix_spawn_file_actions_addchdir_np(&actions, \"/\") == 0,\n              posix_spawn_file_actions_addopen(&actions, 3, \"/etc/sudoers\", O_RDONLY, 0) == 0 else {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "pmset-environment-extra",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "            \"LANG\": \"C\",\n            \"PATH\": \"/usr/bin:/bin:/usr/sbin:/sbin\",\n",
+            "after": "            \"LANG\": \"C\",\n            \"DYLD_INSERT_LIBRARIES\": \"/tmp/x\",\n            \"PATH\": \"/usr/bin:/bin:/usr/sbin:/sbin\",\n"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "kill-positive-pid",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "if activeChild == pid { _ = Darwin.kill(-pid, SIGKILL) }",
+            "after": "if activeChild == pid { _ = Darwin.kill(pid, SIGKILL) }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "kill-unguarded",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "if activeChild == pid { _ = Darwin.kill(-pid, SIGKILL) }",
+            "after": "_ = Darwin.kill(-pid, SIGKILL)"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "reap-keeps-active",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "                activeChild = nil\n                return result == pid ? status : -1",
+            "after": "                return result == pid ? status : -1"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "no-process-group",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "let flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF",
+            "after": "let flags = POSIX_SPAWN_SETSIGDEF"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "no-cloexec-default",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": " | POSIX_SPAWN_CLOEXEC_DEFAULT",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "wait-any-child",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "repeat { result = waitpid(pid, &status, WNOHANG) }",
+            "after": "repeat { result = waitpid(-1, &status, WNOHANG) }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "signal-exit-as-success",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "return signal == 0 ? (status >> 8) & 0xff : 128 + signal",
+            "after": "return signal == 0 ? (status >> 8) & 0xff : 0"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "spawn-while-stopping",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "            guard !isStopping else { return ECANCELED }\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-late-seal-recreates-state",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "guard var state = connections[admission.connection], state.lifetime == admission.lifetime else { return false }",
+            "after": "var state = connections[admission.connection] ?? ConnectionState()"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "gate-reused-connection-accepts-old-ticket",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsClientGateTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "guard lock.withLock({ connections[admission.connection]?.lifetime == admission.lifetime }) else { return false }",
+            "after": "guard lock.withLock({ connections[admission.connection] != nil }) else { return false }"
+          },
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "guard let state = connections[admission.connection], state.lifetime == admission.lifetime else { return nil }",
+            "after": "guard let state = connections[admission.connection] else { return nil }"
+          },
+          {
+            "path": "Sources/FanControlShared/PowermetricsSampling.swift",
+            "before": "guard var state = connections[admission.connection], state.lifetime == admission.lifetime else { return false }",
+            "after": "guard var state = connections[admission.connection] else { return false }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "listener-no-gate-registration",
+        "case": "p2-1-admission",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "                powerSamplingClients.register(connection: ObjectIdentifier(newConnection))\n",
+            "after": ""
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "leader-reaped-before-pipe-eof",
+        "case": "p2-3-reap",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "if stdoutEOF && stderrEOF && waitStatus == nil { waitStatus = reapIfExited(pid) }",
+            "after": "if waitStatus == nil { waitStatus = reapIfExited(pid) }"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-spawn-alias",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        let launcher = posix_spawn; _ = launcher\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "pmset-environment-suffix",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "        ]\n        process.standardOutput = outputPipe",
+            "after": "        ].merging(ProcessInfo.processInfo.environment) { _, inherited in inherited }\n        process.standardOutput = outputPipe"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "pmset-environment-mutate-after-assignment",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/main.swift",
+            "before": "        process.standardOutput = outputPipe",
+            "after": "        process.environment?[\"DYLD_INSERT_LIBRARIES\"] = \"/tmp/x\"\n        process.standardOutput = outputPipe"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-qualified-typed-init",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        let other: Foundation.Process = .init(); _ = other\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-vfork",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = vfork()\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-nstask",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = NSTask()\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-execl",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = execl(\"/bin/sh\", \"sh\", nil)\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-execle",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = execle(\"/bin/sh\", \"sh\", nil, nil)\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-execve",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = execve(\"/bin/sh\", nil, nil)\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-execvp",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = execvp(\"sh\", nil)\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-execvP",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = execvP(\"sh\", \"/bin\", nil)\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-fexecve",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = fexecve(0, nil, nil)\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-spawn-suffix",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = posix_spawn_future(&pid, path, nil, nil, argv, nil)\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      },
+      {
+        "id": "bypass-process-run-spaces",
+        "case": "p2-2-guard",
+        "filter": "StorageCleanerMacTests.PowermetricsHelperSourceGuardTests",
+        "edits": [
+          {
+            "path": "Sources/FanControlHelper/PowermetricsProcessRunner.swift",
+            "before": "    func stopForTermination() {",
+            "after": "    private func injectedBypass() {\n        #if false\n        _ = try? Process . run(URL(fileURLWithPath: \"/bin/sh\"), arguments: [])\n        #endif\n    }\n\n    func stopForTermination() {"
+          }
+        ],
+        "status": "NOT RUN"
+      }
+    ]
+  }
+}

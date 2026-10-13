@@ -31,35 +31,61 @@ enum MenuBarStatusRenderer {
         for snapshot: SystemMonitorSnapshot?,
         mode: MenuBarStatusDisplayMode,
         deviceStatus: MenuBarDeviceStatusSnapshot = .empty,
-        appearance: NSAppearance? = nil, highlighted: Bool = false
+        appearance: NSAppearance? = nil, highlighted: Bool = false,
+        statusPreset: PanelStatusColorPreset = .original,
+        statusCustomDayHex: String = "", statusCustomNightHex: String = ""
     ) -> NSImage {
+        let ink = statusPreset.ink(
+            dark: appearance?.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+            customDayHex: statusCustomDayHex, customNightHex: statusCustomNightHex
+        )
         switch mode {
         case .deviceStatus:
-            return MenuBarDeviceStatusDrawing.image(for: deviceStatus, appearance: appearance, highlighted: highlighted)
+            return MenuBarDeviceStatusDrawing.image(for: deviceStatus, appearance: appearance,
+                                                    highlighted: highlighted, statusPreset: statusPreset,
+                                                    statusCustomDayHex: statusCustomDayHex,
+                                                    statusCustomNightHex: statusCustomNightHex)
         case .memory:
-            return image(for: snapshot)
+            return recolored(image(for: snapshot), with: ink)
         case .cpu:
-            return singleValueImage(
+            return recolored(singleValueImage(
                 icon: cpuIcon,
                 text: displayValue(for: .cpuUsage, snapshot: snapshot)
-            )
+            ), with: ink)
         case .temperature:
-            return singleValueImage(
+            return recolored(singleValueImage(
                 icon: temperatureIcon,
                 text: displayValue(for: .chipTemperature, snapshot: snapshot)
-            )
+            ), with: ink)
         case .cpuAndMemory:
-            return stackedTextImage(
+            return recolored(stackedTextImage(
                 top: "C \(displayValue(for: .cpuUsage, snapshot: snapshot))",
                 bottom: "M \(displayValue(for: .memoryUsage, snapshot: snapshot))"
-            )
+            ), with: ink)
         case .network:
             let throughput = snapshot?.networkThroughput
-            return stackedTextImage(
+            return recolored(stackedTextImage(
                 top: "↓\(menuBarRate(throughput?.downBytesPerSecond))",
                 bottom: "↑\(menuBarRate(throughput?.upBytesPerSecond))"
-            )
+            ), with: ink)
         }
+    }
+
+    private static func recolored(_ image: NSImage, with ink: NSColor?) -> NSImage {
+        guard let ink else { return image }
+        let tinted = NSImage(size: image.size)
+        tinted.lockFocus()
+        let rect = NSRect(origin: .zero, size: image.size)
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        if let context = NSGraphicsContext.current?.cgContext {
+            context.setBlendMode(.sourceIn)
+            context.setFillColor(ink.cgColor)
+            context.fill(rect)
+            context.setBlendMode(.normal)
+        }
+        tinted.unlockFocus()
+        tinted.isTemplate = false
+        return tinted
     }
 
     /// Icon plus one measured value, matching the reference memory layout but

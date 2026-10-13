@@ -6,13 +6,40 @@ typealias AdvancedPanelTypography = MenuBarPanelTypography
 enum MemorySampleStatusPresentation {
     static let refreshInterval: TimeInterval = 15
 
+    /// Help and VoiceOver text of the memory card and page (D28): the level
+    /// is the system's, as in Activity Monitor; only the percentage is an
+    /// estimate. When this sample lacks the level or the headroom, it says so.
+    /// The headroom has one name everywhere: 系统压力余量 (review P2-4).
     static func evidence(snapshot: MemorySnapshot?) -> String {
         guard let snapshot else { return L10n.text("尚无内存样本", "No memory sample yet") }
         let time = snapshot.generatedAt.formatted(.dateTime.year().month().day().hour().minute().second())
-        return L10n.text(
-            "快照生成于 \(time)。压力为本应用根据系统数据评估的等级，不是压力百分比。",
-            "Snapshot generated at \(time). Pressure is an app-assessed grade based on system data, not a pressure percentage."
+        let explanation = L10n.text(
+            "快照生成于 \(time)。压力等级（正常／升高／高）取自 macOS 系统，与活动监视器一致；压力百分比为 100% 减去系统压力余量，是估算，仅用于趋势。",
+            "Snapshot generated at \(time). The pressure level (Normal / Elevated / High) comes from macOS, the same source as Activity Monitor; the pressure percentage is an estimate, 100% minus system pressure headroom, for trends only."
         )
+        let hasSystemLevel = snapshot.measurements.pressure.value != nil
+        let hasPercent = snapshot.pressureEstimatePercent != nil
+        let gap: String? = switch (hasSystemLevel, hasPercent) {
+        case (true, true):
+            nil
+        case (false, true):
+            L10n.text(
+                "本次未读到系统的压力等级，等级按百分比估算（85% 起为升高、95% 起为高）。",
+                "macOS did not report a level for this sample, so it is estimated from the percentage (Elevated from 85%, High from 95%)."
+            )
+        case (true, false):
+            L10n.text(
+                "本次未读到系统压力余量，没有压力百分比。",
+                "macOS did not report pressure headroom for this sample, so there is no percentage."
+            )
+        case (false, false):
+            L10n.text(
+                "本次未读到系统的压力等级和压力余量，等级不可用。",
+                "macOS reported neither a level nor pressure headroom for this sample, so the level is unavailable."
+            )
+        }
+        guard let gap else { return explanation }
+        return explanation + L10n.text("", " ") + gap
     }
 
     static func text(snapshot: MemorySnapshot?, isPaused: Bool, referenceDate: Date) -> String {
@@ -21,7 +48,7 @@ enum MemorySampleStatusPresentation {
                 ? L10n.text("已暂停 · 尚未采样", "Paused · Not sampled")
                 : L10n.text("首次采样中", "Sampling")
         }
-        let time = PanelTimestampFormat.display(snapshot.generatedAt)
+        let time = PanelTimestampFormat.age(snapshot.generatedAt, now: referenceDate)
         if isPaused { return L10n.text("已暂停 · ", "Paused · ") + time }
         if referenceDate.timeIntervalSince(snapshot.generatedAt) >= 60 {
             return L10n.text("已过期 · ", "Stale · ") + time
@@ -37,6 +64,15 @@ enum MemorySampleStatusPresentation {
             return MeasurementAvailability.invalidSample.title
         }
         return time
+    }
+
+    /// The memory page header shows a bare sample time as "采样 16:13" so it
+    /// is not read as the current clock. Stale, paused and unavailable
+    /// states already name themselves and are returned unchanged.
+    static func headerText(snapshot: MemorySnapshot?, isPaused: Bool, referenceDate: Date) -> String {
+        let status = text(snapshot: snapshot, isPaused: isPaused, referenceDate: referenceDate)
+        guard let snapshot, status == PanelTimestampFormat.age(snapshot.generatedAt, now: referenceDate) else { return status }
+        return L10n.text("采样 ", "Sampled ") + status
     }
 }
 
@@ -58,7 +94,7 @@ struct MiniWindowStatusCapsule: View {
                 .foregroundStyle(tint)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 7)
+        .padding(.horizontal, MiniWindowStyleTokens.inlineSpacing)
         .padding(.vertical, 2)
         .background(
             Capsule(style: .continuous)
@@ -72,7 +108,7 @@ struct MiniWindowStatusCapsule: View {
 /// natural-height measurement so even a short display never hides the last row.
 struct MiniWindowPausedSamplingRow: View {
     var body: some View {
-        Label(L10n.text("自动刷新已暂停", "Automatic Refresh Paused"), systemImage: AppSymbols.Action.pause)
+        Text(L10n.text("自动刷新已暂停", "Automatic Refresh Paused"))
             .font(AdvancedPanelTypography.captionStrong)
             .foregroundStyle(AppDesignTokens.Palette.warning)
             .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
@@ -97,62 +133,6 @@ extension MenuBarAdvancedStatusView {
         return actions.contextMenuContents
     }
 
-    var header: some View {
-        PanelHeader(
-            store: store,
-            state: panelSettingsState,
-            title: selectedSection.title,
-            updatedAt: selectedSectionUpdatedAt,
-            unavailableText: updatedUnavailableText,
-            systemImage: selectedSection.systemImage,
-            isConnected: monitorSnapshot != nil,
-            isRefreshing: isRefreshingLocalData,
-            simpleSectionSelection: nil,
-            showMainWindow: { openApp(filter: .overview) },
-            togglePause: { store.toggleMenuBarRefreshPaused() },
-            refresh: refreshPanelData
-        )
-    }
-
-    var moduleRail: some View {
-        VStack(spacing: 2) {
-            ForEach(PanelSection.allCases) { section in
-                AppSelectionButton(
-                    title: section.title,
-                    systemImage: section.systemImage,
-                    isSelected: selectedRailSection == section,
-                    showsTitle: false
-                ) {
-                    selectedSection = section
-                    if reduceMotion {
-                        selectedRailSection = section
-                    } else if railSelectionDistance(to: section) > 1 {
-                        withAnimation(AppMotionTokens.stateChange) {
-                            selectedRailSection = section
-                        }
-                    } else {
-                        withAnimation(AppMotionTokens.navigation) {
-                            selectedRailSection = section
-                        }
-                    }
-                }
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 4)
-        .frame(width: PanelLayoutMetrics.navigationWidth)
-    }
-
-    func railSelectionDistance(to section: PanelSection) -> Int {
-        guard let currentIndex = PanelSection.allCases.firstIndex(of: selectedRailSection),
-              let nextIndex = PanelSection.allCases.firstIndex(of: section) else {
-            return .max
-        }
-        return abs(currentIndex - nextIndex)
-    }
-
-
     func refreshPanelData() {
         store.refreshMenuBarNow()
         auxiliaryState.requestManualRefresh()
@@ -163,58 +143,17 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    var metricColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 90), spacing: 6)]
-    }
-
     var monitorSnapshot: SystemMonitorSnapshot? {
-        monitorState.snapshot
+        let live = MenuBarSamplingContext.shared.presentationSnapshot(live: monitorState.snapshot)
+#if DEBUG || STORAGE_CLEANER_BETA
+        return MiniWindowDemoData.presentationSnapshot(live: live)
+#else
+        return live
+#endif
     }
 
     var memorySnapshot: MemorySnapshot? {
         store.menuBarDisplayMemorySnapshot
-    }
-
-    var processMemorySnapshot: MemorySnapshot? {
-#if DEBUG || STORAGE_CLEANER_BETA
-        if MiniWindowDemoData.isEnabled {
-            return store.menuBarDisplayMemorySnapshot
-        }
-#endif
-        return store.memorySnapshot
-    }
-
-    var hasCachedDiskHealth: Bool {
-        guard let healthSummary else { return false }
-        return healthSummary.diskSMARTStatus != nil
-            || healthSummary.diskStatusText != nil
-            || healthSummary.capacitySevenDayDeltaBytes != nil
-            || healthSummary.backupStatusText != nil
-    }
-
-    var hasCachedNetworkSpeedTest: Bool {
-        guard let healthSummary else { return false }
-        return healthSummary.lastDownloadMbps != nil
-            || healthSummary.lastUploadMbps != nil
-            || healthSummary.lastSpeedTestAt != nil
-    }
-
-    var hasCachedBatteryHealth: Bool {
-        guard let healthSummary else { return false }
-        return healthSummary.batteryCapacityPercent != nil
-            || healthSummary.batteryCycleCount != nil
-            || healthSummary.batteryCondition != nil
-            || healthSummary.batteryPowerMode != nil
-    }
-
-    func capacitySevenDayDeltaText(_ value: Int64) -> String {
-        guard value != 0 else {
-            return L10n.text("无明显变化", "No material change")
-        }
-        let amount = ByteFormat.storageString(abs(value))
-        return value > 0
-            ? L10n.text("可用增加 \(amount)", "Available increased by \(amount)")
-            : L10n.text("可用减少 \(amount)", "Available decreased by \(amount)")
     }
 
     func diskSMARTStatusText(_ status: DiskSMARTStatus) -> String {
@@ -230,35 +169,6 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    func diskSMARTStatusTint(_ status: DiskSMARTStatus) -> Color {
-        switch status {
-        case .verified:
-            AppDesignTokens.Palette.success
-        case .failing:
-            AppDesignTokens.Palette.destructive
-        case .unsupported, .unavailable:
-            .secondary
-        }
-    }
-
-    func capacityDeltaTint(_ value: Int64) -> Color {
-        if value > 0 { return AppDesignTokens.Palette.success
-        }
-        if value < 0 { return AppDesignTokens.Palette.warning
-        }
-        return AppDesignTokens.Palette.information
-    }
-
-    func speedMbpsText(_ value: Double) -> String {
-        String(format: "%.1f Mbps", value)
-    }
-
-    func batteryCapacityTint(_ capacity: Int) -> Color {
-        if capacity < 80 { return AppDesignTokens.Palette.warning
-        }
-        return AppDesignTokens.Palette.success
-    }
-
     func batteryConditionText(_ condition: BatteryCondition) -> String {
         switch condition {
         case .normal:
@@ -267,17 +177,6 @@ extension MenuBarAdvancedStatusView {
             L10n.text("建议检修", "Service Recommended")
         case .unknown:
             L10n.text("未知", "Unknown")
-        }
-    }
-
-    func batteryConditionTint(_ condition: BatteryCondition) -> Color {
-        switch condition {
-        case .normal:
-            AppDesignTokens.Palette.success
-        case .serviceRecommended:
-            AppDesignTokens.Palette.warning
-        case .unknown:
-            .secondary
         }
     }
 
@@ -296,42 +195,6 @@ extension MenuBarAdvancedStatusView {
         monitorSnapshot?.cpuUsageBreakdown
     }
 
-    var loadAverage: SystemLoadAverage? {
-        monitorSnapshot?.loadAverage
-    }
-
-    var updatedUnavailableText: String {
-        switch selectedSection {
-        case .disk:
-            return L10n.text("正在读取磁盘数据", "Reading disk data")
-        case .power:
-            return L10n.text("等待电源或按需耗电测量", "Waiting for power or on-demand energy data")
-        case .cleanup:
-            return L10n.text("等待扫描", "Waiting for a scan")
-        case .overview, .processor, .memory, .network, .sensors:
-            return L10n.text("正在采样…", "Sampling…")
-        }
-    }
-
-    var selectedSectionUpdatedAt: Date? {
-        switch selectedSection {
-        case .disk:
-            storageRefreshedAt
-        case .power:
-            [batterySnapshot == nil ? nil : batteryRefreshedAt, store.energyImpactSnapshot?.generatedAt]
-                .compactMap { $0 }
-                .max()
-        case .cleanup:
-            store.scanHistorySummary.latest?.date
-        case .overview, .processor, .memory, .network, .sensors:
-            monitorSnapshot?.generatedAt
-        }
-    }
-
-    func timestampText(_ date: Date) -> String {
-        PanelTimestampFormat.detail(date)
-    }
-
     func metric(_ kind: MenuBarMetricKind) -> SystemMonitorMetric? {
         monitorSnapshot?.metric(for: kind)
     }
@@ -345,11 +208,6 @@ extension MenuBarAdvancedStatusView {
         return metric.value
     }
 
-    func metricDetail(_ kind: MenuBarMetricKind) -> String {
-        guard let metric = metric(kind), metric.isAvailable else { return "--" }
-        return metric.detail
-    }
-
     func metricPercent(_ kind: MenuBarMetricKind) -> Double? {
         guard let value = numericValue(metricValue(kind)) else { return nil }
         return min(1, max(0, value / 100))
@@ -357,10 +215,6 @@ extension MenuBarAdvancedStatusView {
 
     func numericValue(_ value: String) -> Double? {
         Double(value.filter { $0.isNumber || $0 == "." })
-    }
-
-    func percentProgress(_ value: Double?) -> Double? {
-        value.map { min(1, max(0, $0 / 100)) }
     }
 
     func percentText(_ value: Double?) -> String {
@@ -371,20 +225,6 @@ extension MenuBarAdvancedStatusView {
     func decimalText(_ value: Double?) -> String {
         guard let value else { return "--" }
         return String(format: "%.2f", value)
-    }
-
-    var processorTopologyText: String {
-        guard let processorTelemetry else { return "" }
-        return processorTelemetry.performanceLevels
-            .filter { $0.coreCount > 0 }
-            .map { level in
-                let title = processorLevelTitle(level.name)
-                return L10n.text(
-                    "\(level.coreCount) \(title)",
-                    "\(level.coreCount) \(title) cores"
-                )
-            }
-            .joined(separator: " + ")
     }
 
     func processorLevelTitle(_ rawName: String) -> String {
@@ -401,55 +241,14 @@ extension MenuBarAdvancedStatusView {
         return rawName
     }
 
-    func processorClusterTitle(_ cluster: CPUPerformanceStateService.ClusterReading) -> String {
-        let baseTitle = processorLevelTitle(cluster.performanceLevelName)
-        let siblingClusters = processorTelemetry?.clusters.filter {
-            $0.performanceLevelIndex == cluster.performanceLevelIndex
-        } ?? []
-        guard siblingClusters.count > 1,
-              let index = siblingClusters.firstIndex(where: { $0.identifier == cluster.identifier }) else {
-            return L10n.text("\(baseTitle)簇", "\(baseTitle) Cluster")
-        }
-        return L10n.text("\(baseTitle)簇 \(index + 1)", "\(baseTitle) Cluster \(index + 1)")
-    }
-
     func processorFrequencyText(_ megahertz: Double) -> String {
         String(format: "%.2f GHz", megahertz / 1_000)
     }
 
-    func processorVoltageText(_ volts: Double) -> String {
-        String(format: "%.2f V", volts)
-    }
-
-    func processorClusterTint(_ cluster: CPUPerformanceStateService.ClusterReading) -> Color {
-        let normalized = cluster.performanceLevelName.lowercased()
-        if normalized.contains("efficiency") || normalized == "e" {
-            return AppDesignTokens.Palette.success
-        }
-        if normalized.contains("super") {
-            return AppDesignTokens.Palette.tertiary
-        }
-        return AppDesignTokens.Palette.information
-    }
-
-    var processorChartSeries: [MenuBarTelemetrySeries] {
-        var series = [
-            MenuBarTelemetrySeries(id: "user", title: L10n.text("用户", "User"), channel: .cpuUser, color: resolvedPrimaryTint),
-            MenuBarTelemetrySeries(id: "system", title: L10n.text("系统", "System"), channel: .cpuSystem, color: resolvedSecondaryTint)
-        ]
-        if metricAvailable(.gpuUsage) {
-            series.append(
-                MenuBarTelemetrySeries(id: "gpu", title: "GPU", channel: .gpu, color: resolvedGPUTint)
-            )
-        }
-        return series
-    }
-
+    /// The fan charts' scale from the window's largest fan reading, prepared
+    /// with the window (P2-1).
     var fanTrendMaximum: Double {
-        MenuBarChartGeometry.niceCeiling(
-            for: history.flatMap { [$0.fanRPM, $0.fanTargetRPM].compactMap { $0 } },
-            minimum: 1_000
-        )
+        historySummary.fanTrendMaximum
     }
 
     var hasOverviewCompactGauges: Bool {
@@ -458,27 +257,14 @@ extension MenuBarAdvancedStatusView {
             || batterySnapshot?.chargePercent != nil
     }
 
+    /// The CPU load color exit (PanelMetricColors.cpuLoad): used for the
+    /// total CPU readouts, never for headings.
     var processorTint: Color {
-        guard let value = cpuBreakdown?.totalPercent ?? numericValue(metricValue(.cpuUsage)) else { return AppDesignTokens.Palette.information
-        }
-        if value >= 90 { return AppDesignTokens.Palette.destructive
-        }
-        if value >= 75 { return AppDesignTokens.Palette.warning
-        }
-        return AppDesignTokens.Palette.information
+        panelMetricColors.cpuLoad(cpuBreakdown?.totalPercent ?? numericValue(metricValue(.cpuUsage)))
     }
 
     var memoryTint: Color {
-        return switch memorySnapshot?.reportablePressureLevel {
-        case .critical:
-            AppDesignTokens.Palette.destructive
-        case .elevated:
-            AppDesignTokens.Palette.warning
-        case .normal:
-            AppDesignTokens.Palette.information
-        case .none:
-            .secondary
-        }
+        panelMetricColors.memoryPressure(for: memorySnapshot?.reportablePressureLevel)
     }
 
     var memoryPressureTitle: String {
@@ -523,45 +309,23 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    var memoryPressureStateProgress: Double? {
-        switch memorySnapshot?.reportablePressureLevel {
-        case .critical:
-            1
-        case .elevated:
-            2 / 3
-        case .normal:
-            1 / 3
-        case .none:
-            nil
-        }
-    }
-
-    var memoryPressureHeadroomText: String {
-        guard let memorySnapshot else {
-            return L10n.text("系统压力余量读取中", "Reading system pressure headroom")
-        }
-        return memorySnapshot.pressureHeadroomPercent.map { headroom in
-            L10n.text("系统压力余量 \(headroom)%", "System pressure headroom \(headroom)%")
-        } ?? L10n.text("系统压力余量不可用", "System pressure headroom unavailable")
-    }
-
     var memoryRingSegments: [GeekCombinedRingSegment] {
         guard let composition = memorySnapshot?.ringComposition else { return [] }
         return [
             GeekCombinedRingSegment(
                 id: "app-or-other",
                 progress: composition.appOrOtherRatio,
-                color: AppChartPalette.memoryAppOrOther
+                color: panelMetricColors.memoryApp
             ),
             GeekCombinedRingSegment(
                 id: "wired",
                 progress: composition.wiredRatio,
-                color: AppChartPalette.memoryWired
+                color: panelMetricColors.memoryWired
             ),
             GeekCombinedRingSegment(
                 id: "compressed",
                 progress: composition.compressedRatio,
-                color: AppChartPalette.memoryCompressed
+                color: panelMetricColors.memoryCompressed
             ),
         ]
     }
@@ -588,7 +352,7 @@ extension MenuBarAdvancedStatusView {
 #else
         let referenceDate = date
 #endif
-        return MemorySampleStatusPresentation.text(
+        return MemorySampleStatusPresentation.headerText(
             snapshot: memorySnapshot,
             isPaused: store.isMenuBarRefreshPaused,
             referenceDate: referenceDate
@@ -611,7 +375,7 @@ extension MenuBarAdvancedStatusView {
             return L10n.text("内存组成读取中。", "Memory composition is being read.")
         }
         return L10n.text(
-            "应用及其他 \(ByteFormat.string(Int64(clamping: composition.appOrOtherBytes)))，有线 \(ByteFormat.string(Int64(clamping: composition.wiredBytes)))，压缩 \(ByteFormat.string(Int64(clamping: composition.compressedBytes)))，可用 \(ByteFormat.string(Int64(clamping: composition.availableBytes)))。",
+            "应用及其他 \(ByteFormat.string(Int64(clamping: composition.appOrOtherBytes)))，联动 \(ByteFormat.string(Int64(clamping: composition.wiredBytes)))，压缩 \(ByteFormat.string(Int64(clamping: composition.compressedBytes)))，可用 \(ByteFormat.string(Int64(clamping: composition.availableBytes)))。",
             "Apps and other \(ByteFormat.string(Int64(clamping: composition.appOrOtherBytes))), wired \(ByteFormat.string(Int64(clamping: composition.wiredBytes))), compressed \(ByteFormat.string(Int64(clamping: composition.compressedBytes))), available \(ByteFormat.string(Int64(clamping: composition.availableBytes)))."
         )
     }
@@ -623,7 +387,7 @@ extension MenuBarAdvancedStatusView {
         case .attention:
             AppDesignTokens.Palette.warning
         case .normal, .none:
-            AppDesignTokens.Palette.information
+            panelMetricColors.diskWrite
         }
     }
 
@@ -640,11 +404,6 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    var storagePercentText: String {
-        guard let storageSnapshot else { return "--" }
-        return "\(storageSnapshot.userUsedPercent)%"
-    }
-
     var temperatureValue: Double? {
         guard metricAvailable(.chipTemperature) else { return nil }
         return numericValue(metricValue(.chipTemperature))
@@ -654,14 +413,10 @@ extension MenuBarAdvancedStatusView {
         temperatureValue.map { min(1, max(0, $0 / 100)) }
     }
 
+    /// Chip temperature color: the one temperature rule, whose normal color
+    /// follows the chart theme like the other sensor rings and histories.
     var temperatureTint: Color {
-        guard let temperatureValue else { return AppDesignTokens.Palette.information
-        }
-        if temperatureValue >= 90 { return AppDesignTokens.Palette.destructive
-        }
-        if temperatureValue >= 80 { return AppDesignTokens.Palette.warning
-        }
-        return AppDesignTokens.Palette.information
+        panelMetricColors.temperature(temperatureValue, chartAccent: panelChartAccentColor)
     }
 
     var thermalStateTitle: String {
@@ -676,21 +431,6 @@ extension MenuBarAdvancedStatusView {
             L10n.text("较热", "Serious")
         case .critical:
             L10n.text("过热", "Critical")
-        }
-    }
-
-    var thermalStateTint: Color {
-        switch monitorSnapshot?.thermalState ?? .unknown {
-        case .unknown:
-            .secondary
-        case .nominal:
-            AppDesignTokens.Palette.success
-        case .fair:
-            AppDesignTokens.Palette.caution
-        case .serious:
-            AppDesignTokens.Palette.warning
-        case .critical:
-            AppDesignTokens.Palette.destructive
         }
     }
 
@@ -711,38 +451,29 @@ extension MenuBarAdvancedStatusView {
     }
 
     var networkDownText: String {
-        if let latest = geekChartHistory.last {
-            return rateText(latest.downBytesPerSecond)
-        }
-        return rateText(monitorSnapshot?.networkThroughput?.downBytesPerSecond)
+        rateText(networkCurrentRates.down)
     }
 
     var networkUpText: String {
-        if let latest = geekChartHistory.last {
-            return rateText(latest.upBytesPerSecond)
-        }
-        return rateText(monitorSnapshot?.networkThroughput?.upBytesPerSecond)
+        rateText(networkCurrentRates.up)
+    }
+
+    /// BOARD N16-3: the network history's current reading (D39), keeping the
+    /// last rates through a sample without them (`MenuBarNetworkReadout`).
+    /// The open page's window was read before, so opening another page
+    /// could show "--" until the next sample.
+    var networkCurrentRates: (down: Int64?, up: Int64?) {
+        MenuBarNetworkReadout.rates(
+            current: currentReading(of: networkDisplayedHistory),
+            lastReading: monitorState.lastNetworkReading,
+            now: historyReferenceDate,
+            retainsStoredReading: MenuBarSamplingContext.shared.plan != nil
+        )
     }
 
     func rateText(_ bytes: Int64?) -> String {
         guard let bytes else { return "--" }
         return "\(ByteFormat.string(bytes))/s"
-    }
-
-    var networkDownPeak: Int64? {
-        history.compactMap(\.downBytesPerSecond).max()
-    }
-
-    var networkUpPeak: Int64? {
-        history.compactMap(\.upBytesPerSecond).max()
-    }
-
-    func networkRelativeProgress(direction: AdvancedNetworkDirection) -> Double? {
-        guard let throughput = monitorSnapshot?.networkThroughput else { return nil }
-        let current = direction == .download ? throughput.downBytesPerSecond : throughput.upBytesPerSecond
-        let peak = direction == .download ? networkDownPeak : networkUpPeak
-        guard let peak, peak > 0 else { return 0 }
-        return min(1, max(0, Double(current) / Double(peak)))
     }
 
     var sessionDownloadedBytes: Int64 {
@@ -751,47 +482,6 @@ extension MenuBarAdvancedStatusView {
 
     var sessionUploadedBytes: Int64 {
         monitorState.sessionUploadedBytes
-    }
-
-    var sensorTiles: [AdvancedMetricTileModel] {
-        var tiles: [AdvancedMetricTileModel] = []
-        if metricAvailable(.chipTemperature) {
-            tiles.append(
-                AdvancedMetricTileModel(
-                    id: "temperature",
-                    title: L10n.text("芯片温度", "Chip Temp"),
-                    value: metricValue(.chipTemperature),
-                    detail: L10n.text("实时最高", "Live Peak"),
-                    tint: temperatureTint,
-                    progress: temperatureProgress
-                )
-            )
-        }
-        if metricAvailable(.fanSpeed) {
-            tiles.append(
-                AdvancedMetricTileModel(
-                    id: "fan",
-                    title: L10n.text("风扇转速", "Fan Speed"),
-                    value: metricValue(.fanSpeed),
-                    detail: metricDetail(.fanSpeed),
-                    tint: AppDesignTokens.Palette.tertiary,
-                    progress: nil
-                )
-            )
-        }
-        if metricAvailable(.gpuUsage) {
-            tiles.append(
-                AdvancedMetricTileModel(
-                    id: "gpu",
-                    title: "GPU",
-                    value: metricValue(.gpuUsage),
-                    detail: L10n.text("驱动统计", "Driver"),
-                    tint: AppDesignTokens.Palette.diagnostic,
-                    progress: metricPercent(.gpuUsage)
-                )
-            )
-        }
-        return tiles
     }
 
     var fanTelemetryRows: [AdvancedTelemetryRow] {
@@ -807,9 +497,10 @@ extension MenuBarAdvancedStatusView {
     var batteryTint: Color {
         switch batterySnapshot?.powerSource ?? .unknown {
         case .acPower:
-            return AppDesignTokens.Palette.information
+            return batterySnapshot?.isCharging == true
+                ? panelMetricColors.batteryCharging : panelMetricColors.battery
         case .batteryPower:
-            return AppDesignTokens.Palette.sensitive
+            return panelMetricColors.batteryDraining
         case .unknown:
             return .secondary
         }
@@ -828,36 +519,24 @@ extension MenuBarAdvancedStatusView {
             return MiniWindowDemoData.hardwareControlProfile.hasInternalBattery
         }
 #endif
-        return InternalBatteryPresence.resolve(
-            hasExplicitNoBatteryEvidence: hasConfirmedNoInternalBattery,
+        return resolvedMiniWindowBatteryAvailability == .present
+    }
+
+    var hasConfirmedNoInternalBattery: Bool {
+        resolvedMiniWindowBatteryAvailability == .absent
+    }
+
+    private var resolvedMiniWindowBatteryAvailability: InternalBatteryAvailability {
+        let healthSaysAbsent: Bool
+        if case .notPresent? = computerHealthStore.snapshot?.batteryEvidence {
+            healthSaysAbsent = true
+        } else { healthSaysAbsent = false }
+        return MiniWindowBatteryPolicy.resolve(
+            live: reportedInternalBatteryAvailability, healthSaysAbsent: healthSaysAbsent,
             hasPowerSnapshot: batterySnapshot != nil,
             hasElectricalBatteryData: batteryElectricalSnapshot?.hasBatteryData == true,
             hasHealthSnapshot: computerHealthStore.snapshot?.battery != nil
         )
-    }
-
-    var hasConfirmedNoInternalBattery: Bool {
-        if case .notPresent? = computerHealthStore.snapshot?.batteryEvidence {
-            return true
-        }
-        return false
-    }
-
-    var batterySystemImage: String {
-        guard let batterySnapshot else { return "battery.0" }
-        switch batterySnapshot.presentationState {
-        case .charging:
-            return "battery.100percent.bolt"
-        case .charged, .connectedNotCharging, .optimizedChargingPaused:
-            return "powerplug.fill"
-        case .calculating, .unknown, .unavailable, .discharging:
-            break
-        }
-        let charge = batterySnapshot.chargePercent ?? 0
-        if charge >= 75 { return "battery.100percent" }
-        if charge >= 40 { return "battery.50percent" }
-        if charge >= 15 { return "battery.25percent" }
-        return "battery.0percent"
     }
 
     var batteryPowerSourceTitle: String {
@@ -880,70 +559,152 @@ extension MenuBarAdvancedStatusView {
     }
 
     var batteryPresentationStateTitle: String {
-        switch batteryPresentationState {
-        case let .charging(minutes):
+        BatteryPresentationText.title(batteryPresentationState)
+    }
+
+    var batteryPresentationStateCompactTitle: String {
+        BatteryPresentationText.compactTitle(batteryPresentationState)
+    }
+
+    func durationMinutesText(_ minutes: Int) -> String {
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        if hours > 0 {
+            return L10n.text("\(hours) 小时 \(remainder) 分", "\(hours)h \(remainder)m")
+        }
+        return L10n.text("\(remainder) 分钟", "\(remainder)m")
+    }
+
+    var safeCleanupBytesText: String {
+        guard let entry = store.latestSafeCleanupEntry else {
+            return L10n.text("尚未扫描", "Not Scanned Yet")
+        }
+        return ByteFormat.string(entry.greenBytes)
+    }
+
+    var safeCleanupCountText: String {
+        guard let entry = store.latestSafeCleanupEntry else {
+            return L10n.text("等待扫描", "Waiting for Scan")
+        }
+        return L10n.text("\(entry.greenCount) 项", "\(entry.greenCount) items")
+    }
+
+    var cleanupSummaryTitle: String {
+        if store.latestSafeCleanupEntry == nil && actionableCleanupItems.isEmpty {
+            return L10n.text("尚未扫描", "Not Scanned Yet")
+        }
+        return actionableCleanupItems.isEmpty
+            ? L10n.text("上次扫描摘要", "Last Scan Summary")
+            : L10n.text("可安全清理", "Safe Cleanup")
+    }
+
+    var staleCleanupSummaryNotice: String {
+        if store.latestSafeCleanupEntry?.greenCount ?? 0 > 0 {
+            return L10n.text(
+                "需重新扫描后才能清理",
+                "Rescan before cleanup"
+            )
+        }
+        return L10n.text(
+            "当前没有已加载的可操作清理项。",
+            "No actionable cleanup items are currently loaded."
+        )
+    }
+
+    var actionableCleanupItems: [StorageItem] {
+        Array(store.items(for: .green).filter(\.canMoveToTrash).prefix(4))
+    }
+
+    // Legacy adapters also serve the dormant simple-panel pages.
+    var cleanupPageBytesText: String { safeCleanupBytesText }
+    var cleanupPageCountText: String { safeCleanupCountText }
+
+}
+
+/// Status wording of the battery card, the power page and their help text.
+///
+/// "正在计算" appears only while macOS is calculating a time (`isEstimating`,
+/// IOPowerSources' -1). A charged, connected, paused or finishing battery and
+/// a state for which the system offers no time each say what they are.
+enum BatteryPresentationText {
+    static func title(_ state: BatteryPresentationState) -> String {
+        switch state {
+        case let .charging(minutes, isEstimating):
             guard let minutes, minutes > 0 else {
-                return L10n.text("正在计算", "Calculating")
+                return untimedChargingTitle(isEstimating: isEstimating)
             }
             return L10n.text(
                 "预计 \(batteryDurationText(minutes))后充满",
                 "Estimated full in \(batteryDurationText(minutes))"
             )
-        case .charged:
-            return L10n.text("已充满", "Fully Charged")
-        case .connectedNotCharging:
-            return L10n.text("已接通电源", "Connected to Power")
-        case .optimizedChargingPaused:
-            return L10n.text("已暂停充电", "Charging Paused")
-        case let .discharging(minutes):
+        case let .discharging(minutes, isEstimating):
             guard let minutes, minutes > 0 else {
-                return L10n.text("正在计算", "Calculating")
+                return untimedDischargingTitle(isEstimating: isEstimating)
             }
             return L10n.text(
                 "剩余 \(batteryDurationText(minutes))",
                 "\(batteryDurationText(minutes)) remaining"
             )
-        case .calculating:
-            return L10n.text("正在计算", "Calculating")
-        case .unknown:
-            return L10n.text("状态未知", "Status Unknown")
         case .unavailable:
             return L10n.text("不可用", "Unavailable")
+        case .finishingCharge, .charged, .connectedNotCharging, .optimizedChargingPaused, .unknown:
+            return stateTitle(state)
         }
     }
 
-    var batteryPresentationStateCompactTitle: String {
-        switch batteryPresentationState {
-        case let .charging(minutes):
+    static func compactTitle(_ state: BatteryPresentationState) -> String {
+        switch state {
+        case let .charging(minutes, isEstimating):
             guard let minutes, minutes > 0 else {
-                return L10n.text("正在计算", "Calculating")
+                return untimedChargingTitle(isEstimating: isEstimating)
             }
             return L10n.text(
                 "约 \(batteryCompactDurationText(minutes))后充满",
                 "Est. full in \(batteryCompactDurationText(minutes))"
             )
+        case let .discharging(minutes, isEstimating):
+            guard let minutes, minutes > 0 else {
+                return untimedDischargingTitle(isEstimating: isEstimating)
+            }
+            return L10n.text(
+                "剩余约 \(batteryCompactDurationText(minutes))",
+                "About \(batteryCompactDurationText(minutes)) remaining"
+            )
+        case .finishingCharge, .charged, .connectedNotCharging, .optimizedChargingPaused,
+             .unknown, .unavailable:
+            return stateTitle(state)
+        }
+    }
+
+    /// States without a time. Unknown and unavailable share the compact text.
+    private static func stateTitle(_ state: BatteryPresentationState) -> String {
+        switch state {
+        case .finishingCharge:
+            return L10n.text("即将充满", "Finishing Charge")
         case .charged:
             return L10n.text("已充满", "Fully Charged")
         case .connectedNotCharging:
             return L10n.text("已接通电源", "Connected to Power")
         case .optimizedChargingPaused:
             return L10n.text("已暂停充电", "Charging Paused")
-        case let .discharging(minutes):
-            guard let minutes, minutes > 0 else {
-                return L10n.text("正在计算", "Calculating")
-            }
-            return L10n.text(
-                "剩余约 \(batteryCompactDurationText(minutes))",
-                "About \(batteryCompactDurationText(minutes)) remaining"
-            )
-        case .calculating:
-            return L10n.text("正在计算", "Calculating")
-        case .unknown, .unavailable:
+        case .charging, .discharging, .unknown, .unavailable:
             return L10n.text("状态未知", "Status Unknown")
         }
     }
 
-    private func batteryDurationText(_ minutes: Int) -> String {
+    private static func untimedChargingTitle(isEstimating: Bool) -> String {
+        isEstimating ? calculatingTitle : L10n.text("正在充电", "Charging")
+    }
+
+    private static func untimedDischargingTitle(isEstimating: Bool) -> String {
+        isEstimating ? calculatingTitle : L10n.text("使用电池", "On Battery")
+    }
+
+    private static var calculatingTitle: String {
+        L10n.text("正在计算", "Calculating")
+    }
+
+    private static func batteryDurationText(_ minutes: Int) -> String {
         let hours = minutes / 60
         let remainder = minutes % 60
         if hours > 0 {
@@ -958,7 +719,7 @@ extension MenuBarAdvancedStatusView {
         return L10n.text("\(remainder) 分钟", "\(remainder)m")
     }
 
-    private func batteryCompactDurationText(_ minutes: Int) -> String {
+    private static func batteryCompactDurationText(_ minutes: Int) -> String {
         let hours = minutes / 60
         let remainder = minutes % 60
         if hours > 0, remainder > 0 {
@@ -969,59 +730,6 @@ extension MenuBarAdvancedStatusView {
         }
         return L10n.text("\(remainder) 分", "\(remainder)m")
     }
-
-    func durationMinutesText(_ minutes: Int) -> String {
-        let hours = minutes / 60
-        let remainder = minutes % 60
-        if hours > 0 {
-            return L10n.text("\(hours) 小时 \(remainder) 分", "\(hours)h \(remainder)m")
-        }
-        return L10n.text("\(remainder) 分钟", "\(remainder)m")
-    }
-
-    var safeCleanupBytesText: String {
-        guard let status = store.scanHistorySummary.latestStatus() else { return "--" }
-        return ByteFormat.string(status.entry.greenBytes)
-    }
-
-    var safeCleanupCountText: String {
-        guard let status = store.scanHistorySummary.latestStatus() else {
-            return L10n.text("等待扫描", "Waiting for Scan")
-        }
-        return L10n.text("\(status.entry.greenCount) 项", "\(status.entry.greenCount) items")
-    }
-
-    var cleanupSummaryTitle: String {
-        actionableCleanupItems.isEmpty
-            ? L10n.text("上次扫描摘要", "Last Scan Summary")
-            : L10n.text("可安全清理", "Safe Cleanup")
-    }
-
-    var staleCleanupSummaryNotice: String {
-        if store.scanHistorySummary.latestStatus()?.entry.greenCount ?? 0 > 0 {
-            return L10n.text(
-                "上方是上次扫描摘要；当前没有已加载的可操作明细，请重新扫描后再确认清理。",
-                "The summary above is from the last scan; no actionable details are loaded now. Rescan before confirming cleanup."
-            )
-        }
-        return L10n.text(
-            "当前没有已加载的可操作清理项。",
-            "No actionable cleanup items are currently loaded."
-        )
-    }
-
-    var actionableCleanupItems: [StorageItem] {
-        Array(store.items(for: .green).filter(\.canMoveToTrash).prefix(4))
-    }
-
-    var actionableMemoryApps: [MemoryAppUsage] {
-        Array(
-            (processMemorySnapshot?.appsByResidentUsage ?? [])
-                .filter { $0.canQuit && $0.bundlePath?.hasSuffix(".app") == true }
-                .prefix(4)
-        )
-    }
-
 }
 
 enum InternalBatteryPresence {
@@ -1036,11 +744,6 @@ enum InternalBatteryPresence {
     }
 }
 
-enum AdvancedNetworkDirection {
-    case download
-    case upload
-}
-
 struct AdvancedMetricTileModel: Identifiable {
     let id: String
     let title: String
@@ -1052,121 +755,25 @@ struct AdvancedMetricTileModel: Identifiable {
 
 struct AdvancedPanelCard<Content: View>: View {
     let title: String
-    let systemImage: String
-    let tint: Color
     let content: Content
 
-    init(title: String, systemImage: String, tint: Color, @ViewBuilder content: () -> Content) {
+    init(title: String, @ViewBuilder content: () -> Content) {
         self.title = title
-        self.systemImage = systemImage
-        self.tint = tint
         self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label {
-                Text(title)
-                    .foregroundStyle(.primary)
-            } icon: {
-                Image(systemName: systemImage)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.secondary)
-            }
-            .font(AdvancedPanelTypography.section)
-            .accessibilityAddTraits(.isHeader)
+            Text(title)
+                .foregroundStyle(.primary)
+                .font(AdvancedPanelTypography.section)
+                .accessibilityAddTraits(.isHeader)
 
             content
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-struct AdvancedMetricTile: View {
-    let title: String
-    let value: String
-    let detail: String
-    let tint: Color
-    let progress: Double?
-
-    var body: some View {
-        Group {
-            if isPercentageMetric {
-                PanelCircularGauge(
-                    title: title,
-                    value: value,
-                    progress: progress,
-                    tint: tint,
-                    detail: detail,
-                    size: 52
-                )
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title.uppercased())
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    Text(value)
-                        .font(AdvancedPanelTypography.value)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.86)
-
-                    Text(detail)
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .accessibilityElement(children: .combine)
-            }
-        }
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
-    }
-
-    private var isPercentageMetric: Bool {
-        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedValue.hasSuffix("%") || trimmedValue.hasSuffix("％")
-    }
-}
-
-struct AdvancedCompactGauge: View {
-    let title: String
-    let value: String
-    let progress: Double?
-    let tint: Color
-
-    var body: some View {
-        PanelCircularGauge(
-            title: title,
-            value: value,
-            progress: progress,
-            tint: tint,
-            size: 52
-        )
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-    }
-}
-
-struct AdvancedPlainMetric: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        VStack(spacing: 3) {
-            Text(value)
-                .font(AdvancedPanelTypography.value)
-                .monospacedDigit()
-            Text(title)
-                .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1210,71 +817,11 @@ extension EnvironmentValues {
     }
 }
 
-struct AdvancedProcessorClusterRow: View {
-    let title: String
-    let detail: String
-    let frequency: String?
-    let voltage: String?
-    let tint: Color
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(AdvancedPanelTypography.body)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(detail)
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-
-            Spacer(minLength: 8)
-
-            if let frequency, let voltage {
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(frequency)
-                        .font(AdvancedPanelTypography.compactValue)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                    Text(L10n.text("平均有效频率", "Avg. Frequency"))
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(minWidth: 72, alignment: .trailing)
-
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(voltage)
-                        .font(AdvancedPanelTypography.compactValue)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                    Text(L10n.text("状态电压", "State Voltage"))
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(minWidth: 58, alignment: .trailing)
-            } else {
-                Text(L10n.text("休眠", "Sleeping"))
-                    .font(AdvancedPanelTypography.compactValue)
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 138, alignment: .trailing)
-            }
-        }
-        .frame(minHeight: 30)
-        .accessibilityElement(children: .combine)
-    }
-}
-
 struct AdvancedUnavailableRow: View {
     let title: String
 
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: AppSymbols.Action.info)
-                .foregroundStyle(.secondary)
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
             Text(title)
                 .font(AdvancedPanelTypography.body)
                 .foregroundStyle(.secondary)
@@ -1284,68 +831,11 @@ struct AdvancedUnavailableRow: View {
     }
 }
 
-struct AdvancedAppUsageRow: View {
-    let app: MemoryAppUsage
-
-    var body: some View {
-        HStack(spacing: 7) {
-            AdvancedAppIcon(path: app.iconPath, fallback: "app.fill")
-            VStack(alignment: .leading, spacing: 1) {
-                Text(app.name)
-                    .font(AdvancedPanelTypography.body.weight(.semibold))
-                    .lineLimit(1)
-                Text(L10n.text("\(app.processCount) 个进程", "\(app.processCount) processes"))
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            Text(ByteFormat.string(app.bytes))
-                .font(AdvancedPanelTypography.compactValue)
-                .monospacedDigit()
-            Text(String(format: "%.1f%%", app.percent))
-                .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 34, alignment: .trailing)
-        }
-        .frame(minHeight: 30)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-struct AdvancedEnergyAppRow: View {
-    let app: EnergyImpactApp
-
-    var body: some View {
-        HStack(spacing: 7) {
-            AdvancedAppIcon(path: app.iconPath, fallback: "bolt.fill")
-            VStack(alignment: .leading, spacing: 1) {
-                Text(app.name)
-                    .font(AdvancedPanelTypography.body.weight(.semibold))
-                    .lineLimit(1)
-                Text(app.measurementTitle)
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            Text(app.currentPowerWattsText)
-                .font(AdvancedPanelTypography.compactValue)
-                .monospacedDigit()
-        }
-        .frame(minHeight: 30)
-        .accessibilityElement(children: .combine)
-    }
-}
-
 struct AdvancedCleanupItemRow: View {
     let item: StorageItem
 
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: AppSymbols.Panel.archive)
-                .font(AdvancedPanelTypography.symbol)
-                .foregroundStyle(AppDesignTokens.Palette.success)
-                .frame(width: 24)
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.title)
                     .font(AdvancedPanelTypography.body.weight(.semibold))
@@ -1362,23 +852,5 @@ struct AdvancedCleanupItemRow: View {
         }
         .frame(minHeight: 30)
         .accessibilityElement(children: .combine)
-    }
-}
-
-struct AdvancedAppIcon: View {
-    let path: String
-    let fallback: String
-
-    var body: some View {
-        CachedAppIconView(
-            path: path,
-            size: 24
-        ) {
-            Image(systemName: fallback)
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
-                .frame(width: 24, height: 24)
-        }
-            .frame(width: 24, height: 24)
     }
 }

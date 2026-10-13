@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var store: ScanStore
     private let computerHealthStore: ComputerHealthStore
@@ -12,10 +13,18 @@ struct ContentView: View {
     private let heavyWorkActivityStore: HeavyWorkActivityStore
     @ObservedObject private var navigationState: AppNavigationState
     @AppStorage(L10n.languageDefaultsKey) private var languageRawValue = AppLanguage.system.rawValue
+    @AppStorage(AppCanvasTheme.defaultsKey) private var canvasThemeRawValue = AppCanvasTheme.defaultTheme.rawValue
+    /// D53 §2.2: the full sidebar or the icon rail (below 960 pt), with the
+    /// user's manual choice kept until the window crosses the threshold.
+    @State private var sidebarPresentation = SidebarPresentationState()
+    @State private var lastSidebarWindowWidth: CGFloat = 0
+    @State private var generatedArtWindowVisible = false
+    @Environment(\.generatedArtLibrary) private var generatedArtLibrary
     @AppStorage(FirstLaunchOnboardingPolicy.completionDefaultsKey)
     private var didCompleteFirstLaunchOnboarding = false
     @SceneStorage("selectedFilter.v2") private var selectedFilterRaw = ReviewFilter.overview.rawValue
     @State private var isShowingFirstLaunchOnboarding = false
+    @State private var isShowingOperationHistory = false
 
     init(
         store: ScanStore,
@@ -75,15 +84,61 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { proxy in
             mainContent(metrics: WindowLayoutMetrics(contentSize: proxy.size))
+                .onChange(of: proxy.size.width, initial: true) { _, width in
+                    guard width > 1 else { return }
+                    defer { lastSidebarWindowWidth = width }
+                    var next = sidebarPresentation
+                    next.update(windowWidth: width)
+                    guard next != sidebarPresentation else { return }
+                    // The first real width sets the form at once; later
+                    // window resizes animate the change (§2.2).
+                    guard lastSidebarWindowWidth > 1 else {
+                        sidebarPresentation = next
+                        return
+                    }
+#if DEBUG
+                    if FeaturePresentationDemo.disablesLayoutAnimations {
+                        sidebarPresentation = next
+                        return
+                    }
+#endif
+                    withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {
+                        sidebarPresentation = next
+                    }
+                }
         }
     }
 
     private func mainContent(metrics: WindowLayoutMetrics) -> some View {
         fullWorkspace(metrics: metrics)
+        .modifier(FeatureRuntimeClockHost(store: store, healthStore: computerHealthStore,
+            privacyStore: browserPrivacyStore, benchmarkStore: macBenchmarkStore))
         .navigationSplitViewStyle(.balanced)
         .environment(\.windowLayoutMetrics, metrics)
+        .environment(\.generatedArtWindowVisible, generatedArtWindowVisible)
+        .background(GeneratedArtWindowVisibility(visible: $generatedArtWindowVisible).frame(width: 0, height: 0))
+        .task(id: GeneratedArtLoadRequest(name: activePresentationFilter.rawValue, visible: generatedArtWindowVisible)) {
+            guard generatedArtWindowVisible else { return }
+            if activePresentationFilter == .updater { StartupApplicationUpdateScheduler.shared.promoteIfPending() }
+            // Current-page art goes first; speculative headers decode serially.
+            if let art = GeneratedArt.module(for: activePresentationFilter) {
+                _ = await generatedArtLibrary.image(named: art.resourceName(.landing))
+            }
+            await generatedArtLibrary.preload(GeneratedArt.headerResourceNames, whileVisible: generatedArtWindowVisible)
+        }
+        // D53: the night canvas theme (pure black or deep space) for every
+        // view of the main window, its sheets and overlays.
+        .environment(\.canvasTheme, AppCanvasTheme.resolve(rawValue: canvasThemeRawValue))
         .toolbar(removing: .sidebarToggle)
         .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    isShowingOperationHistory = true
+                } label: {
+                    Label(L10n.text("操作记录", "Operation History"), systemImage: "clock.arrow.circlepath")
+                }
+                .help(L10n.text("查看清理、卸载及迁移回执与恢复", "View cleanup, uninstall and migration receipts and recovery"))
+            }
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .principal) {
                     IntegratedTitlebar(theme: activePresentationFilter.moduleTheme)
@@ -95,7 +150,14 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(isPresented: $isShowingOperationHistory) {
+            ReversibleOperationsView(store: store, resumeUninstall: { report in
+                selectFilter(.uninstall)
+                store.prepareResidualUninstall(report)
+            })
+        }
         .toolbarBackground(.hidden, for: .windowToolbar)
+        .toolbar(FeatureLightfield.owns(activePresentationFilter) ? .hidden : .visible, for: .windowToolbar)
         .background(MainWindowChromeConfigurator().frame(width: 0, height: 0))
         .focusedSceneValue(
             \.mainWindowSidebarAction,
@@ -111,12 +173,17 @@ struct ContentView: View {
             \.startupItemsKeyboardActions,
             startupItemsKeyboardActions
         )
-        .id(languageRawValue)
         .task {
             await Task.yield()
+#if DEBUG
+            guard !FeaturePresentationDemo.isEnabled, !LightfieldComponentGallery.isRequested else { return }
+#endif
             await store.loadPersistedHistoryIfNeeded()
         }
         .task {
+#if DEBUG
+            guard !FeaturePresentationDemo.isEnabled, !LightfieldComponentGallery.isRequested else { return }
+#endif
             await networkSpeedTestStore.restoreLastSuccessfulResult()
         }
 #if DEBUG || STORAGE_CLEANER_BETA
@@ -125,7 +192,8 @@ struct ContentView: View {
                 navigationState: navigationState,
                 browserPrivacyStore: browserPrivacyStore,
                 store: store,
-                healthStore: computerHealthStore
+                healthStore: computerHealthStore,
+                openSettings: { openSettings() }
             )
         }
 #endif
@@ -168,6 +236,11 @@ struct ContentView: View {
         )
         .onAppear {
 #if DEBUG
+            if LightfieldComponentGallery.isRequested { selectFilter(.memory); return }
+            if let configuration = FeaturePresentationDemo.launchConfiguration {
+                selectFilter(configuration.module ?? launchFilter ?? .overview)
+                return
+            }
             if let debugAppUpdatePresentation {
                 selectFilter(.updater)
                 store.installDebugAppUpdatePresentationFixture(debugAppUpdatePresentation)
@@ -310,35 +383,15 @@ struct ContentView: View {
                     .environment(\.locale, L10n.locale)
             }
         }
-        .sheet(isPresented: uninstallPreviewSheetBinding) {
-            if let app = store.pendingUninstallApp {
-                UninstallPreviewSheet(
+        .sheet(isPresented: relatedAppCleanupAlertBinding) {
+            if let app = store.pendingRelatedCleanupApp {
+                RelatedAppFilesReviewSheet(
                     app: app,
-                    canConfirm: store.canRequestUninstall(app),
-                    isProcessing: store.isUninstallingApp,
-                    cancel: {
-                        store.pendingUninstallApp = nil
-                    },
-                    confirm: {
-                        store.confirmUninstall()
-                    }
+                    isProcessing: store.isCleaningRelatedAppFiles,
+                    cancel: { store.keepRelatedAppFiles() },
+                    confirm: { store.confirmRelatedAppCleanup(selectedPaths: $0) }
                 )
                 .environment(\.locale, L10n.locale)
-            }
-        }
-        .alert(L10n.text("是否清除关联文件？", "Remove Associated Files?"), isPresented: relatedAppCleanupAlertBinding) {
-            Button(L10n.text("保留", "Keep"), role: .cancel) {
-                store.keepRelatedAppFiles()
-            }
-            Button(L10n.text("清除关联文件", "Remove Associated Files"), role: .destructive) {
-                store.confirmRelatedAppCleanup()
-            }
-        } message: {
-            if let app = store.pendingRelatedCleanupApp {
-                Text(L10n.text(
-                    "\(app.name) 已卸载。是否将发现的 \(app.relatedItems.count) 个关联文件（\(ByteFormat.string(app.relatedBytes))）也移到废纸篓？",
-                    "\(app.name) was uninstalled. Move \(app.relatedItems.count) associated files (\(ByteFormat.string(app.relatedBytes))) to Trash too?"
-                ))
             }
         }
         .sheet(isPresented: accessRepairGuideBinding) {
@@ -396,17 +449,26 @@ struct ContentView: View {
             }
             .disabled(!store.canRequestMemoryQuitActions)
         } message: {
+            // BOARD N19: the apps by name and who handles unsaved work.
             if let summary = store.pendingMemoryQuitSummary {
-                Text(
-                    L10n.text(
-                        "所选 \(summary.appCount) 个应用目前约占 \(ByteFormat.string(summary.estimatedBytes))；预计释放量以退出后的刷新重测为准。",
-                        "The selected \(summary.appCount) apps currently use about \(ByteFormat.string(summary.estimatedBytes)); estimated release will be remeasured after quitting and refresh."
-                    )
-                )
+                Text(summary.confirmationMessage)
             }
         }
         .alert(L10n.text("操作失败", "Operation Failed"), isPresented: errorAlertBinding) {
+            if store.uninstallPermissionDenied {
+                Button(L10n.text("在访达中定位", "Locate in Finder")) {
+                    store.revealDeniedUninstallAppInFinder()
+                }
+                Button(L10n.text("打开 App 管理设置", "Open App Management Settings")) {
+                    _ = CleanupService.openAppManagementSettings()
+                    store.uninstallPermissionDenied = false
+                    store.uninstallDeniedApp = nil
+                    store.errorMessage = nil
+                }
+            }
             Button(L10n.text("关闭", "Close")) {
+                store.uninstallPermissionDenied = false
+                store.uninstallDeniedApp = nil
                 store.errorMessage = nil
             }
         } message: {
@@ -415,15 +477,26 @@ struct ContentView: View {
     }
 
     private func fullWorkspace(metrics: WindowLayoutMetrics) -> some View {
-        NavigationSplitView {
+        let sidebarMode = sidebarPresentation.effective
+        return NavigationSplitView {
             SidebarView(
                 store: store,
-                selection: selectedFilter
+                selection: selectedFilter,
+                presentation: sidebarMode,
+                onTogglePresentation: {
+                    withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {
+                        sidebarPresentation.toggle()
+                    }
+                }
             )
+            // D53 §2.2 replaces the old 900 pt window-width switch (172 /
+            // 196 pt), under which a wider window got a narrower detail.
+            // D67: the full sidebar is the same 210 pt on every page, so
+            // switching between D67 and V1 pages never moves the detail.
             .navigationSplitViewColumnWidth(
-                min: metrics.sidebarMinimumWidth,
-                ideal: metrics.sidebarIdealWidth,
-                max: metrics.sidebarMaximumWidth
+                min: sidebarMode == .full ? FeatureLightfield.sidebarWidth : sidebarMode.minimumWidth,
+                ideal: sidebarMode == .full ? FeatureLightfield.sidebarWidth : sidebarMode.idealWidth,
+                max: sidebarMode == .full ? FeatureLightfield.sidebarWidth : sidebarMode.maximumWidth
             )
         } detail: {
             MainContentHost(
@@ -431,7 +504,13 @@ struct ContentView: View {
                 showsIntegratedTitlebar: false
             ) {
 #if DEBUG
-                if debugAppUpdatePresentation != nil {
+                if LightfieldComponentGallery.isRequested {
+                    LightfieldComponentGallery(session: .shared)
+                } else if FeaturePresentationDemo.isEnabled {
+                    FeaturePresentationDemoView(session: .shared, store: store,
+                        module: activePresentationFilter, healthStore: computerHealthStore,
+                        networkStore: networkSpeedTestStore, browserStore: browserPrivacyStore)
+                } else if debugAppUpdatePresentation != nil {
                     AppUpdaterView(store: store)
                 } else if let debugSmartScanSession {
                     SmartScanFlowHost(store: store, selection: selectedFilter)
@@ -439,6 +518,11 @@ struct ContentView: View {
                             navigationState.select(.overview)
                             store.installDebugSmartScanSessionFixture(debugSmartScanSession)
                         }
+                } else if DebugSmartScanFlowDemo.isRequested {
+                    // D53 V0 recording: landing → scanning → results →
+                    // selection, from fixtures only (no scan, no cleanup).
+                    DebugSmartScanFlowDemoView(store: store)
+                        .onAppear { navigationState.select(.overview) }
                 } else if let debugScanPresentation {
                     DebugScanPresentationView(
                         scenario: debugScanPresentation,
@@ -471,6 +555,9 @@ struct ContentView: View {
                 )
 #endif
             }
+            // D67 pages hide the window toolbar; they show the same
+            // “操作记录” entry in their status line instead.
+            .environment(\.featureOperationHistoryAction, { isShowingOperationHistory = true })
         }
     }
 
@@ -550,6 +637,8 @@ struct ContentView: View {
         } set: { isPresented in
             if !isPresented {
                 store.errorMessage = nil
+                store.uninstallPermissionDenied = false
+                store.uninstallDeniedApp = nil
             }
         }
     }
@@ -575,15 +664,7 @@ struct ContentView: View {
     }
 
     private var v2CleanupConfirmationBinding: Binding<Bool> {
-        Binding {
-            store.scanPresentationState == .confirming
-                && store.pendingCleanPlan != nil
-                && store.pendingCleanPreflight?.isConfirmable == true
-        } set: { isPresented in
-            if !isPresented {
-                store.cancelV2CleanupConfirmation()
-            }
-        }
+        CleanupPlanConfirmationPresentation.binding(for: store)
     }
 
     private var emptyTrashAlertBinding: Binding<Bool> {
@@ -717,7 +798,11 @@ struct ContentView: View {
     private var relatedAppCleanupAlertBinding: Binding<Bool> {
         Binding {
             store.pendingRelatedCleanupApp != nil
-        } set: { _ in }
+        } set: { isPresented in
+            if !isPresented && !store.isCleaningRelatedAppFiles {
+                store.keepRelatedAppFiles()
+            }
+        }
     }
 
 }
@@ -741,21 +826,26 @@ private struct DetailRouterView: View {
     }
 
     var body: some View {
-        Group {
-            // The overview is the one Smart Scan flow. Its host performs one
-            // direct switch over the Store's presentation state, so SwiftUI
-            // never retains the old scan page beneath results during a
-            // removal transition.
-            if presentationFilter == .overview || presentsV2CleanupPage {
-                SmartScanFlowHost(store: store, selection: $selection)
-            } else if store.scanPresentationState.showsProgressPage,
-                      store.scanPresentationRoute == presentationFilter {
-                ScanProgressView(store: store, module: presentationFilter)
-            } else {
-                routedContent
+        // D53 §3.2.1: pages change with the shared transition, keyed by the
+        // sidebar destination (system tools switch inside their own hub).
+        PageTransitionContainer(key: filter) {
+            Group {
+                // The overview is the one Smart Scan flow. Its host performs one
+                // direct switch over the Store's presentation state, so SwiftUI
+                // never retains the old scan page beneath results during a
+                // removal transition.
+                if presentationFilter == .overview || presentsV2CleanupPage {
+                    SmartScanFlowHost(store: store, selection: $selection)
+                } else if store.scanPresentationState.showsProgressPage,
+                          store.scanPresentationRoute == presentationFilter {
+                    ScanProgressView(store: store, module: presentationFilter)
+                } else {
+                    routedContent
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .featureFlowTransition(value: store.scanPresentationState.showsProgressPage)
     }
 
     private var presentsV2CleanupPage: Bool {
@@ -781,7 +871,7 @@ private struct DetailRouterView: View {
     private var routedContent: some View {
         if filter == .overview {
             if let session = store.cleanupScanSession,
-               session.includedCategoryIDs == nil {
+               (session.smartScanScopes != nil || session.includedCategoryIDs == nil) {
                 CleanupScanOverviewView(
                     store: store,
                     session: session
@@ -812,6 +902,7 @@ private struct DetailRouterView: View {
                 heavyWorkActivityStore: heavyWorkActivityStore,
                 monitorState: store.menuBarMonitorState,
                 auxiliaryState: store.menuBarAuxiliaryMonitorState,
+                helperMonitor: store.helperPowerMetricsMonitor,
                 isTelemetryPaused: store.isMenuBarRefreshPaused,
                 refreshTelemetry: store.refreshMenuBarMonitor
             )
@@ -822,57 +913,18 @@ private struct DetailRouterView: View {
         }
     }
 
-    @ViewBuilder
     private var cleanupWorkspace: some View {
-        Group {
-            if cleanupSessionForCurrentFilter == nil,
-               (store.cleanupScanSession != nil || store.result == nil) {
-                ToolPreparationView(
-                    store: store,
-                    filter: filter
-                )
-            } else if let session = cleanupSessionForCurrentFilter {
-                // This page already owns its header, results and action bar.
-                // Wrapping it in another workspace repeats the module title.
-                CleanupScanResultsView(store: store, filter: filter, session: session)
-            } else {
-                ReviewWorkspaceShell(
-                    filter: filter,
-                    headerActions: { EmptyView() }
-                ) {
-                    Group {
-                        if store.result != nil {
-                            ItemListView(store: store, filter: filter)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
-                    .layoutPriority(1)
-                    .clipped()
-                }
-            }
-        }
-#if DEBUG
-        .layoutProbe(LayoutProbeID.workspace)
-#endif
-    }
-
-    private var cleanupSessionForCurrentFilter: ScanSession? {
-        guard let session = store.cleanupScanSession else { return nil }
-        if filter == .devCaches {
-            guard session.includedCategoryIDs?.contains("developer") ?? true else {
-                return nil
-            }
-            return session
-        }
-        if filter == .green, session.includedRuleIDs != nil {
-            return session
-        }
-        return session.includedCategoryIDs == nil ? session : nil
+        CleanupWorkspaceView(store: store, filter: filter)
     }
 
     @ViewBuilder
     private var fileWorkspace: some View {
-        if filter == .duplicates {
+        if filter == .migration && (largeFilesWorkspace.migrationKind == .application
+            ? store.isLoadingInstalledApps : largeFilesWorkspace.isScanning) {
+            LargeFilesScanLandingView(store: store, workspace: largeFilesWorkspace, mode: .migration)
+        } else if filter == .largeFiles && largeFilesWorkspace.isAnalyzingStorage {
+            LargeFilesScanLandingView(store: store, workspace: largeFilesWorkspace)
+        } else if filter == .duplicates {
             DuplicateFilesView(store: store)
         } else if filter == .migration,
                   (largeFilesWorkspace.migrationKind == .file
@@ -884,33 +936,9 @@ private struct DetailRouterView: View {
                 mode: .migration
             )
         } else if filter == .migration {
-            FeatureDataPageShell(
-                title: ReviewFilter.migration.sidebarTitle,
-                subtitle: ReviewFilter.migration.pageSubtitle,
-                systemImage: ReviewFilter.migration.systemImage
-            ) {
-                fileAnalysisScanButton
-            } controls: {
-                EmptyView()
-            } content: {
-                LargeFilesView(
-                    store: store,
-                    workspace: largeFilesWorkspace,
-                    mode: .migration
-                )
-            }
+            LargeFilesView(store: store, workspace: largeFilesWorkspace, mode: .migration)
         } else if largeFilesWorkspace.hasStorageAnalysis {
-            FeatureDataPageShell(
-                title: ReviewFilter.largeFiles.sidebarTitle,
-                subtitle: ReviewFilter.largeFiles.pageSubtitle,
-                systemImage: ReviewFilter.largeFiles.systemImage
-            ) {
-                fileAnalysisScanButton
-            } controls: {
-                EmptyView()
-            } content: {
-                LargeFilesView(store: store, workspace: largeFilesWorkspace)
-            }
+            LargeFilesView(store: store, workspace: largeFilesWorkspace)
         } else {
             LargeFilesScanLandingView(store: store, workspace: largeFilesWorkspace)
         }
@@ -990,14 +1018,89 @@ private struct DetailRouterView: View {
     }
 }
 
+/// The production cleanup-page router, also hosted directly by route contracts.
+struct CleanupWorkspaceView: View {
+    @ObservedObject var store: ScanStore
+    let filter: ReviewFilter
+
+    private var cleanupSessionForCurrentFilter: ScanSession? {
+        store.cleanupSession(for: filter)
+    }
+
+    var body: some View {
+        Group {
+            if cleanupSessionForCurrentFilter == nil,
+               (store.cleanupScanSession != nil || store.result == nil) {
+                ToolPreparationView(
+                    store: store,
+                    filter: filter
+                )
+#if DEBUG
+                .layoutProbe("cleanup.route.landing")
+#endif
+            } else if let session = cleanupSessionForCurrentFilter {
+                // This page already owns its header, results and action bar.
+                // Wrapping it in another workspace repeats the module title.
+                CleanupScanResultsView(store: store, filter: filter, session: session)
+#if DEBUG
+                    .layoutProbe("cleanup.route.results")
+#endif
+            } else {
+                ReviewWorkspaceShell(
+                    filter: filter,
+                    headerActions: { EmptyView() }
+                ) {
+                    Group {
+                        if store.result != nil {
+                            ItemListView(store: store, filter: filter)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+                    .layoutPriority(1)
+                    .clipped()
+                }
+            }
+        }
+#if DEBUG
+        .layoutProbe(LayoutProbeID.workspace)
+#endif
+    }
+}
+
 /// The overview has a single, mutually-exclusive Smart Scan page. The Store
 /// remains alive above this view, so switching pages never recreates a scanner,
 /// a frozen plan, or an executor.
 private struct SmartScanFlowHost: View {
     @ObservedObject var store: ScanStore
     @Binding var selection: ReviewFilter
+    /// D53 §3.2.3: the start button morphs into the progress card.
+    @Namespace private var flowNamespace
 
+    /// One value per page of the flow; progress updates inside a page do
+    /// not count as a page change.
+    private var flowStage: Int {
+        switch store.scanPresentationState {
+        case .idle: 0
+        case .preparing, .scanning, .finalizing: 1
+        case .cancelling: isCancellingCleanup ? 3 : 1
+        case .results, .confirming: 2
+        case .cleaning, .verifying: 3
+        case .completed: 4
+        case .cancelled: 5
+        case .failed: 6
+        }
+    }
+
+    /// One page per stage, switched by the presentation state; the shared
+    /// page transition animates only the change of stage (D53 §3.2.3).
     var body: some View {
+        PageTransitionContainer(key: flowStage) {
+            flowPage
+        }
+        .environment(\.smartScanFlowNamespace, flowNamespace)
+    }
+
+    private var flowPage: some View {
         Group {
             switch store.scanPresentationState {
             case .idle:
@@ -1060,6 +1163,7 @@ private struct SmartScanFlowHost: View {
                         systemImage: "checkmark.shield.fill",
                         status: .completed(L10n.text("已完成", "Completed")),
                         actionTitle: L10n.text("完成", "Done"),
+                        stateArt: .stateSuccess,
                         action: store.dismissV2CleanupReport
                     )
                 }
@@ -1102,6 +1206,7 @@ private struct SmartScanFlowHost: View {
                         systemImage: "exclamationmark.triangle.fill",
                         status: .failed(L10n.text("未执行清理", "No cleanup was performed")),
                         actionTitle: L10n.text("重新扫描", "Scan Again"),
+                        stateArt: .stateError,
                         action: restart
                     )
                 }
@@ -1153,19 +1258,19 @@ private struct SmartScanTerminalPage: View {
     let systemImage: String
     let status: ScanStatusPresentation
     let actionTitle: String
+    /// D58: the state picture of a finished or failed flow; `nil` keeps the
+    /// Smart Scan drawing (a cancelled scan changed nothing).
+    var stateArt: GeneratedArt? = nil
     let action: () -> Void
 
     var body: some View {
-        HeroScanPage(
-            title: title,
-            subtitle: detail,
-            headerSystemImage: systemImage,
+        LegacyTerminalLandingPage(
+            title: title, subtitle: detail, systemImage: systemImage, configurationTitle: nil,
             actionTitle: actionTitle,
             actionDetail: L10n.text("返回智能扫描首页", "Return to Smart Scan home"),
-            actionSystemImage: systemImage,
-            status: status,
-            action: action
-        )
+            actionSystemImage: systemImage, status: status, trustText: "", action: action
+        ) { EmptyView() }
+        .environment(\.landingStateArt, stateArt)
     }
 }
 
@@ -1187,7 +1292,6 @@ private struct ReviewWorkspaceShell<Content: View, HeaderActions: View>: View {
     var body: some View {
         ManagementListPage(
             title: filter.sidebarTitle,
-            subtitle: filter.pageSubtitle,
             systemImage: filter.systemImage
         ) {
             headerActions
@@ -1206,7 +1310,7 @@ private struct ReviewWorkspaceShell<Content: View, HeaderActions: View>: View {
 
 }
 
-private struct ToolPreparationView: View {
+struct ToolPreparationView: View {
     @ObservedObject var store: ScanStore
     let filter: ReviewFilter
 
@@ -1215,9 +1319,26 @@ private struct ToolPreparationView: View {
     }
 
     var body: some View {
+        Group {
+        if filter == .green {
+            FeatureLightfieldPage(module: .green, phase: .landing, title: filter.sidebarTitle,
+                status: preparationStatus.title,
+                safety: L10n.text("只读扫描 · 清理前逐项确认", "Read-only scan · Review before cleanup"),
+                actionTitle: scanActionTitle,
+                actionEnabled: !store.isPreparingScan && !hasEmptySafeCleanupSelection,
+                action: store.startScanRespectingAccessGuide) {
+                FeatureLightfieldOptions(title: L10n.text("扫描范围", "Scan Scope")) {
+                    ForEach(SafeCleanupScanScope.allCases) { scope in
+                        FeatureLightfieldCleanupScopeRow(scope: scope,
+                            selected: store.selectedSafeCleanupScopes.contains(scope),
+                            onToggle: { store.toggleSafeCleanupScope(scope) })
+                            .disabled(store.isPreparingScan)
+                    }
+                }
+            }
+        } else {
         HeroScanPage(
             title: filter.sidebarTitle,
-            subtitle: filter.pageSubtitle,
             headerSystemImage: filter.systemImage,
             configurationTitle: L10n.text("扫描范围", "Scan Scope"),
             actionTitle: scanActionTitle,
@@ -1237,6 +1358,8 @@ private struct ToolPreparationView: View {
                 SafeCleanupScopeSelectionView(store: store)
                     .frame(maxWidth: 560)
             }
+        }
+        }
         }
     }
 
@@ -1282,27 +1405,98 @@ private struct SafeCleanupScopeSelectionView: View {
     @ObservedObject var store: ScanStore
 
     var body: some View {
-        LazyVGrid(
-            columns: [
-                GridItem(.flexible(), spacing: AppDesignTokens.Spacing.small),
-                GridItem(.flexible(), spacing: AppDesignTokens.Spacing.small),
-            ],
-            spacing: AppDesignTokens.Spacing.small
-        ) {
+        SafeCleanupScopeCards(
+            selectedScopes: store.selectedSafeCleanupScopes,
+            onToggle: store.toggleSafeCleanupScope
+        )
+    }
+}
+
+/// The live store owns selection and scan rules. This presentation also lets
+/// the native layout fixture exercise the actual buttons without a scanner.
+struct SafeCleanupScopeCards: View {
+    let selectedScopes: Set<SafeCleanupScanScope>
+    let onToggle: (SafeCleanupScanScope) -> Void
+
+    var body: some View {
+        SafeCleanupScopeCardLayout() {
             ForEach(SafeCleanupScanScope.allCases) { scope in
                 SafeCleanupScopeButton(
                     scope: scope,
-                    isSelected: store.selectedSafeCleanupScopes.contains(scope)
+                    isSelected: selectedScopes.contains(scope)
                 ) {
-                    store.toggleSafeCleanupScope(scope)
+                    onToggle(scope)
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        #if DEBUG
+        .layoutProbe("safeCleanup.scope.cards")
+        #endif
+    }
+}
+
+/// Budget columns against this card group's proposal, not the entire window.
+/// One Layout keeps the four button identities stable while the window resizes.
+private struct SafeCleanupScopeCardLayout: Layout {
+    private let minimumCardWidth: CGFloat = 140
+    private let spacing = AppDesignTokens.Spacing.small
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = usableWidth(proposal.width)
+        let columns = columnCount(width: width)
+        let heights = rowHeights(width: width, columns: columns, subviews: subviews)
+        return CGSize(width: width, height: heights.reduce(0, +)
+            + spacing * CGFloat(max(0, heights.count - 1)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let width = usableWidth(bounds.width)
+        let columns = columnCount(width: width)
+        let cardWidth = max(0, (width - spacing * CGFloat(columns - 1)) / CGFloat(columns))
+        let heights = rowHeights(width: width, columns: columns, subviews: subviews)
+        var y = bounds.minY
+        for row in heights.indices {
+            for column in 0..<columns {
+                let index = row * columns + column
+                guard index < subviews.count else { continue }
+                subviews[index].place(
+                    at: CGPoint(x: bounds.minX + CGFloat(column) * (cardWidth + spacing), y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: cardWidth, height: heights[row])
+                )
+            }
+            y += heights[row] + spacing
+        }
+    }
+
+    private func usableWidth(_ proposed: CGFloat?) -> CGFloat {
+        guard let proposed, proposed.isFinite else { return 2 * minimumCardWidth + spacing }
+        return max(0, proposed)
+    }
+
+    private func columnCount(width: CGFloat) -> Int {
+        width >= 2 * minimumCardWidth + spacing ? 2 : 1
+    }
+
+    private func rowHeights(width: CGFloat, columns: Int, subviews: Subviews) -> [CGFloat] {
+        let cardWidth = max(0, (width - spacing * CGFloat(columns - 1)) / CGFloat(columns))
+        let proposal = ProposedViewSize(width: cardWidth, height: nil)
+        var heights = [CGFloat]()
+        for index in subviews.indices {
+            let row = index / columns
+            let height = subviews[index].sizeThatFits(proposal).height
+            if row == heights.count { heights.append(height) }
+            else { heights[row] = max(heights[row], height) }
+        }
+        return heights
     }
 }
 
 private struct SafeCleanupScopeButton: View {
+    @AppSurfaces private var surfaces
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.moduleTheme) private var theme
     @State private var isHovered = false
 
@@ -1312,86 +1506,37 @@ private struct SafeCleanupScopeButton: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .symbolRenderingMode(.hierarchical)
-                    .font(.system(size: 25, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 40, height: 40)
-                    .background(tint.opacity(0.16), in: RoundedRectangle(
-                        cornerRadius: 9,
-                        style: .continuous
-                    ))
-                    .accessibilityHidden(true)
-
-                Text(title)
-                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    .foregroundStyle(theme.primaryText)
-                    .multilineTextAlignment(.center)
-            }
-            .padding(.horizontal, AppDesignTokens.Spacing.medium)
-            .padding(.vertical, AppDesignTokens.Spacing.small)
-            .frame(maxWidth: .infinity, minHeight: 80, alignment: .center)
-            .overlay(alignment: .topTrailing) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(isSelected ? tint : theme.secondaryText.opacity(0.72))
-                    .padding(8)
-                    .accessibilityHidden(true)
-            }
-            .background(
-                LinearGradient(
-                    colors: isSelected
-                        ? [tint.opacity(isHovered ? 0.22 : 0.17), tint.opacity(0.08)]
-                        : [AppAppearanceColors.ink.opacity(isHovered ? 0.085 : 0.055), AppAppearanceColors.ink.opacity(0.025)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: RoundedRectangle(
-                    cornerRadius: AppDesignTokens.Radius.glassControl,
-                    style: .continuous
-                )
-            )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: AppDesignTokens.Radius.glassControl,
-                    style: .continuous
-                )
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            AppAppearanceColors.ink.opacity(isSelected ? 0.30 : 0.16),
-                            isSelected ? tint.opacity(0.72) : AppAppearanceColors.ink.opacity(0.08),
-                            Color.black.opacity(0.22),
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: isSelected ? 1.25 : 1
-                )
+            FeatureOptionCard(isSelected: isSelected) {
+                VStack(spacing: 6) {
+                    IconTile(systemImage: systemImage, side: 40, pigment: categoryPigment)
+#if DEBUG
+                        .layoutProbe("safeCleanup.scope.icon.\(scope.rawValue)")
+#endif
+                    Text(title).font(AppDesignTokens.TypeScale.bodyEmphasis)
+                        .foregroundStyle(surfaces.textPrimary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+#if DEBUG
+                        .layoutProbe("safeCleanup.scope.title.\(scope.rawValue)")
+#endif
+                }
+                .frame(maxWidth: .infinity, minHeight: 66)
+                .overlay(alignment: .topTrailing) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(AppDesignTokens.TypeScale.secondary)
+                        .foregroundStyle(isSelected ? theme.actionFill : surfaces.textSecondary)
+                        .accessibilityHidden(true)
+                }
             }
         }
-        .contentShape(RoundedRectangle(
-            cornerRadius: AppDesignTokens.Radius.glassControl,
-            style: .continuous
-        ))
         .buttonStyle(ResponsivePlainButtonStyle())
-        .onHover { isHovered = $0 }
-        .shadow(
-            color: tint.opacity(isSelected ? (isHovered ? 0.30 : 0.18) : 0),
-            radius: isHovered ? 10 : 7,
-            y: 3
-        )
-        .animation(
-            AppMotionTokens.resolved(AppMotionTokens.hover, reduceMotion: reduceMotion),
-            value: isHovered
-        )
         .accessibilityLabel(title)
-        .accessibilityValue(isSelected
-            ? L10n.text("已选择", "Selected")
-            : L10n.text("未选择", "Not selected"))
+        .accessibilityValue(isSelected ? L10n.text("已选择", "Selected") : L10n.text("未选择", "Not selected"))
         .accessibilityHint(detail)
         .help(detail)
+#if DEBUG
+        .layoutProbe("safeCleanup.scope.card.\(scope.rawValue)")
+#endif
     }
 
     private var title: String {
@@ -1425,12 +1570,12 @@ private struct SafeCleanupScopeButton: View {
         }
     }
 
-    private var tint: Color {
+    private var categoryPigment: ModulePigment {
         switch scope {
-        case .caches: .orange
-        case .logs: .blue
-        case .temporaryFiles: .mint
-        case .downloadResidue: .cyan
+        case .caches: .cleanup
+        case .logs: .smartScan
+        case .temporaryFiles: .protection
+        case .downloadResidue: .files
         }
     }
 }
@@ -1639,7 +1784,7 @@ private struct HomeStatusBoard: View {
         if hasLiveResult {
             return candidates.reduce(0) { $0 + $1.sizeBytes }
         }
-        return summary?.entry.greenBytes ?? store.scanHistorySummary.latest?.greenBytes ?? 0
+        return store.scanHistorySummary.latestCleanupEntry?.greenBytes ?? 0
     }
 
     var body: some View {
@@ -1710,6 +1855,10 @@ private struct HomeStatusBoard: View {
                 .font(AppDesignTokens.Typography.body)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if let entry = summary?.entry {
+                ScanHistoryHealthStatusLine(entry: entry)
+            }
 
             statusPills
 
@@ -2330,18 +2479,18 @@ private struct SmartCleanupFocusPanel: View {
         if store.result != nil {
             return liveCleanableBytes
         }
-        return store.scanHistorySummary.latest?.greenBytes ?? 0
+        return store.scanHistorySummary.latestCleanupEntry?.greenBytes ?? 0
     }
 
     private var displayCount: Int {
         if store.result != nil {
             return candidates.count
         }
-        return store.scanHistorySummary.latest?.greenCount ?? 0
+        return store.scanHistorySummary.latestCleanupEntry?.greenCount ?? 0
     }
 
     private var lastScanStatus: LastScanStatusSummary? {
-        store.scanHistorySummary.latestStatus()
+        store.scanHistorySummary.latestCleanupStatus()
     }
 
     var body: some View {
@@ -2370,7 +2519,12 @@ private struct SmartCleanupFocusPanel: View {
 
     private var metricColumn: some View {
         VStack(alignment: .leading, spacing: 7) {
-            CleanupAmountMetric(bytes: displayBytes, tint: tint, isHistorical: !hasLiveResult)
+            if hasLiveResult || store.scanHistorySummary.latestCleanupEntry != nil {
+                CleanupAmountMetric(bytes: displayBytes, tint: tint, isHistorical: !hasLiveResult)
+            } else {
+                Text(L10n.text("尚未扫描", "Not Scanned Yet"))
+                    .font(AppDesignTokens.Typography.compactLabelEmphasis)
+            }
 
             Text(displayCount > 0 ? L10n.items(displayCount) : L10n.text("等待扫描", "Awaiting scan"))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)

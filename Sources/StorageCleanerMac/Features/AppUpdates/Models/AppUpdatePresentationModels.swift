@@ -67,7 +67,7 @@ struct AppScanSummary: Hashable, Sendable {
         applications.filter { $0.appUpdatePresentationCategory == .requiresAuthorization }
     }
     var batchEligibleApps: [InstalledApplication] {
-        eligibleAutomaticApps + requiresQuitApps
+        eligibleAutomaticApps + requiresQuitApps + requiresAuthorizationApps
     }
     var automaticCount: Int { eligibleAutomaticApps.count }
     var requiresQuitCount: Int { requiresQuitApps.count }
@@ -137,6 +137,7 @@ struct AppUpdateCatalogEntry: Identifiable, Hashable, Sendable {
     var isUpdateAvailable: Bool { application.hasPresentableUpdate }
     var canJoinAutomaticUpdatePlan: Bool { application.canJoinAutomaticUpdatePlan }
     var canJoinAutomaticUpdateBatch: Bool { application.canJoinAutomaticUpdateBatch }
+    var canJoinSelectedUpdateBatch: Bool { application.canJoinSelectedUpdateBatch }
 }
 
 struct AppUpdateCatalogSnapshot: Hashable, Sendable {
@@ -213,12 +214,11 @@ struct FrozenUpdatePlan: Hashable, Sendable {
         self.sessionID = sessionID
         self.createdAt = createdAt
         let executableApplicationIDs = built.automaticApplicationIDs
-            + built.requiresQuitApplicationIDs
+            + built.requiresQuitApplicationIDs + built.requiresAuthorizationApplicationIDs
         automaticApplications = executableApplicationIDs.compactMap {
             applicationsByID[$0]
         }
         let allApplicationIDs = executableApplicationIDs
-            + built.requiresAuthorizationApplicationIDs
             + built.appStoreApplicationIDs
             + built.websiteApplicationIDs
             + built.manualApplicationIDs
@@ -226,24 +226,7 @@ struct FrozenUpdatePlan: Hashable, Sendable {
         self.applications = allApplicationIDs.compactMap { applicationsByID[$0] }
         plan = built
 
-        // There is no safe continuation for authorization, App Store, in-app,
-        // or manual work in this queue. Keep those items visible as skipped
-        // instead of dropping them or leaving an authorization task hanging.
-        executionPlan = ApplicationUpdatePlan(
-            id: sessionID,
-            createdAt: createdAt,
-            automaticApplicationIDs: built.automaticApplicationIDs,
-            requiresQuitApplicationIDs: built.requiresQuitApplicationIDs,
-            requiresAuthorizationApplicationIDs: [],
-            appStoreApplicationIDs: [],
-            websiteApplicationIDs: [],
-            manualApplicationIDs: [],
-            skippedApplicationIDs: built.requiresAuthorizationApplicationIDs
-                + built.appStoreApplicationIDs
-                + built.websiteApplicationIDs
-                + built.manualApplicationIDs
-                + built.skippedApplicationIDs
-        )
+        executionPlan = built
     }
 }
 
@@ -338,6 +321,7 @@ struct AppUpdateReport: Hashable, Sendable {
     var succeededCount: Int { items.count { $0.state == .completed } }
     var failedCount: Int { items.count { $0.state == .failed } }
     var cancelledCount: Int { items.count { $0.state == .cancelled } }
+    var skippedCount: Int { items.count { $0.state == .skipped } }
     var retryableApplicationIDs: [String] {
         items.filter(\.canRetry).map(\.applicationID)
     }
@@ -526,7 +510,7 @@ struct AppUpdatePresentationMachine: Sendable {
         case .idle:
             return [.idle, .scanning, .managing, .preparingUpdate].contains(to)
         case .scanning:
-            return [.scanning, .scanSummary, .cancelled, .failed].contains(to)
+            return [.scanning, .scanSummary, .managing, .cancelled, .failed].contains(to)
         case .scanSummary:
             return [
                 .scanSummary, .managing, .preparingUpdate, .updating, .scanning, .idle,
@@ -591,6 +575,7 @@ private extension InstalledApplication {
     }
 
     var hasConfirmedPresentableUpdate: Bool {
+        if !isPresentationSystemManaged, !isDuplicate, canJoinAutomaticUpdateBatch { return true }
         guard !isPresentationSystemManaged,
               !isDuplicate,
               hasPresentableUpdate,

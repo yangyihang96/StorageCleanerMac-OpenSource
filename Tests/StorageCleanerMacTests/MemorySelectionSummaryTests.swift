@@ -28,16 +28,21 @@ final class MemorySelectionSummaryTests: XCTestCase {
         XCTAssertTrue(quitPermission.contains("guard !MiniWindowDemoData.isEnabled else { return false }"))
         XCTAssertTrue(quitPermission.contains("return canEditMemorySelection"))
 
-        let menu = try section(view, from: "private struct GeekMemoryProcessSelectionMenu: View {",
-                               to: "private struct GeekMemoryCleanupButton: View {")
+        let menu = try section(view, from: "struct GeekMemoryProcessSelectionMenu: View {",
+                               to: "enum GeekMemoryQuitSelection {")
         XCTAssertTrue(menu.contains("Menu {"))
         XCTAssertTrue(menu.contains("ForEach(selectableApps)"))
         XCTAssertTrue(menu.contains(".disabled(selectableApps.isEmpty || !store.canEditMemorySelection)"))
         XCTAssertTrue(menu.contains("store.setMemoryAppUsageSelection(app, isSelected: isSelected)"))
         XCTAssertFalse(menu.contains("canRequestMemoryQuitActions"))
-        let cleanup = try section(view, from: "private struct GeekMemoryCleanupButton: View {",
+        // Decision D2 (2026-10-04): the button is available for a manual
+        // selection only (was `.disabled(!canPrepareSelection || …)`, which
+        // also accepted the suggested apps); the quit permission still guards it.
+        let cleanup = try section(view, from: "enum GeekMemoryQuitSelection {",
                                   to: "private struct GeekMemoryQuitResultCard: View {")
-        XCTAssertTrue(cleanup.contains(".disabled(!canPrepareSelection || !store.canRequestMemoryQuitActions)"))
+        XCTAssertTrue(cleanup.contains("store.selectedMemoryAppCount > 0 && store.canRequestMemoryQuitActions"))
+        XCTAssertTrue(cleanup.contains(".disabled(!GeekMemoryQuitSelection.isAvailable(store: store))"))
+        XCTAssertFalse(cleanup.contains("recommendedQuitApps"))
         XCTAssertTrue(cleanup.contains(".disabled(!store.canRequestMemoryQuitActions)"))
         XCTAssertTrue(cleanup.contains("store.confirmQuitSelectedMemoryProcesses()"))
 
@@ -56,7 +61,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
     #if DEBUG || STORAGE_CLEANER_BETA
     @MainActor
     func testFixtureSnapshotSelectionOnlyChangesDraftAndRespectsBusyState() throws {
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         let captured = MiniWindowDemoData.memorySnapshot
         store.memorySnapshot = captured
         let app = try XCTUnwrap(captured.appsByResidentUsage.first { !$0.selectableProcessIDs.isEmpty })
@@ -148,7 +153,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
                                    iconPath: "/usr/libexec/example", bundlePath: nil,
                                    residentBytes: 800 * 1024 * 1024, percent: 1, canQuit: false)
         let captured = snapshot(processes: [leader, system, helper])
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = captured
         let panel = MemoryProcessSelectionPanel(snapshot: captured, store: store)
 
@@ -166,13 +171,13 @@ final class MemorySelectionSummaryTests: XCTestCase {
     }
 
     @MainActor
-    func testSampledListUsesTheSuppliedSnapshotWithoutMixingStoreProcesses() {
+    func testSampledListUsesTheSuppliedSnapshotWithoutMixingStoreProcesses() throws {
         let fixtureProcess = process(id: 6_911, name: "Fixture", executable: "Fixture",
                                      residentBytes: 40 * 1024 * 1024, canQuit: false)
         let otherProcess = process(id: 6_912, name: "Other", executable: "Other",
                                    residentBytes: 80 * 1024 * 1024, canQuit: true)
         let fixtureSnapshot = snapshot(processes: [fixtureProcess])
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [otherProcess])
         let panel = MemoryProcessSelectionPanel(snapshot: fixtureSnapshot, store: store)
 
@@ -197,7 +202,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 600 * 1024 * 1024,
             canQuit: false
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [helper, leader])
 
         let app = try XCTUnwrap(store.memorySnapshot?.appsByResidentUsage.first)
@@ -233,7 +238,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 200 * 1024 * 1024,
             canQuit: false
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [secondRegularInstance, helper, largerLeader])
 
         let app = try XCTUnwrap(store.memorySnapshot?.appsByResidentUsage.first)
@@ -255,7 +260,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
     }
 
     @MainActor
-    func testRecommendedSelectionUsesApplicationCountAndAggregateUsage() {
+    func testRecommendedSelectionUsesApplicationCountAndAggregateUsage() throws {
         let firstLeader = process(
             id: 7_021,
             name: "First",
@@ -288,7 +293,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 500 * 1024 * 1024,
             canQuit: false
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(
             processes: [firstHelper, secondLeader, firstLeader, secondHelper],
             freeBytes: 300 * 1024 * 1024,
@@ -303,8 +308,11 @@ final class MemorySelectionSummaryTests: XCTestCase {
         XCTAssertEqual(Set(store.selectedMemoryProcessesForQuit.map(\.id)), [firstLeader.id, secondLeader.id])
     }
 
+    /// BOARD N19 (2026-10-07): the second click used to quit at once (this
+    /// test asserted `isOptimizingMemory` after it). It now asks first, and
+    /// only the confirmation's own button quits.
     @MainActor
-    func testRecommendedActionSelectsFirstAndExecutesOnlyOnSecondClick() {
+    func testRecommendedActionSelectsFirstAndAsksForConfirmationOnSecondClick() throws {
         let suggested = process(
             id: 7_027,
             name: "Suggested",
@@ -313,7 +321,9 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 900 * 1024 * 1024,
             canQuit: true
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
+        var uptime: TimeInterval = 50
+        store.memoryActionUptime = { uptime }
         store.memorySnapshot = snapshot(
             processes: [suggested],
             freeBytes: 300 * 1024 * 1024,
@@ -329,12 +339,15 @@ final class MemorySelectionSummaryTests: XCTestCase {
         XCTAssertNil(store.pendingMemoryQuitSummary)
         XCTAssertFalse(store.isOptimizingMemory)
 
+        uptime += 1
         store.performRecommendedMemoryAction()
 
-        XCTAssertTrue(store.isOptimizingMemory)
-        XCTAssertNil(store.pendingMemoryQuitSummary)
-        XCTAssertTrue(store.pendingMemoryProcessesToQuit.isEmpty)
-        store.cancelMemoryOptimization()
+        XCTAssertFalse(store.isOptimizingMemory)
+        XCTAssertEqual(store.pendingMemoryQuitSummary?.appNames, ["Suggested"])
+        XCTAssertEqual(store.pendingMemoryProcessesToQuit.map(\.id), [suggested.id])
+        XCTAssertFalse(store.isMemoryBatchQuitConfirmationPresentedInMenuBar)
+        store.cancelQuitSelectedMemoryProcesses()
+        XCTAssertFalse(store.isOptimizingMemory)
     }
 
     @MainActor
@@ -355,7 +368,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 900 * 1024 * 1024,
             canQuit: true
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(
             processes: [suggested, manual],
             freeBytes: 300 * 1024 * 1024,
@@ -390,7 +403,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 600 * 1024 * 1024,
             canQuit: false
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [leader, helper])
         let app = try XCTUnwrap(store.memorySnapshot?.appsByResidentUsage.first)
         store.setMemoryAppUsageSelection(app, isSelected: true)
@@ -399,7 +412,8 @@ final class MemorySelectionSummaryTests: XCTestCase {
 
         XCTAssertEqual(
             store.pendingMemoryQuitSummary,
-            MemoryQuitSelectionSummary(appCount: 1, estimatedBytes: 1_000 * 1024 * 1024)
+            // D2 supplement: the summary also names the app.
+            MemoryQuitSelectionSummary(appCount: 1, estimatedBytes: 1_000 * 1024 * 1024, appNames: [app.name])
         )
         XCTAssertEqual(store.pendingMemoryProcessesToQuit.map(\.id), [leader.id])
         XCTAssertTrue(store.isMemoryBatchQuitConfirmationPresentedInMenuBar)
@@ -432,7 +446,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 700 * 1024 * 1024,
             canQuit: true
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [leader])
         let app = try XCTUnwrap(store.memorySnapshot?.appsByResidentUsage.first)
         store.setMemoryAppUsageSelection(app, isSelected: true)
@@ -469,7 +483,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 500 * 1024 * 1024,
             canQuit: false
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [helper, secondRegularInstance, leader])
         let app = try XCTUnwrap(store.memorySnapshot?.appsByResidentUsage.first)
         store.setMemoryAppUsageSelection(app, isSelected: true)
@@ -502,7 +516,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 300 * 1024 * 1024,
             canQuit: true
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [firstInstance, secondInstance])
         let app = try XCTUnwrap(store.memorySnapshot?.appsByResidentUsage.first)
         store.setMemoryAppUsageSelection(app, isSelected: true)
@@ -533,7 +547,7 @@ final class MemorySelectionSummaryTests: XCTestCase {
             residentBytes: 300 * 1024 * 1024,
             canQuit: true
         )
-        let store = ScanStore()
+        let store = try ScanStore.makeForTests(for: self)
         store.memorySnapshot = snapshot(processes: [successfulInstance, failedInstance])
         let app = try XCTUnwrap(store.memorySnapshot?.appsByResidentUsage.first)
         store.setMemoryAppUsageSelection(app, isSelected: true)

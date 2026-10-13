@@ -33,6 +33,31 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertEqual(snapshot.sensorAvailability, .unavailable)
     }
 
+    func testMeasuredBootDateSurvivesSnapshotWhileFutureOrMissingDateDoesNot() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let boot = now.addingTimeInterval(-3_600)
+        let result = SystemMonitorService.buildSnapshot(
+            enabledKinds: [.cpuUsage], memorySnapshot: nil,
+            previousNetworkSample: nil,
+            liveReadings: SystemMonitorService.LiveReadings(
+                cpuUsagePercent: nil,
+                systemUptimeSeconds: 3_600,
+                systemBootAt: boot,
+                thermal: .empty,
+                networkSample: nil
+            ),
+            now: now
+        )
+        XCTAssertEqual(result.snapshot.systemBootAt, boot)
+        XCTAssertEqual(result.snapshot.systemUptimeSeconds, 3_600)
+
+        let invalid = SystemMonitorSnapshot(
+            generatedAt: now, metrics: [], networkThroughput: nil,
+            systemBootAt: now.addingTimeInterval(60)
+        )
+        XCTAssertNil(invalid.systemBootAt)
+    }
+
     func testCPUTickDeltaUsesActiveShareWithoutLaunchingPS() {
         let previous = SystemMonitorService.CPUUsageTicks(user: 100, system: 50, idle: 850, nice: 0)
         let current = SystemMonitorService.CPUUsageTicks(user: 130, system: 70, idle: 900, nice: 0)
@@ -918,16 +943,24 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertEqual(snapshot?.memoryUsedBytes, 783_007_744)
     }
 
+    /// D57: `PMU tdie*`/`tdev*` are the power-management IC's dies, not the
+    /// CPU (they were the "CPU" row on M5). A SoC die sensor still counts.
     func testAppleSiliconTemperatureServicePrefersRealtimeDieSensors() {
         let readings = [
             AppleSiliconTemperatureService.Reading(name: "gas gauge battery", value: 35.1),
             AppleSiliconTemperatureService.Reading(name: "NAND CH0 temp", value: 44.0),
             AppleSiliconTemperatureService.Reading(name: "PMU tcal", value: 51.82),
-            AppleSiliconTemperatureService.Reading(name: "PMU tdie1", value: 57.0),
-            AppleSiliconTemperatureService.Reading(name: "PMU tdev8", value: 58.28)
+            AppleSiliconTemperatureService.Reading(name: "PMU tdie1", value: 77.0),
+            AppleSiliconTemperatureService.Reading(name: "PMU tdev8", value: 78.28),
+            AppleSiliconTemperatureService.Reading(name: "PMGR SOC Die Temp Sensor0", value: 58.28),
+            AppleSiliconTemperatureService.Reading(name: "pACC MTR Temp 0", value: 49.2)
         ]
 
         XCTAssertEqual(AppleSiliconTemperatureService.chipTemperatureCelsius(from: readings), 58.28)
+        XCTAssertNil(
+            AppleSiliconTemperatureService.chipTemperatureCelsius(from: Array(readings.prefix(5))),
+            "only PMU dies: no chip temperature"
+        )
     }
 
     func testAppleSiliconTemperatureServiceFallsBackToClusterMonitorSensors() {
@@ -971,10 +1004,10 @@ final class SystemMonitorServiceTests: XCTestCase {
             AppleSiliconTemperatureService.Reading(name: "ambient invalid", value: 140)
         ]
 
+        // D57: the PMU dies (58.2) no longer form a "CPU" (`.chip`) zone.
         XCTAssertEqual(
             AppleSiliconTemperatureService.regionalTemperatures(from: readings),
             [
-                SystemTemperatureReading(zone: .chip, celsius: 58.2),
                 SystemTemperatureReading(zone: .soc, celsius: 56.0),
                 SystemTemperatureReading(zone: .performanceCores, celsius: 49.2),
                 SystemTemperatureReading(zone: .efficiencyCores, celsius: 46.4),
@@ -1025,12 +1058,13 @@ final class SystemMonitorServiceTests: XCTestCase {
             "TaLP": 45.0, "TaRF": 46.2,
             "TB1T": 34.5, "TB2T": 35.1,
             "TH0x": 44.3,
-            "TDeL": 31.7, "TDeR": 30.4,
+            // D57: palm rest is Ts0P/Ts1P (iStat's keys), no longer TDeL/TDeR.
+            "Ts0P": 31.7, "Ts1P": 30.4, "TDeL": 39.1, "TDeR": 38.9,
             "TaLT": 40.2, "TaRT": 37.4,
             "TW0P": 55.6
         ]
 
-        let readings = SMCFanSpeedService.temperatureReadings { values[$0] }
+        let readings = SMCFanSpeedService.temperatureReadings(readValue: { values[$0] }, platform: .appleSilicon)
         let byZone = Dictionary(uniqueKeysWithValues: readings.map { ($0.zone, $0.celsius) })
 
         XCTAssertEqual(readings.count, 10)
@@ -1064,7 +1098,11 @@ final class SystemMonitorServiceTests: XCTestCase {
         )
     }
 
-    func testSMCFanSpeedServiceDoesNotPresentM5SSDControllersAsPalmRest() {
+    /// D57 reverses the earlier assumption that `Ts0P/Ts1P` are SSD
+    /// controllers: on Mac17,9 they stay flat under a 9 GB/s SSD read load
+    /// while `TH0x` rises, and iStat collects them. Until the names are
+    /// checked in iStat the zone is marked as inferred from the key names.
+    func testSMCFanSpeedServiceReadsM5PalmRestFromTs0PAndTs1P() throws {
         let values: [String: Double] = [
             "Tp00": 52, "Tp04": 52, "Tp08": 52, "Tp0C": 52,
             "Tp0O": 54, "Tp0R": 54, "Tp0U": 54, "Tp0X": 54,
@@ -1076,8 +1114,9 @@ final class SystemMonitorServiceTests: XCTestCase {
         let readings = SMCFanSpeedService.temperatureReadings { values[$0] }
         let byZone = Dictionary(uniqueKeysWithValues: readings.map { ($0.zone, $0.celsius) })
 
-        XCTAssertNil(byZone[.palmRest])
+        XCTAssertEqual(try XCTUnwrap(byZone[.palmRest]), 31.05, accuracy: 0.001)
         XCTAssertEqual(byZone[.storage], 44.3)
+        XCTAssertEqual(SMCFanSpeedService.inferredTemperatureZones { values[$0] }, [.palmRest])
     }
 
     func testSMCFanSpeedServiceUsesCompleteM5GPUClusterTable() throws {
@@ -1210,7 +1249,7 @@ final class SystemMonitorServiceTests: XCTestCase {
                 for visible in [false, true] {
                     XCTAssertEqual(interval.sleepNanoseconds(panelVisible: visible,
                         statusDisplayMode: mode, customFanControlActive: false, lowPowerMode: false),
-                        interval.sleepNanoseconds)
+                        visible ? interval.sleepNanoseconds : 5_000_000_000)
                 }
             }
             XCTAssertEqual(interval.memorySnapshotSeconds, interval.seconds)
@@ -1218,16 +1257,16 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertEqual(MenuBarRefreshInterval.oneSecond.sleepNanoseconds(panelVisible: false,
             statusDisplayMode: .network, customFanControlActive: false, lowPowerMode: true), 30_000_000_000)
         XCTAssertEqual(MenuBarRefreshInterval.oneSecond.sleepNanoseconds(panelVisible: true,
-            statusDisplayMode: .network, customFanControlActive: false, lowPowerMode: true), 1_000_000_000)
+            statusDisplayMode: .network, customFanControlActive: false, lowPowerMode: true), 30_000_000_000)
         XCTAssertEqual(MenuBarRefreshInterval.fiveSeconds.sleepNanoseconds(panelVisible: false,
-            statusDisplayMode: .memory, customFanControlActive: true, lowPowerMode: true), 2_000_000_000)
+            statusDisplayMode: .memory, customFanControlActive: true, lowPowerMode: true), 30_000_000_000)
         XCTAssertEqual(MenuBarRefreshInterval.oneSecond.sleepNanoseconds(panelVisible: false,
-            statusDisplayMode: .memory, customFanControlActive: true, lowPowerMode: true), 1_000_000_000)
+            statusDisplayMode: .memory, customFanControlActive: true, lowPowerMode: true), 30_000_000_000)
     }
 
     @MainActor
-    func testMenuBarMonitorStatePublishesWithoutInvalidatingScanStore() {
-        let store = ScanStore()
+    func testMenuBarMonitorStatePublishesWithoutInvalidatingScanStore() throws {
+        let store = try ScanStore.makeForTests(for: self)
         var storeChangeCount = 0
         var monitorChangeCount = 0
         let storeCancellable = store.objectWillChange.sink { storeChangeCount += 1 }
@@ -1506,7 +1545,7 @@ final class SystemMonitorServiceTests: XCTestCase {
     }
 
     func testMenuBarStatusDisplayModePersistsAndDefaultsToDeviceStatus() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        let defaults = try XCTUnwrap(TestPreferenceDomain.make(for: self))
 
         XCTAssertEqual(MenuBarStatusDisplayMode.stored(in: defaults), .deviceStatus)
 
@@ -1659,61 +1698,18 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"),
-            encoding: .utf8
-        )
-        let controllerSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"),
-            encoding: .utf8
-        )
-        let rootSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"),
-            encoding: .utf8
-        )
-        let sessionSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"),
-            encoding: .utf8
-        )
-        let storeSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Stores/ScanStore.swift"),
-            encoding: .utf8
-        )
-        let modelSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Models/SystemMonitorModels.swift"),
-            encoding: .utf8
-        )
-        let panelSettingsSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"),
-            encoding: .utf8
-        )
-        let chromeSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"),
-            encoding: .utf8
-        )
-        let chartSamplingSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/PanelChartSampling.swift"),
-            encoding: .utf8
-        )
+        let source = try D64MenuBarSource.liveSources()
+        let controllerSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"))
+        let rootSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"))
+        let sessionSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"))
+        let storeSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Stores/ScanStore.swift"))
+        let modelSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Models/SystemMonitorModels.swift"))
+        let panelSettingsSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"))
+        let chromeSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"))
+        let chartSamplingSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/PanelChartSampling.swift"))
 
         XCTAssertEqual(MenuBarMetricKind.allCases.count, 6)
-        XCTAssertTrue(source.contains("CPU"))
-        XCTAssertTrue(source.contains("内存"))
-        XCTAssertTrue(source.contains("温度"))
-        XCTAssertTrue(source.contains("磁盘"))
-        XCTAssertTrue(source.contains("网络"))
-        XCTAssertFalse(source.contains("StorageCapacityService.snapshot()"))
-        XCTAssertTrue(source.contains("auxiliaryState.registerConsumer("))
-        XCTAssertFalse(source.contains("menuBar.showHardwareDetails"))
-        XCTAssertFalse(source.contains("显示硬件详情"))
         XCTAssertTrue(chromeSource.contains("MenuBarRefreshInterval.allCases"))
-        XCTAssertFalse(source.contains("MenuBarPanelSize.allCases"))
-        XCTAssertFalse(source.contains("MenuBarSection.allCases"))
-        XCTAssertFalse(source.contains("MenuBarProcessLimit.allCases"))
-        XCTAssertFalse(source.contains("显示区域"))
-        XCTAssertFalse(source.contains("应用数量"))
-        XCTAssertFalse(source.contains("小窗宽度"))
-        XCTAssertFalse(source.contains("选择显示项"))
         XCTAssertFalse(storeSource.contains("menuBar.metricSelection"))
         XCTAssertFalse(storeSource.contains("menuBar.panelSize"))
         XCTAssertFalse(storeSource.contains("menuBar.sectionSelection"))
@@ -1724,10 +1720,6 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(storeSource.contains("let enabledKinds = MenuBarMetricKind.defaultSelection"))
         XCTAssertTrue(modelSource.contains("struct NetworkMonitorThroughput"))
         XCTAssertTrue(modelSource.contains("let networkThroughput: NetworkMonitorThroughput?"))
-        XCTAssertTrue(source.contains("store.toggleMenuBarRefreshPaused()"))
-        XCTAssertTrue(source.contains("store.refreshMenuBarNow()"))
-        XCTAssertTrue(source.contains("private var memoryTint: Color"))
-        XCTAssertFalse(source.contains(".task(id: store.menuBarRefreshInterval)"))
         XCTAssertTrue(controllerSource.contains("private var refreshTask: Task<Void, Never>?"))
         XCTAssertTrue(controllerSource.contains("private weak var store: ScanStore?"))
         XCTAssertTrue(controllerSource.contains("interval.sleepNanoseconds("))
@@ -1741,137 +1733,87 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(rootSource.contains("presentation: .geek"))
         XCTAssertTrue(sessionSource.contains("panel.contentViewController = nil"))
         XCTAssertFalse(controllerSource.contains("NSPopover"))
-        XCTAssertTrue(source.contains("store.refreshMenuBarLiveStatus(showLoadingWhenEmpty: false)"))
-        XCTAssertFalse(source.contains("refreshMenuBarLiveStatus(showLoadingWhenEmpty: false, forceMemorySnapshot: true)"))
         XCTAssertTrue(controllerSource.contains("store.refreshMenuBarLiveStatus(showLoadingWhenEmpty: false)"))
-        XCTAssertFalse(source.contains("Timer.publish(every: 1"))
         XCTAssertFalse(controllerSource.contains("Timer.publish(every: 1"))
-        XCTAssertTrue(source.contains("PanelShell(density: .simple, showsNavigation: false)"))
-        XCTAssertFalse(source.contains(".frame(width: 360, height: 300)"))
-        XCTAssertFalse(source.contains(".frame(height: 204, alignment: .top)"))
         XCTAssertFalse(controllerSource.contains("NSSize(width: 360, height: 300)"))
-        XCTAssertFalse(source.contains(".frame(width: 384)"))
-        XCTAssertFalse(source.contains(".frame(width: 408)"))
-        XCTAssertTrue(modelSource.contains("L10n.text(\"系统\", \"System\")"))
+        XCTAssertFalse(modelSource.contains("var simpleTitle:"))
+        XCTAssertTrue(modelSource.contains("L10n.text(\"概览\", \"Overview\")"))
         XCTAssertTrue(modelSource.contains("L10n.text(\"清理\", \"Cleanup\")"))
-        XCTAssertTrue(source.contains("panelSettingsState.selectedSection"))
-        XCTAssertTrue(source.contains("panelSettingsState.selectSection(section)"))
-        XCTAssertFalse(source.contains("@State private var selectedTab"))
-        XCTAssertTrue(source.contains("private var cleanupPage: some View"))
-        XCTAssertTrue(source.contains("扫描缓存与开发文件"))
-        XCTAssertTrue(source.contains("分析磁盘空间"))
-        XCTAssertTrue(source.contains("store.startScanRespectingAccessGuide()"))
-        XCTAssertTrue(source.contains("store.items(for: .green).filter(\\.canMoveToTrash)"))
-        XCTAssertTrue(source.contains(".prefix(2)"))
-        XCTAssertTrue(source.contains("MenuBarCleanupGroupRow"))
-        XCTAssertTrue(source.contains("ScrollView(.vertical)"))
-        XCTAssertTrue(source.contains(".scrollIndicators(.hidden)"))
-        let cleanupPageSource = try XCTUnwrap(
-            source.components(separatedBy: "private var cleanupPage: some View").last?
-                .components(separatedBy: "private var cleanupOverview: some View").first
-        )
-        XCTAssertFalse(cleanupPageSource.contains("Spacer(minLength: 0)"))
-        let systemPageSource = try XCTUnwrap(
-            source.components(separatedBy: "private var systemStatusPage: some View").last?
-                .components(separatedBy: "private var networkSummaryRow: some View").first
-        )
-        XCTAssertTrue(systemPageSource.contains("LazyVGrid(columns: systemMetricColumns"))
-        XCTAssertTrue(systemPageSource.contains("MenuBarStatusMetricCell("))
-        XCTAssertEqual(systemPageSource.components(separatedBy: "GeekPrecisionNetworkChart(").count - 1, 1)
-        XCTAssertFalse(source.contains("MenuBarPrimaryMetric"))
-        XCTAssertFalse(source.contains("MenuBarCompactMetric"))
-        XCTAssertTrue(source.contains("private var systemStatusMetrics: [MenuBarStatusMetric]"))
-        let compactMetricsSource = try XCTUnwrap(
-            source.components(separatedBy: "private var systemStatusMetrics: [MenuBarStatusMetric]").last?
-                .components(separatedBy: "private func systemStatusMetric").first
-        )
-        XCTAssertEqual(compactMetricsSource.components(separatedBy: "systemStatusMetric(").count - 1, 3)
-        XCTAssertEqual(compactMetricsSource.components(separatedBy: "MenuBarStatusMetric(").count - 1, 1)
-        XCTAssertTrue(compactMetricsSource.contains("for: .cpuUsage"))
-        XCTAssertTrue(compactMetricsSource.contains("for: .memoryUsage"))
-        XCTAssertTrue(compactMetricsSource.contains("for: .chipTemperature"))
-        XCTAssertTrue(compactMetricsSource.contains("id: \"storage\""))
-        XCTAssertFalse(compactMetricsSource.contains(".gpuUsage"))
-        XCTAssertFalse(compactMetricsSource.contains(".fanSpeed"))
-        XCTAssertTrue(source.contains("count: 4"))
-        XCTAssertFalse(source.contains("private var storageSummaryRow: some View"))
-        XCTAssertTrue(source.contains("private var networkSummaryRow: some View"))
-        XCTAssertTrue(source.contains("GeekPrecisionNetworkChart("))
-        XCTAssertTrue(source.contains("PanelCircularGauge("))
-        XCTAssertTrue(source.contains("points: monitorState.history"))
-        XCTAssertFalse(source.contains("networkHistory"))
-        XCTAssertTrue(source.contains("MenuBarNetworkPalette.download"))
-        XCTAssertTrue(source.contains("MenuBarNetworkPalette.upload"))
-        let networkTextSource = try XCTUnwrap(
-            source.components(separatedBy: "private func networkMetricText").last?
-                .components(separatedBy: "@ViewBuilder\n    private var recommendationSection").first
-        )
-        XCTAssertEqual(networkTextSource.components(separatedBy: ".font(MenuBarTypography.metricValue)").count - 1, 1)
-        XCTAssertEqual(networkTextSource.components(separatedBy: ".foregroundStyle(tint)").count - 1, 1)
-        XCTAssertTrue(source.contains("private typealias MenuBarTypography = MenuBarPanelTypography"))
-        XCTAssertFalse(source.contains("private enum MenuBarTypography"))
-        XCTAssertFalse(source.contains("static let primaryMetric"))
-        XCTAssertFalse(source.contains("static let metricValue: Font = .system(size:"))
-        XCTAssertFalse(source.contains("static let value: Font = .system(size:"))
-        XCTAssertFalse(source.contains("static let caption: Font = .system(size:"))
-        XCTAssertFalse(source.contains("AppDesignTokens.Typography"))
-        XCTAssertFalse(source.contains("size: 9.5"))
-        XCTAssertFalse(source.contains("size: 10.5"))
-        XCTAssertFalse(source.contains("size: 11.5"))
-        XCTAssertTrue(source.contains("$0.canQuit && $0.bundlePath?.hasSuffix(\".app\") == true"))
-        XCTAssertTrue(source.contains("可退出应用"))
-        XCTAssertFalse(source.contains("暂无可退出应用"))
-        XCTAssertFalse(source.contains("系统进程只读"))
-        XCTAssertTrue(source.contains("snapshot?.recommendedQuitApps"))
-        XCTAssertTrue(source.contains(".prefix(3)"))
-        XCTAssertTrue(source.contains("store.performRecommendedMemoryAction(presentConfirmationInMenuBar: true)"))
-        let compactProcessIconSource = try XCTUnwrap(
-            source.components(separatedBy: "private struct MenuBarProcessIcon: View").last
-        )
-        XCTAssertTrue(compactProcessIconSource.contains("CachedAppIconView("))
-        XCTAssertFalse(compactProcessIconSource.contains("AppIconCache.icon(forFile:"))
-        XCTAssertFalse(compactProcessIconSource.contains("FileManager.default.fileExists"))
-        XCTAssertTrue(source.contains("合并 \\(app.processCount) 个进程"))
-        XCTAssertFalse(source.contains("Mac 状态"))
-        XCTAssertFalse(source.contains("private var healthTitle: String"))
-        XCTAssertFalse(source.contains("private struct MenuBarHealthGauge"))
-        XCTAssertFalse(source.contains("摄像头"))
-        XCTAssertFalse(source.contains("麦克风"))
-        XCTAssertFalse(source.contains("Image(systemName: \"laptopcomputer\")"))
-        XCTAssertFalse(source.contains("这台 Mac"))
-        XCTAssertFalse(source.contains("AppIconArtwork"))
-        XCTAssertFalse(source.contains("GlassAppBackdrop"))
-        XCTAssertFalse(source.contains("MenuBarPanelBackdrop"))
-        XCTAssertTrue(source.contains("PanelShell(density: .simple"))
-        XCTAssertFalse(source.contains("LinearGradient("))
-        XCTAssertFalse(source.contains("MenuBarSurfaceModifier"))
-        XCTAssertFalse(source.contains("MenuBarIconButtonStyle"))
-        XCTAssertFalse(source.contains("MenuBarOpenButtonStyle"))
-        XCTAssertTrue(source.contains("PanelHeader("))
         XCTAssertEqual(chromeSource.components(separatedBy: "kind: .toolbar").count - 1, 1)
         XCTAssertEqual(chromeSource.components(separatedBy: "Menu {").count - 1, 2)
         XCTAssertTrue(chromeSource.contains("struct PanelRefreshControl: View"))
         XCTAssertTrue(chromeSource.contains("AppSymbols.Action.resume"))
         XCTAssertTrue(chromeSource.contains("AppSymbols.Action.refresh"))
         XCTAssertTrue(chromeSource.contains("AppSymbols.Action.more"))
-        XCTAssertFalse(source.contains(".contentTransition(.numericText())"))
-        XCTAssertTrue(source.contains(
-            "AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion)"
-        ))
-        XCTAssertFalse(source.contains(".snappy(duration: 0.30)"))
-        XCTAssertTrue(chromeSource.contains(
-            ".accessibilityLabel(L10n.text(\"小窗分区\", \"Panel Section\"))"
-        ))
-        XCTAssertTrue(source.contains(".monospacedDigit()"))
-        XCTAssertFalse(source.contains("transaction.animation = nil"))
+        XCTAssertTrue(chromeSource.contains("L10n.text(\"打开主窗口\", \"Open Main Window\")"))
         XCTAssertFalse(panelSettingsSource.contains("退出存储清理助手"))
         XCTAssertFalse(panelSettingsSource.contains("NSApp.terminate"))
-        XCTAssertTrue(source.contains("case currentScan(Date)"))
-        XCTAssertTrue(chromeSource.contains("L10n.text(\"打开主窗口\", \"Open Main Window\")"))
-        XCTAssertFalse(source.contains(".appGlassSegmentedControl()"))
-        XCTAssertTrue(source.contains(".accessibilityElement(children: .combine)"))
         XCTAssertTrue(chartSamplingSource.contains("static let minimumRenderableSampleCount = 2"))
         XCTAssertTrue(chartSamplingSource.contains("PanelChartSamplingPlaceholder"))
+
+        // D64 replaces the obsolete simple-tab contract with the actual
+        // configurable overview and its eight routes, never a second layout.
+        let geek = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarGeekPanel.swift")
+        let modules = try r2SourceDeclaration("func geekOverviewModule", in: geek)
+        for destination in [".processor", ".memory", ".disk", ".network", ".power"] {
+            XCTAssertTrue(modules.contains("destination: " + destination), destination)
+        }
+        // Sensors uses its own hover region; cleanup is a detail route, not
+        // a level-one module. These paths predate the D64 rail removal.
+        XCTAssertTrue(modules.contains("case .sensors:"))
+        XCTAssertTrue(modules.contains("geekSensorsCard"))
+        XCTAssertTrue(modules.contains("panelCoordinator.hardwareDetailFocus == .monitoring"))
+        XCTAssertTrue(modules.contains("case .memoryBreakdown, .fans, .systemLoad, .cleanupSummary:"))
+        XCTAssertTrue(modules.contains("EmptyView()"))
+        let sensors = try r2SourceDeclaration("var geekSensorsCard:", in: geek)
+        XCTAssertTrue(sensors.contains("GeekOverviewHoverRegion(destination: .sensors"))
+        XCTAssertTrue(sensors.contains("preview: previewGeekSection"))
+        XCTAssertTrue(sensors.contains("openDetail: { selectGeekHardwareDetail(.monitoring) }"))
+        let routes = try r2SourceDeclaration("private var requestedGeekPage:", in: geek)
+        for section in PanelSection.allCases {
+            XCTAssertTrue(routes.contains("case ." + section.rawValue + ":"), section.rawValue)
+        }
+        XCTAssertTrue(routes.contains("case .cleanup: return AnyView(geekCleanupPage)"))
+        // B6 moved iteration into the shared natural-size overview; live routing stays here.
+        let overviewSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPanel.swift"))
+        XCTAssertTrue(geek.contains("GeekOverviewPanel(modules: geekVisibleOverviewModules)"))
+        XCTAssertTrue(overviewSource.contains("ForEach(modules) { module in"))
+        XCTAssertTrue(overviewSource.contains("moduleContent(module)"))
+        XCTAssertTrue(geek.contains("liveCard(overviewCardDomain(module), page: MenuBarCardIdentity.overviewPage) { geekOverviewModule(module) }"))
+        XCTAssertFalse(geek.contains("MiniWindowConfigurationPreviewCard("))
+        XCTAssertTrue(source.contains("GeekPrecisionNetworkChart("))
+        XCTAssertTrue(source.contains("points: networkChartHistory"))
+        XCTAssertTrue(source.contains("panelMetricColors.networkUpload"))
+        XCTAssertTrue(source.contains("panelMetricColors.networkDownload"))
+        XCTAssertTrue(source.contains("store.toggleMenuBarRefreshPaused()"))
+        XCTAssertTrue(source.contains("store.refreshMenuBarNow()"))
+        XCTAssertTrue(source.contains("auxiliaryState.registerConsumer("))
+        XCTAssertFalse(source.contains("StorageCapacityService.snapshot()"))
+        XCTAssertFalse(source.contains("Timer.publish(every: 1"))
+        let memory = try D64MenuBarSource.source("MenuBarAdvanced/GeekMemoryView.swift")
+        XCTAssertTrue(memory.contains("store.menuBarPreparedMemoryApps"))
+        XCTAssertTrue(memory.contains("GeekMemoryQuitSelection.request(store: store)"))
+        XCTAssertTrue(memory.contains(".disabled(!GeekMemoryQuitSelection.isAvailable(store: store))"))
+        XCTAssertTrue(memory.contains("Text(summary.confirmationMessage)"))
+        let cache = try D64MenuBarSource.source("MenuBarAdvanced/GeekPanelComponents.swift")
+        let icon = try r2SourceDeclaration("struct GeekSecondaryProcessIcon:", in: cache)
+        XCTAssertTrue(icon.contains("CachedAppIconView("))
+        XCTAssertFalse(icon.contains("AppIconCache.icon(forFile:"))
+        XCTAssertFalse(icon.contains("FileManager.default.fileExists"))
+        let components = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarAdvancedComponents.swift")
+        XCTAssertTrue(components.contains("store.items(for: .green).filter(\\.canMoveToTrash)"))
+        let root = try D64MenuBarSource.source("MenuBarAdvancedStatusView.swift")
+        XCTAssertTrue(root.contains("PanelShell("))
+        XCTAssertTrue(root.contains("showsHeader: false"))
+        XCTAssertTrue(root.contains("showsNavigation: false"))
+        XCTAssertFalse(root.contains("var detailPage:"))
+        XCTAssertFalse(root.contains("var moduleRail:"))
+        let cleanup = try D64MenuBarSource.source("MenuBarAdvanced/GeekCleanupView.swift")
+        XCTAssertTrue(cleanup.contains("AdvancedSmartCleanupItemRow("))
+        XCTAssertTrue(cleanup.contains(".cleanupItemReadback("))
+        for obsolete in ["MenuBarStatusMetricCell", "MenuBarPrimaryMetric", "MenuBarCompactMetric", "MenuBarRecommendedAppsQuit", "private struct MenuBarHealthGauge", "Image(systemName: \"laptopcomputer\")", "AppIconArtwork", "GlassAppBackdrop"] {
+            XCTAssertFalse(source.contains(obsolete), obsolete)
+        }
     }
 
     func testGeekOnlyPanelKeepsRealDataAndSharesOneWindowSession() throws {
@@ -1880,73 +1822,28 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let advancedSource = try advancedPanelSource(projectRoot: projectRoot)
-        let compactSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"),
-            encoding: .utf8
-        )
-        let controllerSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"),
-            encoding: .utf8
-        )
-        let rootSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"),
-            encoding: .utf8
-        )
-        let sessionSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"),
-            encoding: .utf8
-        )
-        let panelSettingsSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"),
-            encoding: .utf8
-        )
-        let chromeSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"),
-            encoding: .utf8
-        )
-        let appSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"),
-            encoding: .utf8
-        )
-        let auxiliaryMonitorSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarAuxiliaryMonitorState.swift"),
-            encoding: .utf8
-        )
-        let telemetryModelSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Models/MenuBarTelemetryModels.swift"),
-            encoding: .utf8
-        )
-        let tertiaryDetailSource = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let compactSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"))
+        let controllerSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"))
+        let rootSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"))
+        let sessionSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"))
+        let panelSettingsSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"))
+        let chromeSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"))
+        let appSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"))
+        let auxiliaryMonitorSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarAuxiliaryMonitorState.swift"))
+        let telemetryModelSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Models/MenuBarTelemetryModels.swift"))
+        let tertiaryDetailSource = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift"
-            ),
-            encoding: .utf8
-        )
-        let systemModelSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Models/SystemMonitorModels.swift"),
-            encoding: .utf8
-        )
-        let telemetryChartSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarTelemetryChart.swift"),
-            encoding: .utf8
-        )
-        let geometrySource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/PanelGeometryStore.swift"),
-            encoding: .utf8
-        )
-        let statusPanelSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusPanel.swift"),
-            encoding: .utf8
-        )
-        let chartSamplingSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/PanelChartSampling.swift"),
-            encoding: .utf8
-        )
+            ))
+        let systemModelSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Models/SystemMonitorModels.swift"))
+        let telemetryChartSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarTelemetryChart.swift"))
+        let geometrySource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/PanelGeometryStore.swift"))
+        let statusPanelSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusPanel.swift"))
+        let chartSamplingSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/PanelChartSampling.swift"))
 
         XCTAssertEqual(PanelDensity.allCases, [.simple, .complex, .geek])
         XCTAssertEqual(PanelDensity.menuBarChoices, [.geek])
         XCTAssertEqual(PanelDensity.defaultValue, .geek)
-        XCTAssertEqual(PanelDensity.stored(in: UserDefaults(suiteName: UUID().uuidString)!), .geek)
+        XCTAssertEqual(PanelDensity.stored(in: TestPreferenceDomain.make(for: self)), .geek)
         XCTAssertFalse(chromeSource.contains("Picker(L10n.text(\"面板模式\""))
         XCTAssertFalse(chromeSource.contains("ForEach(PanelDensity.menuBarChoices)"))
         XCTAssertFalse(panelSettingsSource.contains("struct PanelSettingsView: View"))
@@ -1955,7 +1852,7 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(controllerSource.contains("panelSession?.selectDensity(density)"))
         XCTAssertEqual(controllerSource.components(separatedBy: "MenuBarPanelSession(").count - 1, 1)
         XCTAssertFalse(controllerSource.contains("panelSession?.resize(contentSize:"))
-        XCTAssertTrue(controllerSource.contains("panelSession?.setGeekSection(section)"))
+        XCTAssertTrue(controllerSource.contains("panelSession?.setGeekSection(section, preferredDetailSize: preferredDetailSize)"))
         XCTAssertTrue(geometrySource.contains("case .simple: NSSize(width: 420, height: 280)"))
         XCTAssertTrue(geometrySource.contains(
             "case .complex, .geek: MiniWindowStyleTokens.overviewSize"
@@ -1981,13 +1878,13 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(sessionSource.contains("panel.contentViewController = nil"))
         XCTAssertFalse(compactSource.contains(".frame(width: 360, height: 300)"))
         XCTAssertFalse(compactSource.contains(".frame(height: 204, alignment: .top)"))
-        XCTAssertTrue(compactSource.contains("PanelShell(density: .simple"))
+        XCTAssertTrue(compactSource.contains("PanelShell("))
         XCTAssertTrue(advancedSource.contains("density: presentation"))
         XCTAssertTrue(advancedSource.contains("GeekAttachedPanelShell("))
         XCTAssertTrue(advancedSource.contains("section: selectedSection"))
         XCTAssertTrue(advancedSource.contains("onHoverChange: geekAttachedPanelHoverChanged"))
-        XCTAssertTrue(advancedSource.contains("showsHeader: !hidesChrome"))
-        XCTAssertTrue(advancedSource.contains("showsNavigation: !hidesChrome"))
+        XCTAssertTrue(advancedSource.contains("showsHeader: false"))
+        XCTAssertTrue(advancedSource.contains("showsNavigation: false"))
         XCTAssertFalse(advancedSource.contains("case .window"))
         XCTAssertFalse(appSource.contains("AdvancedMonitorWindowCoordinator"))
         XCTAssertFalse(appSource.contains("AdvancedMonitorWindowView("))
@@ -2002,21 +1899,31 @@ final class SystemMonitorServiceTests: XCTestCase {
                 .path
         ))
         XCTAssertTrue(advancedSource.contains("GeekDashboardConfiguration"))
-        XCTAssertTrue(advancedSource.contains("GeekDashboardLayoutPlanner.rows"))
-        XCTAssertTrue(advancedSource.contains("GeekDashboardEditor"))
+        // Batch 2b removed the unreferenced dashboard-row and metric-tile
+        // builders; GeekDashboardLayoutPlanner keeps its own unit tests.
+        XCTAssertFalse(advancedSource.contains("GeekDashboardEditor(state:"))
         XCTAssertFalse(advancedSource.contains("高级监控"))
         XCTAssertFalse(advancedSource.contains("Advanced Monitor"))
         XCTAssertFalse(advancedSource.contains("geekWorkspace"))
         XCTAssertFalse(advancedSource.contains("geekModuleRail"))
-        XCTAssertTrue(advancedSource.contains("var moduleRail: some View"))
-        XCTAssertTrue(advancedSource.contains("PanelHeader("))
+        XCTAssertFalse(advancedSource.contains("var moduleRail: some View"))
+        XCTAssertFalse(advancedSource.contains("PanelHeader("))
         XCTAssertTrue(advancedSource.contains("geekDetailPage"))
         XCTAssertFalse(advancedSource.contains(".frame(height: presentation.contentHeight)"))
-        XCTAssertTrue(advancedSource.contains("ScrollView(.vertical)"))
+        XCTAssertTrue(advancedSource.contains("GeekDetailPageFrame(isPaused:"))
         XCTAssertFalse(advancedSource.contains("var geekFooter: some View"))
         XCTAssertTrue(advancedSource.contains("openApp(filter: .overview)"))
         XCTAssertFalse(advancedSource.contains("toggleSettingsPresentation()"))
-        XCTAssertTrue(advancedSource.contains("ForEach(PanelSection.allCases)"))
+        // The shared composition receives real modules/cards without creating another session.
+        let overviewSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPanel.swift"))
+        XCTAssertTrue(advancedSource.contains("GeekOverviewPanel(modules: geekVisibleOverviewModules)"))
+        XCTAssertTrue(overviewSource.contains("ForEach(modules) { module in"))
+        XCTAssertTrue(overviewSource.contains("moduleContent(module)"))
+        XCTAssertTrue(advancedSource.contains("liveCard(overviewCardDomain(module), page: MenuBarCardIdentity.overviewPage) { geekOverviewModule(module) }"))
+        XCTAssertFalse(overviewSource.contains("MenuBarPanelSession("))
+        let previewSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/Settings/SettingsMiniWindowPreview.swift"))
+        XCTAssertFalse(previewSource.contains("MenuBarPanelSession("))
+        XCTAssertFalse(previewSource.contains("ScanStore("))
         XCTAssertTrue(advancedSource.contains("geekChartRangeTitle"))
         XCTAssertFalse(tertiaryDetailSource.contains("最近 120 秒"))
         XCTAssertFalse(tertiaryDetailSource.contains("Last 120 Seconds"))
@@ -2025,8 +1932,8 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(advancedSource.contains("GeekDiskIOChart"))
         XCTAssertTrue(advancedSource.contains("duration: geekChartDuration"))
         XCTAssertTrue(advancedSource.contains("ViewThatFits(in: .horizontal)"))
-        XCTAssertTrue(advancedSource.contains("grid(columns: 3"))
-        XCTAssertTrue(advancedSource.contains("topProcesses"))
+        XCTAssertTrue(advancedSource.contains("GeekMetricSummaryGrid("))
+        XCTAssertTrue(advancedSource.contains("store.menuBarPreparedMemoryApps"))
         XCTAssertTrue(systemModelSource.contains("enum PanelSection: String"))
         XCTAssertTrue(systemModelSource.contains("case overview"))
         XCTAssertTrue(systemModelSource.contains("case processor"))
@@ -2037,7 +1944,11 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(systemModelSource.contains("case power"))
         XCTAssertTrue(systemModelSource.contains("case cleanup"))
         XCTAssertTrue(auxiliaryMonitorSource.contains("BatteryPowerService.internalBatterySnapshot()"))
-        XCTAssertTrue(auxiliaryMonitorSource.contains("NativeBatteryElectricalService.snapshot()"))
+        // r2-mini-sampling (D71④): the SMC battery read moved behind the
+        // same-tick coalescing cache; it still reads the real SMC source.
+        XCTAssertTrue(auxiliaryMonitorSource.contains("MenuBarBatteryElectricalCache.shared.snapshot()"))
+        let electricalCacheSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarBatteryElectricalCache.swift"))
+        XCTAssertTrue(electricalCacheSource.contains("NativeBatteryElectricalService.snapshot()"))
         XCTAssertTrue(auxiliaryMonitorSource.contains("NativeDiskIOMonitorService.counters()"))
         XCTAssertTrue(auxiliaryMonitorSource.contains("consumers: [UUID: MenuBarAuxiliaryMonitorDemand]"))
         XCTAssertTrue(advancedSource.contains("presentation.auxiliaryDemand("))
@@ -2045,12 +1956,12 @@ final class SystemMonitorServiceTests: XCTestCase {
             "geekConfiguration: panelSettingsState.geekDashboardConfiguration"
         ))
         XCTAssertTrue(advancedSource.contains(
-            "let needsComplexOverviewTelemetry = self == .complex && section == .overview"
+            "let isOverview = self == .geek || (self == .complex && section == .overview)"
         ))
         XCTAssertTrue(advancedSource.contains("let visibleGeekModules = Set("))
-        XCTAssertTrue(advancedSource.contains("let needsGeekOverviewDisk = self == .geek"))
+        XCTAssertTrue(advancedSource.contains("let needsGeekOverviewDisk = isOverview"))
         XCTAssertFalse(advancedSource.contains("let needsGeekOverviewNetwork = self == .geek"))
-        XCTAssertTrue(advancedSource.contains("let needsGeekOverviewProcessor = self == .geek"))
+        XCTAssertTrue(advancedSource.contains("let needsGeekOverviewProcessor = isOverview"))
         XCTAssertTrue(advancedSource.contains("|| needsGeekOverviewProcessor"))
         XCTAssertTrue(advancedSource.contains("|| needsGeekOverviewDisk"))
         XCTAssertFalse(advancedSource.contains("|| needsGeekOverviewNetwork"))
@@ -2067,30 +1978,47 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(telemetryModelSource.contains("static let highResolutionDuration: TimeInterval = 60 * 60"))
         XCTAssertTrue(telemetryModelSource.contains("static let bucketDuration: TimeInterval = 60"))
         XCTAssertTrue(telemetryModelSource.contains("static let maximumMinutePointCount = 28 * 24 * 60 + 1"))
-        XCTAssertTrue(advancedSource.contains("MenuBarNetworkPalette.download"))
-        XCTAssertTrue(advancedSource.contains("MenuBarNetworkPalette.upload"))
-        XCTAssertTrue(advancedSource.contains("估算下载量"))
-        XCTAssertTrue(advancedSource.contains("Estimated Download"))
-        XCTAssertTrue(advancedSource.contains("估算上传量"))
-        XCTAssertTrue(advancedSource.contains("Estimated Upload"))
-        XCTAssertTrue(advancedSource.contains("估算下载"))
-        XCTAssertTrue(advancedSource.contains("Est. Download"))
-        XCTAssertTrue(advancedSource.contains("估算上传"))
-        XCTAssertTrue(advancedSource.contains("Est. Upload"))
-        XCTAssertTrue(advancedSource.contains("session total"))
-        XCTAssertTrue(advancedSource.contains("ByteFormat.string(sessionDownloadedBytes)"))
-        XCTAssertTrue(advancedSource.contains("ByteFormat.string(sessionUploadedBytes)"))
-        XCTAssertTrue(advancedSource.contains("title: L10n.text(\"风扇转速\", \"Fan Speed\")"))
-        XCTAssertTrue(advancedSource.contains("value: metricValue(.fanSpeed)"))
+        XCTAssertTrue(advancedSource.contains("panelMetricColors.networkDownload"))
+        XCTAssertTrue(advancedSource.contains("panelMetricColors.networkUpload"))
+        // D64 retires the non-Geek estimated-traffic captions. The live
+        // chart still displays peaks and monitor-owned session totals in
+        // both languages, with distinct upload/download accessibility text.
+        let network = try D64MenuBarSource.source("MenuBarAdvanced/GeekNetworkView.swift")
+        let trend = try r2SourceDeclaration("private var geekNetworkTrendCard:", in: network)
+        XCTAssertTrue(trend.contains("下载峰值"))
+        XCTAssertTrue(trend.contains("Download peak"))
+        XCTAssertTrue(trend.contains("上传峰值"))
+        XCTAssertTrue(trend.contains("Upload peak"))
+        XCTAssertTrue(trend.contains("会话累计"))
+        XCTAssertTrue(trend.contains("session total"))
+        XCTAssertTrue(trend.contains("total: ByteFormat.string(sessionDownloadedBytes)"))
+        XCTAssertTrue(trend.contains("total: ByteFormat.string(sessionUploadedBytes)"))
+        let components = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarAdvancedComponents.swift")
+        let downloaded = try r2SourceDeclaration("var sessionDownloadedBytes:", in: components)
+        let uploaded = try r2SourceDeclaration("var sessionUploadedBytes:", in: components)
+        XCTAssertTrue(downloaded.contains("monitorState.sessionDownloadedBytes"))
+        XCTAssertTrue(uploaded.contains("monitorState.sessionUploadedBytes"))
+        let sensorSummary = try D64MenuBarSource.source("MenuBarAdvanced/GeekOverviewPresentation.swift")
+        XCTAssertTrue(sensorSummary.contains("value: geekFanTelemetry.actualRPM.map(SystemFanSpeedFormat.number)"))
+        XCTAssertTrue(sensorSummary.contains("geekFanTelemetry.isFanless"))
+        XCTAssertTrue(sensorSummary.contains("geekFanTelemetry.isSampling"))
         XCTAssertTrue(advancedSource.contains("if metricAvailable(.fanSpeed)"))
         XCTAssertTrue(advancedSource.contains("valueRange: 20...110"))
-        XCTAssertTrue(advancedSource.contains("title: L10n.text(\"平均转速\", \"Fan Average\")"))
+        // The removed tile's fan average lives on in the fan history title.
+        XCTAssertTrue(advancedSource.contains("L10n.text(\"平均转速\", \"Average Fan Speed\")"))
         XCTAssertTrue(advancedSource.contains("geekSensorHeader(L10n.text(\"温度\", \"TEMPERATURE\"))"))
         XCTAssertTrue(advancedSource.contains("valueRange: 0...fanTrendMaximum"))
         XCTAssertTrue(advancedSource.contains("channel: .fanRPM"))
         XCTAssertFalse(advancedSource.contains("sensorTrendSeries"))
         XCTAssertFalse(advancedSource.contains("GeekMemoryCompositionHoverDetail"))
-        XCTAssertTrue(advancedSource.contains("GPU、温度和风扇约每 2 秒更新"))
+        // The retired sampling hint is not a scheduling contract. Keep the
+        // actual primary-publication/auxiliary-refresh wiring covered.
+        let root = try D64MenuBarSource.source("MenuBarAdvancedStatusView.swift")
+        let sampling = try r2SourceDeclaration("struct MenuBarAdvancedSamplingCoordinator: View", in: root)
+        XCTAssertTrue(sampling.contains("monitorState.needsRefresh("))
+        XCTAssertTrue(sampling.contains("interval: store.menuBarRefreshInterval.seconds"))
+        XCTAssertTrue(sampling.contains(".onChange(of: monitorState.snapshot?.generatedAt)"))
+        XCTAssertTrue(sampling.contains("auxiliaryState.refreshFromPrimaryMonitorUpdate()"))
         XCTAssertTrue(advancedSource.contains(".monospacedDigit()"))
         XCTAssertFalse(advancedSource.contains("Timer.publish"))
         // MenuBarTelemetryChart.swift keeps only the shared series/sample/
@@ -2103,12 +2031,11 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertFalse(advancedSource.contains("EnergyImpactService.snapshot()"))
         XCTAssertFalse(advancedSource.contains("MemoryOptimizerService.snapshot()"))
         XCTAssertFalse(advancedSource.contains("Shell.capture"))
-        let advancedAppIconSource = try XCTUnwrap(
-            advancedSource.components(separatedBy: "struct AdvancedAppIcon: View").last
-        )
-        XCTAssertTrue(advancedAppIconSource.contains("CachedAppIconView("))
-        XCTAssertFalse(advancedAppIconSource.contains("AppIconCache.icon(forFile:"))
-        XCTAssertFalse(advancedAppIconSource.contains("FileManager.default.fileExists"))
+        let iconComponents = try D64MenuBarSource.source("MenuBarAdvanced/GeekPanelComponents.swift")
+        let processIcon = try r2SourceDeclaration("struct GeekSecondaryProcessIcon:", in: iconComponents)
+        XCTAssertTrue(processIcon.contains("CachedAppIconView("))
+        XCTAssertFalse(processIcon.contains("AppIconCache.icon(forFile:"))
+        XCTAssertFalse(processIcon.contains("FileManager.default.fileExists"))
     }
 
     func testAllPanelDensitiesShareOneRefreshActionDefinition() throws {
@@ -2117,18 +2044,12 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let viewsFolder = projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views")
-        let detailedSource = try String(
-            contentsOf: viewsFolder
+        let detailedSource = try r2ProductionSource(at: viewsFolder
                 .appendingPathComponent("MenuBarAdvanced")
-                .appendingPathComponent("MenuBarAdvancedComponents.swift"),
-            encoding: .utf8
-        )
-        let chromeSource = try String(
-            contentsOf: viewsFolder.appendingPathComponent("MenuBarPanelChrome.swift"),
-            encoding: .utf8
-        )
+                .appendingPathComponent("MenuBarAdvancedComponents.swift"))
+        let chromeSource = try r2ProductionSource(at: viewsFolder.appendingPathComponent("MenuBarPanelChrome.swift"))
 
-        XCTAssertTrue(detailedSource.contains("PanelHeader("))
+        XCTAssertTrue(detailedSource.contains("PanelToolbarActions("))
         XCTAssertEqual(
             chromeSource.components(separatedBy: "立即刷新\", \"Refresh Now").count - 1,
             1,
@@ -2140,29 +2061,25 @@ final class SystemMonitorServiceTests: XCTestCase {
     }
 
     func testCompactCleanupPanelAvoidsDuplicateOrMisleadingActions() throws {
-        let projectRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot
-                .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"),
-            encoding: .utf8
-        )
-        let groupRows = try XCTUnwrap(
-            source.components(separatedBy: "private var cleanupGroupRows: some View").last?
-                .components(separatedBy: "private var cleanupQuickActions: some View").first
-        )
-        let groupRowView = try XCTUnwrap(
-            source.components(separatedBy: "private struct MenuBarCleanupGroupRow").last?
-                .components(separatedBy: "private struct MenuBarUtilityActionRow").first
-        )
-
-        XCTAssertFalse(groupRows.contains("Button {"))
-        XCTAssertFalse(groupRowView.contains("chevron.right"))
-        XCTAssertTrue(source.contains("guard !store.isPreparingScan else { return false }"))
-        XCTAssertTrue(source.contains("case .firstScan, .repairAccess, .rescan, .currentScan:"))
-        XCTAssertTrue(source.contains("maintenanceRecommendation != .lowDisk"))
+        // D64: summaries stay read-only; actions take the user to review.
+        let cleanup = try D64MenuBarSource.source("MenuBarAdvanced/GeekCleanupView.swift")
+        for marker in ["struct AdvancedSmartCleanupItemRow:"] {
+            let row = try r2SourceDeclaration(marker, in: cleanup)
+            XCTAssertFalse(row.contains("Button"))
+            XCTAssertFalse(row.contains("chevron"))
+            XCTAssertFalse(row.contains("moveToTrash"))
+            XCTAssertTrue(row.contains(".cleanupItemReadback("))
+        }
+        let actions = try r2SourceDeclaration("struct GeekCleanupActions:", in: cleanup)
+        XCTAssertTrue(actions.contains("action: reviewSafe"))
+        XCTAssertTrue(actions.contains("action: reviewLargeFiles"))
+        XCTAssertTrue(actions.contains("action: openMemory"))
+        XCTAssertFalse(actions.contains("startScan"))
+        XCTAssertFalse(actions.contains("confirmCleanup"))
+        let components = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarAdvancedComponents.swift")
+        let notice = try r2SourceDeclaration("var staleCleanupSummaryNotice:", in: components)
+        XCTAssertTrue(notice.contains("需重新扫描后才能清理"))
+        XCTAssertTrue(notice.contains("Rescan before cleanup"))
     }
 
     func testPanelControlsUseCompactMoreMenuAndImmediateSelection() throws {
@@ -2170,30 +2087,12 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let compactSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"),
-            encoding: .utf8
-        )
-        let advancedSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"),
-            encoding: .utf8
-        )
-        let controllerSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"),
-            encoding: .utf8
-        )
-        let rootSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"),
-            encoding: .utf8
-        )
-        let settingsSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"),
-            encoding: .utf8
-        )
-        let chromeSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"),
-            encoding: .utf8
-        )
+        let compactSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"))
+        let advancedSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"))
+        let controllerSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"))
+        let rootSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"))
+        let settingsSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"))
+        let chromeSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"))
 
         for source in [compactSource, advancedSource] {
             XCTAssertFalse(source.contains("panelModeRawValue = mode.rawValue"))
@@ -2214,16 +2113,16 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(rootSource.contains("struct PanelScene: View"))
         XCTAssertFalse(rootSource.contains("Menu {"))
         XCTAssertFalse(rootSource.contains(".popover("))
-        XCTAssertTrue(chromeSource.contains(".popover(isPresented: geekEditorBinding"))
-        XCTAssertEqual(chromeSource.components(separatedBy: ".popover(isPresented:").count - 1, 1)
+        XCTAssertFalse(chromeSource.contains(".popover(isPresented: geekEditorBinding"))
+        XCTAssertEqual(chromeSource.components(separatedBy: ".popover(isPresented:").count - 1, 0)
         XCTAssertFalse(chromeSource.contains("PanelSettingsView("))
         XCTAssertFalse(chromeSource.contains("if state.selectedDensity == .geek {"))
         XCTAssertTrue(chromeSource.contains("state.presentGeekEditor()"))
         XCTAssertEqual(
-            chromeSource.components(separatedBy: "Customize Geek Overview…").count - 1,
+            chromeSource.components(separatedBy: "Panel Settings…").count - 1,
             1
         )
-        XCTAssertTrue(chromeSource.contains("GeekDashboardEditor(state: state)"))
+        XCTAssertFalse(chromeSource.contains("GeekDashboardEditor(state: state)"))
         XCTAssertTrue(chromeSource.contains("启动时恢复小窗"))
         XCTAssertFalse(chromeSource.contains("isSettingsPresented"))
         XCTAssertFalse(chromeSource.contains("MenuBarStatusController.shared.selectPanelDensity(density)"))
@@ -2239,7 +2138,7 @@ final class SystemMonitorServiceTests: XCTestCase {
 
     @MainActor
     func testPanelDensitySelectionHasNoDeferredPendingState() {
-        let state = MenuBarPanelSettingsState(initialDensity: .simple)
+        let state = MenuBarPanelSettingsState(initialDensity: .simple, defaults: TestPreferenceDomain.make(for: self))
         state.selectDensity(.geek)
 
         XCTAssertEqual(state.selectedDensity, .geek)
@@ -2250,14 +2149,8 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let appSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"),
-            encoding: .utf8
-        )
-        let storeSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Stores/ScanStore.swift"),
-            encoding: .utf8
-        )
+        let appSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"))
+        let storeSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Stores/ScanStore.swift"))
 
         XCTAssertTrue(appSource.contains("store.prepareMenuBarLiveStatusOnLaunch()"))
         XCTAssertTrue(appSource.contains("computerHealthStore.prepareMenuBarHealthOnLaunch()"))
@@ -2272,30 +2165,12 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let appSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"),
-            encoding: .utf8
-        )
-        let rendererSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusRenderer.swift"),
-            encoding: .utf8
-        )
-        let controllerSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"),
-            encoding: .utf8
-        )
-        let compactSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"),
-            encoding: .utf8
-        )
-        let rootSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"),
-            encoding: .utf8
-        )
-        let sessionSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"),
-            encoding: .utf8
-        )
+        let appSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/App/StorageCleanerMacApp.swift"))
+        let rendererSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusRenderer.swift"))
+        let controllerSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"))
+        let compactSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"))
+        let rootSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"))
+        let sessionSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"))
 
         XCTAssertTrue(appSource.contains("@StateObject private var menuBarStatusController = MenuBarStatusController.shared"))
         XCTAssertTrue(appSource.contains("menuBarStatusController.install("))
@@ -2344,14 +2219,8 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Services/SystemMonitorService.swift"),
-            encoding: .utf8
-        )
-        let smcSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Services/SMCFanSpeedService.swift"),
-            encoding: .utf8
-        )
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Services/SystemMonitorService.swift"))
+        let smcSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Services/SMCFanSpeedService.swift"))
 
         XCTAssertTrue(source.contains("SMCFanSpeedService.currentHardwareReadings()"))
         XCTAssertTrue(source.contains("smcReadings.temperatureReadings"))
@@ -2367,7 +2236,8 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(source.contains("private static let gpuSamplingInterval: TimeInterval = 1"))
         XCTAssertTrue(source.contains("static let background: TimeInterval = 15"))
         XCTAssertTrue(source.contains("static let interactive: TimeInterval = 2"))
-        XCTAssertTrue(source.contains("now.timeIntervalSince(gpuSampledAt) < Self.gpuSamplingInterval"))
+        XCTAssertTrue(source.contains("now.timeIntervalSince(gpuSampledAt) < samplingInterval"))
+        XCTAssertTrue(source.contains("samplingPlan?.gpuInterval ?? Self.gpuSamplingInterval"))
         XCTAssertTrue(source.contains("now.timeIntervalSince(thermalSampledAt) < max(1, samplingInterval)"))
         XCTAssertTrue(source.contains("SystemMonitorService.temperatureAndFanReadings()"))
         XCTAssertTrue(source.contains("private var isGPUSampleInFlight = false"))
@@ -2464,7 +2334,7 @@ final class SystemMonitorServiceTests: XCTestCase {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
         return try ([rootURL] + sectionURLs)
-            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .map { try r2ProductionSource(at: $0) }
             .joined(separator: "\n")
     }
 
@@ -2577,10 +2447,7 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Services/AppleSiliconTemperatureService.swift"),
-            encoding: .utf8
-        )
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Services/AppleSiliconTemperatureService.swift"))
 
         XCTAssertTrue(source.contains("private static let clientStore = TemperatureClientStore()"))
         XCTAssertTrue(source.contains("private final class TemperatureClientStore: @unchecked Sendable"))
@@ -2598,50 +2465,17 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let packageSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Package.swift"),
-            encoding: .utf8
-        )
-        let sidebarSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SidebarView.swift"),
-            encoding: .utf8
-        )
-        let glassSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/GlassStyle.swift"),
-            encoding: .utf8
-        )
-        let controllerSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"),
-            encoding: .utf8
-        )
-        let rootSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"),
-            encoding: .utf8
-        )
-        let compactPanelSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"),
-            encoding: .utf8
-        )
-        let advancedPanelSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"),
-            encoding: .utf8
-        )
-        let advancedStatusSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"),
-            encoding: .utf8
-        )
-        let settingsSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"),
-            encoding: .utf8
-        )
-        let chromeSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"),
-            encoding: .utf8
-        )
-        let sessionSource = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"),
-            encoding: .utf8
-        )
+        let packageSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Package.swift"))
+        let sidebarSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/SidebarView.swift"))
+        let glassSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/GlassStyle.swift"))
+        let controllerSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift"))
+        let rootSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"))
+        let compactPanelSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"))
+        let advancedPanelSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"))
+        let advancedStatusSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"))
+        let settingsSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift"))
+        let chromeSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"))
+        let sessionSource = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Support/MenuBarPanelSession.swift"))
 
         XCTAssertTrue(packageSource.contains(".macOS(.v14)"))
         XCTAssertTrue(sidebarSource.contains("ScrollView(.vertical)"))
@@ -2650,16 +2484,24 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertTrue(sidebarSource.contains("LinearGradient("))
         XCTAssertFalse(sidebarSource.contains(".environment(\\.colorScheme, .dark)"),
                        "The sidebar must inherit the selected day/night appearance")
-        XCTAssertTrue(sidebarSource.contains("AppAppearanceColors.sidebarTop"))
-        XCTAssertTrue(sidebarSource.contains("accent.opacity(colorScheme == .dark ? 0.30 : 0.12)"))
+        // D67: sidebar follows the exact night/day lightfield tokens.
+        XCTAssertTrue(sidebarSource.contains("FeatureLightfieldPalette.resolve(scheme).sidebar"))
+        // DECISIONS D3 (2026-10-04) replaced the shared blue selection: the
+        // selected row follows its module color like the header and primary button.
+        // D53 §3.2.2 draws it as the module gradient block that slides.
+        XCTAssertFalse(sidebarSource.contains(".fill(AppAppearanceColors.selectedSurface)"))
+        XCTAssertTrue(sidebarSource.contains("private var pigment: ModulePigment { filter.moduleTheme.pigment }"))
+        XCTAssertTrue(sidebarSource.contains("SidebarSelectionBlock(pigment: pigment)"))
+        XCTAssertFalse(sidebarSource.contains("filter.moduleTheme.accent.opacity(0.30)"))
         XCTAssertFalse(sidebarSource.contains("List(selection: listSelection)"))
         XCTAssertFalse(sidebarSource.contains("legacyBackdrop"))
         XCTAssertFalse(glassSource.contains(".glassEffect("))
         XCTAssertTrue(glassSource.contains("private struct GlassSurfaceDepthKey"))
         XCTAssertTrue(glassSource.contains("@Environment(\\.glassSurfaceDepth)"))
         XCTAssertTrue(glassSource.contains("private struct AdaptivePopoverChromeModifier"))
-        XCTAssertTrue(glassSource.contains("Color(nsColor: .controlBackgroundColor)"))
-        XCTAssertTrue(glassSource.contains(".fill(AppDesignTokens.Palette.contentBackground)"))
+        XCTAssertTrue(glassSource.contains("guard moduleTheme.isImmersive else { return AppAppearanceColors.panel }"))
+        XCTAssertFalse(glassSource.contains("Color(nsColor: .controlBackgroundColor)"))
+        XCTAssertTrue(glassSource.contains(".fill(panelChromePalette?.shell ?? AppDesignTokens.Palette.contentBackground)"))
         XCTAssertTrue(glassSource.contains(".strokeBorder(borderColor, lineWidth: borderWidth)"))
         XCTAssertTrue(glassSource.contains("view.state = .followsWindowActiveState"))
         XCTAssertFalse(glassSource.contains("GlassVisualEffectBackdrop(material: .popover"))
@@ -2667,7 +2509,7 @@ final class SystemMonitorServiceTests: XCTestCase {
         XCTAssertFalse(glassSource.contains("tinted.interactive()"))
         XCTAssertFalse(glassSource.contains("struct MenuBarGlassBackdrop"))
         XCTAssertFalse(glassSource.contains("RadialGradient("))
-        XCTAssertTrue(compactPanelSource.contains("PanelShell(density: .simple"))
+        XCTAssertTrue(compactPanelSource.contains("PanelShell("))
         XCTAssertFalse(compactPanelSource.contains("MenuBarGlassBackdrop"))
         XCTAssertFalse(compactPanelSource.contains("colorScheme == .dark ? 0.46 : 0.60"))
         XCTAssertTrue(advancedStatusSource.contains("density: presentation"))
@@ -2691,10 +2533,7 @@ final class SystemMonitorServiceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Stores/ScanStore.swift"),
-            encoding: .utf8
-        )
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Stores/ScanStore.swift"))
 
         XCTAssertTrue(source.contains("func refreshMenuBarLiveStatus(showLoadingWhenEmpty: Bool = false, forceMemorySnapshot: Bool = false)"))
         XCTAssertTrue(source.contains("shouldRefreshMenuBarMemorySnapshot"))

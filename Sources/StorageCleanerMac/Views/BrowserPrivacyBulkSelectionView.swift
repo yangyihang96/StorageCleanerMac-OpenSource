@@ -7,6 +7,7 @@ enum BrowserPrivacyBulkSelectionScope: Hashable, Sendable {
     case last30Days
     case olderThan30Days
     case website(String)
+    case sensitive
 
     var title: String {
         switch self {
@@ -20,14 +21,18 @@ enum BrowserPrivacyBulkSelectionScope: Hashable, Sendable {
             L10n.text("30 天以前", "Older Than 30 Days")
         case let .website(domain):
             domain
+        case .sensitive:
+            L10n.text("敏感网站", "Sensitive websites")
         }
     }
 
     func matchingRecordIDs(
         in records: [BrowserPrivacyRecord],
         now: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        disclosure: BrowserPrivacyDisclosurePolicy? = nil
     ) -> Set<UUID> {
+        let disclosure = disclosure ?? .protecting(records)
         let startOfToday = calendar.startOfDay(for: now)
         let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: startOfToday)
             ?? now.addingTimeInterval(86_400)
@@ -52,24 +57,35 @@ enum BrowserPrivacyBulkSelectionScope: Hashable, Sendable {
                 guard let visitedAt = record.visitedAt else { return false }
                 return visitedAt < startOfLast30Days
             case let .website(domain):
-                return Self.normalizedDomain(record.domain) == Self.normalizedDomain(domain)
+                return !disclosure.isConcealed(record) && Self.normalizedDomain(record.domain) == Self.normalizedDomain(domain)
+            case .sensitive:
+                return record.locator != nil && disclosure.isConcealed(record)
             }
         }.map(\.id))
     }
 
     static func websiteOptions(
-        from records: [BrowserPrivacyRecord]
+        from records: [BrowserPrivacyRecord],
+        disclosure: BrowserPrivacyDisclosurePolicy? = nil
     ) -> [BrowserPrivacyWebsiteSelectionOption] {
+        let disclosure = disclosure ?? .protecting(records)
         let counts = records.reduce(into: [String: Int]()) { result, record in
             guard record.selectionEligibility.canSelect,
+                  !disclosure.isConcealed(record),
                   let domain = normalizedDomain(record.domain) else { return }
             result[domain, default: 0] += 1
         }
-        return counts.map { BrowserPrivacyWebsiteSelectionOption(domain: $0.key, count: $0.value) }
+        var options = counts.map { BrowserPrivacyWebsiteSelectionOption(domain: $0.key, count: $0.value) }
             .sorted { lhs, rhs in
                 if lhs.count != rhs.count { return lhs.count > rhs.count }
                 return lhs.domain.localizedCaseInsensitiveCompare(rhs.domain) == .orderedAscending
             }
+        let concealed = records.count { $0.selectionEligibility.canSelect && disclosure.isConcealed($0) }
+        if concealed > 0 {
+            options.insert(.init(domain: L10n.text("敏感网站", "Sensitive websites"), count: concealed, isSensitive: true,
+                hasDeletableRecord: records.contains { $0.locator != nil && $0.selectionEligibility.canSelect && disclosure.isConcealed($0) }), at: 0)
+        }
+        return options
     }
 
     private static func normalizedDomain(_ value: String?) -> String? {
@@ -82,8 +98,33 @@ enum BrowserPrivacyBulkSelectionScope: Hashable, Sendable {
 struct BrowserPrivacyWebsiteSelectionOption: Identifiable, Equatable, Sendable {
     let domain: String
     let count: Int
+    var isSensitive = false
+    var hasDeletableRecord = true
 
-    var id: String { domain }
+    var id: String { isSensitive ? "sensitive-sites" : domain }
+    var title: String { isSensitive ? BrowserPrivacyDisclosurePolicy.sensitiveSummary(count) : domain }
+}
+
+struct BrowserPrivacyBulkSelectionPresentation: Sendable {
+    let websiteOptions: [BrowserPrivacyWebsiteSelectionOption]
+    let dateCounts: [BrowserPrivacyBulkSelectionScope: Int]
+    let dateSummaries: [BrowserPrivacyBulkSelectionScope: String]
+    static let dateScopes: [BrowserPrivacyBulkSelectionScope] = [.today, .last7Days, .last30Days, .olderThan30Days]
+    init(records: [BrowserPrivacyRecord], disclosure: BrowserPrivacyDisclosurePolicy) {
+        websiteOptions = BrowserPrivacyBulkSelectionScope.websiteOptions(from: records, disclosure: disclosure)
+        let now = Date()
+        var counts: [BrowserPrivacyBulkSelectionScope: Int] = [:], summaries: [BrowserPrivacyBulkSelectionScope: String] = [:]
+        for scope in Self.dateScopes {
+            let ids = scope.matchingRecordIDs(in: records, now: now, disclosure: disclosure)
+            let subset = records.filter { ids.contains($0.id) }
+            counts[scope] = ids.count; summaries[scope] = disclosure.summary(subset)
+        }
+        dateCounts = counts; dateSummaries = summaries
+    }
+    func websiteOptions(matching query: String) -> [BrowserPrivacyWebsiteSelectionOption] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return websiteOptions.filter { $0.isSensitive || query.isEmpty || $0.domain.localizedCaseInsensitiveContains(query) }
+    }
 }
 
 struct BrowserPrivacyBulkSelectionView: View {
@@ -92,27 +133,23 @@ struct BrowserPrivacyBulkSelectionView: View {
 
     @State private var websiteQuery = ""
 
-    private static let dateScopes: [BrowserPrivacyBulkSelectionScope] = [
-        .today,
-        .last7Days,
-        .last30Days,
-        .olderThan30Days,
-    ]
-    private let websiteOptions: [BrowserPrivacyWebsiteSelectionOption]
-    private let dateCounts: [BrowserPrivacyBulkSelectionScope: Int]
+    private static let dateScopes = BrowserPrivacyBulkSelectionPresentation.dateScopes
+    let presentation: BrowserPrivacyBulkSelectionPresentation
 
     init(
         records: [BrowserPrivacyRecord],
         isDisabled: Bool,
+        disclosure: BrowserPrivacyDisclosurePolicy? = nil,
         onSelect: @escaping (BrowserPrivacyBulkSelectionScope) -> Void
     ) {
         self.isDisabled = isDisabled
         self.onSelect = onSelect
-        websiteOptions = BrowserPrivacyBulkSelectionScope.websiteOptions(from: records)
-        let now = Date()
-        dateCounts = Dictionary(uniqueKeysWithValues: Self.dateScopes.map { scope in
-            (scope, scope.matchingRecordIDs(in: records, now: now).count)
-        })
+        presentation = .init(records: records, disclosure: disclosure ?? .protecting(records))
+    }
+
+    init(presentation: BrowserPrivacyBulkSelectionPresentation, isDisabled: Bool,
+         onSelect: @escaping (BrowserPrivacyBulkSelectionScope) -> Void) {
+        self.presentation = presentation; self.isDisabled = isDisabled; self.onSelect = onSelect
     }
 
     var body: some View {
@@ -120,12 +157,6 @@ struct BrowserPrivacyBulkSelectionView: View {
             VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.micro) {
                 Text(L10n.text("批量选择", "Bulk Select"))
                     .font(AppTypography.sectionTitle)
-                Text(L10n.text(
-                    "按日期或网站加入选择；不会立即删除。",
-                    "Add records by date or website; nothing is deleted immediately."
-                ))
-                .font(AppTypography.caption)
-                .foregroundStyle(AppDesignTokens.Palette.secondaryText)
             }
 
             Divider()
@@ -153,6 +184,10 @@ struct BrowserPrivacyBulkSelectionView: View {
             )
             .textFieldStyle(.roundedBorder)
 
+            ForEach(filteredWebsiteOptions.filter(\.isSensitive)) { option in
+                websiteSelectionButton(option)
+            }
+
             if filteredWebsiteOptions.isEmpty {
                 Text(L10n.text("没有匹配的网站", "No matching websites"))
                     .font(AppTypography.caption)
@@ -161,7 +196,7 @@ struct BrowserPrivacyBulkSelectionView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(filteredWebsiteOptions) { option in
+                        ForEach(filteredWebsiteOptions.filter { !$0.isSensitive }) { option in
                             websiteSelectionButton(option)
                             Divider()
                         }
@@ -176,13 +211,12 @@ struct BrowserPrivacyBulkSelectionView: View {
     }
 
     private var filteredWebsiteOptions: [BrowserPrivacyWebsiteSelectionOption] {
-        let query = websiteQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return websiteOptions }
-        return websiteOptions.filter { $0.domain.localizedCaseInsensitiveContains(query) }
+        presentation.websiteOptions(matching: websiteQuery)
     }
 
     private func dateSelectionButton(_ scope: BrowserPrivacyBulkSelectionScope) -> some View {
-        let count = dateCounts[scope, default: 0]
+        let count = presentation.dateCounts[scope, default: 0]
+        let summary = presentation.dateSummaries[scope] ?? BrowserPrivacyLightfieldPresentation.recordCount(0)
         return Button {
             onSelect(scope)
         } label: {
@@ -193,7 +227,7 @@ struct BrowserPrivacyBulkSelectionView: View {
                     .accessibilityHidden(true)
                 Text(scope.title)
                 Spacer(minLength: AppDesignTokens.Spacing.small)
-                Text(L10n.text("\(count) 项", "\(count) items"))
+                Text(summary)
                     .font(AppTypography.caption.monospacedDigit())
                     .foregroundStyle(AppDesignTokens.Palette.secondaryText)
             }
@@ -203,8 +237,8 @@ struct BrowserPrivacyBulkSelectionView: View {
         .appButtonChrome(.toolbar)
         .disabled(isDisabled || count == 0)
         .accessibilityLabel(L10n.text(
-            "选择\(scope.title)的 \(count) 项浏览记录",
-            "Select \(count) browsing records from \(scope.title)"
+            "选择\(scope.title)的 \(summary)",
+            "Select \(summary) from \(scope.title)"
         ))
     }
 
@@ -212,29 +246,25 @@ struct BrowserPrivacyBulkSelectionView: View {
         _ option: BrowserPrivacyWebsiteSelectionOption
     ) -> some View {
         Button {
-            onSelect(.website(option.domain))
+            onSelect(option.isSensitive ? .sensitive : .website(option.domain))
         } label: {
             HStack(spacing: AppDesignTokens.Spacing.small) {
-                Image(systemName: "globe")
-                    .frame(width: 18)
-                    .foregroundStyle(AppDesignTokens.Palette.accent)
-                    .accessibilityHidden(true)
-                Text(option.domain)
+                Text(option.title)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: AppDesignTokens.Spacing.small)
-                Text(L10n.text("\(option.count) 项", "\(option.count) items"))
+                if !option.isSensitive { Text(BrowserPrivacyCountText.visits(option.count))
                     .font(AppTypography.caption.monospacedDigit())
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(AppDesignTokens.Palette.secondaryText) }
             }
             .padding(.vertical, AppDesignTokens.Spacing.small)
             .contentShape(Rectangle())
         }
         .appButtonChrome(.toolbar)
-        .disabled(isDisabled)
-        .accessibilityLabel(L10n.text(
-            "选择网站 \(option.domain) 的 \(option.count) 项浏览记录",
-            "Select \(option.count) browsing records for \(option.domain)"
+        .disabled(isDisabled || (option.isSensitive && !option.hasDeletableRecord))
+        .accessibilityLabel(option.isSensitive ? option.title : L10n.text(
+            "选择网站 \(option.domain) 的 \(option.count) 次访问",
+            "Select \(BrowserPrivacyCountText.visits(option.count)) for \(option.domain)"
         ))
     }
 
@@ -245,6 +275,7 @@ struct BrowserPrivacyBulkSelectionView: View {
         case .last30Days: "calendar.circle"
         case .olderThan30Days: "calendar.badge.minus"
         case .website: "globe"
+        case .sensitive: "lock"
         }
     }
 }

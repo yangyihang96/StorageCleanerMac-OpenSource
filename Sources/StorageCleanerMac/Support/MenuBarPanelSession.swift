@@ -26,7 +26,7 @@ final class GeekPanelCoordinator: ObservableObject {
     @Published private(set) var route: GeekPanelRoute {
         didSet {
             guard oldValue != route else { return }
-            MenuBarPresentationTrace.begin("presentation", event: NSApp.currentEvent)
+            MenuBarPresentationTrace.routeChanged(from: oldValue, to: route, event: NSApp?.currentEvent)
             PerformanceTelemetry.panelInput("route", target: String(describing: route))
         }
     }
@@ -35,6 +35,21 @@ final class GeekPanelCoordinator: ObservableObject {
     private(set) var pinnedModule: PanelSection?
     private(set) var isHistoryPinned = false
     private(set) var isControlPalettePresented = false
+    private(set) var historyInteractionToken: UUID?
+    var isInteractingWithHistory: Bool { historyInteractionToken != nil }
+
+    func beginHistoryInteraction() -> UUID? {
+        guard case .history = route else { return nil }
+        invalidateHoverIntent()
+        let token = UUID()
+        historyInteractionToken = token
+        return token
+    }
+    func endHistoryInteraction(_ token: UUID?) {
+        guard token == historyInteractionToken else { return }
+        historyInteractionToken = nil
+    }
+
     private var suppressesModuleAfterEscape = false
     private var moduleEscapePointerLocation: NSPoint?
     private var moduleEscapeAnchors: [SmallWindowAnchorSnapshot] = []
@@ -44,6 +59,20 @@ final class GeekPanelCoordinator: ObservableObject {
     private let pointerLocationProvider: @MainActor () -> NSPoint
     let hoverIntentController: HoverIntentController
     let anchorRegistry: SmallWindowAnchorRegistry
+    private var stationaryReflow = CascadeStationaryPointerGuard()
+
+    func preservePointerAfterReflow(previous: [NSRect], next: [NSRect], pointer: NSPoint) {
+        guard previous != next else { return }
+        stationaryReflow.begin(previous: previous, next: next, pointer: pointer)
+        if stationaryReflow.retains(pointer) {
+            invalidateHoverIntent()
+            setPointerWithinHoverEnvelope(true)
+        }
+    }
+
+    func retainsPointerAfterReflow(_ point: NSPoint) -> Bool {
+        stationaryReflow.retains(point)
+    }
     /// Answers whether a presented control palette still owns the pointer
     /// (anchor, palette, or the corridor between them). Wired by the panel
     /// session; nil means no palette surface exists.
@@ -99,8 +128,12 @@ final class GeekPanelCoordinator: ObservableObject {
         condition: @escaping @MainActor () -> Bool,
         action: @escaping @MainActor () -> Void
     ) -> HoverIntent {
+        guard !isInteractingWithHistory else { return expiredHoverIntent() }
         guard !suppressesModuleAfterEscape else {
             return cancelledHoverIntent()
+        }
+        guard !stationaryReflow.retains(pointerLocationProvider()) else {
+            return expiredHoverIntent()
         }
         // A pointer traveling from a palette's anchor to the palette crosses
         // neighboring hover targets (the anchor rows are much shorter than
@@ -125,8 +158,12 @@ final class GeekPanelCoordinator: ObservableObject {
         condition: @escaping @MainActor () -> Bool,
         action: @escaping @MainActor () -> Void
     ) -> HoverIntent {
+        guard !isInteractingWithHistory else { return expiredHoverIntent() }
         guard !suppressesTertiaryAfterEscape else {
             return cancelledHoverIntent()
+        }
+        guard !stationaryReflow.retains(pointerLocationProvider()) else {
+            return expiredHoverIntent()
         }
         guard controlPaletteClaimsPointer?() != true else {
             return expiredHoverIntent()
@@ -209,14 +246,16 @@ final class GeekPanelCoordinator: ObservableObject {
         screenRect: NSRect,
         parentPanelRole: SmallWindowPanelRole = .primary,
         preferredPlacementEdge: MenuBarCascadeDirection = .left,
-        contentKind: String
+        contentKind: String,
+        layoutOffset: CGFloat? = nil
     ) {
         anchorRegistry.update(
             id: id,
             screenRect: screenRect,
             parentPanelRole: parentPanelRole,
             preferredPlacementEdge: preferredPlacementEdge,
-            contentKind: contentKind
+            contentKind: contentKind,
+            layoutOffset: layoutOffset
         )
         if suppressesModuleAfterEscape,
            parentPanelRole == .primary,
@@ -235,7 +274,8 @@ final class GeekPanelCoordinator: ObservableObject {
     }
 
     func previewModule(_ section: PanelSection) {
-        guard section != .overview, pinnedModule == nil, !suppressesModuleAfterEscape else { return }
+        guard section != .overview, pinnedModule == nil, !suppressesModuleAfterEscape,
+              !stationaryReflow.retains(pointerLocationProvider()) else { return }
         route = .module(section)
         hoverIntentController.markOpen(anchorID: .module(section), panelRole: .secondary)
     }
@@ -254,7 +294,8 @@ final class GeekPanelCoordinator: ObservableObject {
     }
 
     func previewHardwareDetail(_ focus: GeekHardwareDetailFocus) {
-        guard pinnedModule == nil, !suppressesModuleAfterEscape else { return }
+        guard pinnedModule == nil, !suppressesModuleAfterEscape,
+              !stationaryReflow.retains(pointerLocationProvider()) else { return }
         hardwareDetailFocus = focus
         route = .module(.sensors)
         hoverIntentController.markOpen(anchorID: .module(.sensors), panelRole: .secondary)
@@ -289,6 +330,7 @@ final class GeekPanelCoordinator: ObservableObject {
         guard section != .overview else { return false }
         guard pinned || !isHistoryPinned else { return false }
         guard pinned || !suppressesTertiaryAfterEscape else { return false }
+        guard pinned || !stationaryReflow.retains(pointerLocationProvider()) else { return false }
         let ownsCurrentHover: Bool
         if case .open(_, .tertiary) = hoverIntentController.state {
             ownsCurrentHover = true
@@ -305,6 +347,7 @@ final class GeekPanelCoordinator: ObservableObject {
         }
         guard pinned || !isControlPalettePresented || ownsCurrentHover else { return false }
         isControlPalettePresented = false
+        historyInteractionToken = nil
         isHistoryPinned = pinned
         route = .history(module: section, selection: selection)
         hoverIntentController.markOpen(
@@ -325,6 +368,7 @@ final class GeekPanelCoordinator: ObservableObject {
     }
 
     func dismissHistory() {
+        historyInteractionToken = nil
         guard case let .history(section, _) = route else { return }
         isHistoryPinned = false
         route = .module(section)
@@ -332,12 +376,12 @@ final class GeekPanelCoordinator: ObservableObject {
     }
 
     func dismissUnpinnedModule() {
-        guard pinnedModule == nil else { return }
+        guard !isInteractingWithHistory, pinnedModule == nil else { return }
         reset()
     }
 
     func dismissUnpinnedHierarchy() {
-        guard !isHistoryPinned else { return }
+        guard !isInteractingWithHistory, !isHistoryPinned else { return }
         if pinnedModule == nil {
             reset()
         } else {
@@ -383,6 +427,8 @@ final class GeekPanelCoordinator: ObservableObject {
     }
 
     func reset() {
+        historyInteractionToken = nil
+        stationaryReflow.reset()
         invalidateHoverIntent()
         pinnedModule = nil
         isHistoryPinned = false
@@ -447,9 +493,57 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     private(set) var tertiarySourceOffset: CGFloat?
     private var attachedOverviewFrame: NSRect?
     private var attachedCascadeLayout: MenuBarCascadeLayout?
+    /// The level-one card offset of each page's last placement that had a
+    /// registered anchor. A card that is rebuilt (the overview moves into the
+    /// attached shell when a level-two page opens) removes its anchor and
+    /// registers it again a turn later; placements in between keep this
+    /// offset instead of the default one, which drew the page misplaced and
+    /// cost two extra frames. Cleared when the overview layout can change.
+    private var anchoredDetailTopOffsets: [PanelSection: CGFloat] = [:]
+    /// The dashboard layout the remembered offsets were measured in: cards
+    /// reordered or hidden at the same overview size move (review of phase
+    /// 1, P2-2).
+    private var anchoredDetailTopOffsetsLayout: GeekDashboardConfiguration?
     private var hoverIntentAnchor: NSPoint?
     private var persistsGeometry = false
     private var isApplyingProgrammaticFrame = false
+    private var isResolvingCascade = false
+    /// Tests only: runs inside every programmatic frame, as the view update
+    /// that `setFrame(display: true)` performs does in the live panel.
+    var programmaticFrameDidApplyForTesting: (() -> Void)?
+    /// Geometry calls that reach the session while it resolves the cascade
+    /// or applies a frame: `panel.setFrame(display: true)` runs the SwiftUI
+    /// update synchronously, and that update forwards the selected page,
+    /// measured sizes and presented levels (`MenuBarStatusController`). They
+    /// were dropped, which left the session's geometry behind the view's
+    /// until an unrelated request came. They are now replayed in the order
+    /// they were made once the current placement is done; each call checks
+    /// the session's state again when it runs.
+    private var deferredGeometryCalls: [DeferredGeometryCall] = []
+    private struct DeferredGeometryCall {
+        /// A page selection (`setGeekSection`): the call the replay bound
+        /// keeps, with every call made after it (BOARD N11-2).
+        let selectsSection: Bool
+        let run: @MainActor () -> Void
+    }
+    private var isReplayingDeferredGeometryCalls = false
+    /// Audit only: the outermost entry point that placed the panel, reported
+    /// with every `setFrame` span.
+    private var traceGeometryCause: String?
+    private var isAnchorRefreshDeferred = false
+    private var isGeometryReplayScheduled = false
+    /// Calls replayed since the queue was last empty: one operation of the
+    /// user and the calls it produced.
+    private var geometryReplayBurstCount = 0
+    /// Set while the newest call of a stopped burst runs: the calls it
+    /// produces are dropped instead of queued.
+    private var dropsDeferredGeometryCalls = false
+    /// Calls replayed before the rest continue on the next main-queue turn.
+    static let maximumSynchronousGeometryReplays = 8
+    /// Calls replayed for one operation before replaying stops. Placing the
+    /// cascade settles in a few calls; more means calls that keep undoing
+    /// each other.
+    static let maximumGeometryReplaysPerBurst = 32
 
     private var localKeyMonitor: Any?
     private var localMouseMonitor: Any?
@@ -457,8 +551,11 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     private var defaultObservers: [NSObjectProtocol] = []
     private let menuTrackingObservers = MenuBarMenuTrackingObservers()
     private var trackingMenus: Set<ObjectIdentifier> = []
+    private var menuWasApplicationActiveAtBegin = false
     private var deactivatedDuringMenuTracking = false
-    private var menuTrackingDismissalTask: Task<Void, Never>?
+    private var applicationDeactivationTask: Task<Void, Never>?
+    private var lastNativeMenuEndedAt: Date?
+    private var menuTrackingHoverReleaseTask: Task<Void, Never>?
 
     init(
         panel: MenuBarStatusPanel = MenuBarStatusPanel(contentRect: .zero),
@@ -546,16 +643,27 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 #if DEBUG || STORAGE_CLEANER_BETA
         PerformanceTelemetry.logger.notice("MenuBar lifecycle: show")
 #endif
+        let showStartedAt = MenuBarPresentationTrace.uptime
+        let ownsTraceCause = beginTraceGeometryCause("show")
+        defer { endTraceGeometryCause(ownsTraceCause) }
 
         if panel.contentViewController !== hostingController {
             panel.contentViewController = hostingController
             panel.installPointerTracking()
+            MenuBarPresentationTrace.span("show.attach", from: showStartedAt)
         }
 
         self.anchor = anchor
         self.screen = screen
         self.density = density
         isPresented = true
+        deferredGeometryCalls.removeAll()
+        isAnchorRefreshDeferred = false
+        anchoredDetailTopOffsets.removeAll()
+        geometryReplayBurstCount = 0
+        lastNativeMenuEndedAt = nil
+        applicationDeactivationTask?.cancel()
+        applicationDeactivationTask = nil
         controlPaletteCoordinator?.dismiss()
         panelCoordinator?.reset()
         cascadeDirection = .left
@@ -583,16 +691,32 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             backingScaleFactor: screen.backingScaleFactor
         )
         attachedOverviewFrame = density.usesAttachedDetailPresentation ? frame : nil
+        let frameStartedAt = MenuBarPresentationTrace.uptime
         applyProgrammaticFrame(frame)
+        MenuBarPresentationTrace.span("show.frame", from: frameStartedAt)
         installEventMonitors()
         installObservers()
         // A non-activating panel can become key without activating the app.
         // This keeps Escape and keyboard controls inside the visible window
         // group while preserving the foreground application's activation.
         if presentsPanelOnShow {
+            let orderStartedAt = MenuBarPresentationTrace.uptime
+#if DEBUG || STORAGE_CLEANER_BETA
+            // The latency script measures without taking key focus from the
+            // application the person at this Mac is using.
+            if MenuBarLatencyScript.isRequested {
+                panel.orderFrontRegardless()
+            } else {
+                panel.makeKeyAndOrderFront(nil)
+                panel.orderFrontRegardless()
+            }
+#else
             panel.makeKeyAndOrderFront(nil)
             panel.orderFrontRegardless()
+#endif
+            MenuBarPresentationTrace.span("show.order", from: orderStartedAt)
         }
+        MenuBarPresentationTrace.span("show.total", from: showStartedAt)
         PerformanceTelemetry.panelInput("presented", target: "overview.visible=\(panel.isVisible) activeSpace=\(panel.isOnActiveSpace) frame=\(NSStringFromRect(panel.frame)) content=\(NSStringFromRect(hostingController.view.frame)) appHidden=\(NSApp.isHidden) minimized=\(panel.isMiniaturized) level=\(panel.level.rawValue) anchor=\(NSStringFromRect(anchor)) screen=\(NSStringFromRect(visibleFrame)) occlusion=\(panel.occlusionState.rawValue)", window: panel)
 #if DEBUG || STORAGE_CLEANER_BETA
         scheduleDebugSnapshotsIfRequested()
@@ -602,6 +726,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     func selectDensity(_ density: PanelDensity) {
         guard !isTornDown, let anchor, let screen else { return }
         controlPaletteCoordinator?.dismiss()
+        anchoredDetailTopOffsets.removeAll()
         let previousDensity = self.density
         let sectionToRestore = previousDensity.usesAttachedDetailPresentation
             && density.usesAttachedDetailPresentation
@@ -648,9 +773,117 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 
     func setGeekSection(
         _ section: PanelSection,
-        visibleFrameOverride: NSRect? = nil
+        visibleFrameOverride: NSRect? = nil,
+        preferredDetailSize: CGSize? = nil
     ) {
-        guard !isTornDown, density.usesAttachedDetailPresentation else { return }
+        guard !isTornDown else { return }
+        let ownsTraceCause = beginTraceGeometryCause("section")
+        defer { endTraceGeometryCause(ownsTraceCause) }
+        guard !deferGeometryCallIfNeeded(selectsSection: true, { [weak self] in
+            self?.setGeekSection(
+                section,
+                visibleFrameOverride: visibleFrameOverride,
+                preferredDetailSize: preferredDetailSize
+            )
+        }) else {
+            replayDeferredGeometryCalls()
+            return
+        }
+        guard density.usesAttachedDetailPresentation else { return }
+        resolveCascade(
+            section,
+            visibleFrameOverride: visibleFrameOverride,
+            preferredDetailSize: preferredDetailSize
+        )
+        replayDeferredGeometryCalls()
+    }
+
+    /// Defers `call` while the cascade is resolved or a frame is applied,
+    /// and while older deferred calls still wait for their turn (after a
+    /// spill to the next main-queue turn): a later call never runs before an
+    /// earlier one. Calls made by a replayed call run directly, in place.
+    /// Returns whether the call was deferred (or dropped, see
+    /// `dropsDeferredGeometryCalls`).
+    private func deferGeometryCallIfNeeded(
+        selectsSection: Bool = false,
+        _ call: @escaping @MainActor () -> Void
+    ) -> Bool {
+        let mustWait = isResolvingCascade || isApplyingProgrammaticFrame
+            || (!deferredGeometryCalls.isEmpty && !isReplayingDeferredGeometryCalls)
+        guard mustWait else { return false }
+        guard !dropsDeferredGeometryCalls else { return true }
+        deferredGeometryCalls.append(DeferredGeometryCall(selectsSection: selectsSection, run: call))
+        return true
+    }
+
+    /// Runs the deferred calls in the order they were made. A call that
+    /// places the cascade can defer further calls (from the view update of
+    /// its own frame); they run in the same loop. After
+    /// `maximumSynchronousGeometryReplays` the rest continue on the next
+    /// main-queue turn. After `maximumGeometryReplaysPerBurst` for one
+    /// operation the calls keep producing each other: the newest page
+    /// selection and the calls queued after it run, once (only the newest
+    /// call when no page selection is queued), the calls they produce are
+    /// dropped, and replaying stops until the next call from outside. Running
+    /// only the newest call could leave the session on an older page with
+    /// the newest page's measurements (BOARD N11-2).
+    private func replayDeferredGeometryCalls() {
+        guard !isResolvingCascade, !isApplyingProgrammaticFrame,
+              !isReplayingDeferredGeometryCalls else { return }
+        isReplayingDeferredGeometryCalls = true
+        defer {
+            isReplayingDeferredGeometryCalls = false
+            if deferredGeometryCalls.isEmpty { geometryReplayBurstCount = 0 }
+        }
+        var replayedThisTurn = 0
+        while !isTornDown, !deferredGeometryCalls.isEmpty {
+            guard geometryReplayBurstCount < Self.maximumGeometryReplaysPerBurst else {
+                let lastSelection = deferredGeometryCalls.lastIndex { $0.selectsSection }
+                let kept = Array(deferredGeometryCalls[(lastSelection ?? deferredGeometryCalls.count - 1)...])
+                PerformanceTelemetry.logger.notice(
+                    "MenuBar cascade: geometry calls did not settle after \(self.geometryReplayBurstCount, privacy: .public) replays; dropped \(self.deferredGeometryCalls.count - kept.count, privacy: .public) queued calls and applied the newest page selection and the \(kept.count, privacy: .public) calls from it once"
+                )
+                deferredGeometryCalls.removeAll()
+                isAnchorRefreshDeferred = false
+                dropsDeferredGeometryCalls = true
+                for call in kept where !isTornDown { call.run() }
+                dropsDeferredGeometryCalls = false
+                deferredGeometryCalls.removeAll()
+                isAnchorRefreshDeferred = false
+                return
+            }
+            guard replayedThisTurn < Self.maximumSynchronousGeometryReplays else {
+                scheduleDeferredGeometryReplay()
+                return
+            }
+            replayedThisTurn += 1
+            geometryReplayBurstCount += 1
+            let call = deferredGeometryCalls.removeFirst()
+            let outerTraceCause = traceGeometryCause
+            if MenuBarPresentationTrace.enabled { traceGeometryCause = "deferred" }
+            call.run()
+            if MenuBarPresentationTrace.enabled { traceGeometryCause = outerTraceCause }
+        }
+    }
+
+    private func scheduleDeferredGeometryReplay() {
+        guard !isGeometryReplayScheduled else { return }
+        isGeometryReplayScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            isGeometryReplayScheduled = false
+            replayDeferredGeometryCalls()
+        }
+    }
+
+    private func resolveCascade(
+        _ section: PanelSection,
+        visibleFrameOverride: NSRect?,
+        preferredDetailSize: CGSize?
+    ) {
+        isResolvingCascade = true
+        defer { isResolvingCascade = false }
+        let previousHoverFrames = attachedHoverFrames
 
         if geekSection != section {
             controlPaletteCoordinator?.dismiss()
@@ -659,7 +892,15 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         let overviewFrame = attachedOverviewFrame ?? collapsedAttachedFrame(from: panel.frame)
         attachedOverviewFrame = overviewFrame
         if geekSection != section {
-            detailColumnSize = nil
+            detailColumnSize = preferredDetailSize.map {
+                GeekPanelPresentationMetrics.normalizedDetailSize(
+                    $0, for: section, density: density
+                )
+            }
+        } else if let preferredDetailSize, section != .overview {
+            detailColumnSize = GeekPanelPresentationMetrics.normalizedDetailSize(
+                preferredDetailSize, for: section, density: density
+            )
         }
         geekSection = section
         let resolvedScreen = ScreenContextResolver.resolve(
@@ -700,31 +941,42 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         let visibleFrame = visibleFrameOverride
             ?? resolvedVisibleFrame(for: resolvedScreen)
             ?? overviewFrame
-        let detailTopOffset = registeredDetailTopOffset(
+        guard visibleFrame.width.isFinite, visibleFrame.height.isFinite,
+              visibleFrame.width >= 1, visibleFrame.height >= 1,
+              visibleFrame.minX.isFinite, visibleFrame.minY.isFinite else { return }
+        let layout = panelSettingsState?.geekDashboardConfiguration
+        if layout != anchoredDetailTopOffsetsLayout {
+            anchoredDetailTopOffsets.removeAll()
+            anchoredDetailTopOffsetsLayout = layout
+        }
+        let registeredTopOffset = registeredDetailTopOffset(
             for: section,
             overviewFrame: overviewFrame,
             detailSize: detailSize
-        ) ?? GeekPanelPresentationMetrics.detailVerticalOffset(
-            for: section,
-            density: density,
-            detailSize: detailSize,
-            overviewSize: overviewSize
         )
+        if let registeredTopOffset {
+            anchoredDetailTopOffsets[section] = registeredTopOffset
+        }
+        let detailTopOffset = registeredTopOffset
+            ?? anchoredDetailTopOffsets[section].flatMap {
+                Self.clampedDetailTopOffset($0, overviewFrame.height, detailSize.height)
+            }
+            ?? GeekPanelPresentationMetrics.detailVerticalOffset(
+                for: section,
+                density: density,
+                detailSize: detailSize,
+                overviewSize: overviewSize
+            )
         let tertiaryTopOffset = GeekPanelPresentationMetrics.tertiaryVerticalOffset(
             for: section,
             density: density,
             detailSize: detailSize,
             detailTopOffset: detailTopOffset,
             tertiarySize: tertiaryColumnSize,
-            sourceOffset: tertiarySourceOffset.map { offset in
-                offset * MiniWindowPageFit.scale(
-                    content: detailSize,
-                    available: CGSize(width: detailSize.width, height: max(1, visibleFrame.height - 16))
-                )
-            },
+            sourceOffset: tertiarySourceOffset,
             overviewSize: overviewSize
         )
-        let secondaryCascade = MenuBarPanelPlacement.cascade(
+        let secondaryCascade = MenuBarPanelPlacement.reflowingCascade(
             parentFrame: overviewFrame,
             childSizes: [detailSize],
             visibleFrame: visibleFrame,
@@ -732,9 +984,10 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             preferredAlignment: .anchor,
             childTopOffsets: [detailTopOffset],
             pointerLocation: pointerLocationProvider(),
-            backingScaleFactor: resolvedScreen?.backingScaleFactor ?? 1
+            backingScaleFactor: resolvedScreen?.backingScaleFactor ?? 1,
+            scrollsTallDetails: section == .power
         )
-        let completeCascade = MenuBarPanelPlacement.cascade(
+        let completeCascade = MenuBarPanelPlacement.reflowingCascade(
             parentFrame: overviewFrame,
             childSizes: [detailSize, tertiaryColumnSize],
             visibleFrame: visibleFrame,
@@ -742,14 +995,26 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             preferredAlignment: .anchor,
             childTopOffsets: [detailTopOffset, tertiaryTopOffset],
             pointerLocation: pointerLocationProvider(),
-            backingScaleFactor: resolvedScreen?.backingScaleFactor ?? 1
+            backingScaleFactor: resolvedScreen?.backingScaleFactor ?? 1,
+            scrollsTallDetails: section == .power
         )
-        let requestedTertiaryColumn = isTertiaryPresented
-            && completeCascade.tertiaryPresentationMode == .column
-        if isTertiaryPresented && !requestedTertiaryColumn {
-            isTertiaryPresented = false
-        }
-        let cascade = requestedTertiaryColumn ? completeCascade : secondaryCascade
+        // Reserve all three levels even while only level 2 is visible. Opening
+        // level 3 must not discover a new fixed-anchor constraint and erase it.
+        guard completeCascade.childFrames.count == 2,
+              completeCascade.tertiaryPresentationMode == .column else { return }
+        let reservedSecondary = MenuBarCascadeLayout(
+            direction: completeCascade.direction, alignment: completeCascade.alignment,
+            parentFrame: completeCascade.parentFrame,
+            childFrames: Array(completeCascade.childFrames.prefix(1)),
+            secondaryPresentationMode: .adjacent, tertiaryPresentationMode: .column,
+            isCompact: completeCascade.isCompact
+        )
+        let cascade = isTertiaryPresented ? completeCascade : reservedSecondary
+        panelCoordinator?.preservePointerAfterReflow(
+            previous: previousHoverFrames, next: cascade.visibleFrames,
+            pointer: pointerLocationProvider()
+        )
+        if !cascade.isCompact { attachedOverviewFrame = cascade.parentFrame }
         let previousDirection = cascadeDirection
         cascadeDirection = cascade.direction
         secondaryPresentationMode = cascade.secondaryPresentationMode
@@ -778,11 +1043,22 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     }
 
     func setOverviewSize(_ preferredSize: CGSize) {
-        guard !isTornDown, density.usesAttachedDetailPresentation else { return }
+        guard !isTornDown else { return }
+        let ownsTraceCause = beginTraceGeometryCause("overviewSize")
+        defer { endTraceGeometryCause(ownsTraceCause) }
+        guard !deferGeometryCallIfNeeded({ [weak self] in
+            self?.setOverviewSize(preferredSize)
+        }) else {
+            replayDeferredGeometryCalls()
+            return
+        }
+        guard density.usesAttachedDetailPresentation else { return }
         let normalizedSize = GeekPanelPresentationMetrics.normalizedOverviewSize(
             preferredSize
         )
         guard overviewSize != normalizedSize else { return }
+        // Another overview size is another card layout.
+        anchoredDetailTopOffsets.removeAll()
 
         let currentOverviewFrame = attachedOverviewFrame
             ?? collapsedAttachedFrame(from: panel.frame)
@@ -802,15 +1078,34 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     }
 
     func setDetailSize(_ preferredSize: CGSize?) {
-        guard !isTornDown,
-              density.usesAttachedDetailPresentation,
+        guard !isTornDown else { return }
+        let ownsTraceCause = beginTraceGeometryCause("detailSize")
+        defer { endTraceGeometryCause(ownsTraceCause) }
+        // Deferred whole: the size is normalized for the page the session
+        // holds when the call runs, after a page change made before it.
+        guard !deferGeometryCallIfNeeded({ [weak self] in
+            self?.setDetailSize(preferredSize)
+        }) else {
+            replayDeferredGeometryCalls()
+            return
+        }
+        guard density.usesAttachedDetailPresentation,
               geekSection != .overview else { return }
         let normalizedSize = GeekPanelPresentationMetrics.normalizedDetailSize(
             preferredSize,
             for: geekSection,
             density: density
         )
-        guard detailColumnSize != normalizedSize else { return }
+        // The first selection may have used the same normalized default size.
+        // A later content measurement must not solve and redraw the entire
+        // cascade again when its visible geometry is already correct.
+        let currentSize = GeekPanelPresentationMetrics.normalizedDetailSize(
+            detailColumnSize, for: geekSection, density: density
+        )
+        guard currentSize != normalizedSize else {
+            detailColumnSize = normalizedSize
+            return
+        }
         detailColumnSize = normalizedSize
         setGeekSection(geekSection)
     }
@@ -820,8 +1115,16 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         preferredSize: CGSize? = nil,
         sourceOffset: CGFloat? = nil
     ) {
-        guard !isTornDown,
-              density.usesAttachedDetailPresentation,
+        guard !isTornDown else { return }
+        let ownsTraceCause = beginTraceGeometryCause("tertiary")
+        defer { endTraceGeometryCause(ownsTraceCause) }
+        guard !deferGeometryCallIfNeeded({ [weak self] in
+            self?.setTertiaryPresented(presented, preferredSize: preferredSize, sourceOffset: sourceOffset)
+        }) else {
+            replayDeferredGeometryCalls()
+            return
+        }
+        guard density.usesAttachedDetailPresentation,
               geekSection != .overview else { return }
         if presented, let panelCoordinator {
             guard case .history = panelCoordinator.route else { return }
@@ -831,7 +1134,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         }
         let normalizedSize = presented
             ? GeekPanelPresentationMetrics.normalizedTertiarySize(preferredSize)
-            : GeekPanelPresentationMetrics.tertiarySize
+            : tertiaryColumnSize
         let normalizedSourceOffset = presented
             ? GeekPanelPresentationMetrics.normalizedTertiarySourceOffset(sourceOffset)
             : nil
@@ -858,6 +1161,12 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         guard !isApplyingProgrammaticFrame, !isTornDown else { return }
+        MenuBarPresentationTrace.measure("session.windowDidMove") { handleWindowMove() }
+    }
+
+    private func handleWindowMove() {
+        let ownsTraceCause = beginTraceGeometryCause("windowMove")
+        defer { endTraceGeometryCause(ownsTraceCause) }
         let previousScreen = screen
         persistCurrentFrameIfNeeded()
         let resolvedScreen = ScreenContextResolver.resolve(
@@ -915,16 +1224,21 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     ) -> Bool {
         guard !isTornDown else { return false }
         guard eventWindowNumber != 0 else { return false }
+#if DEBUG || STORAGE_CLEANER_BETA
+        // The script's panel is off every display; clicks of the person
+        // using this Mac are never meant for it.
+        guard !MenuBarLatencyScript.ignoresOutsideInput else { return false }
+#endif
         let sourceWindow = sourceWindow ?? eventWindowNumber.flatMap {
             NSApp.window(withWindowNumber: $0)
         }
         let triggerFrame = triggerFrameProvider?() ?? anchor
         guard triggerFrame?.contains(screenLocation) != true else { return false }
         guard sourceWindow?.level != .popUpMenu else { return false }
-        // A system-owned menu can report no application window. While AppKit
-        // is tracking it, that unknown source is not proof of an outside click.
-        // A real app switch is reconciled after the menu finishes tracking.
-        guard trackingMenus.isEmpty || sourceWindow != nil else { return false }
+        // A native menu item belongs to a separate window, sometimes one
+        // AppKit resolves as an application window. Never interpret its click
+        // as outside-panel dismissal before SwiftUI handles the selection.
+        guard trackingMenus.isEmpty else { return false }
 
         if controlPaletteCoordinator?.handleMouseDown(
             sourceWindow: sourceWindow,
@@ -977,11 +1291,14 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             id: signpostID
         )
         defer { PerformanceTelemetry.signposter.endInterval("WindowClose", state) }
+        let hideStartedAt = MenuBarPresentationTrace.uptime
+        let inputUptime = NSApp?.currentEvent?.timestamp
 
         removeEventMonitors()
         removeObservers()
         controlPaletteCoordinator?.dismiss()
         panel.orderOut(nil)
+        MenuBarPresentationTrace.span("hide.orderOut", from: hideStartedAt, ["reason": reason])
         MenuBarPresentationTrace.discardPendingDraws()
         if persistsGeometry {
             geometryStore.save(frame: persistableFrame, for: density)
@@ -995,13 +1312,23 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         screen = nil
         panelCoordinator?.reset()
         onDismiss?()
+        if MenuBarPresentationTrace.enabled {
+            var fields: [String: Any] = ["reason": reason]
+            if let inputUptime, inputUptime <= hideStartedAt, hideStartedAt - inputUptime < 1 {
+                fields["inputToHideStartMs"] = (hideStartedAt - inputUptime) * 1000
+            }
+            MenuBarPresentationTrace.span("hide.total", from: hideStartedAt, fields)
+        }
     }
 
     func teardown() {
         guard !isTornDown else { return }
+        let teardownStartedAt = MenuBarPresentationTrace.uptime
+        defer { MenuBarPresentationTrace.span("teardown", from: teardownStartedAt) }
 
         isTornDown = true
         isPresented = false
+        deferredGeometryCalls.removeAll()
         removeEventMonitors()
         removeObservers()
         controlPaletteCoordinator?.teardown()
@@ -1029,6 +1356,16 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         closeHandler?()
     }
 
+    private func beginTraceGeometryCause(_ cause: @autoclosure () -> String) -> Bool {
+        guard MenuBarPresentationTrace.enabled, traceGeometryCause == nil else { return false }
+        traceGeometryCause = cause()
+        return true
+    }
+
+    private func endTraceGeometryCause(_ owned: Bool) {
+        if owned { traceGeometryCause = nil }
+    }
+
     private func resolvedVisibleFrame(for screen: NSScreen?) -> NSRect? {
         fixedVisibleFrame ?? screen?.visibleFrame
     }
@@ -1040,18 +1377,52 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     ) -> CGFloat? {
         guard let snapshot = panelCoordinator?.anchorRegistry.snapshot(
             for: .module(section)
-        ), snapshot.screenRect.intersects(overviewFrame) else { return nil }
-        let offset = overviewFrame.maxY - snapshot.screenRect.maxY
+        ) else { return nil }
+        // The card's offset inside the overview is the same wherever the
+        // window is; a screen rect is only as current as the frame it was
+        // measured in.
+        if let layoutOffset = snapshot.layoutOffset, layoutOffset.isFinite {
+            return Self.clampedDetailTopOffset(layoutOffset, overviewFrame.height, detailSize.height)
+        }
+        guard snapshot.screenRect.intersects(overviewFrame) else { return nil }
+        return Self.clampedDetailTopOffset(overviewFrame.maxY - snapshot.screenRect.maxY,
+                                           overviewFrame.height, detailSize.height)
+    }
+
+    /// The level-two page's top below the overview's top, kept inside the
+    /// overview: at least 0 and at most the overview height less the smaller
+    /// of 44 pt and the page height.
+    static func clampedDetailTopOffset(_ offset: CGFloat, _ overviewHeight: CGFloat,
+                                       _ detailHeight: CGFloat) -> CGFloat? {
         guard offset.isFinite else { return nil }
-        return min(max(0, offset), max(0, overviewFrame.height - min(44, detailSize.height)))
+        let limit = max(0, overviewHeight - min(44, detailHeight))
+        return min(max(0, offset), limit)
     }
 
     private func registeredAnchorDidChange(_ anchorID: SmallWindowAnchorID) {
+        let ownsTraceCause = beginTraceGeometryCause(
+            panelCoordinator?.anchorRegistry.snapshot(for: anchorID) == nil ? "anchorRemoved" : "anchor"
+        )
+        defer { endTraceGeometryCause(ownsTraceCause) }
+        // An anchor of another page needs nothing here: a page change that is
+        // still deferred reads the registry when it runs.
         guard isPresented,
               !isTornDown,
-              !isApplyingProgrammaticFrame,
               geekSection != .overview,
               anchorID == .module(geekSection) else { return }
+        if isResolvingCascade || isApplyingProgrammaticFrame {
+            // Registered from the view update inside the frame being applied:
+            // place the cascade again once that frame is done (once, however
+            // many times the anchor reported).
+            guard !isAnchorRefreshDeferred else { return }
+            isAnchorRefreshDeferred = true
+            _ = deferGeometryCallIfNeeded { [weak self] in
+                guard let self else { return }
+                isAnchorRefreshDeferred = false
+                registeredAnchorDidChange(anchorID)
+            }
+            return
+        }
         setGeekSection(geekSection)
     }
 
@@ -1088,11 +1459,21 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             id: signpostID
         )
         defer { PerformanceTelemetry.signposter.endInterval("WindowReposition", state) }
+        let setFrameStartedAt = MenuBarPresentationTrace.uptime
         isApplyingProgrammaticFrame = true
         panel.setFrame(alignedFrame, display: true)
+        programmaticFrameDidApplyForTesting?()
         isApplyingProgrammaticFrame = false
+        MenuBarPresentationTrace.span("setFrame", from: setFrameStartedAt, [
+            "x": alignedFrame.minX, "y": alignedFrame.minY,
+            "width": alignedFrame.width, "height": alignedFrame.height,
+            "visible": panel.isVisible, "cause": self.traceGeometryCause ?? "other"
+        ])
         PerformanceTelemetry.signposter.emitEvent("PanelRepositioned")
         refreshPointerWithinHoverEnvelope()
+        // A frame applied outside a cascade resolution (show) replays here;
+        // a resolution replays after it has finished.
+        replayDeferredGeometryCalls()
     }
 
 #if DEBUG || STORAGE_CLEANER_BETA
@@ -1133,10 +1514,13 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
                !MiniWindowDemoData.isEnabled {
                 // Only select and render live monitoring pages. Control actions,
                 // process termination and demo fixtures are never entered here.
-                for section in [PanelSection.processor, .memory, .disk, .network, .sensors, .power] {
+                for section in MiniWindowDemoData.liveAuditSections(arguments: ProcessInfo.processInfo.arguments) {
                     panelCoordinator?.reset()
                     panelCoordinator?.selectModule(section)
                     guard await waitForDebugAttachedLayout(childCount: 1, section: section) else { continue }
+                    // D57: the power page reads SMC and the Energy Model every
+                    // 2 s; its first counter window needs one more sample.
+                    if section == .power { try? await Task.sleep(for: .seconds(5)) }
                     await captureDebugSnapshot(named: "live-\(section.rawValue)-secondary.png", in: directory)
                     if let detail = section.tertiaryDetail {
                         panelCoordinator?.presentHistory(.builtIn(detail.rawValue), pinned: true)
@@ -1481,9 +1865,19 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 
     private func pointerLocationChanged(_ location: NSPoint) {
         guard !isTornDown, density.usesAttachedDetailPresentation else { return }
+        // A native range menu occupies its own AppKit window. Treat the menu
+        // as part of the hover session until its selection has been delivered.
+        if !trackingMenus.isEmpty {
+            panelCoordinator?.setPointerWithinHoverEnvelope(true)
+            return
+        }
         let frames = attachedHoverFrames
         panelCoordinator?.recordPointer(location)
         panelCoordinator?.updateWindowGroupFrames(frames)
+        if panelCoordinator?.retainsPointerAfterReflow(location) == true {
+            panelCoordinator?.setPointerWithinHoverEnvelope(true)
+            return
+        }
         if frames.contains(where: { $0.contains(location) }) {
             hoverIntentAnchor = location
             panelCoordinator?.setPointerWithinHoverEnvelope(true)
@@ -1618,7 +2012,8 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             parentFrame: layout.parentFrame.offsetBy(dx: offset.x, dy: offset.y),
             childFrames: layout.childFrames.map { $0.offsetBy(dx: offset.x, dy: offset.y) },
             secondaryPresentationMode: layout.secondaryPresentationMode,
-            tertiaryPresentationMode: layout.tertiaryPresentationMode
+            tertiaryPresentationMode: layout.tertiaryPresentationMode,
+            isCompact: layout.isCompact
         )
     }
 
@@ -1701,9 +2096,18 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
                 let menuID = ObjectIdentifier(menu)
                 MainActor.assumeIsolated {
                     guard let self, self.isPresented else { return }
-                    self.menuTrackingDismissalTask?.cancel()
-                    self.menuTrackingDismissalTask = nil
+                    self.applicationDeactivationTask?.cancel()
+                    self.applicationDeactivationTask = nil
+                    self.lastNativeMenuEndedAt = nil
+                    self.menuTrackingHoverReleaseTask?.cancel()
+                    self.menuTrackingHoverReleaseTask = nil
+                    if self.trackingMenus.isEmpty {
+                        self.menuWasApplicationActiveAtBegin = self.applicationIsActiveProvider()
+                        self.deactivatedDuringMenuTracking = false
+                    }
                     self.trackingMenus.insert(menuID)
+                    self.panelCoordinator?.invalidateHoverIntent()
+                    self.panelCoordinator?.setPointerWithinHoverEnvelope(true)
 #if DEBUG || STORAGE_CLEANER_BETA
                     PerformanceTelemetry.logger.notice("MenuBar lifecycle: native-menu-begin")
 #endif
@@ -1735,7 +2139,21 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             deactivatedDuringMenuTracking = true
             return
         }
-        hide(reason: "application-deactivated")
+        // NSPanel is intentionally nonactivating. Native menus can briefly
+        // resign application focus before didBeginTracking arrives, or just
+        // after didEndTracking. Defer the decision so neither transition
+        // closes the source control before its action is committed.
+        applicationDeactivationTask?.cancel()
+        applicationDeactivationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self else { return }
+            self.applicationDeactivationTask = nil
+            guard self.isPresented, self.trackingMenus.isEmpty,
+                  !self.applicationIsActiveProvider() else { return }
+            if let menuEnd = self.lastNativeMenuEndedAt,
+               Date().timeIntervalSince(menuEnd) < 0.5 { return }
+            self.hide(reason: "application-deactivated")
+        }
     }
 
     private func menuDidEndTracking(_ menuID: ObjectIdentifier) {
@@ -1743,16 +2161,32 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 #if DEBUG || STORAGE_CLEANER_BETA
         PerformanceTelemetry.logger.notice("MenuBar lifecycle: native-menu-end remainingTracking=\(!self.trackingMenus.isEmpty)")
 #endif
-        guard trackingMenus.isEmpty, deactivatedDuringMenuTracking else { return }
-        menuTrackingDismissalTask = Task { @MainActor [weak self] in
-            // Let AppKit finish restoring menu focus before interpreting the
-            // transient resign-active notification as a real application switch.
-            await Task.yield()
-            guard !Task.isCancelled, let self, self.trackingMenus.isEmpty else { return }
-            self.menuTrackingDismissalTask = nil
-            self.deactivatedDuringMenuTracking = false
-            guard self.isPresented, !self.applicationIsActiveProvider() else { return }
-            self.hide(reason: "application-inactive-after-menu")
+        guard trackingMenus.isEmpty else { return }
+        lastNativeMenuEndedAt = Date()
+        let shouldReconcileApplicationSwitch = menuWasApplicationActiveAtBegin
+            && deactivatedDuringMenuTracking
+        menuWasApplicationActiveAtBegin = false
+        deactivatedDuringMenuTracking = false
+        // SwiftUI may run the selected item's action just after tracking ends.
+        // Keep the tertiary surface alive briefly, then restore normal hover.
+        menuTrackingHoverReleaseTask?.cancel()
+        menuTrackingHoverReleaseTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, let self, self.trackingMenus.isEmpty,
+                  self.isPresented else { return }
+            self.menuTrackingHoverReleaseTask = nil
+            self.refreshPointerWithinHoverEnvelope()
+        }
+        if shouldReconcileApplicationSwitch {
+            applicationDeactivationTask?.cancel()
+            applicationDeactivationTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled, let self else { return }
+                self.applicationDeactivationTask = nil
+                guard self.isPresented, self.trackingMenus.isEmpty,
+                      !self.applicationIsActiveProvider() else { return }
+                self.hide(reason: "application-inactive-after-menu")
+            }
         }
     }
 
@@ -1866,10 +2300,14 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         }
         defaultObservers.removeAll()
         menuTrackingObservers.removeAll()
-        menuTrackingDismissalTask?.cancel()
-        menuTrackingDismissalTask = nil
+        applicationDeactivationTask?.cancel()
+        applicationDeactivationTask = nil
+        menuTrackingHoverReleaseTask?.cancel()
+        menuTrackingHoverReleaseTask = nil
         trackingMenus.removeAll()
+        menuWasApplicationActiveAtBegin = false
         deactivatedDuringMenuTracking = false
+        lastNativeMenuEndedAt = nil
     }
 }
 
@@ -1925,3 +2363,13 @@ private final class MenuBarMenuTrackingObservers {
         removeAll()
     }
 }
+
+#if DEBUG || STORAGE_CLEANER_BETA
+/// Read-only access for `MenuBarLatencyScript`, which drives the same
+/// coordinator and settings entry points a click uses.
+extension MenuBarPanelSession {
+    var latencyScriptCoordinator: GeekPanelCoordinator? { panelCoordinator }
+    var latencyScriptSettings: MenuBarPanelSettingsState? { panelSettingsState }
+    var latencyScriptChildFrames: [NSRect] { attachedCascadeLayout?.childFrames ?? [] }
+}
+#endif

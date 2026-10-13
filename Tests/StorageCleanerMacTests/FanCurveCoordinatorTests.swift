@@ -6,9 +6,9 @@ import XCTest
 @MainActor
 final class FanCurveCoordinatorTests: XCTestCase {
     func testApplyValidatesThenActivatesAndNeverSendsGenericRPMWrites() async {
-        let suite = "FanCurveCoordinatorTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let clock = CurveTestClock(Date(timeIntervalSince1970: 10_000))
         var requests: [FanControlHelperRequest] = []
         var activeProfileID: UUID?
@@ -81,9 +81,9 @@ final class FanCurveCoordinatorTests: XCTestCase {
     }
 
     func testMissingSelectedSensorBlocksBeforeXPC() async {
-        let suite = "FanCurveCoordinatorTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         var requests: [FanControlHelperRequest] = []
         let now = Date()
         let coordinator = FanControlCoordinator(
@@ -123,9 +123,9 @@ final class FanCurveCoordinatorTests: XCTestCase {
     }
 
     private func assertVerificationFailureRecoveryFeedback(restoreSucceeds: Bool) async {
-        let suite = "FanCurveCoordinatorTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let now = Date()
         var operations: [FanControlHelperRequest.Operation] = []
         var pendingRestore: CheckedContinuation<Bool, Never>?
@@ -197,8 +197,8 @@ final class FanCurveCoordinatorTests: XCTestCase {
             "Helper 已确认恢复请求完成；当前硬件模式仍待确认。",
             "Helper confirmed completion of the restore request; the current hardware mode remains unconfirmed."
         ) : L10n.text(
-            "恢复请求未获确认，请检查 Helper 连接与风扇状态。",
-            "The restore request was not confirmed. Check the Helper connection and fan state."
+            "恢复请求未获确认，请检查辅助程序连接与风扇状态。",
+            "The restore request was not confirmed. Check the helper connection and fan state."
         )
         let expectedMessage = failureReason + "\n" + expectedStatus
         for _ in 0..<200 where coordinator.lastMessage != expectedMessage {

@@ -31,7 +31,7 @@ extension FocusedValues {
 /// A value-driven management console for normalized startup-item snapshots.
 /// It does not read files, execute commands, or decide capabilities itself.
 struct StartupItemsDashboardView: View {
-    @Environment(\.moduleTheme) private var theme
+    @Environment(\.colorScheme) private var scheme
     let items: [StartupItemsDomain.Item]
     let isLoading: Bool
     let progress: StartupItemsScanProgress?
@@ -48,8 +48,10 @@ struct StartupItemsDashboardView: View {
     var onOpenParentApplication: ((StartupItemsDomain.Item) -> Void)?
     var onCopyText: ((String) -> Void)?
     var onOpenSystemSettings: (() -> Void)?
+    var onUndo: (() -> Void)?
 
     @State private var query = ""
+    @State private var showsSearch = false
     @AppStorage("startupItems.category.v1") private var category: StartupItemsCategory = .all
     @AppStorage("startupItems.status.v1") private var status: StartupItemsStatusFilter = .all
     @AppStorage("startupItems.source.v1") private var source: StartupItemsSourceFilter = .all
@@ -90,7 +92,8 @@ struct StartupItemsDashboardView: View {
         onReveal: ((StartupItemsDomain.Item) -> Void)? = nil,
         onOpenParentApplication: ((StartupItemsDomain.Item) -> Void)? = nil,
         onCopyText: ((String) -> Void)? = nil,
-        onOpenSystemSettings: (() -> Void)? = nil
+        onOpenSystemSettings: (() -> Void)? = nil,
+        onUndo: (() -> Void)? = nil
     ) {
         self.items = items
         self.isLoading = isLoading
@@ -107,6 +110,7 @@ struct StartupItemsDashboardView: View {
         self.onOpenParentApplication = onOpenParentApplication
         self.onCopyText = onCopyText
         self.onOpenSystemSettings = onOpenSystemSettings
+        self.onUndo = onUndo
     }
 
     var body: some View {
@@ -121,30 +125,42 @@ struct StartupItemsDashboardView: View {
             includeTechnicalDetails: showsTechnicalDetails
         )
 
-        ManagementListPage(
+        FeatureLightfieldPage(module: .startup, phase: .result,
             title: L10n.text("登录项与后台任务", "Login Items & Background Tasks"),
-            subtitle: ReviewFilter.startup.pageSubtitle,
-            systemImage: AppSymbols.Navigation.loginItems
-        ) {
-            coverageAction
-            headerAction
-        } controls: {
-            EmptyView()
-        } content: {
-            GeometryReader { geometry in
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        overview(presentation)
-                        controls(presentation)
-                        content(presentation)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            status: isLoading && items.isEmpty ? (progress?.title ?? L10n.text("正在读取启动项", "Reading Startup Items"))
+                : L10n.text("已读取 \(presentation.summary.total) 项 · 可直接管理 \(presentation.summary.manageable) 项",
+                    "\(presentation.summary.total) read · \(presentation.summary.manageable) directly manageable"),
+            safety: L10n.text("受保护项目仅查看 · 管理前核对来源", "Protected items are read-only · Verify sources before changes"),
+            actionTitle: isLoading ? L10n.text("取消读取", "Cancel Reading") : L10n.text("重新检查登录项", "Check Login Items Again"),
+            actionEnabled: !isPerformingOperation, showsArtwork: false,
+            action: { if isLoading { onCancel() } else { onRefresh() } }) {
+            ScrollViewReader { scroll in
+                LightfieldResultContent(listHeader: AnyView(tableHeader(presentation))) {
+                    LightfieldSummary(module: .startup, label: L10n.text("已读取的登录项与后台任务", "Login items and background tasks read"),
+                        value: isLoading && items.isEmpty ? "—" : "\(presentation.summary.total)", unit: L10n.text("项", "items"),
+                        note: L10n.text("· \(presentation.summary.manageable) 项可直接管理", "· \(presentation.summary.manageable) directly manageable"))
+                } rows: {
+                    ForEach(presentation.visibleItems) { item in
+                        StartupItemRow(item: item,
+                            isPending: activeOperationCandidateID.map { candidateID in
+                                item.components.contains(where: { $0.id == candidateID })
+                            } ?? false,
+                            isPerformingOperation: isPerformingOperation || isLoading,
+                            onEnable: presentation.allowsStartupMutationActions ? onEnable : nil,
+                            onDisable: presentation.allowsStartupMutationActions ? onDisable : nil,
+                            onStop: presentation.allowsStartupMutationActions ? onStop : nil,
+                            onReveal: onReveal, onOpenParentApplication: onOpenParentApplication, onCopyText: onCopyText,
+                            onOpenSystemSettings: presentation.allowsStartupMutationActions ? onOpenSystemSettings : nil,
+                            onInspect: { inspectedItem = item })
+                            .background(selectedItemID == item.id ? FeatureLightfieldPalette.resolve(scheme).hoverColor : .clear)
+                            .onTapGesture { selectedItemID = item.id }
+                            .id(item.id)
+                            .lightfieldResultRowBoundary()
+                            .lightfieldComponentProbe("startup.row." + item.id)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if geometry.size.width >= 940, let image = GoldenLandingAsset.startup.image {
-                        GoldenLandingArtwork(image: image)
-                            .frame(width: min(360, geometry.size.width - 660))
-                            .frame(maxHeight: .infinity)
-                    }
+                }
+                .onChange(of: selectedItemID) { _, id in
+                    if let id { scroll.scrollTo(id) }
                 }
             }
         }
@@ -173,7 +189,17 @@ struct StartupItemsDashboardView: View {
             self.selectedItemID = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .storageCleanerFocusStartupItemsSearch)) { _ in
+            showsSearch = true
             isSearchFocused = true
+        }
+        .focusable()
+        .onKeyPress(.downArrow) {
+            guard !isSearchFocused else { return .ignored }
+            moveSelection(1, in: presentation); return .handled
+        }
+        .onKeyPress(.upArrow) {
+            guard !isSearchFocused else { return .ignored }
+            moveSelection(-1, in: presentation); return .handled
         }
         .onKeyPress(.return) {
             guard !isSearchFocused,
@@ -189,313 +215,94 @@ struct StartupItemsDashboardView: View {
         }
     }
 
-    private var headerAction: some View {
-        GlassToolbarButton(
-            title: isLoading
-                ? L10n.text("取消读取", "Cancel Reading")
-                : L10n.text("刷新启动项", "Refresh Startup Items"),
-            systemImage: isLoading ? "xmark" : AppSymbols.Action.refresh,
-            isLoading: false
-        ) {
-            if isLoading {
-                onCancel()
-            } else {
-                onRefresh()
-            }
-        }
-        .help(isLoading
-            ? L10n.text("取消当前读取", "Cancel the current read")
-            : L10n.text("重新读取登录项与后台任务", "Reread login items and background tasks"))
-    }
-
-    private func overview(_ presentation: StartupItemsPresentation) -> some View {
-        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-            if isLoading && !presentation.visibleItems.isEmpty {
-                scanStatus
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: AppDesignTokens.Spacing.large) {
-                    summaryMetrics(presentation)
-                }
-
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.flexible(), alignment: .leading),
-                        count: 2
-                    ),
-                    alignment: .leading,
-                    spacing: AppDesignTokens.Spacing.small
-                ) {
-                    summaryMetrics(presentation)
-                }
-            }
-        }
-    }
-
-    private var scanStatus: some View {
-        RuntimeInlineStatus(
-            title: progress?.title ?? L10n.text("正在扫描登录项", "Scanning Login Items"),
-            detail: L10n.text("已发现 \(progress?.discoveredCount ?? items.count) 项", "\(progress?.discoveredCount ?? items.count) items found")
-        )
-    }
-
-    @ViewBuilder
-    private func summaryMetrics(_ presentation: StartupItemsPresentation) -> some View {
-        startupMetric(
-            title: L10n.text("全部项目", "All Items"),
-            value: "\(presentation.summary.total)",
-            systemImage: "square.stack.3d.up.fill",
-            tint: theme.accent
-        )
-        startupMetric(
-            title: L10n.text("登录时打开", "Open at Login"),
-            value: "\(presentation.summary.openAtLogin)",
-            systemImage: "person.crop.circle.badge.checkmark",
-            tint: AppDesignTokens.Palette.information
-        )
-        startupMetric(
-            title: L10n.text("后台任务", "Background Tasks"),
-            value: "\(presentation.summary.background)",
-            systemImage: "gearshape.2.fill",
-            tint: AppDesignTokens.Palette.tertiary
-        )
-        startupMetric(
-            title: L10n.text("可直接管理", "Directly Manageable"),
-            value: "\(presentation.summary.manageable)",
-            systemImage: "switch.2",
-            tint: AppDesignTokens.Palette.success
-        )
-    }
-
-    private func startupMetric(title: String, value: String, systemImage: String, tint: Color) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(tint)
-                .frame(width: 38, height: 38)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(isLoading && items.isEmpty ? "—" : value)
-                    .font(.system(size: 21, weight: .semibold))
-                    .monospacedDigit()
-                Text(title).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.10), lineWidth: 1))
-        .accessibilityElement(children: .combine)
-    }
-
-    private func controls(_ presentation: StartupItemsPresentation) -> some View {
-        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: AppDesignTokens.Spacing.small) {
-                    categoryControl(presentation)
-                        .frame(width: 350)
-                    searchControls
-                        .frame(minWidth: 260)
-                }
-                .frame(minWidth: 620)
-
-                VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                    categoryControl(presentation)
-                        .frame(maxWidth: .infinity)
-                    searchControls
-                }
-            }
-            HStack(spacing: AppDesignTokens.Spacing.small) {
-                Picker(L10n.text("状态", "Status"), selection: $status) {
-                    ForEach(StartupItemsStatusFilter.allCases) { filter in
-                        Text(filter.title).tag(filter)
+    private func tableHeader(_ presentation: StartupItemsPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+                    resultControls(presentation)
+                    if showsSearch || !query.isEmpty { searchField.padding(.vertical, 8) }
+                    FeatureLightfieldHairline()
+                    if presentation.visibleItems.isEmpty {
+                        Text(isLoading ? (progress?.title ?? L10n.text("正在读取启动项", "Reading Startup Items"))
+                            : L10n.text("没有符合当前筛选条件的项目", "No Items Match These Filters"))
+                            .font(.system(size: 15)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
+                            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
                     }
+        }
+    }
+
+    private var categoryIndex: Binding<Int> {
+        Binding(get: { primaryCategories.firstIndex(of: effectiveCategory) ?? 0 },
+            set: { category = primaryCategories[min(max(0, $0), primaryCategories.count - 1)] })
+    }
+
+    private func resultControls(_ presentation: StartupItemsPresentation) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                categoryControl
+                Spacer(minLength: 0)
+                Text(L10n.text("\(presentation.visibleItems.count) / \(presentation.summary.total) 项", "Showing \(presentation.visibleItems.count) of \(presentation.summary.total)"))
+                    .font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg3)
+                    .lineLimit(1)
+                advancedFiltersMenu
+                coverageAction
+                if let onUndo {
+                    Button(L10n.text("撤销", "Undo"), action: onUndo).buttonStyle(FeatureLightfieldRowButtonStyle())
+                        .disabled(isPerformingOperation || isLoading)
                 }
-                Picker(L10n.text("来源", "Source"), selection: $source) {
-                    ForEach(StartupItemsSourceFilter.allCases) { filter in
-                        Text(filter.title).tag(filter)
-                    }
-                }
-                Picker(L10n.text("排序", "Sort"), selection: $sort) {
-                    ForEach(StartupItemsSortOrder.allCases) { option in
-                        Text(option.title).tag(option)
+            }.frame(minWidth: 560)
+            VStack(alignment: .leading, spacing: 8) {
+                categoryControl
+                HStack {
+                    advancedFiltersMenu; coverageAction
+                    if let onUndo {
+                        Button(L10n.text("撤销", "Undo"), action: onUndo).buttonStyle(FeatureLightfieldRowButtonStyle())
+                            .disabled(isPerformingOperation || isLoading)
                     }
                 }
             }
-            .pickerStyle(.menu)
         }
     }
 
-    private func categoryControl(_ presentation: StartupItemsPresentation) -> some View {
-        GlassSegmentedControl(
-            selection: primaryCategoryBinding,
-            options: primaryCategories,
-            title: { category in
-                let count = isLoading && items.isEmpty ? "—" : String(presentation.count(for: category))
-                return "\(category.title) \(count)"
-            }
-        )
-        .accessibilityLabel(L10n.text("启动项分类", "Startup item category"))
-    }
-
-    private var searchControls: some View {
-        HStack(spacing: AppDesignTokens.Spacing.small) {
-            searchField
-            advancedFiltersMenu
-        }
+    private var categoryControl: some View {
+        LightfieldTextSegments(titles: primaryCategories.map(\.title), selection: categoryIndex, module: .startup)
+            .accessibilityLabel(L10n.text("启动项分类", "Startup item category"))
     }
 
     private var searchField: some View {
-        TaskSearchField(
-            placeholder: L10n.text("搜索启动项", "Search startup items"),
-            text: $query,
-            tint: theme.accent,
-            focus: $isSearchFocused
-        )
-        .accessibilityLabel(L10n.text("搜索启动项", "Search startup items"))
+        TextField(L10n.text("搜索启动项", "Search startup items"), text: $query)
+            .textFieldStyle(.plain).font(.system(size: 15))
+            .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
+            .focused($isSearchFocused)
+            .accessibilityLabel(L10n.text("搜索启动项", "Search startup items"))
     }
 
     private var advancedFiltersMenu: some View {
         Menu {
-            Toggle(
-                L10n.text("显示技术明细", "Show Technical Details"),
-                isOn: $showsTechnicalDetails
-            )
-
+            Toggle(L10n.text("显示搜索", "Show Search"), isOn: $showsSearch)
+            Picker(L10n.text("状态", "Status"), selection: $status) {
+                ForEach(StartupItemsStatusFilter.allCases) { Text($0.title).tag($0) }
+            }
+            Picker(L10n.text("来源", "Source"), selection: $source) {
+                ForEach(StartupItemsSourceFilter.allCases) { Text($0.title).tag($0) }
+            }
+            Picker(L10n.text("排序", "Sort"), selection: $sort) {
+                ForEach(StartupItemsSortOrder.allCases) { Text($0.title).tag($0) }
+            }
+            Toggle(L10n.text("显示技术明细", "Show Technical Details"), isOn: $showsTechnicalDetails)
             if showsTechnicalDetails {
-                Divider()
-                Toggle(isOn: $includeAppleSystem) {
-                    Label(
-                        L10n.text("显示 Apple 系统项目", "Show Apple System Items"),
-                        systemImage: "apple.logo"
-                    )
-                }
+                Toggle(L10n.text("显示 Apple 系统项目", "Show Apple System Items"), isOn: $includeAppleSystem)
             }
-        } label: {
-            glassMenuIcon(systemImage: "line.3.horizontal.decrease.circle")
-        }
+        } label: { Text(L10n.text("筛选", "Filters")).font(.system(size: 13)) }
         .menuStyle(.borderlessButton)
-        .help(L10n.text(
-            "显示技术明细与 Apple 系统项目",
-            "Show technical details and Apple system items"
-        ))
+        .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
         .accessibilityLabel(L10n.text("筛选与显示", "Filter and Display"))
+
     }
 
-    @ViewBuilder
-    private func content(_ presentation: StartupItemsPresentation) -> some View {
-        if presentation.visibleItems.isEmpty, !isLoading {
-            AppEmptyState(
-                title: query.trimmed.isEmpty
-                    ? L10n.text("没有符合当前筛选条件的项目", "No Items Match These Filters")
-                    : L10n.text("没有搜索结果", "No Search Results"),
-                detail: query.trimmed.isEmpty
-                    ? L10n.text(
-                        "调整分类或筛选条件。",
-                        "Choose another category or filter."
-                    )
-                    : L10n.text("尝试搜索应用名称、开发者或用途。", "Search by application, developer, or purpose."),
-                systemImage: AppSymbols.Navigation.loginItems,
-                density: .inline
-            )
-        } else if presentation.visibleItems.isEmpty {
-            AppEmptyState(
-                title: progress?.title ?? L10n.text("正在扫描启动项目", "Scanning Startup Items"),
-                detail: L10n.text(
-                    "已发现 \(progress?.discoveredCount ?? items.count) 个项目，正在补全状态与归属。",
-                    "\(progress?.discoveredCount ?? items.count) items found; resolving state and attribution."
-                ),
-                systemImage: AppSymbols.Navigation.loginItems,
-                density: .inline,
-                isLoading: true
-            )
-        } else {
-            VStack(spacing: 0) {
-                HStack(spacing: AppDesignTokens.Spacing.medium) {
-                    Text(L10n.text("名称", "Name"))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(L10n.text("来源", "Source"))
-                        .frame(width: 110, alignment: .leading)
-                    Text(L10n.text("状态", "Status"))
-                        .frame(width: 132, alignment: .leading)
-                    Text(L10n.text("操作", "Actions"))
-                        .frame(width: 90, alignment: .trailing)
-                }
-                .font(AppTypography.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
-                Divider()
-                List(selection: $selectedItemID) {
-                    ForEach(presentation.visibleItems) { item in
-                        StartupItemRow(
-                            item: item,
-                            isPending: activeOperationCandidateID.map { candidateID in
-                                item.components.contains(where: { $0.id == candidateID })
-                            } ?? false,
-                            isPerformingOperation: isPerformingOperation || isLoading,
-                            onEnable: presentation.allowsStartupMutationActions ? onEnable : nil,
-                            onDisable: presentation.allowsStartupMutationActions ? onDisable : nil,
-                            onStop: presentation.allowsStartupMutationActions ? onStop : nil,
-                            onReveal: onReveal,
-                            onOpenParentApplication: onOpenParentApplication,
-                            onCopyText: onCopyText,
-                            onOpenSystemSettings: presentation.allowsStartupMutationActions
-                                ? onOpenSystemSettings
-                                : nil,
-                            onInspect: { inspectedItem = item }
-                        )
-                        .tag(item.id)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
-                    }
-                }
-                .listStyle(.inset)
-                .environment(\.defaultMinListRowHeight, 52)
-                .scrollContentBackground(.hidden)
-                .listRowSeparatorTint(Color.primary.opacity(0.10))
-                .accessibilityLabel(L10n.text("登录项与后台任务列表", "Login items and background tasks list"))
-
-                Divider()
-                HStack {
-                    Text(L10n.text(
-                        "显示 \(presentation.visibleItems.count) 项，共 \(presentation.summary.total) 项",
-                        "Showing \(presentation.visibleItems.count) of \(presentation.summary.total) items"
-                    ))
-                    .font(AppTypography.caption)
-                    .foregroundStyle(.secondary)
-                    Spacer()
-                    if let item = selectedItem(in: presentation) {
-                        Text(item.managementExplanation)
-                            .font(AppTypography.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-        }
-    }
-
-    private func glassMenuIcon(systemImage: String) -> some View {
-        Image(systemName: systemImage)
-            .font(AppTypography.toolbar)
-            .foregroundStyle(theme.primaryText)
-            .frame(
-                width: AppControlSizes.iconHitRegion,
-                height: AppControlSizes.iconHitRegion
-            )
-            .background(
-                RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl, style: .continuous)
-                    .fill(Color.primary.opacity(0.055))
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
-            }
+    private func moveSelection(_ direction: Int, in presentation: StartupItemsPresentation) {
+        let ids = presentation.visibleItems.map(\.id)
+        guard !ids.isEmpty else { return }
+        let current = selectedItemID.flatMap { ids.firstIndex(of: $0) }
+        selectedItemID = ids[min(ids.count - 1, max(0, (current ?? (direction > 0 ? -1 : ids.count)) + direction))]
     }
 
     private func selectedItem(in presentation: StartupItemsPresentation) -> StartupItemsDomain.Item? {
@@ -505,7 +312,8 @@ struct StartupItemsDashboardView: View {
 
 }
 
-private struct StartupItemRow: View {
+struct StartupItemRow: View {
+    @Environment(\.colorScheme) private var scheme
     let item: StartupItemsDomain.Item
     let isPending: Bool
     let isPerformingOperation: Bool
@@ -543,40 +351,45 @@ private struct StartupItemRow: View {
     }
 
     var body: some View {
-        HStack(spacing: AppDesignTokens.Spacing.medium) {
-            CachedAppIconView(path: item.applicationIconPath ?? "", size: 34) {
-                AppSymbolIcon(
-                    systemImage: item.fallbackSystemImage,
-                    role: .inline,
-                    tint: AppDesignTokens.Palette.secondaryText,
-                    isDecorative: true
-                )
-            }
-            .frame(width: 36, height: 36)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                identity
+                StartupItemStatusLabel(item: item).frame(width: 150, alignment: .leading)
+                actions.frame(width: 130, alignment: .trailing)
+            }.frame(minWidth: 650, minHeight: 52)
+            HStack(spacing: 12) {
+                identity
+                VStack(alignment: .trailing, spacing: 4) {
+                    StartupItemStatusLabel(item: item)
+                    actions
+                }.frame(width: 144)
+            }.frame(minHeight: 76)
+        }
+        .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
+        .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2, perform: onInspect)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(item.displayName)
+        .accessibilityValue(item.displayStatus)
+        .accessibilityAction { onInspect() }
+    }
 
+    private var identity: some View {
+        HStack(spacing: 16) {
+            LightfieldAppIcon(path: item.applicationIconPath, size: .medium)
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.displayName)
-                    .font(AppTypography.body.weight(.semibold))
-                    .lineLimit(1)
-                    .help(item.displayName)
+                Text(item.displayName).font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1).truncationMode(.middle).help(item.displayName)
+                    .lightfieldComponentProbe("startup.name." + item.id)
                 Text(compactPurpose(item.resolvedPurpose.value))
-                    .font(AppTypography.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .help(item.resolvedPurpose.value)
-            }
+                    .font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
+                    .lineLimit(1).truncationMode(.middle).help(item.resolvedPurpose.value)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 
-            Spacer(minLength: AppDesignTokens.Spacing.medium)
-
-            Text(Array(Set(item.components.map { $0.source.title })).sorted().joined(separator: " / "))
-                .font(AppTypography.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 110, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-
-            StartupItemStatusLabel(item: item)
-                .frame(width: 132, alignment: .leading)
-
+    private var actions: some View {
             HStack(spacing: 6) {
                 if isPending && isPerformingOperation {
                     ProgressView()
@@ -592,17 +405,27 @@ private struct StartupItemRow: View {
                     .toggleStyle(.switch)
                     .disabled(isPending || isPerformingOperation)
                     .help(toggleHelp)
-                    .accessibilityLabel(L10n.text("允许以后启动", "Allow future launches"))
-                    .accessibilityValue(item.displayStatus)
+                    .accessibilityLabel(L10n.text("允许以后启动 · \(item.displayName)", "Allow future launches · \(item.displayName)"))
+                    // A native switch insists on numeric AXValue. Publish the
+                    // management status and the same gated action to VoiceOver.
+                    .accessibilityRepresentation {
+                        Button(L10n.text("允许以后启动 · \(item.displayName)", "Allow future launches · \(item.displayName)")) {
+                            requestEnablement(!isEnabled)
+                        }
+                        .disabled(isPending || isPerformingOperation)
+                        .accessibilityValue(item.displayStatus)
+                        .accessibilityHint(toggleHelp)
+                    }
                     .frame(width: 42)
                 } else if canOpenSystemSettings {
-                    AppIconButton(
-                        title: L10n.text("在系统设置中管理", "Manage in System Settings"),
-                        systemImage: "gearshape",
-                        kind: .toolbar
-                    ) {
+                    Button(L10n.text("仅系统设置", "System Settings")) {
                         onOpenSystemSettings?()
-                    }
+                    }.buttonStyle(FeatureLightfieldRowButtonStyle())
+                        .font(.system(size: 13)).lineLimit(1)
+                        .help(L10n.text("在系统设置中管理", "Manage in System Settings"))
+                } else {
+                    Text(L10n.text("仅查看", "Read-only")).font(.system(size: 13))
+                        .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg3)
                 }
 
                 Menu {
@@ -648,19 +471,12 @@ private struct StartupItemRow: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: AppControlSizes.iconHitRegion, height: AppControlSizes.iconHitRegion)
+                    Text(L10n.text("更多", "More")).font(.system(size: 13))
                 }
                 .menuStyle(.borderlessButton)
                 .help(L10n.text("更多操作", "More Actions"))
                 .accessibilityLabel(L10n.text("更多操作", "More Actions"))
             }
-            .frame(width: 90, alignment: .trailing)
-        }
-        .padding(.vertical, 8)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2, perform: onInspect)
-        .accessibilityElement(children: .contain)
     }
 
     private var toggleHelp: String {
@@ -702,14 +518,15 @@ private struct StartupItemRow: View {
 }
 
 private struct StartupItemStatusLabel: View {
+    @Environment(\.colorScheme) private var scheme
     let item: StartupItemsDomain.Item
 
     var body: some View {
-        MetadataPill(
-            text: shortStatus,
-            systemImage: statusSymbol,
-            tint: statusTint
-        )
+        HStack(spacing: 10) {
+            LightfieldStatusGlyph(status: item.metadataPillStatus, symbol: statusSymbol, color: statusTint)
+            Text(shortStatus).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
+        }.foregroundStyle(statusTint)
+        .accessibilityElement(children: .ignore)
         .help(statusHelp)
         .accessibilityLabel(item.displayStatus)
     }
@@ -736,17 +553,13 @@ private struct StartupItemStatusLabel: View {
     }
 
     private var statusTint: Color {
-        if item.requiresAdministrator || item.hasConfigurationIssue {
-            return AppDesignTokens.Palette.warning
-        }
-        if item.isSystemSettingsOnly || item.isReadOnly {
-            return AppDesignTokens.Palette.secondaryText
-        }
+        let palette = FeatureLightfieldPalette.resolve(scheme)
+        if item.requiresAdministrator || item.hasConfigurationIssue { return palette.warningColor }
+        if item.isSystemSettingsOnly || item.isReadOnly { return palette.fg3 }
         switch item.state.process {
-        case .running: return AppDesignTokens.Palette.success
-        case .waiting: return AppDesignTokens.Palette.information
-        case .failed: return AppDesignTokens.Palette.warning
-        case .stopped, .unknown: return AppDesignTokens.Palette.secondaryText
+        case .running: return FeatureLightfieldStatus.normal.color(palette)
+        case .failed: return palette.warningColor
+        case .waiting, .stopped, .unknown: return palette.fg3
         }
     }
 

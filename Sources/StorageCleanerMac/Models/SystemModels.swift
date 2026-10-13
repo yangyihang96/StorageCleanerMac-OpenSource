@@ -119,6 +119,44 @@ struct MemoryAppUsage: Identifiable, Hashable, Sendable {
 struct MemoryQuitSelectionSummary: Equatable, Sendable {
     let appCount: Int
     let estimatedBytes: Int64
+    /// The apps that will quit, in the order they are listed (D2 supplement:
+    /// the simple panel's confirmation names them).
+    var appNames: [String] = []
+
+    /// The names for a confirmation: all of them up to three, otherwise the
+    /// first three and the total ("A、B、C 等 5 个").
+    var appNameList: String {
+        appNameList(limit: 3)
+    }
+
+    /// All names up to `limit`, otherwise the first `limit` and the total.
+    func appNameList(limit: Int) -> String {
+        let shown = appNames.prefix(max(1, limit))
+        let total = max(appCount, appNames.count)
+        guard total > shown.count else {
+            return shown.joined(separator: L10n.text("、", ", "))
+        }
+        return L10n.text(
+            "\(shown.joined(separator: "、")) 等 \(total) 个",
+            "\(shown.joined(separator: ", ")) and \(total - shown.count) more"
+        )
+    }
+
+    /// The most names a confirmation lists before "等 N 个".
+    static let confirmationNameLimit = 10
+
+    /// The message of every confirmation before apps quit (main window, mini
+    /// window, simple panel; BOARD N19): the apps by name, that each app
+    /// handles its own unsaved work (a normal quit; nothing is force quit),
+    /// and their current use.
+    var confirmationMessage: String {
+        let names = appNameList(limit: Self.confirmationNameLimit)
+        let bytes = ByteFormat.string(estimatedBytes)
+        return L10n.text(
+            "将正常退出：\(names)。未保存的内容由各应用自行处理，可能会提示你保存；不会强制退出。这些应用目前约占 \(bytes)，预计释放量以退出后的刷新重测为准。",
+            "These apps will quit normally: \(names). Each app handles its own unsaved work and may ask you to save it; nothing is force quit. They currently use about \(bytes); the memory freed is measured again after they quit."
+        )
+    }
 }
 
 private struct MemoryProcessAnalysis: Sendable {
@@ -270,8 +308,12 @@ struct MemorySnapshot: Sendable {
     let compressedBytes: Int64
     let swapUsedBytes: Int64
     let swapTotalBytes: Int64
-    let pageInsCount: Int64
-    let pageOutsCount: Int64
+    /// Compressed data read back from / written to the swap files since
+    /// startup: the kernel's swap-in / swap-out page counters (vm_stat's
+    /// Swapins / Swapouts) times the page size. Nil while the VM statistics
+    /// are unreadable; zero is a real reading.
+    let swappedInBytes: Int64?
+    let swappedOutBytes: Int64?
     let pressureFreePercentage: Int?
     let pressureSummary: String
     let topProcesses: [MemoryProcess]
@@ -296,8 +338,8 @@ struct MemorySnapshot: Sendable {
         pressureSummary: String,
         topProcesses: [MemoryProcess],
         swapTotalBytes: Int64 = 0,
-        pageInsCount: Int64 = 0,
-        pageOutsCount: Int64 = 0,
+        swappedInBytes: Int64? = nil,
+        swappedOutBytes: Int64? = nil,
         measurements: MemoryMeasurements? = nil,
         quality: MeasurementQuality = .complete,
         warnings: [MeasurementWarning] = []
@@ -314,8 +356,8 @@ struct MemorySnapshot: Sendable {
         self.compressedBytes = compressedBytes
         self.swapUsedBytes = swapUsedBytes
         self.swapTotalBytes = max(swapUsedBytes, swapTotalBytes)
-        self.pageInsCount = max(0, pageInsCount)
-        self.pageOutsCount = max(0, pageOutsCount)
+        self.swappedInBytes = swappedInBytes.map { max(0, $0) }
+        self.swappedOutBytes = swappedOutBytes.map { max(0, $0) }
         self.pressureFreePercentage = pressureFreePercentage
         self.pressureSummary = pressureSummary
         self.topProcesses = topProcesses
@@ -473,18 +515,23 @@ struct MemorySnapshot: Sendable {
     }
 
     /// A trend-only complement of system headroom, not an iStat/Activity Monitor percentage.
+    /// It is displayed beside the level; it does not decide the level.
     var pressureEstimatePercent: Int? {
         pressureHeadroomPercent.map { 100 - $0 }
     }
 
-    /// A pressure level suitable for user-facing status. Missing measurements stay unavailable
-    /// instead of inheriting the conservative `.elevated` action-policy fallback.
+    /// The memory pressure level everywhere in the app (D28): the system's
+    /// level when the sample has one. A sample without it (a fixture, an
+    /// older result, or a system level that could not be read) is estimated
+    /// from the pressure percent by the single percent rule; without a
+    /// percent it is unknown (nil), and the views say so.
     var reportablePressureLevel: MemoryPressureLevel? {
         if let measuredLevel = measurements.pressure.value {
             return measuredLevel
         }
-        guard pressureHeadroomPercent != nil else { return nil }
-        return pressureLevel
+        return pressureEstimatePercent.flatMap {
+            MemoryPressureLevel.estimated(fromPressurePercent: Double($0))
+        }
     }
 
     var cleanupPlan: MemoryCleanupPlan {
@@ -503,31 +550,35 @@ struct MemorySnapshot: Sendable {
             )
         }
 
+        let title: String
+        let detail: String
+        switch reportablePressureLevel {
+        case .normal:
+            title = L10n.text("当前状态正常", "Memory looks normal")
+            detail = L10n.text(
+                "当前没有明显需要处理的内存项。macOS 会把可用内存用于文件缓存来加速再次打开应用和文件，保持观察即可。",
+                "There is no obvious memory item to handle right now. macOS uses available memory for file cache to speed up reopening apps and files, so monitoring is enough."
+            )
+        case .elevated, .critical:
+            title = L10n.text("继续观察压力", "Keep watching pressure")
+            detail = L10n.text(
+                "系统有压力信号，但当前缓存或应用退出收益还不够明确；先观察占用变化，必要时再处理具体应用。",
+                "There are pressure signals, but cache or app-quit benefits are not clear enough yet. Watch usage changes first, then handle specific apps if needed."
+            )
+        case nil:
+            // D28: without the system level or a percent the level is
+            // unknown; neither "normal" nor "pressure signals" is claimed.
+            title = L10n.text("继续观察", "Keep watching")
+            detail = L10n.text(
+                "暂时读不到系统内存压力等级，当前也没有明显需要处理的内存项；保持观察即可。",
+                "The system memory pressure level cannot be read right now, and there is no obvious memory item to handle; keep watching."
+            )
+        }
         return MemoryCleanupPlan(
             primaryAction: .observe,
-            title: pressureLevel == .normal ? L10n.text("当前状态正常", "Memory looks normal") : L10n.text("继续观察压力", "Keep watching pressure"),
-            detail: pressureLevel == .normal
-                ? L10n.text(
-                    "当前没有明显需要处理的内存项。macOS 会把可用内存用于文件缓存来加速再次打开应用和文件，保持观察即可。",
-                    "There is no obvious memory item to handle right now. macOS uses available memory for file cache to speed up reopening apps and files, so monitoring is enough."
-                )
-                : L10n.text(
-                    "系统有压力信号，但当前缓存或应用退出收益还不够明确；先观察占用变化，必要时再处理具体应用。",
-                    "There are pressure signals, but cache or app-quit benefits are not clear enough yet. Watch usage changes first, then handle specific apps if needed."
-                ),
+            title: title,
+            detail: detail,
             estimatedRecoverableBytes: 0
-        )
-    }
-
-    var pressureLevel: MemoryPressureLevel {
-        if let measured = measurements.pressure.value { return measured }
-        guard pressureFreePercentage != nil else { return .elevated }
-        return MemoryPressurePolicy.classify(
-            physicalBytes: physicalBytes,
-            availableBytes: availableBytes,
-            compressedBytes: compressedBytes,
-            swapUsedBytes: measurements.swapUsedBytes.value.map(Int64.init(clamping:)),
-            pressureFreePercentage: pressureFreePercentage
         )
     }
 
@@ -562,10 +613,51 @@ enum MemoryPressureLevel: Sendable {
         case .normal:
             L10n.text("正常", "Normal")
         case .elevated:
-            L10n.text("上升", "Elevated")
+            L10n.text("升高", "Elevated")
         case .critical:
-            L10n.text("偏高", "High")
+            L10n.text("高", "High")
         }
+    }
+
+    /// The system's memory pressure condition. `kern.memorystatus_vm_pressure_level`
+    /// and Dispatch's memory-pressure source use the same codes
+    /// (`DISPATCH_MEMORYPRESSURE_NORMAL` 1, `_WARN` 2, `_CRITICAL` 4).
+    init?(systemCode: Int) {
+        switch systemCode {
+        case 1: self = .normal
+        case 2: self = .elevated
+        case 4: self = .critical
+        default: return nil
+        }
+    }
+
+    var systemCode: Int {
+        switch self {
+        case .normal: 1
+        case .elevated: 2
+        case .critical: 4
+        }
+    }
+
+    /// Order for choosing the most severe level of several samples.
+    var severity: Int {
+        switch self {
+        case .normal: 0
+        case .elevated: 1
+        case .critical: 2
+        }
+    }
+
+    /// An estimate for a sample that has only the pressure percent
+    /// (100 minus the system's free percentage) and no system level: samples
+    /// recorded before the level was stored, or taken while the level could
+    /// not be read. The system does not derive its level from this percent
+    /// alone, so a recorded system level always takes precedence. This is the
+    /// only percent-to-level rule: 85 % is elevated, 95 % critical
+    /// (`MemoryPressurePolicy.classify(pressureFreePercentage:)`).
+    static func estimated(fromPressurePercent percent: Double) -> MemoryPressureLevel? {
+        guard percent.isFinite, (0...100).contains(percent) else { return nil }
+        return MemoryPressurePolicy.classify(pressureFreePercentage: Int((100 - percent).rounded()))
     }
 }
 
@@ -646,6 +738,33 @@ enum EnergyImpactScanPhase: Int, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum EnergyMetricSource: String, Hashable, Sendable {
+    case systemData, estimated, mixed, unknown
+    var title: String {
+        switch self {
+        case .systemData: L10n.text("系统数据", "System data")
+        case .estimated: L10n.text("估算", "Estimated")
+        case .mixed: L10n.text("混合", "Mixed")
+        case .unknown: L10n.text("待采样", "Awaiting sample")
+        }
+    }
+    static func from(measured: Int, total: Int) -> Self {
+        guard total > 0 else { return .unknown }
+        if measured <= 0 { return .estimated }
+        return measured >= total ? .systemData : .mixed
+    }
+}
+
+struct EnergyMetricEvidence: Hashable, Sendable {
+    let source: EnergyMetricSource
+    let sampledAt: Date?
+    let intervalSeconds: TimeInterval?
+    var detail: String {
+        guard let sampledAt else { return source.title }
+        return "\(source.title) · \(sampledAt.formatted(date: .omitted, time: .standard))"
+    }
+}
+
 struct EnergyImpactApp: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
@@ -668,6 +787,26 @@ struct EnergyImpactApp: Identifiable, Hashable, Sendable {
     let measuredProcessCount: Int
     let processIDs: [Int32]
     let isApplication: Bool
+
+    // Cumulative counters and the current sampling interval have independent evidence.
+    var currentMeasuredProcessCount: Int? = nil
+    var sampledAt: Date? = nil
+    var currentSampleSeconds: TimeInterval? = nil
+
+    var cumulativeEvidence: EnergyMetricEvidence {
+        EnergyMetricEvidence(source: .from(measured: measuredProcessCount, total: processCount),
+                             sampledAt: sampledAt, intervalSeconds: nil)
+    }
+    var currentEvidence: EnergyMetricEvidence {
+        let validInterval = currentSampleSeconds.map { $0.isFinite && $0 > 0 } == true
+        return EnergyMetricEvidence(source: validInterval
+            ? .from(measured: currentMeasuredProcessCount ?? 0, total: processCount) : .unknown,
+            sampledAt: sampledAt, intervalSeconds: currentSampleSeconds)
+    }
+    var averageEvidence: EnergyMetricEvidence {
+        EnergyMetricEvidence(source: longestRunningSeconds == nil ? .estimated : cumulativeEvidence.source,
+                             sampledAt: sampledAt, intervalSeconds: longestRunningSeconds)
+    }
 
     var measurementQuality: EnergyMeasurementQuality {
         if measuredProcessCount <= 0 {
@@ -1053,8 +1192,8 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
     let modifiedAt: Date?
     let scanIdentity: FileIdentity?
     let lastUsedAt: Date?
-    let relatedPaths: [String]
-    let relatedItems: [InstalledAppRelatedItem]
+    var relatedPaths: [String]
+    var relatedItems: [InstalledAppRelatedItem]
     var status: InstalledAppStatus
     var appStoreRating: Double?
     var appStoreRatingCount: Int?
@@ -1125,9 +1264,13 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
     }
 
     var canMoveToTrash: Bool {
+        canMoveToTrash(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+    }
+
+    func canMoveToTrash(homeDirectory: URL) -> Bool {
         status == .installed
             && path.hasSuffix(".app")
-            && (PathSafety.isInsideApplications(path) || PathSafety.isInsideHome(path))
+            && (PathSafety.isInsideApplications(path) || PathSafety.isInsideHome(path, homeDirectory: homeDirectory))
     }
 
     var isAppleApp: Bool {
@@ -1212,7 +1355,7 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
             }
         }
 
-        reasons.append(L10n.text("卸载操作会先进入确认页，可选择同时把关联文件移到废纸篓。", "Uninstalling opens a confirmation sheet where associated files can also be moved to Trash."))
+        reasons.append(L10n.text("先核对并移动应用本体；成功后再逐项决定是否移动关联文件。", "Review and move the app first; after it succeeds, choose related files separately."))
 
         return reasons
     }
@@ -1405,15 +1548,24 @@ struct InstalledAppRelatedItem: Identifiable, Hashable, Sendable {
     let sizeBytes: Int64
     let scanIdentity: FileIdentity?
     // An exact bundle-ID match is only a candidate, not exclusive ownership.
-    // No production ownership verifier currently issues this evidence.
+    // Legacy fixture injection; production UninstallPlan additionally requires
+    // structured evidence from UninstallOwnershipVerifier.
     let verifiedExclusiveOwnerBundleID: String?
+    let ownershipEvidence: UninstallOwnershipEvidence?
+    let sizeIsKnown: Bool
+    let ownershipBlockReason: UninstallOwnershipBlockReason
 
     init(path: String, sizeBytes: Int64, scanIdentity: FileIdentity? = nil,
-         verifiedExclusiveOwnerBundleID: String? = nil) {
+         verifiedExclusiveOwnerBundleID: String? = nil,
+         ownershipEvidence: UninstallOwnershipEvidence? = nil, sizeIsKnown: Bool = true,
+         ownershipBlockReason: UninstallOwnershipBlockReason = .notVerified) {
         self.path = path
         self.sizeBytes = sizeBytes
         self.scanIdentity = scanIdentity
-        self.verifiedExclusiveOwnerBundleID = verifiedExclusiveOwnerBundleID
+        self.verifiedExclusiveOwnerBundleID = ownershipEvidence?.bundleID ?? verifiedExclusiveOwnerBundleID
+        self.ownershipEvidence = ownershipEvidence
+        self.sizeIsKnown = sizeIsKnown
+        self.ownershipBlockReason = ownershipBlockReason
     }
 
     var id: String { path }
@@ -1498,7 +1650,7 @@ enum AppUninstallSortMode: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .recommendation: L10n.text("建议", "Recommendation")
+        case .recommendation: L10n.text("待复核", "Review Priority")
         case .totalFootprint: L10n.text("总占用", "Total Size")
         case .bundleSize: L10n.text("应用大小", "App Size")
         case .leftovers: L10n.text("关联文件大小", "Associated Files")
@@ -1686,6 +1838,14 @@ struct AppUpdateOneClickPlan: Sendable {
 
     var manualReviewCount: Int {
         sparkleApps.count + manualApps.count
+    }
+
+    /// Keep in-app updaters in their own apps. Only confirmed manual website
+    /// sources enter the persisted guidance queue.
+    var guidedWebsiteApps: [AppUpdateItem] {
+        manualApps.filter {
+            AppUpdateService.validatedManualUpdateURL(for: $0) != nil
+        }
     }
 
     var automaticCount: Int {

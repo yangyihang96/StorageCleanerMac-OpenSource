@@ -71,7 +71,7 @@ struct ScanReportService {
         lines.append("| \(L10n.text("状态扣分", "Health Deductions")) | \(scoreBreakdown.healthPenalty) | \(L10n.text("来自可用空间与可安全清理积压。", "From available space and safe-cleanup backlog.")) |")
         lines.append("| \(L10n.text("可信度扣分", "Confidence Deductions")) | \(scoreBreakdown.confidencePenalty) | \(tableText(scoreBreakdown.confidenceDetail)) |")
         lines.append("| \(L10n.text("结果时效", "Result Freshness")) | \(tableText(freshnessValue(for: freshness))) | \(tableText(freshnessSummary(for: freshness))) |")
-        lines.append("| \(L10n.text("权限覆盖率", "Access Coverage")) | \(coverage.estimatedCoveragePercent)% | \(tableText(coverageSummary(for: coverage))) |")
+        lines.append("| \(L10n.text("全盘权限覆盖率（未测量）", "Whole-disk access coverage (not measured)")) | — | \(tableText(coverageSummary(for: coverage))) |")
         lines.append("| \(L10n.text("扫描完成状态", "Scan Completion")) | \(result.scanWasLimited ? L10n.text("部分完成", "Partial") : L10n.text("完整完成", "Complete")) | \(result.scanWasLimited ? L10n.text("达到扫描预算或安全数量上限，部分位置未完成；建议重新扫描。", "A scan budget or safety cap was reached before every location completed; rescan is recommended.") : L10n.text("扫描在预算与安全上限内完成。", "The scan completed within its budget and safety caps.")) |")
         lines.append("| \(L10n.text("权限缺口", "Access Gaps")) | \(coverage.deniedCount) | \(coverage.deniedCount == 0 ? L10n.text("没有发现未读取位置。", "No unreadable locations were detected.") : L10n.text("授权后重新扫描可提高排行和评分准确度。", "Grant access and rescan to improve ranking and score accuracy.")) |")
         lines.append("")

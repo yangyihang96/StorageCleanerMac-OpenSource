@@ -363,16 +363,13 @@ final class AppIconCacheTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift"
         )
         let compactMenuSource = try source(
-            at: "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"
+            at: "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPanelComponents.swift"
         )
         let advancedMenuSource = try source(
             at: "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"
         )
         let advancedMenuComponentsSource = try source(
             at: "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
-        )
-        let largeFilesSource = try source(
-            at: "Sources/StorageCleanerMac/Views/LargeFilesView.swift"
         )
         let combinedSource = systemUtilitiesSource
             + compactMenuSource
@@ -396,44 +393,41 @@ final class AppIconCacheTests: XCTestCase {
             endingAt: "private struct LoadingPanel",
             in: systemUtilitiesSource
         )
-        let externalAppMigrationSegment = try structSegment(
-            named: "ExternalAppMigrationRow",
-            endingAt: "private struct ExternalMigrationNotice",
-            in: largeFilesSource
-        )
+        // D70 migration rows compose the shared cached 24 pt app icon.
+        let externalAppMigrationSegment = try source(at:
+            "Sources/StorageCleanerMac/Views/FilesLightfield/FileMigrationLightfieldView.swift")
+        let lightfieldIconSource = try source(at:
+            "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldComponents.swift")
         let compactProcessSegment = try structSegment(
-            named: "MenuBarProcessIcon",
+            named: "GeekSecondaryProcessIcon",
             in: compactMenuSource
         )
-        let advancedAppSegment = try structSegment(
-            named: "AdvancedAppIcon",
-            in: advancedMenuComponentsSource
-        )
+        XCTAssertFalse(advancedMenuComponentsSource.contains("struct AdvancedAppIcon:"))
         let auditedSegments = [
             uninstallPreviewSegment,
             processSegment,
             installedAppSegment,
             compactProcessSegment,
-            advancedAppSegment,
         ]
 
         for segment in auditedSegments {
             XCTAssertFalse(segment.contains("FileManager.default.fileExists"))
             XCTAssertTrue(segment.contains("CachedAppIconView("))
         }
-        XCTAssertTrue(externalAppMigrationSegment.contains("CachedAppIconView(path: item.sourceURL.path, size: 28)"))
+        XCTAssertTrue(externalAppMigrationSegment.contains("LightfieldAppIcon(path: entry.item.sourceURL.path, size: .medium"))
+        XCTAssertTrue(lightfieldIconSource.contains("CachedAppIconView(path: path ??"))
+        XCTAssertTrue(lightfieldIconSource.contains("medium = 24"))
+        XCTAssertFalse(externalAppMigrationSegment.contains("FileManager.default.fileExists"))
 
         let uninstallPreviewFallback = try fallbackClosure(in: uninstallPreviewSegment)
         let processFallback = try fallbackClosure(in: processSegment)
         let installedAppFallback = try fallbackClosure(in: installedAppSegment)
         let compactProcessFallback = try fallbackClosure(in: compactProcessSegment)
-        let advancedAppFallback = try fallbackClosure(in: advancedAppSegment)
+        // AdvancedAppIcon was retired; the live compact glyph is checked below.
         let fallbackClosures = [
             uninstallPreviewFallback,
             processFallback,
             installedAppFallback,
-            compactProcessFallback,
-            advancedAppFallback,
         ]
 
         for fallback in fallbackClosures {
@@ -458,7 +452,11 @@ final class AppIconCacheTests: XCTestCase {
             try sourceAfterFallback(in: processSegment)
                 .contains(".background(iconFill, in: Circle())")
         )
-        XCTAssertTrue(compactProcessFallback.contains(".font(MenuBarTypography.value)"))
+        // D64 migrates the retired compact icon to the shared live glyph.
+        XCTAssertTrue(compactProcessFallback.contains("AppSymbolGlyph(systemImage: fallback"))
+        XCTAssertTrue(compactProcessFallback.contains("renderingMode: .hierarchical"))
+        XCTAssertTrue(compactProcessFallback.contains(".foregroundStyle(.secondary)"))
+        XCTAssertTrue(compactProcessFallback.contains("size: MiniWindowStyleTokens.processIconSize"))
         XCTAssertFalse(compactProcessFallback.contains(".background(.thinMaterial"))
         XCTAssertFalse(
             try sourceAfterFallback(in: compactProcessSegment)

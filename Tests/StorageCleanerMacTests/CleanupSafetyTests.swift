@@ -3,7 +3,7 @@ import XCTest
 
 final class CleanupSafetyTests: XCTestCase {
     func testOnlyAvailableGreenItemsCanMoveToTrash() {
-        let green = makeItem(tier: .green, trashPaths: ["~/Library/Caches/example"])
+        let green = makeItem(tier: .green, trashPaths: ["/Users/fixture/Library/Caches/example"])
         XCTAssertTrue(green.canMoveToTrash)
 
         let yellow = makeItem(tier: .yellow, trashPaths: ["~/Downloads"])
@@ -12,12 +12,12 @@ final class CleanupSafetyTests: XCTestCase {
         let red = makeItem(tier: .red, trashPaths: ["/Applications/Xcode.app"])
         XCTAssertFalse(red.canMoveToTrash)
 
-        let alreadyMoved = makeItem(tier: .green, trashPaths: ["~/Library/Caches/example"], status: .movedToTrash)
+        let alreadyMoved = makeItem(tier: .green, trashPaths: ["/Users/fixture/Library/Caches/example"], status: .movedToTrash)
         XCTAssertFalse(alreadyMoved.canMoveToTrash)
     }
 
     func testAllowedTrashPathsOnlyIncludesGreenItems() {
-        let greenPath = "~/Library/Caches/example"
+        let greenPath = "/Users/fixture/Library/Caches/example"
         let yellowPath = "~/Downloads"
         let result = ScanResult(
             generatedAt: Date(),
@@ -55,7 +55,7 @@ final class CleanupSafetyTests: XCTestCase {
             StorageGroup(
                 id: "caches",
                 title: "Caches",
-                entries: [DirectoryEntry(name: "Cache", path: "~/Library/Caches/example", sizeBytes: 4_000, isDirectory: true)]
+                entries: [DirectoryEntry(name: "Cache", path: "/Users/fixture/Library/Caches/example", sizeBytes: 4_000, isDirectory: true)]
             )
         ]
 
@@ -74,13 +74,13 @@ final class CleanupSafetyTests: XCTestCase {
     func testClassifierKeepsSpecificHigherPriorityPathWhenCandidatesOverlap() {
         let broadCache = DirectoryEntry(
             name: "Google",
-            path: "~/Library/Caches/Google",
+            path: "/Users/fixture/Library/Caches/Google",
             sizeBytes: 8_000,
             isDirectory: true
         )
         let chromeCache = DirectoryEntry(
             name: "Chrome",
-            path: "~/Library/Caches/Google/Chrome",
+            path: "/Users/fixture/Library/Caches/Google/Chrome",
             sizeBytes: 6_000,
             isDirectory: true
         )
@@ -116,14 +116,14 @@ final class CleanupSafetyTests: XCTestCase {
     }
 
     func testPathNormalizationExpandsHome() {
-        let normalized = PathSafety.normalizedPath("~/Library/Caches")
+        let normalized = PathSafety.normalizedPath("~/Documents")
         XCTAssertTrue(normalized.hasPrefix(PathSafety.homePath + "/"))
         XCTAssertTrue(PathSafety.isInsideHome(normalized))
     }
 
     func testCleanupRejectsNewExcludedDescendantFromOlderScanResult() {
-        let parent = "~/Library/Caches/Codex/.tmp"
-        let excludedChild = "~/Library/Caches/Codex/.tmp/keep/session.jsonl"
+        let parent = "/Users/fixture/Library/Caches/Codex/.tmp"
+        let excludedChild = "/Users/fixture/Library/Caches/Codex/.tmp/keep/session.jsonl"
         let item = makeItem(tier: .green, path: parent, trashPaths: [parent])
 
         XCTAssertThrowsError(
@@ -140,11 +140,11 @@ final class CleanupSafetyTests: XCTestCase {
     }
 
     func testCleanupRejectsCandidateReplacedBySymbolicLinkAfterScan() throws {
-        let testRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/StorageCleanerSymlinkTests-\(UUID().uuidString)", isDirectory: true)
+        let testRoot = TestFileSystem.uniqueOperationRoot("StorageCleanerSymlinkTests")
+        TestFileSystem.registerCleanup(of: testRoot, for: self)
         let target = testRoot.appendingPathComponent("user-data", isDirectory: true)
         let candidate = testRoot.appendingPathComponent("codex-temp", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: testRoot) }
+        defer { TestFileSystem.remove(testRoot) }
 
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         try Data("keep".utf8).write(to: target.appendingPathComponent("keep.txt"))
@@ -155,7 +155,8 @@ final class CleanupSafetyTests: XCTestCase {
             try CleanupService.moveToTrash(
                 item,
                 allowedPaths: [PathSafety.lexicalPath(candidate.path)],
-                excludedPaths: []
+                excludedPaths: [],
+                homeDirectory: testRoot
             )
         ) { error in
             guard case CleanupServiceError.notAllowed = error else {
@@ -167,7 +168,7 @@ final class CleanupSafetyTests: XCTestCase {
 
     func testMoveToTrashReturnsExactSystemResultingURL() throws {
         let testRoot = try makeRestoreHome()
-        defer { try? FileManager.default.removeItem(at: testRoot) }
+        defer { TestFileSystem.remove(testRoot) }
 
         let candidateURL = testRoot.appendingPathComponent("cache.bin")
         try Data("cache".utf8).write(to: candidateURL)
@@ -185,6 +186,7 @@ final class CleanupSafetyTests: XCTestCase {
             item,
             allowedPaths: [PathSafety.lexicalPath(candidateURL.path)],
             excludedPaths: [],
+            homeDirectory: testRoot,
             trashItemOperation: { originalURL in
                 observedOriginalURL = originalURL
                 try FileManager.default.moveItem(at: originalURL, to: expectedTrashURL)
@@ -202,7 +204,7 @@ final class CleanupSafetyTests: XCTestCase {
 
     func testRestoreFromTrashRejectsAReplacementAtTheRecordedTrashPath() throws {
         let homeURL = try makeRestoreHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         let originalParent = homeURL.appendingPathComponent("Library/Caches", isDirectory: true)
@@ -239,7 +241,7 @@ final class CleanupSafetyTests: XCTestCase {
 
     func testRestoreFromTrashRestoresExactOriginalPath() throws {
         let homeURL = try makeRestoreHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         let originalParent = homeURL.appendingPathComponent("Library/Caches", isDirectory: true)
@@ -272,7 +274,7 @@ final class CleanupSafetyTests: XCTestCase {
 
     func testRestoreFromTrashDoesNotOverwriteExistingDestination() throws {
         let homeURL = try makeRestoreHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         let originalParent = homeURL.appendingPathComponent("Library/Caches", isDirectory: true)
@@ -304,7 +306,7 @@ final class CleanupSafetyTests: XCTestCase {
 
     func testRestoreFromTrashReportsMissingAndInvalidRecordsSeparately() throws {
         let homeURL = try makeRestoreHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         let originalParent = homeURL.appendingPathComponent("Library/Caches", isDirectory: true)
@@ -332,13 +334,13 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(summary.missingCount, 1)
         XCTAssertEqual(summary.failed.map(\.record), [invalidRecord])
         XCTAssertEqual(summary.failedCount, 1)
-        XCTAssertFalse(summary.failed[0].reason.isEmpty)
+        XCTAssertFalse(try XCTUnwrap(summary.failed.first).reason.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: outsideSourceURL.path))
     }
 
     func testRestoreFromTrashRejectsUnsafeOriginalPath() throws {
         let homeURL = try makeRestoreHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         try FileManager.default.createDirectory(at: trashURL, withIntermediateDirectories: true)
@@ -365,7 +367,7 @@ final class CleanupSafetyTests: XCTestCase {
 
     func testRestoreFromTrashRejectsSymbolicLinkDestinationParent() throws {
         let homeURL = try makeRestoreHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         let realParent = homeURL.appendingPathComponent("real-parent", isDirectory: true)
@@ -398,7 +400,7 @@ final class CleanupSafetyTests: XCTestCase {
         let privateTemporaryArtifact = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("storage-cleaner-reveal-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: privateTemporaryArtifact, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: privateTemporaryArtifact) }
+        defer { TestFileSystem.remove(privateTemporaryArtifact) }
         let userTemporaryArtifact = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("codex-screenshot.png")
             .path
@@ -410,8 +412,8 @@ final class CleanupSafetyTests: XCTestCase {
     }
 
     func testTrashSummaryCountsDirectTrashItemsAndNestedBytes() throws {
-        let homeURL = try makeTemporaryHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        let homeURL = try makeTrashHome()
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         try FileManager.default.createDirectory(at: trashURL, withIntermediateDirectories: true)
@@ -429,8 +431,8 @@ final class CleanupSafetyTests: XCTestCase {
     }
 
     func testEmptyUserTrashRemovesOnlyTrashContents() throws {
-        let homeURL = try makeTemporaryHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        let homeURL = try makeTrashHome()
+        defer { TestFileSystem.remove(homeURL) }
 
         let trashURL = CleanupService.userTrashURL(homeDirectory: homeURL)
         try FileManager.default.createDirectory(at: trashURL, withIntermediateDirectories: true)
@@ -448,8 +450,8 @@ final class CleanupSafetyTests: XCTestCase {
     }
 
     func testEmptyUserTrashRejectsNonTrashLocation() throws {
-        let homeURL = try makeTemporaryHome()
-        defer { try? FileManager.default.removeItem(at: homeURL) }
+        let homeURL = try makeTrashHome()
+        defer { TestFileSystem.remove(homeURL) }
 
         XCTAssertThrowsError(try CleanupService.emptyUserTrash(at: homeURL)) { error in
             guard case CleanupServiceError.invalidTrashLocation = error else {
@@ -459,12 +461,12 @@ final class CleanupSafetyTests: XCTestCase {
     }
 
     @MainActor
-    func testBulkCleanupPreviewOnlyIncludesAvailableGreenItemsAndCanBeEdited() {
-        let cleanable = makeItem(tier: .green, path: "~/Library/Caches/cleanable", trashPaths: ["~/Library/Caches/cleanable"])
-        let moved = makeItem(tier: .green, path: "~/Library/Caches/moved", trashPaths: ["~/Library/Caches/moved"], status: .movedToTrash)
+    func testBulkCleanupPreviewOnlyIncludesAvailableGreenItemsAndCanBeEdited() throws {
+        let cleanable = makeItem(tier: .green, path: "/Users/fixture/Library/Caches/cleanable", trashPaths: ["/Users/fixture/Library/Caches/cleanable"])
+        let moved = makeItem(tier: .green, path: "/Users/fixture/Library/Caches/moved", trashPaths: ["/Users/fixture/Library/Caches/moved"], status: .movedToTrash)
         let review = makeItem(tier: .yellow, path: "~/Downloads/review", trashPaths: ["~/Downloads/review"])
 
-        let store = ScanStore(cleanupFeatureConfiguration: .legacy)
+        let store = try ScanStore.makeForTests(for: self, cleanupFeatureConfiguration: .legacy)
         store.result = ScanResult(
             generatedAt: Date(),
             scanSeconds: 0.25,
@@ -507,23 +509,23 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertEqual(store.pendingBulkTrashItems.map(\.id), [cleanable.id])
     }
 
-    private func makeTemporaryHome() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("StorageCleanerTests-\(UUID().uuidString)", isDirectory: true)
+    private func makeTrashHome() throws -> URL {
+        let url = TestFileSystem.uniqueOperationRoot("trash-summary")
+        TestFileSystem.registerCleanup(of: url, for: self)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
     private func makeRestoreHome() throws -> URL {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/StorageCleanerRestoreTests-\(UUID().uuidString)", isDirectory: true)
+        let url = TestFileSystem.uniqueOperationRoot("StorageCleanerRestoreTests")
+        TestFileSystem.registerCleanup(of: url, for: self)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
     private func makeItem(
         tier: StorageTier,
-        path: String = "~/Library/Caches/example",
+        path: String = "/Users/fixture/Library/Caches/example",
         trashPaths: [String],
         status: ItemStatus = .available
     ) -> StorageItem {

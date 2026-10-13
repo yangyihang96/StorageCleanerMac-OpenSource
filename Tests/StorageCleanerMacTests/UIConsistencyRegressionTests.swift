@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+@testable import StorageCleanerMac
 
 final class UIConsistencyRegressionTests: XCTestCase {
     func testLandingScopeAndArtworkSymbolsExistOnTheRunningSystem() throws {
@@ -38,14 +39,34 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(itemList.contains("ItemListResponsiveLayout.mode(availableWidth:"))
         XCTAssertFalse(itemList.contains("HSplitView"))
         XCTAssertTrue(itemList.contains(".appSelectableRowSurface("))
-        XCTAssertGreaterThanOrEqual(occurrences(of: "Section {", in: settings), 5)
+        XCTAssertGreaterThanOrEqual(occurrences(of: "LightfieldSettingsSection {", in: settings), 5)
         XCTAssertTrue(settings.contains("private var settingsSidebar: some View"))
-        XCTAssertTrue(settings.contains("NavigationSplitView"))
-        XCTAssertTrue(settings.contains("List(selection: settingsSelection)"))
+        XCTAssertTrue(settings.contains("SettingsLightfieldPane(category: category)"))
+        XCTAssertTrue(settings.contains("ForEach(SettingsCategory.allCases)"))
+        XCTAssertTrue(settings.contains("settingsSelection.wrappedValue = category"))
+        XCTAssertTrue(settings.contains(".onMoveCommand { direction in"))
+        // DECISIONS D3: Settings rows use the sidebar row surface (themed
+        // fill and stroke, hover) in the window's own theme color. D53
+        // §3.2.2 gives the main sidebar a sliding module-gradient block;
+        // the Settings window moves to it in V4 (UI-V2-SPEC §5).
+        XCTAssertTrue(sidebar.contains("struct SidebarRowBackground: View"))
+        XCTAssertTrue(sidebar.contains("SidebarSelectionBlock(pigment: pigment)"))
+        XCTAssertTrue(sidebar.contains(".matchedGeometryEffect(id: \"sidebar.selection\", in: namespace)"))
+        XCTAssertTrue(settings.contains("RoundedRectangle(cornerRadius: 8)"))
+        XCTAssertTrue(settings.contains(".fill(FeatureLightfieldPalette.accent(.overview).opacity"))
+        XCTAssertFalse(settings.contains("AppAppearanceColors.selectedSurface"))
+        // Sidebar focus and B2 row interaction remain accessible.
+        XCTAssertTrue(settings.contains(".focusEffectDisabled()"))
+        XCTAssertTrue(settings.contains(".buttonStyle(FeatureLightfieldRowButtonStyle())"))
+        // Fixed sidebar remains visible at every supported window width.
+        XCTAssertTrue(settings.contains("settingsSidebar.frame(width: viewport.size.width < 820 ? 180 : FeatureLightfield.sidebarWidth)"))
+        XCTAssertTrue(settings.contains("HStack(spacing: 0)"))
+        XCTAssertTrue(settings.contains("settingsSidebar.frame(width:"))
+        XCTAssertFalse(settings.contains("List(selection: settingsSelection)"))
         XCTAssertTrue(settings.contains("settingsPane(for: selectedCategory)"))
-        XCTAssertTrue(settings.contains(".formStyle(.grouped)"))
+        XCTAssertTrue(settings.contains("FeatureLightfieldHairline()"))
         XCTAssertTrue(settings.contains("if category == .accessAndSetup"))
-        XCTAssertEqual(occurrences(of: ".formStyle(.columns)", in: settings), 1)
+        XCTAssertEqual(occurrences(of: ".formStyle(", in: settings), 0)
         XCTAssertFalse(settings.contains("runModal()"))
         XCTAssertFalse(scanStore.contains("runModal()"))
         XCTAssertTrue(settings.contains("exclusionPanelCoordinator.present("))
@@ -55,7 +76,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(openPanelCoordinator.contains("hostWindow.attachedSheet == nil"))
     }
 
-    func testSettingsUseNativeGroupedRowsAndKeepGeekPanelConfigurationCompact() throws {
+    func testSettingsUseLightfieldRowsAndKeepGeekPanelConfigurationCompact() throws {
         let settings = try sourceText(at: "Sources/StorageCleanerMac/Views/SettingsView.swift")
         let tokens = try sourceText(
             at: "Sources/StorageCleanerMac/Support/AppDesignTokens.swift"
@@ -68,17 +89,17 @@ final class UIConsistencyRegressionTests: XCTestCase {
         )
 
         XCTAssertTrue(settings.contains("private var settingsSidebar: some View"))
-        XCTAssertTrue(settings.contains(".listStyle(.sidebar)"))
+        XCTAssertTrue(settings.contains("FeatureLightfieldRowButtonStyle()"))
         XCTAssertTrue(settings.contains("settingsPane(for: selectedCategory)"))
-        XCTAssertTrue(settings.contains(".formStyle(.grouped)"))
-        XCTAssertEqual(occurrences(of: ".formStyle(.columns)", in: settings), 1)
-        XCTAssertTrue(settings.contains("AppDesignTokens.Layout.settingsPageMaxWidth"))
+        XCTAssertTrue(settings.contains("FeatureLightfieldHairline()"))
+        XCTAssertEqual(occurrences(of: ".formStyle(", in: settings), 0)
+        XCTAssertTrue(settings.contains("SettingsLightfieldGeometry(size: viewport.size, category: category)"))
         XCTAssertTrue(settings.contains("settings.selected-category.v1"))
         XCTAssertGreaterThanOrEqual(occurrences(of: "LabeledContent(", in: settings), 8)
         XCTAssertFalse(settings.contains("ForEach(PanelDensity.menuBarChoices)"))
         XCTAssertFalse(panelChrome.contains("ForEach(PanelDensity.menuBarChoices)"))
         XCTAssertFalse(panelChrome.contains("Picker(L10n.text(\"面板模式\", \"Panel Mode\")"))
-        XCTAssertTrue(panelChrome.contains("Customize Geek Overview…"))
+        XCTAssertTrue(panelChrome.contains("Panel Settings…"))
         XCTAssertTrue(panelChrome.contains("启动时恢复小窗"))
         XCTAssertFalse(panelSettings.contains("struct PanelSettingsView: View"))
         XCTAssertFalse(panelSettings.contains("Form {"))
@@ -89,31 +110,43 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(settings.contains("SettingsMetricPill"))
         XCTAssertFalse(settings.contains("headerSection"))
         XCTAssertFalse(settings.contains(".appGlassSegmentedControl("))
-        XCTAssertTrue(settings.contains("ModuleBackground(theme: settingsTheme)"))
+        XCTAssertTrue(settings.contains("FeatureLightfieldBackdrop(module: .overview"))
         XCTAssertTrue(settings.contains(".environment(\\.moduleTheme, settingsTheme)"))
-        XCTAssertTrue(settings.contains(".scrollContentBackground(.hidden)"))
+        XCTAssertTrue(settings.contains("ScrollView {"))
         XCTAssertFalse(settings.contains(".background(AppDesignTokens.Palette.contentBackground)"))
         XCTAssertTrue(tokens.contains("static let settingsPageMaxWidth: CGFloat = 600"))
     }
 
-    func testSettingsConsolidatesAccessStatusJumpsAndTutorial() throws {
+    func testSettingsConsolidatesAccessStatusAndJumpsWithoutRedundantTutorial() throws {
         let settings = try sourceText(at: "Sources/StorageCleanerMac/Views/SettingsView.swift")
         let onboarding = try sourceText(
             at: "Sources/StorageCleanerMac/Views/FirstLaunchOnboardingView.swift"
         )
 
         XCTAssertTrue(settings.contains("case accessAndSetup"))
-        XCTAssertTrue(settings.contains("PermissionSetupCard("))
+        XCTAssertTrue(settings.contains("SettingsPermissionRow("))
         XCTAssertTrue(onboarding.contains("PermissionSetupCard("))
-        XCTAssertTrue(settings.contains("private var permissionTutorialSection"))
-        XCTAssertTrue(settings.contains("SettingsTutorialStep("))
+        // D64 #9 replaces the duplicated tutorial with permission cards and paths.
+        XCTAssertFalse(settings.contains("var permissionTutorialSection"))
+        XCTAssertFalse(settings.contains("SettingsTutorialStep("))
+        XCTAssertTrue(onboarding.contains("Text(requirement)"))
+        XCTAssertTrue(onboarding.contains("Text(guide)"))
         XCTAssertTrue(settings.contains("openFullDiskAccessSettings()"))
         XCTAssertTrue(settings.contains("openFilesAndFoldersSettings()"))
         XCTAssertTrue(settings.contains("openAppManagementSettings()"))
         XCTAssertTrue(settings.contains("Privacy_AppBundles"))
         XCTAssertTrue(settings.contains("fanControl.openApprovalSettings()"))
         XCTAssertTrue(settings.contains("com.apple.Notifications-Settings.extension"))
-        XCTAssertTrue(settings.contains("辅助功能、屏幕录制、相机、麦克风、定位与自动化"))
+        // Keep the network-consent boundary formerly embedded in the tutorial.
+        XCTAssertTrue(settings.contains("公网 IP 可关闭，地区查询须另行同意"))
+        XCTAssertTrue(settings.contains("public-IP lookup can be turned off, and region lookup requires separate consent"))
+        XCTAssertTrue(settings.contains("Text(PermissionSafetyDisclosure.unneededAccess.text)"))
+        for word in ["辅助功能", "屏幕录制", "相机", "麦克风", "定位", "自动化"] {
+            XCTAssertTrue(PermissionSafetyDisclosure.unneededAccess.chinese.contains(word), word)
+        }
+        for word in ["Accessibility", "Screen Recording", "Camera", "Microphone", "Location", "Automation"] {
+            XCTAssertTrue(PermissionSafetyDisclosure.unneededAccess.english.contains(word), word)
+        }
         XCTAssertFalse(settings.contains("AXIsProcessTrusted"))
         XCTAssertFalse(settings.contains("CGRequestScreenCaptureAccess"))
     }
@@ -131,13 +164,13 @@ final class UIConsistencyRegressionTests: XCTestCase {
         let itemList = try sourceText(at: "Sources/StorageCleanerMac/Views/ItemListView.swift")
         let health = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealthView.swift")
         let benchmark = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift"
+            at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift"
         )
-        let acceleratorBenchmark = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacAcceleratorBenchmarkSection.swift"
+        let rawResults = try sourceText(
+            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MSeriesRawResultView.swift"
         )
-        let sustainedBenchmark = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacSustainedBenchmarkSection.swift"
+        let leaderboard = try sourceText(
+            at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7LeaderboardSection.swift"
         )
         let largeFiles = try sourceText(at: "Sources/StorageCleanerMac/Views/LargeFilesView.swift")
         let utilities = try sourceText(at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
@@ -159,8 +192,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
         )
         let benchmarkEmptyState = try sourceSegment(
             benchmark,
-            from: "private var emptyResultCard: some View {",
-            to: "private var displayedProgress: MacBenchmarkPresentationProgress? {"
+            from: "private var latestResultCard: some View {",
+            to: "private func metricSummary("
         )
         let cleanupProgressPage = try sourceSegment(
             cleanupExecution,
@@ -178,10 +211,12 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(components.contains("var progress: Double? = nil"))
         XCTAssertTrue(components.contains("if progress != nil {"))
         XCTAssertTrue(components.contains("} else if isActive {\n                ProgressView()"))
-        XCTAssertTrue(components.contains("width: progress == nil ? 32 : size"))
+        // D64: inactive decorative glyphs own no slot; real progress and results remain.
+        XCTAssertTrue(components.contains(".frame(width: renderedSize, height: renderedSize)"))
+        XCTAssertTrue(components.contains("return isActive || showsStaticStatus ? 32 : 0"))
         XCTAssertFalse(components.contains("progress ?? (isActive ? 0.18 : 0)"))
         XCTAssertFalse(components.contains("progress ?? 0.70"))
-        XCTAssertTrue(emptyState.contains("AppStateIconRing(systemImage: systemImage, isActive: isLoading)"))
+        XCTAssertTrue(emptyState.contains("if isLoading {\n                AppStateIconRing(systemImage: systemImage, isActive: isLoading)"))
         XCTAssertFalse(emptyState.contains("size: density"))
         XCTAssertGreaterThanOrEqual(
             occurrences(of: ".frame(maxWidth: .infinity, alignment: .center)", in: emptyState),
@@ -203,7 +238,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(readyStage.contains("AppStateIconRing(systemImage: systemImage, isActive: isLoading)"))
         XCTAssertFalse(readyStage.contains("Circle()"))
         XCTAssertTrue(smartScan.contains("struct ScanProgressView: View"))
-        XCTAssertTrue(smartScan.contains("SmartScanProgressDashboard(progress: progress)"))
+        XCTAssertTrue(smartScan.contains("FeatureRunningTemplate(")) // D62② shared progress card
         XCTAssertTrue(smartScan.contains("ModuleScanProgressHero(progress: progress)"))
         XCTAssertTrue(smartScan.contains("struct SmartScanThinProgressBar: View"))
         XCTAssertTrue(smartScan.contains("struct ModuleScanProgressRing: View"))
@@ -238,30 +273,38 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(cleanupExecution.contains(".controlSize(.small)"))
         XCTAssertTrue(cleanupOverlay.contains("清空废纸篓后才会真正释放空间"))
         XCTAssertTrue(health.contains("healthEmptyState"))
-        XCTAssertTrue(health.contains("HeroScanPage("))
+        XCTAssertTrue(health.contains("FeatureLightfieldPage("))
         XCTAssertFalse(health.contains("AppEmptyState("))
-        XCTAssertTrue(health.contains("isLoading: healthStore.isRefreshing"))
-        XCTAssertTrue(benchmarkEmptyState.contains("AppEmptyState("))
-        XCTAssertTrue(acceleratorBenchmark.contains("AppStateIconRing("))
-        XCTAssertTrue(sustainedBenchmark.contains("AppStateIconRing("))
-        XCTAssertTrue(benchmark.contains("ProgressView(value: normalizedProgress)"))
-        XCTAssertTrue(benchmark.contains("transaction.animation = nil"))
-        XCTAssertFalse(acceleratorBenchmark.contains("ProgressView("))
-        XCTAssertFalse(sustainedBenchmark.contains("ProgressView("))
-        XCTAssertTrue(largeFiles.contains("emptyPanel(density: .workspace)"))
-        XCTAssertTrue(largeFiles.contains("emptyStateTitle"))
-        XCTAssertTrue(largeFiles.contains("尚无可安全搬移的文件"))
+        XCTAssertTrue(health.contains("actionEnabled: !healthStore.isRefreshing"))
+        XCTAssertTrue(benchmarkEmptyState.contains("尚未完成当前版本的性能测试"))
+        XCTAssertTrue(rawResults.contains("awaiting reference calibration"))
+        XCTAssertTrue(leaderboard.contains("正在读取全球排行榜"))
+        XCTAssertTrue(benchmark.contains("BenchmarkV7RunProgressView("))
+        XCTAssertTrue(benchmark.contains("transaction.animation = reduceMotion ? nil : transaction.animation"))
+        XCTAssertFalse(rawResults.contains("ProgressView("))
+        XCTAssertTrue(leaderboard.contains("ProgressView()"))
+        let migration = try sourceText(at: "Sources/StorageCleanerMac/Views/FilesLightfield/FileMigrationLightfieldView.swift")
+        // D70: the bounded result body owns empty/search states, without a second card.
+        XCTAssertTrue(largeFiles.contains("FileMigrationLightfieldView("))
+        XCTAssertTrue(migration.contains("if visibleEntries.isEmpty"))
+        XCTAssertTrue(migration.contains("尚无可安全搬移的文件"))
         XCTAssertTrue(utilities.contains("density: .workspace"))
         XCTAssertTrue(utilities.contains("density: .inline"))
-        XCTAssertTrue(startupItems.contains("if presentation.visibleItems.isEmpty, !isLoading"))
-        XCTAssertTrue(startupItems.contains("正在扫描启动项目"))
-        XCTAssertTrue(startupItems.contains("isLoading: true"))
+        XCTAssertTrue(startupItems.contains("if presentation.visibleItems.isEmpty"))
+        XCTAssertTrue(startupItems.contains("Text(isLoading ? (progress?.title"))
+        XCTAssertTrue(startupItems.contains("isPerformingOperation: isPerformingOperation || isLoading"))
         XCTAssertTrue(appUpdates.contains("AppUpdateScanningPage("))
         XCTAssertTrue(appUpdates.contains("RuntimeActivityCard("))
-        XCTAssertTrue(startupItems.contains("RuntimeInlineStatus("))
-        XCTAssertTrue(startupItems.contains("List(selection: $selectedItemID)"))
+        XCTAssertTrue(startupItems.contains("progress?.title ?? L10n.text(\"正在读取启动项\", \"Reading Startup Items\")"))
+        XCTAssertTrue(startupItems.contains(".onTapGesture { selectedItemID = item.id }"))
+        XCTAssertTrue(startupItems.contains(".id(item.id)"))
         XCTAssertTrue(appUpdates.contains("fraction: progress.progressFraction"))
-        XCTAssertGreaterThanOrEqual(occurrences(of: "AppEmptyState(", in: startupItems), 2)
+        let results = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldComponents.swift")
+        XCTAssertTrue(startupItems.contains("No Items Match These Filters"))
+        XCTAssertTrue(startupItems.contains("Reading Startup Items"))
+        XCTAssertTrue(startupItems.contains("LightfieldResultContent(listHeader:"))
+        XCTAssertTrue(results.contains("LazyVStack(spacing: 0) { rows }"))
+        XCTAssertFalse(startupItems.contains("AppEmptyState("))
     }
 
     func testV2SmartScanShowsCleanupSelectionWithoutNavigatingAway() throws {
@@ -274,7 +317,14 @@ final class UIConsistencyRegressionTests: XCTestCase {
 
         XCTAssertTrue(overview.contains("CleanupScanResultsView("))
         XCTAssertTrue(overview.contains("filter: .overview"))
-        XCTAssertFalse(overview.contains("AppPageHeader("))
+        // D64④ adds a real health-only result. That branch owns its single
+        // header; file results still reuse the cleanup view's existing header.
+        let fileResults = try sourceSegment(overview, from: "            } else {", to: "        }\n        .frame(")
+        XCTAssertFalse(fileResults.contains("AppPageHeader("))
+        XCTAssertEqual(occurrences(of: "AppPageHeader(", in: overview), 1)
+        XCTAssertTrue(overview.contains("if session.smartScanScopes == [.health]"))
+        XCTAssertTrue(overview.contains("SmartScanPageShell(alignsWithFeatureFlow: true)"))
+        XCTAssertTrue(overview.contains("SmartScanHealthResultsView(snapshot: session.smartScanHealthSnapshot, status: session.smartScanHealthStatus)"))
         XCTAssertFalse(overview.contains("store.showCleanupReview()"))
         XCTAssertFalse(overview.contains("@Binding var selection"))
     }
@@ -305,6 +355,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(flowHost.contains("CleanupScanOverviewView("))
         XCTAssertTrue(flowHost.contains("SmartScanCleanupProgressPage("))
         XCTAssertTrue(flowHost.contains("SmartScanCleanupCompletedPage("))
+        // D53 §3.2.3: the stages stay mutually exclusive; only the change of
+        // stage uses the shared page transition (no local layering).
+        XCTAssertTrue(flowHost.contains("PageTransitionContainer(key: flowStage)"))
         XCTAssertFalse(flowHost.contains("ZStack"))
         XCTAssertFalse(flowHost.contains(".pageTransition("))
         XCTAssertFalse(flowHost.contains("CleanupV2OperationOverlay"))
@@ -381,11 +434,23 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(results.contains("displayedSubcategories(for risk:"))
         XCTAssertTrue(results.contains("发现 \\(ByteFormat.string(safeBytes)) 可安全清理"))
         XCTAssertTrue(results.contains("需要人工判断"))
-        XCTAssertTrue(results.contains("reviewCandidates.filter(\\.isSelectable)"))
-        XCTAssertTrue(results.contains("reviewCandidates.filter { !$0.isSelectable }"))
-        XCTAssertTrue(results.contains("case .reviewOnly: valueCandidates = actionableReviewCandidates"))
-        XCTAssertTrue(results.contains("只读参考"))
-        XCTAssertTrue(results.contains("仅供查看"))
+        // D19: every listed item is selectable, so the cards and tiers count
+        // only selectable items and the read-only reference card is gone.
+        // D23: emptying the Trash has its own section and is not in the cards.
+        // BOARD N20 (r2-live-fixes-2): the rule moved into the definition the
+        // results page shares with the scan history; the page reads it.
+        XCTAssertTrue(results.contains("CleanupScanTierTotals(categories: categories)"))
+        let models = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/StorageCleanerMac/Models/CleanupScanModels.swift"), encoding: .utf8)
+        XCTAssertTrue(models.contains("!$0.action.permanentlyDeletes && $0.isSelectable"))
+        XCTAssertTrue(results.contains("case .reviewOnly: valueCandidates = reviewCandidates"))
+        XCTAssertFalse(results.contains("advisoryReviewCandidates"))
+        XCTAssertFalse(results.contains("只读参考"))
+        XCTAssertFalse(results.contains("仅供查看"))
+        XCTAssertTrue(results.contains("trashSection"))
+        XCTAssertTrue(results.contains("清空废纸篓 · 不可恢复"))
+        XCTAssertTrue(results.contains("完全磁盘访问权限"))
         XCTAssertTrue(results.contains("定位到此风险分组，不会改变选择"))
         XCTAssertTrue(results.contains("accessibilityReduceMotion"))
         XCTAssertTrue(results.contains("colorSchemeContrast"))
@@ -425,17 +490,25 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(results.contains("let isExpanded = expandedRiskTierIDs.contains(risk.rawValue)"))
         XCTAssertTrue(results.contains("if isExpanded {"))
         XCTAssertTrue(results.contains("toggleTierExpansion(risk)"))
-        XCTAssertTrue(results.contains("store.cleanupSelection.state(for: Array(tierSelectionIDs))"))
+        // D25: a duplicate-app group always keeps one copy, so tier and group
+        // checkboxes judge "fully checked" without the kept copies.
+        XCTAssertTrue(results.contains("store.cleanupSelection.groupState(for: Array(tierSelectionIDs), in: session)"))
 
-        XCTAssertTrue(results.contains("ForEach(tierSubcategories)"))
+        // D53 §3.2.4: the index feeds the staggered entrance.
+        XCTAssertTrue(results.contains("ForEach(Array(tierSubcategories.enumerated()), id: \\.element.id)"))
         XCTAssertFalse(source.contains("private struct CleanupCategorySelectionCard"))
         XCTAssertTrue(subcategory.contains("@State private var isExpanded = false"))
         XCTAssertTrue(subcategory.contains("@Environment(\\.accessibilityReduceMotion)"))
         XCTAssertTrue(subcategory.contains("if isExpanded {"))
         XCTAssertTrue(subcategory.contains("ForEach(candidates)"))
         XCTAssertTrue(subcategory.contains(".padding(.leading, layout.cardPadding)"))
-        XCTAssertTrue(subcategory.contains(".glassPanel("))
-        XCTAssertTrue(subcategory.contains(".easeInOut(duration: 0.16)"))
+        // D53 (UI-V2-SPEC 1.3, §3.1, §3.3): v2 card surface; expansion moves
+        // the layout with the standard token (at once under Reduce Motion),
+        // not animated above 200 rows; the group checkbox is one bulk update.
+        XCTAssertTrue(subcategory.contains("SurfaceBackground(level: .card"))
+        XCTAssertTrue(subcategory.contains("BulkUpdateScope(rowCount: candidates.count).perform(AppMotion.layout(reduceMotion: reduceMotion))"))
+        XCTAssertTrue(subcategory.contains("BulkUpdateScope(rowCount: subcategory.selectableCandidateIDs.count).perform {"))
+        XCTAssertTrue(subcategory.contains(".appBulkAnimationGuard(rowCount: candidates.count)"))
 
         XCTAssertTrue(candidate.contains("layout.cardPadding + 52"))
         XCTAssertTrue(candidate.contains("AppDesignTokens.Typography.body"))
@@ -486,8 +559,12 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(scanViews.contains("全部可操作的红色高风险项目"))
         XCTAssertTrue(scanViews.contains("可按分组或逐项选择"))
         XCTAssertTrue(scanViews.contains("双重确认，且只会移入废纸篓"))
-        XCTAssertTrue(scanViews.contains("受保护，不能加入清理计划"))
-        XCTAssertTrue(scanViews.contains("仅供查看，不能加入清理计划"))
+        // D19: nothing listed is view-only any more; D22/D25 row states.
+        XCTAssertFalse(scanViews.contains("受保护，不能加入清理计划"))
+        XCTAssertFalse(scanViews.contains("仅供查看，不能加入清理计划"))
+        XCTAssertTrue(scanViews.contains("此分组没有可清理的项目"))
+        XCTAssertTrue(scanViews.contains("正在运行，清理前需退出"))
+        XCTAssertTrue(scanViews.contains("将保留此副本"))
         XCTAssertTrue(scanViews.contains("完整容量"))
         XCTAssertTrue(scanViews.contains("至少占用"))
         XCTAssertTrue(scanViews.contains("无法计算"))
@@ -506,7 +583,16 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(confirmation.contains("protectedRiskAcknowledged:"))
         XCTAssertTrue(confirmation.contains("protectedTrashMoveAcknowledged:"))
         XCTAssertTrue(confirmation.contains("将移入废纸篓"))
-        XCTAssertTrue(confirmation.contains("当前立即释放取决于废纸篓和文件系统状态"))
+        // Fix round 2 (P2-12): the release note moved into the shared model, which also
+        // says nothing will move when every move item is skipped.
+        XCTAssertTrue(confirmation.contains("facts.cleanupTrashReleaseNote(planHasTrashMoves:"))
+        let confirmationModel = try sourceText(at: "Sources/StorageCleanerMac/Models/OperationConfirmationModels.swift")
+        XCTAssertTrue(confirmationModel.contains("当前立即释放取决于废纸篓和文件系统状态"))
+        // D23: permanent deletion has its own section and two confirmations.
+        XCTAssertTrue(confirmation.contains("permanentDeletionConfirmation"))
+        XCTAssertTrue(confirmation.contains("清空废纸篓 · 不可恢复"))
+        XCTAssertTrue(confirmation.contains("acknowledgesPermanentDeletion"))
+        XCTAssertTrue(confirmation.contains("acknowledgesTrashContentsReviewed"))
 
         XCTAssertTrue(progressPage.contains("CleanupExecutionStageList("))
         XCTAssertTrue(progressPage.contains("onCancel: (() -> Void)?"))
@@ -516,7 +602,11 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(completedPage.contains("reclaimableAfterEmptyingTrashBytes"))
         XCTAssertTrue(completedPage.contains("permanentlyFreedBytes"))
         XCTAssertTrue(completedPage.contains("availableSpaceDeltaBytes"))
-        XCTAssertTrue(completedPage.contains("清空废纸篓后最多可释放这些空间"))
+        XCTAssertTrue(completedPage.contains("OperationResultPresentation(report: report)"))
+        XCTAssertTrue(completedPage.contains("已恢复项目不计为可回收空间"))
+        // Every skipped or failed item is listed with its reason.
+        XCTAssertTrue(completedPage.contains("CleanupReportIssueList(report: report)"))
+        XCTAssertTrue(execution.contains("struct CleanupReportIssueList: View"))
     }
 
     func testCleanupSelectionKeepsCheckboxesCompactWhenSelected() throws {
@@ -552,7 +642,12 @@ final class UIConsistencyRegressionTests: XCTestCase {
         )
 
         XCTAssertTrue(row.contains("Toggle(isOn: selection)"))
-        XCTAssertTrue(row.contains(".toggleStyle(.checkbox)"))
+        // D53 (UI-V2-SPEC 1.5): the animated checkbox draws the box and
+        // exposes the native checkbox to accessibility.
+        XCTAssertTrue(row.contains(".toggleStyle(AnimatedCheckboxToggleStyle("))
+        let controls = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/SelectionControls.swift")
+        XCTAssertTrue(controls.contains(".accessibilityRepresentation {\n            Toggle(isOn: configuration.$isOn) {"))
+        XCTAssertTrue(controls.contains(".toggleStyle(.checkbox)"))
         XCTAssertFalse(row.contains("Button(action: toggleSelection)"))
         XCTAssertFalse(row.contains("private var riskControl"))
         XCTAssertGreaterThanOrEqual(occurrences(of: "AppIconButton(", in: row), 2)
@@ -577,35 +672,46 @@ final class UIConsistencyRegressionTests: XCTestCase {
             from: "struct SmartScanScanningPage: View {",
             to: "private struct SmartScanMetric: View {"
         )
-        let progressBar = try sourceSegment(
-            source,
-            from: "private struct SmartScanThinProgressBar: View {",
-            to: "private struct ScanProgressStageList: View {"
-        )
-
-        XCTAssertTrue(page.contains("RuntimeActivityFooter"))
-        XCTAssertTrue(page.contains("L10n.text(\"只读扫描\", \"Read-only\")"))
-        XCTAssertTrue(progressBar.contains("ProgressView(value: Double(fraction), total: 1)"))
-        XCTAssertTrue(progressBar.contains(".accessibilityLabel(L10n.text(\"扫描进度\", \"Scan progress\"))"))
-        XCTAssertTrue(progressBar.contains(".accessibilityValue"))
-        XCTAssertFalse(progressBar.contains("GeometryReader"))
+        let template = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureTemplates.swift")
+        // D62②: native progress/accessibility now belongs to the common running template.
+        XCTAssertTrue(page.contains("FeatureRunningTemplate("))
+        XCTAssertTrue(template.contains("StatusFooter(status:"))
+        XCTAssertTrue(template.contains("ProgressView(value: measured ?? 0, total: 1)"))
+        XCTAssertTrue(template.contains(".accessibilityLabel(L10n.text(\"进度\", \"Progress\"))"))
+        XCTAssertTrue(template.contains(".accessibilityValue"))
+        XCTAssertTrue(template.contains(".truncationMode(.middle)"))
+        XCTAssertTrue(template.contains("FeaturePageTokens.cancelHeight"))
     }
 
     func testSharedMotionUsesVisiblePageTransitionAndHonorsReduceMotion() throws {
         let source = try sourceText(
             at: "Sources/StorageCleanerMac/Support/AppInteractionStyle.swift"
         )
+        // D53 §3.1–3.2.1: one page transition for the whole window lives in
+        // AppMotion; the compatibility name forwards to it.
+        let motion = try sourceText(at: "Sources/StorageCleanerMac/Support/AppMotion.swift")
 
         XCTAssertTrue(source.contains(".offset(y: reduceMotion || isVisible ? 0 : distance)"))
-        XCTAssertTrue(source.contains("guard !reduceMotion else { return .opacity }"))
-        XCTAssertTrue(source.contains("private struct AppPageTransitionModifier: ViewModifier"))
-        XCTAssertTrue(source.contains("verticalOffset: 8"))
-        XCTAssertTrue(source.contains("verticalOffset: -4"))
-        XCTAssertTrue(source.contains(".offset(y: verticalOffset)"))
+        XCTAssertTrue(source.contains("AppMotion.pageTransition(reduceMotion: reduceMotion)"))
+        // Reduce Motion: the new page only fades in.
+        XCTAssertTrue(motion.contains("insertion: AnyTransition.opacity.animation(reducedFade)"))
+        XCTAssertTrue(motion.contains("removal: pageRemoval.animation(reducedFade)"))
+        XCTAssertTrue(motion.contains("struct AppMotionPageModifier: ViewModifier"))
+        XCTAssertTrue(motion.contains("active: AppMotionPageModifier(opacity: 0, offset: 8)"))
+        // The old page fades out in 0.15 s and, while it does, is neither
+        // hit-testable nor visible to VoiceOver (review contract #11).
+        XCTAssertTrue(motion.contains("removal: pageRemoval.animation(pageExit)"))
+        XCTAssertTrue(motion.contains(".opacity(isLeaving ? 0 : 1)"))
+        XCTAssertTrue(motion.contains(".allowsHitTesting(!isLeaving)"))
+        XCTAssertTrue(motion.contains(".accessibilityHidden(isLeaving)"))
+        XCTAssertTrue(motion.contains(".offset(y: offset)"))
         XCTAssertFalse(source.contains("scale: 0.988"))
+        XCTAssertFalse(motion.contains("scaleEffect"), "A scaled page reports scaled frames while it comes in")
         XCTAssertFalse(source.contains(".snappy("))
+        XCTAssertFalse(motion.contains(".snappy("))
     }
 
+    @MainActor
     func testMainModulesUseGoldenSurfaceWithoutChangingNativeSettingsOrRouteTransitions() throws {
         let source = try sourceText(at: "Sources/StorageCleanerMac/Views/ContentView.swift")
         let presentation = try sourceText(
@@ -618,7 +724,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(source.contains("moduleTint"))
         XCTAssertTrue(presentation.contains("struct ModuleBackground: View"))
         XCTAssertTrue(presentation.contains("theme.startColor(for: colorScheme)"))
-        XCTAssertTrue(presentation.contains("RadialGradient("))
+        XCTAssertFalse(presentation.contains("RadialGradient("),
+                       "The night canvas must not inherit a category-coloured haze")
         XCTAssertTrue(presentation.contains("theme.endColor(for: colorScheme)"))
         XCTAssertFalse(presentation.contains("theme.isImmersive ? .dark : colorScheme"))
         XCTAssertTrue(presentation.contains("@Environment(\\.accessibilityReduceTransparency)"))
@@ -626,8 +733,14 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(presentation.contains("value: route.rawValue"))
         XCTAssertTrue(presentation.contains(".environment(\\.moduleTheme, theme)"))
         XCTAssertTrue(themes.contains("enum ModuleThemeCatalog"))
-        XCTAssertTrue(themes.contains("case .startup:"))
-        XCTAssertTrue(themes.contains("case .updater:"))
+        // D64③ removes the per-route subtitle switch which contained these
+        // standalone cases. Check the actual route-to-theme mapping instead.
+        XCTAssertEqual(ReviewFilter.startup.moduleTheme.featureGroup, .performance)
+        XCTAssertEqual(ReviewFilter.startup.moduleTheme.pigment, .performance)
+        XCTAssertTrue(ReviewFilter.startup.moduleTheme.isImmersive)
+        XCTAssertEqual(ReviewFilter.updater.moduleTheme.featureGroup, .applications)
+        XCTAssertEqual(ReviewFilter.updater.moduleTheme.pigment, .applications)
+        XCTAssertTrue(ReviewFilter.updater.moduleTheme.isImmersive)
         XCTAssertTrue(themes.contains("case .largeFiles, .migration, .duplicates:"))
     }
 
@@ -675,7 +788,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         ]
 
         for file in swiftFiles {
-            let source = try String(contentsOf: file, encoding: .utf8)
+            let source = try r2ProductionSource(at: file)
             if source.contains(".buttonStyle(.plain)") {
                 XCTAssertTrue(
                     plainButtonStyleExemptions.contains(file.lastPathComponent),
@@ -698,9 +811,13 @@ final class UIConsistencyRegressionTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Views/ComputerHealth/ComputerHealthWorkspaceView.swift"
         )
 
-        XCTAssertTrue(source.contains("AppPageHeader("))
-        XCTAssertTrue(source.contains("isHero: true"))
-        XCTAssertTrue(source.contains("ReviewFilter.healthHub.pageSubtitle"))
+        // D67 owns one title in the shared lightfield skeleton. The result
+        // view supplies its content directly instead of adding a V1 header.
+        XCTAssertTrue(source.contains("FeatureLightfieldPage(module: .healthHub"))
+        XCTAssertTrue(source.contains("ComputerHealthView(scanStore: scanStore"))
+        XCTAssertFalse(source.contains("AppPageHeader("))
+        XCTAssertFalse(source.contains("HeroScanPage("))
+        XCTAssertFalse(source.contains("ReviewFilter.healthHub.pageSubtitle"))
         XCTAssertFalse(source.contains("iconSize:"))
         XCTAssertFalse(source.contains("glyphSize:"))
         XCTAssertFalse(source.contains(".background(.ultraThinMaterial)"))
@@ -733,7 +850,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(content.contains(".accessibilityLabel(L10n.text(\"页面\", \"Page\"))"))
         XCTAssertTrue(presentation.contains("struct ManagementListPage<"))
         XCTAssertTrue(presentation.contains("struct ModulePageHeader<Actions: View>: View"))
-        XCTAssertTrue(duplicates.contains("FeatureDataPageShell("))
+        XCTAssertTrue(duplicates.contains("DuplicateFilesLightfieldView(")) // D70: the result owns its Lightfield page
         XCTAssertTrue(duplicates.contains("重新扫描重复文件"))
         XCTAssertTrue(content.contains("重新分析磁盘"))
         XCTAssertFalse(largeFiles.contains("AppPageHeader("))
@@ -744,7 +861,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
 
     func testBenchmarkScrollUsesFlatContentSurfacePolicy() throws {
         let dashboard = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift"
+            at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift"
         )
         let glass = try sourceText(at: "Sources/StorageCleanerMac/Support/GlassStyle.swift")
         let panel = try sourceSegment(
@@ -754,10 +871,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
         )
 
         XCTAssertTrue(dashboard.contains(".environment(\\.scrollSafeGlass, true)"))
-        XCTAssertTrue(panel.contains("Color(nsColor: .controlBackgroundColor)"))
-        XCTAssertTrue(panel.contains("(tint ?? .clear).opacity(tintOpacity)"))
+        XCTAssertTrue(panel.contains("AppAppearanceColors.panel"))
+        XCTAssertFalse(panel.contains("Color(nsColor: .controlBackgroundColor)"))
+        XCTAssertFalse(panel.contains("(tint ?? .clear).opacity"))
         XCTAssertTrue(panel.contains(".strokeBorder(borderColor, lineWidth: 1)"))
-        XCTAssertTrue(panel.contains("guard colorSchemeContrast != .increased else { return 0 }"))
         XCTAssertFalse(panel.contains(".glassEffect("))
         XCTAssertFalse(panel.contains(".ultraThinMaterial"))
         XCTAssertFalse(panel.contains(".regularMaterial"))
@@ -765,35 +882,44 @@ final class UIConsistencyRegressionTests: XCTestCase {
 
     func testMemoryEmptyStateHidesUnavailableActionsAndAvoidsRepeatedMetrics() throws {
         let source = try sourceText(at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
-        let releasePanel = try sourceSegment(
-            source,
-            from: "private struct MemoryReleasePanel: View {",
-            to: "private struct MemoryInlineMetric: View {"
-        )
-        let selectionPanel = try sourceSegment(
-            source,
-            from: "struct MemoryProcessSelectionPanel: View {",
-            to: "private struct MemoryAppSelectionTableHeader: View {"
-        )
-
-        XCTAssertTrue(releasePanel.contains("title: L10n.text(\"已用 / 总量\", \"Used / Total\")"))
-        XCTAssertTrue(releasePanel.contains("snapshot.measurements.physicalBytes.value.map"))
-        XCTAssertTrue(releasePanel.contains("title: L10n.text(\"压力趋势估算\", \"Pressure estimate\")"))
-        XCTAssertTrue(releasePanel.contains("100 − 系统压力余量"))
-        XCTAssertTrue(source.contains("snapshot: store.menuBarDisplayMemorySnapshot ?? snapshot"))
-        XCTAssertTrue(releasePanel.contains("processSnapshot.cleanupPlan"))
-        XCTAssertTrue(selectionPanel.contains("进程快照"))
-        XCTAssertFalse(releasePanel.contains("MemoryInlineMetric(title: L10n.text(\"可用\", \"Available\")"))
-        XCTAssertTrue(releasePanel.contains("if !isObserving"))
-        XCTAssertTrue(releasePanel.contains("L10n.text(\"退出高占用应用\", \"Quit High-Usage Apps\")"))
-        XCTAssertTrue(releasePanel.contains(": cleanupPlan.title"))
-        XCTAssertTrue(releasePanel.contains("\"xmark.circle.fill\""))
-        XCTAssertTrue(releasePanel.contains("\"checkmark.circle\""))
-        XCTAssertFalse(releasePanel.contains("Text(cleanupPlan.title"))
-        XCTAssertTrue(selectionPanel.contains("if !apps.isEmpty"))
-        XCTAssertTrue(selectionPanel.contains("if selectedAppCount > 0"))
-        XCTAssertFalse(selectionPanel.contains("visibleApps.isEmpty || !store.canRequestMemoryQuitActions"))
-        XCTAssertFalse(selectionPanel.contains("退出所选应用"))
+        // D67/D70⑤: guard the routed Lightfield page, not the retired panels.
+        // Empty results use a flat row; the fixed primary action is refresh
+        // until there is a selection, and unavailable selection stays disabled.
+        XCTAssertTrue(source.contains("displaySnapshot: store.menuBarDisplayMemorySnapshot"))
+        XCTAssertTrue(source.contains("LightfieldMemoryPage(store: store"))
+        let lightfield = try sourceText(at: "Sources/StorageCleanerMac/Views/LightfieldMemoryPage.swift")
+        let metrics = try sourceSegment(lightfield, from: "private var memoryMetrics:", to: "private var results:")
+        let empty = try sourceSegment(lightfield, from: "if groups.isEmpty {", to: "private var resultControls:")
+        let commands = try sourceSegment(lightfield, from: "private var selectionCommands:", to: "struct LightfieldMemoryAppRow:")
+        let primary = try sourceSegment(lightfield, from: "private var actionTitle:", to: "private var landing:")
+        XCTAssertTrue(lightfield.contains("displaySnapshot ?? snapshot"))
+        XCTAssertTrue(metrics.contains("label: L10n.text(\"已用 / 总量\", \"Used / Total\")"))
+        XCTAssertTrue(metrics.contains("display?.measuredUsedBytes.map"))
+        XCTAssertTrue(metrics.contains("display?.measurements.physicalBytes.value.map"))
+        XCTAssertEqual(metrics.components(separatedBy: "?? \"—\"").count - 1, 4)
+        XCTAssertTrue(metrics.contains("display?.measurements.cachedBytes.value.map"))
+        XCTAssertTrue(metrics.contains("display?.measurements.swapUsedBytes.value.map"))
+        XCTAssertFalse(metrics.contains("\"Available\""))
+        XCTAssertTrue(lightfield.contains("progress: display?.measuredUsedRatio,"))
+        XCTAssertTrue(lightfield.contains("LightfieldTrendChart(samples: trendSamples"))
+        XCTAssertTrue(lightfield.contains("Latest Process Snapshot: "))
+        XCTAssertFalse(lightfield.contains("该时刻占用最多"))
+        XCTAssertTrue(lightfield.contains("LightfieldPerformancePresentation.memoryOutcome(result.status) + \" · \" + result.detail"))
+        XCTAssertFalse(lightfield.contains("Text(cleanupPlan.title"))
+        XCTAssertTrue(empty.contains("Text(L10n.text(\"本次没有可读的进程样本\", \"No Readable Process Samples\"))"))
+        XCTAssertTrue(empty.contains(".frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)"))
+        for decoration in ["Image(", "Material", ".glassPanel", "SurfaceCard", ".background("] {
+            XCTAssertFalse(empty.contains(decoration), decoration)
+        }
+        XCTAssertTrue(commands.contains(".disabled(!store.canRequestMemoryQuitActions || snapshot?.recommendedQuitApps.isEmpty != false)"))
+        XCTAssertTrue(commands.contains("if store.selectedMemoryAppCount > 0"))
+        XCTAssertTrue(commands.contains(".disabled(!store.canRequestMemoryQuitActions)"))
+        XCTAssertFalse(commands.contains("requestQuit"), "Selection commands never perform the primary action")
+        XCTAssertTrue(primary.contains("if store.selectedMemoryAppCount > 0"))
+        XCTAssertTrue(primary.contains("L10n.text(\"刷新内存快照\", \"Refresh Memory Snapshot\")"))
+        XCTAssertTrue(primary.contains("actionEnabled: result && store.selectedMemoryAppCount > 0 ? store.canRequestMemoryQuitActions : store.canRefreshMemory"))
+        XCTAssertTrue(primary.contains("store.requestQuitSelectedMemoryProcesses()"))
+        XCTAssertFalse(primary.contains("optimizeMemory("))
     }
 
     func testUninstallerRequiresExplicitScanAndUsesSharedLandingShell() throws {
@@ -818,9 +944,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(uninstaller.contains("AppUninstallScanLandingView(store: store)"))
         XCTAssertFalse(uninstaller.contains("Task.sleep(for: .milliseconds(300))"))
         XCTAssertFalse(uninstaller.contains(".task {"))
-        XCTAssertTrue(landing.contains("FeatureLandingPageShell("))
+        // D67: uninstall uses the lightfield skeleton and an explicit scan callback.
+        XCTAssertTrue(landing.contains("FeatureLightfieldPage("))
         XCTAssertTrue(landing.contains("L10n.text(\"读取应用列表\", \"Read App List\")"))
-        XCTAssertTrue(landing.contains("actionSystemImage: \"square.grid.2x2.fill\""))
+        XCTAssertFalse(landing.contains("actionSystemImage:"))
         XCTAssertTrue(landing.contains("action: startScan"))
     }
 
@@ -835,18 +962,26 @@ final class UIConsistencyRegressionTests: XCTestCase {
             to: "enum EnergyImpactSortMode"
         )
 
-        XCTAssertTrue(energy.contains("if store.hasScannedEnergyImpact"))
+        XCTAssertTrue(energy.contains("if store.hasScannedEnergyImpact, !store.isEnergyImpactPageScanActive"))
         XCTAssertTrue(energy.contains("EnergyImpactScanLandingView(store: store)"))
-        XCTAssertTrue(energy.contains("EnergyImpactScanProgressPanel(phase:"))
+        // D69/D70⑥: results use the lightfield page; the real running stages
+        // still come from EnergyImpactRunningPage on the explicit landing route.
+        XCTAssertTrue(energy.contains("LightfieldEnergyPage(snapshot: snapshot"))
+        XCTAssertTrue(landing.contains("EnergyImpactRunningPage(phase: visiblePhase"))
         XCTAssertTrue(energy.contains("store.scanEnergyImpact()"))
         XCTAssertFalse(energy.contains("autoRefreshEnergyImpact"))
         XCTAssertFalse(energy.contains("Task.sleep(for: .milliseconds(250))"))
         XCTAssertFalse(energy.contains("Task.sleep(for: .seconds(6))"))
-        XCTAssertTrue(landing.contains("FeatureLandingPageShell("))
+        // The shared shell selects lightfield ownership for B3.
+        XCTAssertTrue(landing.contains("FeatureLightfieldPage(module: .energy, phase: .landing"))
         XCTAssertTrue(landing.contains("L10n.text(\"开始测量\", \"Start Measurement\")"))
         XCTAssertTrue(landing.contains("EnergyImpactScanPipelineView(phase: visiblePhase, showsStageDetails: true)"))
-        XCTAssertTrue(landing.contains("Text(step.overview)"))
-        XCTAssertTrue(landing.contains("actionSystemImage: \"bolt.fill\""))
+        // D64③ removes visible option descriptions, but keeps all six actual
+        // stages, their labels and the explanatory help for each stage.
+        XCTAssertFalse(landing.contains("Text(step.overview)"))
+        XCTAssertTrue(landing.contains("Text(step.shortTitle)"))
+        XCTAssertTrue(landing.contains(".help(step.overview)"))
+        XCTAssertTrue(landing.contains("actionEnabled: store.canRefreshEnergyImpact"))
         XCTAssertTrue(landing.contains("action: { store.scanEnergyImpact() }"))
         XCTAssertTrue(landing.contains("store.isEnergyImpactPageScanActive"))
         XCTAssertTrue(landing.contains("EnergyImpactScanPhase.allCases.enumerated()"))
@@ -856,11 +991,18 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(landing.contains(".frame(width: 14)"))
         XCTAssertTrue(landing.contains(".fixedSize(horizontal: true, vertical: false)"))
         XCTAssertFalse(landing.contains("return HStack(spacing: AppDesignTokens.Spacing.micro)"))
-        XCTAssertTrue(energy.contains("AppButton("))
-        XCTAssertTrue(energy.contains("systemImage: \"arrow.clockwise\""))
+        let resultPage = try sourceText(at: "Sources/StorageCleanerMac/Views/LightfieldEnergyPage.swift")
+        let template = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfield.swift")
+        XCTAssertTrue(energy.contains("LightfieldEnergyPage(snapshot: snapshot"))
+        XCTAssertTrue(resultPage.contains("actionTitle: L10n.text(\"重新采样能耗\", \"Sample Energy Again\")"))
+        XCTAssertTrue(resultPage.contains("actionEnabled: canRefresh"))
+        XCTAssertTrue(resultPage.contains("action: refresh"))
+        XCTAssertTrue(template.contains("Button(actionTitle, action: action)"))
         XCTAssertTrue(source.contains("ViewThatFits(in: .horizontal)"))
         XCTAssertTrue(source.contains("private var compactLayout: some View"))
-        XCTAssertTrue(source.contains("private func compactValueColumn(title: String, value: String)"))
+        XCTAssertTrue(source.contains("private var evidenceColumns: some View"))
+        XCTAssertTrue(source.contains("evidence: app.currentEvidence"))
+        XCTAssertTrue(source.contains("evidence: app.cumulativeEvidence"))
         XCTAssertTrue(source.contains(".frame(minWidth: 700)"))
 
         let store = try sourceText(at: "Sources/StorageCleanerMac/Stores/ScanStore.swift")
@@ -956,7 +1098,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
 
     func testHealthLargeFilesAndPrivacyAvoidNestedDecorativeShapes() throws {
         let health = try [
-            "Sources/StorageCleanerMac/Views/ComputerHealth/HealthScoreHero.swift",
+            "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfield.swift",
             "Sources/StorageCleanerMac/Views/ComputerHealth/HealthFactorGrid.swift",
             "Sources/StorageCleanerMac/Views/ComputerHealth/HealthActionList.swift"
         ]
@@ -966,23 +1108,24 @@ final class UIConsistencyRegressionTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Views/LargeFilesView.swift"
         )
         let benchmark = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift"
+            at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift"
         )
         let benchmarkSummary = try sourceSegment(
             benchmark,
-            from: "private var scoreSummary: some View",
-            to: "@ViewBuilder\n    private var primaryAction"
+            from: "private func metricSummary(",
+            to: "private var localBestPage: some View"
         )
         let benchmarkAction = try sourceSegment(
             benchmark,
-            from: "@ViewBuilder\n    private var primaryAction",
-            to: "private var runPreparationSection"
+            from: "private var benchmarkPrimaryAction: some View",
+            to: "private var actionCard: some View"
         )
 
-        XCTAssertTrue(health.contains("if let progress {"))
-        XCTAssertTrue(health.contains("min(1, max(0, progress / 100))"))
+        XCTAssertTrue(health.contains("if let measured {"))
+        XCTAssertTrue(health.contains("RuntimeWorkflowState.measuredFraction(fraction)"))
         XCTAssertTrue(health.contains("Circle()"))
-        XCTAssertTrue(health.contains("RoundedRectangle(cornerRadius: 14)"))
+        XCTAssertTrue(health.contains("RoundedRectangle(cornerRadius: 2)"))
+        XCTAssertFalse(health.contains(".glassPanel("))
         XCTAssertFalse(health.contains("scoreRing"))
         XCTAssertFalse(health.contains("miniRing"))
         XCTAssertFalse(health.contains("factorCard"))
@@ -991,19 +1134,21 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(largeFiles.contains("Circle()"))
         XCTAssertFalse(largeFiles.contains("miniRing"))
 
-        XCTAssertTrue(benchmark.contains("scoreSummary"))
+        XCTAssertTrue(benchmark.contains("latestResultCard"))
         XCTAssertFalse(benchmark.contains("scoreRing"))
         XCTAssertFalse(benchmark.contains("Circle()"))
         XCTAssertFalse(benchmarkSummary.contains(".system(size:"))
         XCTAssertEqual(
-            occurrences(of: ".fixedSize(horizontal: true, vertical: false)", in: benchmarkAction),
+            occurrences(of: "Button(", in: benchmarkAction),
             2
         )
+        XCTAssertTrue(benchmarkAction.contains("Button(role: .cancel, action: onCancel)"))
+        XCTAssertTrue(benchmarkAction.contains("Button(action: onStart)"))
     }
 
     func testCompactAndGeekPanelsAvoidCardWithinShapeDecoration() throws {
         let compact = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"
+            at: "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"
         )
         let geek = try sourceText(
             at: "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
@@ -1060,7 +1205,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(compact.contains(".background(.thinMaterial, in: RoundedRectangle(cornerRadius: 6"))
         XCTAssertFalse(compact.contains("MenuBarIconButtonStyle"))
         XCTAssertFalse(compact.contains("MenuBarOpenButtonStyle"))
-        XCTAssertTrue(compact.contains("PanelHeader("))
+        XCTAssertTrue(compact.contains("GeekAttachedPanelShell("))
         XCTAssertEqual(panelChrome.components(separatedBy: "kind: .toolbar").count - 1, 1)
         XCTAssertTrue(panelChrome.contains("Menu {"))
         XCTAssertTrue(panelChrome.contains("AppSymbols.Action.more"))
@@ -1074,7 +1219,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(combinedCard.contains(".frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)"))
         XCTAssertEqual(occurrences(of: ".geekCardSurface(", in: combinedCard), 1,
                        "Each fixed-height overview module keeps one golden card surface")
-        XCTAssertTrue(geek.contains("reading.displayRPM"))
+        let liveSensors = try sourceText(at: "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift")
+        XCTAssertTrue(liveSensors.contains("reading.displayRPM"))
         XCTAssertFalse(geek.contains("presentation:"))
         XCTAssertTrue(geekComponents.contains("struct GeekCombinedCard<Content: View>: View"))
         XCTAssertTrue(geekComponents.contains("struct GeekCombinedRing: View"))
@@ -1095,8 +1241,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(geekComponents.contains("if presentation =="))
         XCTAssertFalse(geekConfiguration.contains("GeekMetricPresentation"))
         XCTAssertFalse(geekConfiguration.contains("ringMetrics"))
-        XCTAssertTrue(advancedComponents.contains("AppSelectionButton("))
-        XCTAssertTrue(advancedComponents.contains("showsTitle: false"))
+        XCTAssertFalse(advancedComponents.contains("var moduleRail:"))
+        let moduleButton = try r2SourceDeclaration("struct GeekOverviewModuleButton<", in: geekComponents)
+        XCTAssertTrue(moduleButton.contains(".appButtonChrome(.metric)"))
+        XCTAssertTrue(moduleButton.contains("action(destination)"))
         XCTAssertFalse(geek.contains("private struct GeekRailButton"))
         XCTAssertFalse(geek.contains(".glassPanel(cornerRadius: 11"))
         XCTAssertTrue(selectionButton.contains("appButtonChrome(isSelected ? .primary : .toolbar"))
@@ -1139,14 +1287,14 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(panel.contains("GeekAttachedPanelShell("))
         XCTAssertTrue(panel.contains("section: selectedSection"))
         XCTAssertTrue(panel.contains("onHoverChange: geekAttachedPanelHoverChanged"))
-        XCTAssertTrue(panel.contains("let hidesChrome = presentation.usesGeekLayout"))
-        XCTAssertTrue(panel.contains("showsHeader: !hidesChrome"))
-        XCTAssertTrue(panel.contains("showsNavigation: !hidesChrome"))
-        XCTAssertTrue(panel.contains("liveHeader"))
-        XCTAssertTrue(panel.contains("navigation: {\n                moduleRail"))
+        XCTAssertFalse(panel.contains("var moduleRail:"))
+        XCTAssertTrue(panel.contains("showsHeader: false"))
+        XCTAssertTrue(panel.contains("showsNavigation: false"))
+        XCTAssertFalse(panel.contains("liveHeader"))
+        XCTAssertTrue(panel.contains("navigation: {\n                EmptyView()"))
         XCTAssertTrue(panel.contains("geekDetailPage"))
-        XCTAssertTrue(components.contains("PanelHeader("))
-        XCTAssertTrue(components.contains("var moduleRail: some View"))
+        XCTAssertTrue(components.contains("PanelToolbarActions("))
+        XCTAssertFalse(components.contains("var moduleRail: some View"))
         XCTAssertFalse(geek.contains("geekHeader"))
         XCTAssertFalse(geek.contains("geekModuleRail"))
         XCTAssertFalse(geek.contains("geekDetailFooter"))
@@ -1234,13 +1382,14 @@ final class UIConsistencyRegressionTests: XCTestCase {
     }
 
     func testSustainedBenchmarkKeepsOneRawOnlyNativeLayout() throws {
-        let source = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacSustainedBenchmarkSection.swift"
-        )
-
-        XCTAssertTrue(source.contains("固定 10 分钟"))
-        XCTAssertTrue(source.contains("不计分、不上传"))
-        XCTAssertTrue(source.contains("AppStateIconRing("))
+        // D64: the unused v6 sustained view was removed; keep raw-only guards on the live renderer.
+        let source = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealth/MSeriesRawResultView.swift")
+        XCTAssertTrue(source.contains("awaiting reference calibration"))
+        XCTAssertTrue(source.contains("sample stability, not statistical confidence"))
+        XCTAssertTrue(source.contains("result.extensions"))
+        XCTAssertTrue(source.contains("result.writtenBytes"))
+        XCTAssertTrue(source.contains("statistics.sampleCount"))
+        XCTAssertTrue(source.contains("DisclosureGroup("))
         XCTAssertFalse(source.contains(".appButtonChrome(.primary)"))
         XCTAssertFalse(source.contains("运行持续测试"))
         XCTAssertFalse(source.contains("MetadataPill("))
@@ -1270,15 +1419,13 @@ final class UIConsistencyRegressionTests: XCTestCase {
         )
         let controls = try sourceText(at: "Sources/StorageCleanerMac/Support/AppControls.swift")
         let rail = try sourceSegment(controls, from: "struct AppSelectionButton: View", to: "struct AppFilterButton: View")
-        let header = try sourceSegment(source, from: "var header: some View", to: "var moduleRail: some View")
-        let tile = try sourceSegment(source, from: "struct AdvancedMetricTile: View", to: "struct AdvancedCompactGauge")
-        let gauge = try sourceSegment(source, from: "struct AdvancedCompactGauge", to: "struct AdvancedPlainMetric")
-        let circularGauge = try sourceSegment(chrome, from: "struct PanelCircularGauge", to: "struct PanelHeader")
-        let geekMetricCell = try sourceSegment(
-            geekComponents,
-            from: "struct GeekMetricCell: View",
-            to: "struct GeekSection"
-        )
+        let header = try r2SourceDeclaration("struct AdvancedPanelCard<", in: source)
+        XCTAssertFalse(source.contains("struct AdvancedMetricTile:"))
+        XCTAssertFalse(source.contains("struct AdvancedCompactGauge:"))
+        XCTAssertFalse(source.contains("struct AdvancedPlainMetric:"))
+        let circularGauge = try r2SourceDeclaration("struct PanelCircularGauge:", in: chrome)
+        let geekMetricCell = try r2SourceDeclaration("struct GeekMetricCell:", in: geekComponents)
+        let metricContent = try r2SourceDeclaration("private var content:", in: geekMetricCell)
 
         XCTAssertFalse(source.contains(".glassPanel(cornerRadius: 12"))
         XCTAssertTrue(controls.contains(".buttonStyle(.borderedProminent)"))
@@ -1288,7 +1435,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(source.contains("AdvancedIconButtonStyle"))
         XCTAssertFalse(source.contains("AdvancedOpenButtonStyle"))
         XCTAssertFalse(source.contains("Circle()"))
-        XCTAssertTrue(header.contains("PanelHeader("))
+        XCTAssertTrue(header.contains("Text(title)"))
+        XCTAssertTrue(header.contains(".accessibilityAddTraits(.isHeader)"))
+        XCTAssertFalse(header.contains("AppSymbolGlyph("))
         XCTAssertFalse(source.contains("tint: .accentColor"))
         XCTAssertFalse(source.contains("var footer: some View"))
         XCTAssertFalse(source.contains("var settingsMenu: some View"))
@@ -1315,14 +1464,12 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(circularGauge.contains("minimumScaleFactor"))
         XCTAssertFalse(circularGauge.contains("Circle()"))
 
-        for metric in [tile, gauge] {
-            XCTAssertTrue(metric.contains("PanelCircularGauge("))
-            XCTAssertFalse(metric.contains("ProgressView(value:"))
-            XCTAssertFalse(metric.contains("Circle()"))
-            XCTAssertFalse(metric.contains("RoundedRectangle("))
-        }
-        XCTAssertTrue(tile.contains("hasSuffix(\"%\")"))
-        XCTAssertTrue(tile.contains("hasSuffix(\"％\")"))
+        XCTAssertTrue(metricContent.contains("PanelCircularGauge("))
+        XCTAssertFalse(metricContent.contains("ProgressView(value:"))
+        XCTAssertFalse(metricContent.contains("Circle()"))
+        XCTAssertFalse(metricContent.contains("RoundedRectangle("))
+        XCTAssertTrue(metricContent.contains("if model.progress != nil"))
+        XCTAssertTrue(metricContent.contains("progress: model.progress"))
         XCTAssertFalse(geek.contains("private struct GeekMetricTile"))
         XCTAssertTrue(geek.contains("GeekCombinedCard(height: GeekPanelLayout.overviewProcessorCardHeight)"))
         XCTAssertFalse(geek.contains("presentation:"))
@@ -1346,9 +1493,6 @@ final class UIConsistencyRegressionTests: XCTestCase {
     }
 
     func testViewsUseNativeButtonsAndPanelUsesNativeSegmentedControls() throws {
-        let geekEditor = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDashboardEditor.swift"
-        )
         let presentation = try sourceText(
             at: "Sources/StorageCleanerMac/Views/ModulePresentation.swift"
         )
@@ -1357,20 +1501,28 @@ final class UIConsistencyRegressionTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/ComputerHealth/ComputerHealthWorkspaceView.swift",
             "Sources/StorageCleanerMac/Views/ComputerHealth/HealthActionList.swift",
             "Sources/StorageCleanerMac/Views/ComputerHealth/HealthScoreHero.swift",
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift",
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkLeaderboardSection.swift",
+            "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift",
+            "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7LeaderboardSection.swift",
             "Sources/StorageCleanerMac/Views/ComputerHealthView.swift",
             "Sources/StorageCleanerMac/Views/ContentView.swift",
             "Sources/StorageCleanerMac/Views/ItemDetailView.swift",
             "Sources/StorageCleanerMac/Views/ItemListView.swift",
             "Sources/StorageCleanerMac/Views/LargeFilesView.swift",
             "Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift",
             "Sources/StorageCleanerMac/Views/OverviewView.swift",
             "Sources/StorageCleanerMac/Views/SettingsView.swift",
             "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift"
         ]
-            .map { try sourceText(at: $0) }
+            .map { path in
+                let text = try sourceText(at: path)
+                // D64/V1: this batch owns V7 result controls; its unchanged landing action uses native prominence.
+                if path.hasSuffix("BenchmarkV7DashboardView.swift") {
+                    let start = try XCTUnwrap(text.range(of: "private var latestResultCard:")).lowerBound
+                    return String(text[start...])
+                }
+                return text
+            }
             .joined(separator: "\n")
 
         XCTAssertFalse(source.contains(".buttonStyle(.bordered)"))
@@ -1381,14 +1533,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(presentation.contains(".pickerStyle(.segmented)"))
         XCTAssertTrue(presentation.contains("Text(title(option)).tag(option)"))
         XCTAssertFalse(presentation.contains("ModuleTechnicalBackdrop"))
-        XCTAssertTrue(geekEditor.contains(".pickerStyle(.menu)"))
-        XCTAssertTrue(geekEditor.contains(".toggleStyle(.checkbox)"))
-        XCTAssertFalse(geekEditor.contains("Layout actions for"))
-        XCTAssertFalse(geekEditor.contains("Module Width"))
-        XCTAssertFalse(geekEditor.contains("Move Up"))
-        XCTAssertFalse(geekEditor.contains("Move Down"))
-        XCTAssertFalse(geekEditor.contains("GeekMetricPresentation"))
-        XCTAssertFalse(geekEditor.contains("刷新频率"))
+        // Batch 2b deleted the never-instantiated GeekDashboardEditor.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDashboardEditor.swift").path))
     }
 
     func testAppButtonFamilyOwnsNativeStatesAndRemovesLocalDuplicates() throws {
@@ -1413,7 +1561,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(controls.contains("ViewThatFits(in: .horizontal)"))
         XCTAssertTrue(controls.contains("Label(title, systemImage: systemImage)"))
         XCTAssertTrue(controls.contains("HStack(spacing: AppDesignTokens.Spacing.small)"))
-        XCTAssertTrue(controls.contains("actionIcon(systemImage: systemImage)"))
+        // D64 #1: the inline icon is conditional; compact icon-only fallback stays.
+        XCTAssertTrue(controls.contains("if showsInlineIcon {\n                actionIcon(systemImage: systemImage)"))
+        XCTAssertTrue(controls.contains("case .primary, .glassProminent:\n            false"))
         XCTAssertTrue(controls.contains(".labelStyle(.iconOnly)"))
         XCTAssertTrue(controls.contains("case .toolbar, .icon, .smallUtility:"))
         XCTAssertTrue(controls.contains("allowsIconOnlyFallback: allowsIconOnlyFallback"))
@@ -1455,7 +1605,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
             to: "struct GlassVisualEffectBackdrop: NSViewRepresentable {"
         )
 
-        XCTAssertTrue(panel.contains("Color(nsColor: .controlBackgroundColor)"))
+        XCTAssertTrue(panel.contains("AppAppearanceColors.panel"))
+        XCTAssertFalse(panel.contains("Color(nsColor: .controlBackgroundColor)"))
         XCTAssertFalse(panel.contains(".glassEffect("))
         XCTAssertTrue(controls.contains(".buttonStyle(.bordered)"))
         XCTAssertTrue(controls.contains(".buttonStyle(.borderedProminent)"))
@@ -1467,7 +1618,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(source.contains("if glassSurfaceDepth > 0"))
         XCTAssertTrue(source.contains("glassSurfaceDepth + 1"))
         XCTAssertTrue(source.contains("private struct AdaptivePopoverChromeModifier"))
-        XCTAssertTrue(popover.contains(".fill(AppDesignTokens.Palette.contentBackground)"))
+        XCTAssertTrue(popover.contains(".fill(panelChromePalette?.shell ?? AppDesignTokens.Palette.contentBackground)"))
         XCTAssertTrue(popover.contains(".strokeBorder(borderColor, lineWidth: borderWidth)"))
         XCTAssertTrue(popover.contains("AppDesignTokens.Palette.separator"))
         XCTAssertTrue(popover.contains("colorSchemeContrast == .increased"))
@@ -1503,7 +1654,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
         let advanced = try sourceText(
             at: "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
         )
-        let compact = try sourceText(at: "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift")
+        let compact = try sourceText(at: "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift")
         let appTypography = try sourceSegment(
             typography,
             from: "enum AppTypography {",
@@ -1540,7 +1691,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(menuTypography.contains(".callout"))
         XCTAssertTrue(menuTypography.contains(".footnote"))
         XCTAssertTrue(advanced.contains("typealias AdvancedPanelTypography = MenuBarPanelTypography"))
-        XCTAssertTrue(compact.contains("typealias MenuBarTypography = MenuBarPanelTypography"))
+        XCTAssertTrue(compact.contains("geekDetailPage"))
+        XCTAssertTrue(advanced.contains(".font(AdvancedPanelTypography.body)"))
     }
 
     func testMainWindowTextAvoidsSmallSemanticFontOverrides() throws {
@@ -1568,15 +1720,44 @@ final class UIConsistencyRegressionTests: XCTestCase {
             for file in files where file.pathExtension == "swift"
                 && !file.path.contains("/MenuBarAdvanced/")
                 && !file.lastPathComponent.hasPrefix("MenuBar") {
-                let source = try String(contentsOf: file, encoding: .utf8)
+                let source = try r2ProductionSource(at: file)
                 for override in smallOverrides {
                     XCTAssertFalse(source.contains(override), "\(file.path): \(override)")
                 }
+                let relativePath = String(file.path.dropFirst(projectRoot.path.count + 1))
+                let scaleViolations = MSeriesV11ScaleContract.violations(path: relativePath, source: source)
+                XCTAssertTrue(scaleViolations.isEmpty, "\(relativePath): \(scaleViolations.joined(separator: "; "))")
                 if source.contains(".minimumScaleFactor(") {
-                    XCTAssertTrue(
-                        ["ModulePresentation.swift", "SidebarView.swift"].contains(file.lastPathComponent),
-                        "\(file.path): only compact immersive controls may scale a single-line label"
-                    )
+                    // LIGHTFIELD-R2-PLAN §B2 requires minimumScaleFactor for compact
+                    // lightfield numerals (ring centre, metric/summary values, chart
+                    // values). Those files are not exempt wholesale: every scaling
+                    // line carries `// lightfield-scale-ok` and the count is capped,
+                    // so a plain row/segment label cannot start scaling unnoticed.
+                    // D69/D70 B7: extend the same line marker and per-file budget
+                    // to compact numeric/date columns; the B2 budgets stay at 6.
+                    let lightfieldScaleBudget = [
+                        "FeatureLightfieldComponents.swift": 6, "FeatureLightfieldCharts.swift": 6,
+                        // D77: only the three compact result numerals may scale;
+                        // one shared call site, labels still truncate with full AX/help.
+                        "FeatureLightfieldResultSpace.swift": 1,
+                        "PerformanceBenchmarkV11ResultPage.swift": 2, "PerformanceBenchmarkV11RawRow.swift": 2,
+                        "PerformanceBenchmarkV11RunningPage.swift": 2,
+                        "LargeFilesView.swift": 1, "FileAnalysisLightfieldView.swift": 3,
+                        "FileMigrationLightfieldView.swift": 3, "DuplicateFilesLightfieldView.swift": 3,
+                        "FeatureLightfieldFileComponents.swift": 1,
+                    ]
+                    if let budget = lightfieldScaleBudget[file.lastPathComponent] {
+                        let lines = source.components(separatedBy: .newlines).filter { $0.contains(".minimumScaleFactor(") }
+                        for line in lines {
+                            XCTAssertTrue(line.contains("// lightfield-scale-ok"), "\(file.path): unmarked scaling: \(line)")
+                        }
+                        XCTAssertLessThanOrEqual(lines.count, budget, "\(file.path): lightfield scaling budget")
+                    } else {
+                        XCTAssertTrue(
+                            ["ModulePresentation.swift", "SidebarView.swift"].contains(file.lastPathComponent),
+                            "\(file.path): only compact immersive controls may scale a single-line label"
+                        )
+                    }
                     XCTAssertTrue(
                         source.contains(".lineLimit(1)"),
                         "\(file.path): compact immersive labels must remain single-line"
@@ -1601,61 +1782,54 @@ final class UIConsistencyRegressionTests: XCTestCase {
     }
 
     func testBenchmarkShowsOneStandardWithoutRepeatedProfileChrome() throws {
-        let models = try sourceText(
-            at: "Sources/StorageCleanerMac/Models/MacBenchmarkModels.swift"
-        )
-        let dashboard = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift"
-        )
-        let results = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkResultSections.swift"
-        )
-        let leaderboard = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkLeaderboardSection.swift"
-        )
-
+        // D64: preserve the model contract and check the current official result route rather than removed v6 chrome.
+        let models = try sourceText(at: "Sources/StorageCleanerMac/Models/MacBenchmarkModels.swift")
+        let dashboard = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift")
+        let results = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealth/MSeriesRawResultView.swift")
+        let leaderboard = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7LeaderboardSection.swift")
         XCTAssertTrue(models.contains("static let allCases: [BenchmarkProfile] = [.standard]"))
-        XCTAssertFalse(dashboard.contains("Picker("))
+        XCTAssertTrue(dashboard.contains("BenchmarkV7Category.corePerformance"))
+        XCTAssertTrue(dashboard.contains("isCurrentComparableOfficialResult"))
+        XCTAssertTrue(dashboard.contains("categoryScores"))
         XCTAssertFalse(dashboard.contains("selectedProfile"))
-        XCTAssertTrue(dashboard.contains("return completedRawOnlyDetail"))
         XCTAssertFalse(dashboard.contains("No verified Standard v6 baseline is available"))
-        XCTAssertTrue(dashboard.contains("1920 × 1080  OFFSCREEN METAL"))
-        XCTAssertTrue(dashboard.contains("1.887B TRIANGLES / SAMPLE"))
+        XCTAssertFalse(dashboard.contains("1920 × 1080  OFFSCREEN METAL"))
+        XCTAssertFalse(dashboard.contains("1.887B TRIANGLES / SAMPLE"))
+        XCTAssertTrue(results.contains("awaiting reference calibration"))
         XCTAssertFalse(results.contains("title: L10n.text(\"模式\", \"Profile\")"))
+        XCTAssertTrue(leaderboard.contains("eligible"))
         XCTAssertFalse(leaderboard.contains("L10n.text(\"模式\", \"Profile\")"))
         XCTAssertFalse(leaderboard.contains("text: MacBenchmarkPresentation.profileTitle(profile)"))
     }
 
     func testBenchmarkWrapsMetadataAndAvoidsNestedContentCards() throws {
-        let dashboard = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift"
-        )
-        let results = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkResultSections.swift"
-        )
-        let leaderboard = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkLeaderboardSection.swift"
-        )
-        let hero = try sourceSegment(
-            dashboard,
-            from: "private var benchmarkHero: some View",
-            to: "private var scoreSummary: some View"
-        )
-
+        // D64: native V7 layouts replace removed v6 hero/result cards. Each adaptive status layout retains an action.
+        let dashboard = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift")
+        let results = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealth/MSeriesRawResultView.swift")
+        let leaderboard = try sourceText(at: "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7LeaderboardSection.swift")
+        let hero = try sourceSegment(dashboard, from: "private func benchmarkStatusBar(", to: "private var compactTemperature: some View")
         XCTAssertTrue(hero.contains("ViewThatFits(in: .horizontal)"))
-        XCTAssertGreaterThanOrEqual(occurrences(of: "ViewThatFits(in: .horizontal)", in: hero), 2)
-        XCTAssertTrue(hero.contains("benchmarkMetadata("))
+        XCTAssertTrue(hero.contains("benchmarkStatusMessage"))
+        // Each status-message alternative must expose the action; the number of fallbacks may change in V1.
+        for alternative in hero.components(separatedBy: "benchmarkStatusMessage").dropFirst() {
+            XCTAssertTrue(alternative.contains("benchmarkPrimaryAction"))
+        }
         XCTAssertTrue(hero.contains("fixedSize(horizontal: false, vertical: true)"))
+        XCTAssertTrue(hero.contains("benchmark.persistentActions"))
         XCTAssertFalse(hero.contains("MetadataPill("))
-        XCTAssertFalse(hero.contains(".glassPanel("))
-
+        XCTAssertTrue(results.contains("Text(title(metric.id)).frame(maxWidth: .infinity, alignment: .leading)"))
+        XCTAssertTrue(results.contains(".accessibilityElement(children: .combine)"))
         XCTAssertFalse(results.contains(".glassPanel("))
         XCTAssertFalse(results.contains("RoundedRectangle("))
-        XCTAssertFalse(leaderboard.contains(".glassPanel("))
-        XCTAssertFalse(leaderboard.contains("RoundedRectangle("))
         XCTAssertTrue(leaderboard.contains("AppButton("))
-        XCTAssertTrue(leaderboard.contains("entry.physicalMemoryBytes"))
-        XCTAssertTrue(leaderboard.contains("entry.systemDiskCapacityBytes"))
+        XCTAssertTrue(leaderboard.contains("entry.memoryGB"))
+        XCTAssertTrue(leaderboard.contains("entry.processorModel"))
+        XCTAssertTrue(leaderboard.contains("GridItem(.adaptive(minimum: 150)"))
+        // The V7 section already has one outer panel; no header or row may add an inner panel.
+        let leaderboardBody = try sourceSegment(leaderboard, from: "var body: some View", to: "private var header:")
+        XCTAssertEqual(occurrences(of: ".glassPanel(", in: leaderboard), 1)
+        XCTAssertEqual(occurrences(of: ".glassPanel(", in: leaderboardBody), 1)
+        XCTAssertFalse(leaderboard.contains("RoundedRectangle("))
     }
 
     func testSharedPageHeaderSymbolsSelectionAndChartsUseOneSemanticSystem() throws {
@@ -1703,26 +1877,28 @@ final class UIConsistencyRegressionTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift"
         )
         let panelSources = try [
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarCombinedPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarDiskPanel.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarMemoryPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarNetworkPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarPowerPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarProcessorPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarSensorsPanel.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDiskView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekNetworkView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekProcessorView.swift",
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift",
         ].map { try sourceText(at: $0) }
 
         XCTAssertTrue(header.contains("struct AppPageHeader"))
-        XCTAssertTrue(pageHeader.contains("AppSymbolIcon("))
+        XCTAssertFalse(pageHeader.contains("AppSymbolIcon("))
         XCTAssertTrue(moduleHeader.contains("AppPageHeader("))
         XCTAssertFalse(moduleHeader.contains("AppSymbolIcon("))
-        XCTAssertTrue(pageHeader.contains("role: .pageFeature"))
+        XCTAssertTrue(pageHeader.contains("Text(title)"))
         XCTAssertTrue(pageHeader.contains("var isHero = false"))
         XCTAssertTrue(pageHeader.contains("isHero && moduleTheme.isImmersive"))
-        XCTAssertTrue(pageHeader.contains(": AppTypography.pageTitle)"))
+        // D53 §2.3: module pages use PageHero; neutral pages keep the
+        // shared page title type.
+        XCTAssertTrue(pageHeader.contains("PageHero("))
+        XCTAssertTrue(pageHeader.contains("AppTypography.pageTitle"))
         XCTAssertFalse(pageHeader.contains("var iconSize:"))
         XCTAssertFalse(pageHeader.contains("var glyphSize:"))
         XCTAssertFalse(pageHeader.contains("let tint: Color"))
@@ -1730,20 +1906,24 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(iconStyle.contains("enum AppIconSizing"))
         XCTAssertTrue(iconStyle.contains("struct AppSymbolIcon: View"))
         XCTAssertTrue(iconStyle.contains("role == .pageFeature || role == .emptyState"))
-        XCTAssertTrue(iconStyle.contains(".font(.system(size: role.glyphSize, weight: role.weight))"))
+        XCTAssertTrue(iconStyle.contains("size: role.glyphSize"))
+        XCTAssertTrue(iconStyle.contains("weight: role.weight"))
+        XCTAssertTrue(iconStyle.contains(".scaledToFit()"))
+        XCTAssertTrue(iconStyle.contains(".frame(width: size, height: size, alignment: .center)"))
         XCTAssertTrue(iconStyle.contains(".frame(width: role.frameSize, height: role.frameSize)"))
         XCTAssertTrue(iconStyle.contains("static let iconHitRegion: CGFloat = 32"))
-        XCTAssertTrue(iconStyle.contains("case .toolbar, .inline, .sidebar: 16"))
+        XCTAssertTrue(iconStyle.contains("case .toolbar, .inline, .sidebar, .settingsNavigation: 16"))
         XCTAssertTrue(iconStyle.contains("case .panelNavigation, .panelHeader, .panelMode: 18"))
         XCTAssertTrue(iconStyle.contains("case .toolbar, .panelNavigation:"))
         XCTAssertTrue(iconStyle.contains(".contentShape(Rectangle())"))
         XCTAssertTrue(iconStyle.contains("var isDecorative = false"))
         XCTAssertTrue(iconStyle.contains(".accessibilityHidden(isDecorative)"))
-        XCTAssertTrue(overview.contains("isDecorative: true"))
+        XCTAssertFalse(overview.contains("AppSymbolIcon("))
         XCTAssertTrue(utilities.contains("isDecorative: true"))
-        XCTAssertTrue(sidebar.contains("Image(systemName: filter.systemImage)"))
-        XCTAssertTrue(sidebar.contains(".frame(width: 18, height: 18)"))
-        XCTAssertTrue(sidebar.contains("filter.moduleTheme.sidebarIconColor"))
+        XCTAssertTrue(sidebar.contains("FeatureLightfieldArtwork(art:"))
+        // D53 (UI-V2-SPEC 1.4): sidebar rows use module-colored icon tiles.
+        XCTAssertTrue(sidebar.contains("IconTile("))
+        XCTAssertTrue(sidebar.contains("filter.moduleTheme.pigment"))
         XCTAssertTrue(symbols.contains("static let showMainWindow = \"macwindow\""))
         XCTAssertTrue(models.contains("AppSymbols.Navigation.safeCleanup"))
         XCTAssertTrue(controls.contains("AppDesignTokens.Palette.accent : nil"))
@@ -1757,8 +1937,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(telemetry.contains("AppChartPalette.download"))
         XCTAssertTrue(telemetry.contains("AppChartPalette.upload"))
         for panelSource in panelSources {
-            XCTAssertFalse(panelSource.contains("Image(systemName: \""))
-            XCTAssertFalse(panelSource.contains("systemImage: \""))
+            let withoutDataArrow = panelSource.replacingOccurrences(
+                of: "Image(systemName: \"arrow.right\")", with: "")
+            XCTAssertFalse(withoutDataArrow.contains("Image(systemName: \""))
+            XCTAssertFalse(withoutDataArrow.contains("systemImage: \""))
         }
     }
 
@@ -1796,9 +1978,20 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(sidebar.contains("AppIconView("))
         XCTAssertFalse(components.contains("AppIconView("))
         XCTAssertFalse(workspace.contains("asset: .smartCareHero"))
-        XCTAssertTrue(sidebar.contains("Image(systemName: filter.systemImage)"))
-        XCTAssertTrue(sidebar.contains("filter.moduleTheme.sidebarIconColor"))
-        XCTAssertTrue(components.contains("AppSymbolIcon("))
+        XCTAssertTrue(sidebar.contains("FeatureLightfieldArtwork(art:"))
+        // D67: generated 20 pt thumbnails belong to clickable navigation rows.
+        XCTAssertTrue(sidebar.contains(".frame(width: 20, height: 20)"))
+        // D64②: the shared header has no decorative icon; the central
+        // illustration remains on its agreed surface and stays decorative.
+        let header = try sourceSegment(components,
+            from: "struct AppPageHeader<Actions: View>: View {", to: "struct TaskSearchField: View {")
+        let orbit = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/OrbitLandingArtwork.swift")
+        XCTAssertFalse(header.contains("AppSymbolIcon("))
+        XCTAssertFalse(header.contains("GeneratedArtView("))
+        XCTAssertTrue(header.contains("PageHero("))
+        XCTAssertTrue(header.contains(".accessibilityAddTraits(.isHeader)"))
+        XCTAssertTrue(orbit.contains("GeneratedArtView("))
+        XCTAssertTrue(orbit.contains(".accessibilityHidden(true)"))
     }
 
     func testPageHeadersUseOneOuterPageGrid() throws {
@@ -1844,18 +2037,22 @@ final class UIConsistencyRegressionTests: XCTestCase {
             from: "private struct ReviewWorkspaceShell<Content: View, HeaderActions: View>: View {",
             to: "private struct ToolPreparationView: View {"
         )
-        let settingsHeader = try sourceSegment(
-            settings,
-            from: "private func settingsDetailHeader(for category: SettingsCategory) -> some View {",
-            to: "@ViewBuilder\n    private func settingsSections(for category: SettingsCategory) -> some View {"
-        )
+        let lightfieldSettings = try sourceText(at: "Sources/StorageCleanerMac/Views/Settings/SettingsLightfield.swift")
+        let settingsHeader = try r2SourceDeclaration("struct SettingsLightfieldPane", in: lightfieldSettings)
 
         XCTAssertTrue(tokens.contains("static let pagePadding: CGFloat = 24"))
         XCTAssertFalse(pageHeader.contains(".padding(.horizontal"))
         XCTAssertTrue(pageHeader.contains("ViewThatFits(in: .horizontal)"))
         XCTAssertTrue(pageHeader.contains(".padding(.vertical, AppDesignTokens.Spacing.medium)"))
         XCTAssertFalse(pageHeader.contains(".fixedSize(horizontal: true, vertical: false)"))
-        XCTAssertTrue(pageHeader.contains(".fixedSize(horizontal: false, vertical: true)"))
+        // D64③ leaves one Text title instead of a title/subtitle VStack.
+        // It measures unwrapped in the first fit, then explicitly wraps in
+        // the fallback. Preserve vertical expansion and both real fit paths.
+        XCTAssertTrue(pageHeader.contains(".fixedSize(horizontal: !wrapsTitle, vertical: true)"))
+        XCTAssertTrue(pageHeader.contains("titleBlock(wrapsTitle: false)"))
+        XCTAssertTrue(pageHeader.contains("titleBlock(wrapsTitle: true)"))
+        XCTAssertTrue(pageHeader.contains("Text(title)"))
+        XCTAssertTrue(pageHeader.contains(".accessibilityAddTraits(.isHeader)"))
         XCTAssertFalse(pageHeader.contains(".lineLimit("))
         XCTAssertFalse(pageHeader.contains(".frame(width: 280"))
         XCTAssertFalse(pageHeader.contains(".frame(minWidth: 560)"))
@@ -1872,15 +2069,20 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(modulePresentation.contains("ContentPanel {"))
         XCTAssertTrue(modulePresentation.contains(".padding(.horizontal, layout.contentPadding)"))
         XCTAssertTrue(modulePresentation.contains(".padding(.bottom, layout.contentPadding)"))
-        XCTAssertTrue(health.contains("AppPageHeader("))
+        // D67 owns the health pilot title rather than the V1 header.
+        XCTAssertTrue(health.contains("FeatureLightfieldPage("))
         XCTAssertTrue(overview.contains("DashboardPage("))
         XCTAssertTrue(smartScan.contains(".padding(.top, AppDesignTokens.Layout.pagePadding)"))
         XCTAssertTrue(settingsHeader.contains("Text(category.title)"))
-        XCTAssertTrue(settingsHeader.contains("Text(category.subtitle)"))
-        XCTAssertTrue(settingsHeader.contains("AppTypography.pageTitle"))
-        XCTAssertTrue(settingsHeader.contains("AppTypography.pageSubtitle"))
+        // D69/B6 retains a single title and adds approved B2 header artwork.
+        XCTAssertFalse(settingsHeader.contains("Text(category.subtitle)"))
+        XCTAssertFalse(settingsHeader.contains("AppSymbolIcon("))
+        XCTAssertTrue(settingsHeader.contains("FeatureLightfield.titleSize"))
+        XCTAssertFalse(settingsHeader.contains("AppTypography.pageSubtitle"))
         XCTAssertFalse(settingsHeader.contains("Image(systemName:"))
-        XCTAssertFalse(settingsHeader.contains(".lineLimit("))
+        // B6's fixed 48 pt header uses a single line; subtitle wrapping was removed.
+        XCTAssertTrue(settingsHeader.contains(".lineLimit(1)"))
+        XCTAssertTrue(settingsHeader.contains(".accessibilityAddTraits(.isHeader)"))
         XCTAssertTrue(settings.contains("SettingsWindowConfigurator(title: selectedCategory.title)"))
         XCTAssertEqual(
             occurrences(of: ".padding(.top, AppDesignTokens.Layout.pagePadding)", in: utilities),
@@ -1939,19 +2141,19 @@ final class UIConsistencyRegressionTests: XCTestCase {
     }
 
     func testPanelHeaderAdaptsStatusBeforeTextCanCollide() throws {
-        let chrome = try sourceText(
-            at: "Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"
-        )
-        let panelHeader = try XCTUnwrap(
-            chrome.components(separatedBy: "struct PanelHeader: View {").dropFirst().first
-        )
-
-        XCTAssertTrue(panelHeader.contains("ViewThatFits(in: .horizontal)"))
-        XCTAssertTrue(panelHeader.contains("headerRow(showsStatusTitle: true)"))
-        XCTAssertTrue(panelHeader.contains("headerRow(showsStatusTitle: false)"))
-        XCTAssertTrue(panelHeader.contains("identityBlock"))
-        XCTAssertTrue(panelHeader.contains(".fixedSize(horizontal: false, vertical: true)"))
-        XCTAssertFalse(panelHeader.contains(".lineLimit(1)"))
+        // D64 removes the dormant header. The real memory process header
+        // still stacks its controls before they can collide with text.
+        let memory = try D64MenuBarSource.source("MenuBarAdvanced/GeekMemoryView.swift")
+        let card = try r2SourceDeclaration("private var geekMemoryProcessesCard:", in: memory)
+        XCTAssertTrue(card.contains("ViewThatFits(in: .horizontal)"))
+        XCTAssertTrue(card.contains("memoryProcessHeader"))
+        XCTAssertTrue(card.contains("memoryProcessTitle"))
+        XCTAssertTrue(card.contains("memoryProcessActions"))
+        XCTAssertTrue(card.contains(".frame(maxWidth: .infinity, alignment: .trailing)"))
+        let header = try r2SourceDeclaration("private var memoryProcessHeader:", in: memory)
+        XCTAssertTrue(header.contains("memoryProcessTitle"))
+        XCTAssertTrue(header.contains("memoryProcessActions"))
+        XCTAssertFalse(header.contains(".frame(width:"))
     }
 
     func testTertiaryPanelsUseOneEqualContentInset() throws {
@@ -1984,10 +2186,7 @@ final class UIConsistencyRegressionTests: XCTestCase {
     }
 
     private func sourceText(at relativePath: String) throws -> String {
-        return try String(
-            contentsOf: projectRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        return try r2ProductionSource(at: projectRoot.appendingPathComponent(relativePath))
     }
 
     private func sourceSegment(_ source: String, from start: String, to end: String) throws -> String {

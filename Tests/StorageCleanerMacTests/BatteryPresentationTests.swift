@@ -3,9 +3,9 @@ import XCTest
 
 final class BatteryPresentationTests: XCTestCase {
     func testChargeTargetDefaultsTo80AndPersists100() throws {
-        let suiteName = "BatteryPresentationTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
         XCTAssertEqual(BatteryChargeTarget.stored(in: defaults), .protected)
         XCTAssertEqual(BatteryChargeTarget.protected.manualLimitPercent, 80)

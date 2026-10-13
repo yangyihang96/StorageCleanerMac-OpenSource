@@ -99,6 +99,17 @@ struct ScanPresentation: Equatable, Sendable {
         return true
     }
 
+    /// "完成" on a cleanup result page goes back to the results the same scan
+    /// still lists (live test 2026-10-06). Only a terminal state of the same
+    /// session can return; the transition table above stays strict, so no
+    /// other caller can leave a result page this way.
+    @discardableResult
+    mutating func returnToResults(matching sessionID: UUID) -> Bool {
+        guard self.sessionID == sessionID, state.isTerminal else { return false }
+        state = .results
+        return true
+    }
+
     mutating func reset() {
         sessionID = nil
         state = .idle

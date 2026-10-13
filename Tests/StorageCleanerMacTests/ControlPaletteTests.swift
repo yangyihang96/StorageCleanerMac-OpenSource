@@ -8,9 +8,9 @@ final class ControlPaletteTests: XCTestCase {
     #if DEBUG || STORAGE_CLEANER_BETA
     func testReadOnlyFixturePublishesAutomaticReadbackAndPreservesUnknownMode() throws {
         for state in [MiniWindowDemoData.HardwareControlDemoState.dualFan, .helperEnabled] {
-            let suite = "ControlPaletteTests.Fixture.\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-            defer { defaults.removePersistentDomain(forName: suite) }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
             let snapshot = fixtureSnapshot(profile)
             let coordinator = FanControlCoordinator.makeReadOnlyFixture(
@@ -41,9 +41,9 @@ final class ControlPaletteTests: XCTestCase {
         ))
         for state in [MiniWindowDemoData.HardwareControlDemoState.fanAutomatic,
                       .helperNotRegistered, .awaitingSystemApproval] {
-            let suite = "ControlPaletteTests.FixtureDenial.\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-            defer { defaults.removePersistentDomain(forName: suite) }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
             let coordinator = FanControlCoordinator.makeReadOnlyFixture(
                 defaults: defaults, profile: profile, snapshot: fixtureSnapshot(profile)
@@ -88,11 +88,19 @@ final class ControlPaletteTests: XCTestCase {
         XCTAssertTrue(factory.contains("coordinator.observedMode = profile.observedMode"))
         XCTAssertFalse(factory.contains("selectMode("))
         XCTAssertFalse(factory.contains("publishObservedMode("))
-        XCTAssertTrue(coordinator.contains("private func send(_ request: FanControlHelperRequest) async throws -> FanControlHelperReply {\n        guard !isDataOnlyFixture else { throw CancellationError() }"))
+        // fix1 added removal-only legacy decoding; fixtures still reject at
+        // the first statement, before either legacy decoding or transport.
+        XCTAssertTrue(coordinator.contains("private func send(_ request: FanControlHelperRequest,\n                      allowsLegacyRemovalFallback: Bool = false) async throws -> FanControlHelperReply {\n        guard !isDataOnlyFixture else { throw CancellationError() }"))
         let controller = try source("Sources/StorageCleanerMac/Support/MenuBarStatusController.swift")
         XCTAssertTrue(controller.contains("if MiniWindowDemoData.isEnabled {\n            paletteFanControl = FanControlCoordinator.makeReadOnlyFixture("))
         XCTAssertTrue(controller.contains("fanControl: paletteFanControl"))
-        XCTAssertTrue(controller.contains("paletteFanControl = .shared"))
+        XCTAssertTrue(controller.contains("static let shared = MenuBarStatusController()"))
+        // D48: production defaults still use the singleton; injected instances
+        // must reach both non-demo routes instead of being bypassed by .shared.
+        XCTAssertTrue(controller.contains("init(fanControlProvider: @escaping @MainActor () -> FanControlCoordinator = { FanControlCoordinator.shared })"))
+        XCTAssertTrue(controller.contains("private lazy var fanControl = fanControlProvider()"))
+        XCTAssertTrue(controller.contains("} else {\n            paletteFanControl = fanControl\n        }\n#else\n        paletteFanControl = fanControl\n#endif"))
+        XCTAssertEqual(controller.components(separatedBy: "paletteFanControl = fanControl").count - 1, 2)
         let routes = try source("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift")
         XCTAssertTrue(routes.contains("return FanControlCoordinator.makeReadOnlyFixture("))
         XCTAssertFalse(routes.contains("height: isExpanded ? 430 : 250"))
@@ -135,9 +143,9 @@ final class ControlPaletteTests: XCTestCase {
     }
 
     func testFanDraftSelectionSliderSyncPresetAndCancelNeverSubmit() throws {
-        let suite = "ControlPaletteTests.Draft.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         var requests: [FanControlHelperRequest] = []
         var registrations = 0
         let coordinator = FanControlCoordinator(
@@ -204,9 +212,9 @@ final class ControlPaletteTests: XCTestCase {
     }
 
     func testManualDraftOnlyExplicitSubmitUsesTheExistingVerifiedRequestChain() async throws {
-        let suite = "ControlPaletteTests.DraftApply.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         var requests: [FanControlHelperRequest] = []
         let coordinator = FanControlCoordinator(
             defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
@@ -239,17 +247,17 @@ final class ControlPaletteTests: XCTestCase {
 
     func testSameRPMDraftWaitsForSettledReadbackAndSurvivesFailure() async throws {
         for succeeds in [false, true] {
-            let suite = "ControlPaletteTests.SettledDraft.\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-            defer { defaults.removePersistentDomain(forName: suite) }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             var now = Date()
-            var holdsWrites = false
+            let holdsWrites = R2TestValue(false)
             var pending: (FanControlHelperRequest, CheckedContinuation<FanControlHelperReply, Never>)?
             let coordinator = FanControlCoordinator(
                 defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
                 now: { now },
                 requestSender: { request in
-                    if holdsWrites && [.apply, .renewFanControlLease].contains(request.operation) {
+                    if holdsWrites.value && [.apply, .renewFanControlLease].contains(request.operation) {
                         return await withCheckedContinuation { pending = (request, $0) }
                     }
                     return FanControlHelperReply(operation: request.operation, success: true,
@@ -284,7 +292,7 @@ final class ControlPaletteTests: XCTestCase {
             // Renew the same targets through the injected transport. Its reply
             // remains pending while the previous confirmed mode/targets remain.
             now.addTimeInterval(FanControlSafetyPolicy.leaseRenewalInterval + 0.1)
-            holdsWrites = true
+            holdsWrites.value = true
             let accepted = await draft.submit(to: coordinator, telemetry: telemetry, thermalState: .nominal)
             XCTAssertTrue(accepted)
             let waiting = await eventually { pending != nil }
@@ -295,7 +303,7 @@ final class ControlPaletteTests: XCTestCase {
             XCTAssertTrue(draft.hasChanges)
             let reply = try XCTUnwrap(pending)
             pending = nil
-            holdsWrites = false
+            holdsWrites.value = false
             reply.1.resume(returning: FanControlHelperReply(operation: reply.0.operation,
                 success: succeeds, message: succeeds ? "verified" : "rejected",
                 appliedTargetRPMByFan: succeeds ? [0: 2_500] : [:]))
@@ -312,9 +320,9 @@ final class ControlPaletteTests: XCTestCase {
         let telemetry = draftTelemetry()
         #if DEBUG || STORAGE_CLEANER_BETA
         for state in [MiniWindowDemoData.HardwareControlDemoState.fanAutomatic, .fanReadOnly, .helperNotRegistered, .awaitingSystemApproval, .connectionInterrupted] {
-            let suite = "ControlPaletteTests.DraftDenied.\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-            defer { defaults.removePersistentDomain(forName: suite) }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
             let coordinator = FanControlCoordinator.makeReadOnlyFixture(defaults: defaults, profile: profile, snapshot: fixtureSnapshot(profile))
             var draft = FanControlDraft(telemetry: telemetry, observedMode: profile.observedMode, synchronizesFans: true)
@@ -327,9 +335,9 @@ final class ControlPaletteTests: XCTestCase {
         }
         #endif
         for helper in [FanControlHelperStatus.notRegistered, .requiresApproval, .enabled] {
-            let suite = "ControlPaletteTests.DraftGuard.\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-            defer { defaults.removePersistentDomain(forName: suite) }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             let coordinator = FanControlCoordinator(defaults: defaults, helperStatusOverride: helper,
                 isHelperReachable: helper == .enabled,
                 requestSender: { _ in XCTFail("Blocked drafts cannot reach transport"); throw CancellationError() },
@@ -424,7 +432,7 @@ final class ControlPaletteTests: XCTestCase {
             anchor.minX - ControlPaletteMetrics.gap,
             accuracy: 0.001
         )
-        XCTAssertEqual(ControlPaletteMetrics.gap, 4)
+        XCTAssertEqual(ControlPaletteMetrics.gap, 0)
     }
 
     func testSideInspectorNeverFallsBackAboveOrBelow() {
@@ -688,9 +696,9 @@ final class ControlPaletteTests: XCTestCase {
 
     #if DEBUG || STORAGE_CLEANER_BETA
     func testConfirmedAutomaticUsesShortNativeLayoutAndCancelledDraftNeverWrites() async throws {
-        let suite = "ControlPaletteTests.AutomaticSummary.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let profile = MiniWindowDemoData.hardwareControlProfile(for: .fanAutomatic)
         let snapshot = fixtureSnapshot(profile)
         let fanControl = FanControlCoordinator.makeReadOnlyFixture(
@@ -724,9 +732,9 @@ final class ControlPaletteTests: XCTestCase {
         XCTAssertEqual(fanControl.latestFanReadings, snapshot.fanReadings)
         XCTAssertTrue(fanControl.isDataOnlyFixture)
 
-        let store = ScanStore(cleanupPreferences: defaults, cleanReportLoader: { [] })
+        let store = try ScanStore.makeForTests(for: self, cleanupPreferences: defaults, cleanReportLoader: { [] })
         store.menuBarMonitorState.update(snapshot)
-        let health = ComputerHealthStore(probe: ControlPaletteUnusedHealthProbe())
+        let health = ComputerHealthStore(probe: ControlPaletteUnusedHealthProbe(), batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
         let parent = NSPanel(contentRect: NSRect(x: 633, y: 81, width: 616, height: 760),
             styleMask: .borderless, backing: .buffered, defer: false)
         let visible = NSRect(x: 0, y: 73, width: 1_352, height: 776)
@@ -764,9 +772,9 @@ final class ControlPaletteTests: XCTestCase {
     #endif
 
     func testProductionRootMeasuresFanControlsAndEditorInsideHiddenNativePanel() async throws {
-        let suite = "ControlPaletteTests.ProductionRoot.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let fanControl = FanControlCoordinator(
             defaults: defaults,
             helperStatusOverride: .enabled,
@@ -780,7 +788,7 @@ final class ControlPaletteTests: XCTestCase {
             serviceStatusProvider: { .enabled },
             serviceRegistrar: { XCTFail("A layout test must never register Helper") }
         )
-        let store = ScanStore(cleanupPreferences: defaults, cleanReportLoader: { [] })
+        let store = try ScanStore.makeForTests(for: self, cleanupPreferences: defaults, cleanReportLoader: { [] })
         let snapshot = SystemMonitorSnapshot(
             generatedAt: Date(), metrics: [], networkThroughput: nil,
             fanReadings: [SystemFanReading(
@@ -791,7 +799,7 @@ final class ControlPaletteTests: XCTestCase {
         )
         store.menuBarMonitorState.update(snapshot)
         fanControl.process(snapshot: snapshot)
-        let health = ComputerHealthStore(probe: ControlPaletteUnusedHealthProbe())
+        let health = ComputerHealthStore(probe: ControlPaletteUnusedHealthProbe(), batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
         let parent = NSPanel(
             contentRect: NSRect(x: 633, y: 37, width: 616, height: 756),
             styleMask: .borderless, backing: .buffered, defer: false
@@ -1433,9 +1441,9 @@ final class ControlPaletteTests: XCTestCase {
     }
 
     func testRequestedFanModeIsSeparateFromConfirmedReadback() async {
-        let suite = "ControlPaletteTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let gate = FanControlReplyGate()
         let coordinator = FanControlCoordinator(
             defaults: defaults,
@@ -1463,6 +1471,52 @@ final class ControlPaletteTests: XCTestCase {
         XCTAssertNil(coordinator.requestedMode)
         XCTAssertEqual(coordinator.selectedMode, .manual)
         XCTAssertNil(coordinator.observedMode)
+    }
+
+    func testCompactFanNamesMapShortButtonsToFullHardwareNames() {
+        let longNames = [
+            "Optical Drive Cooling Fan With An Extended Hardware Name",
+            "Power Supply Exhaust Fan With Another Extended Hardware Name",
+        ]
+        for usesChinese in [false, true] {
+            for (index, name) in longNames.enumerated() {
+                let reading = SystemFanReading(index: index,
+                    identity: usesChinese ? (index == 0 ? .left : .right) : .named(name),
+                    actualRPM: 2_800, minimumRPM: 1_200, maximumRPM: 5_400, targetRPM: 2_800)
+                let presentation = FanTargetPickerPresentation(reading: reading, usesChinese: usesChinese)
+                XCTAssertEqual(presentation.fullName, usesChinese ? reading.displayName : longNames[index])
+                XCTAssertEqual(presentation.buttonTitle, usesChinese ? reading.displayName : "Fan \(index + 1)")
+            }
+        }
+    }
+
+    func testCompactFanMenuUsesBoundPickerForNativeSelection() throws {
+        let viewSource = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/FanControlInlineControls.swift")
+        let menu = try MiniWindowLogicFixtures.section(viewSource,
+            from: "    private func compactTargetFanMenu(reading: SystemFanReading) -> some View {\n",
+            to: "    private func sliderRow(")
+        XCTAssertTrue(menu.contains("return Menu {\n            Picker("))
+        XCTAssertTrue(menu.contains("Picker(L10n.text(\"目标风扇\", \"Target Fan\"), selection: Binding("))
+        XCTAssertTrue(menu.contains("get: { selectedFanID ?? reading.index }"))
+        XCTAssertTrue(menu.contains("set: { selectedFanID = $0 }"))
+        XCTAssertTrue(menu.contains("Text(FanTargetPickerPresentation(reading: fan, usesChinese: L10n.usesChinese).fullName)\n                        .tag(fan.index)"))
+        XCTAssertTrue(menu.contains(".pickerStyle(.inline)"))
+        XCTAssertTrue(menu.contains("Text(presentation.buttonTitle)"))
+        XCTAssertTrue(menu.contains(".frame(width: 80)"))
+    }
+
+    func testFanLayoutFixturePausesAuxiliaryMonitoringBeforeSuspending() throws {
+        let testSource = try MiniWindowLogicFixtures.source("Tests/StorageCleanerMacTests/ControlPaletteTests.swift")
+        let fixture = try MiniWindowLogicFixtures.section(testSource,
+            from: "    private func checkFanPaletteLayout(\n",
+            to: "    private func checkCompactTargetFanNames(")
+        XCTAssertEqual(fixture.components(separatedBy: "let store = try ScanStore.makeForTests(").count - 1, 1)
+        XCTAssertTrue(fixture.contains("let store = try ScanStore.makeForTests(for: self, cleanupPreferences: defaults, cleanReportLoader: { [] })\n                    store.menuBarAuxiliaryMonitorState.setPaused(true)"),
+            "D48: pause synchronously on the next line after construction, before yielding to system notifications")
+        let afterConstruction = try XCTUnwrap(fixture.components(separatedBy:
+            "let store = try ScanStore.makeForTests(").dropFirst().first)
+        let beforeFirstAwait = try XCTUnwrap(afterConstruction.components(separatedBy: "await ").first)
+        XCTAssertTrue(beforeFirstAwait.contains("store.menuBarAuxiliaryMonitorState.setPaused(true)"))
     }
 
     #if DEBUG || STORAGE_CLEANER_BETA
@@ -1527,29 +1581,64 @@ final class ControlPaletteTests: XCTestCase {
             .fanAutomatic, .fanManual65, .curveActive, .fanless,
             .helperNotRegistered, .fanReadOnly, .thermalCritical, .fanReadbackFailed,
         ]
+        try await checkFanPaletteLayout(states: states)
+    }
+
+    /// 手动模式的 280 pt 预算也覆盖带同步开关的双风扇。
+    func testDualFanManualPaletteFitsTheSameHeightBudget() async throws {
+        try await checkFanPaletteLayout(states: [.dualFanManual])
+    }
+
+    func testUnsynchronizedDualFanManualPaletteFitsWithHeadroom() async throws {
+        try await checkFanPaletteLayout(states: [.dualFanManual], synchronized: false)
+    }
+
+    func testLongFanNamesUseShortCompactButtonsAndFullMenuNames() async throws {
+        try await checkFanPaletteLayout(states: [.dualFanManual], synchronized: false, checksLongFanNames: true)
+    }
+
+    private func checkFanPaletteLayout(
+        states: [MiniWindowDemoData.HardwareControlDemoState],
+        synchronized: Bool = true,
+        checksLongFanNames: Bool = false
+    ) async throws {
+        // D48：这组布局测试的偏好域由 TestPreferenceDomain 建在临时目录。
         let artifactDirectory = ProcessInfo.processInfo.environment["STORAGE_CLEANER_LAYOUT_EVIDENCE"]
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
         if let artifactDirectory {
             try FileManager.default.createDirectory(at: artifactDirectory, withIntermediateDirectories: true)
         }
         let previousArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
-        defer { UserDefaults.standard.setVolatileDomain(previousArguments, forName: UserDefaults.argumentDomain) }
+        defer {
+            UserDefaults.standard.setVolatileDomain(previousArguments, forName: UserDefaults.argumentDomain)
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: UserDefaults.standard)
+        }
         for language in [AppLanguage.zhHans, .english] {
             var arguments = previousArguments
             arguments[L10n.languageDefaultsKey] = language.rawValue
             UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: UserDefaults.standard)
+            XCTAssertEqual(L10n.usesChinese, language == .zhHans)
+            if checksLongFanNames {
+                try await checkCompactTargetFanNames(language: language)
+            }
             for dark in [false, true] {
                 for state in states {
-                    let suite = "ControlPaletteTests.Layout.\(UUID().uuidString)"
-                    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-                    defer { defaults.removePersistentDomain(forName: suite) }
+                    let suite = TestPreferenceDomain.makeSuite()
+                    let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+                    defer { TestPreferenceDomain.cleanup(suiteName: suite) }
                     let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
                     let snapshot = fixtureSnapshot(profile)
                     let fanControl = FanControlCoordinator.makeReadOnlyFixture(
                         defaults: defaults, profile: profile, snapshot: snapshot)
-                    let store = ScanStore(cleanupPreferences: defaults, cleanReportLoader: { [] })
+                    if state == .dualFanManual {
+                        fanControl.setManualFansSynchronized(synchronized)
+                        XCTAssertEqual(fanControl.synchronizesManualFans, synchronized)
+                    }
+                    let store = try ScanStore.makeForTests(for: self, cleanupPreferences: defaults, cleanReportLoader: { [] })
+                    store.menuBarAuxiliaryMonitorState.setPaused(true)
                     store.menuBarMonitorState.update(snapshot)
-                    let health = ComputerHealthStore(probe: ControlPaletteUnusedHealthProbe())
+                    let health = ComputerHealthStore(probe: ControlPaletteUnusedHealthProbe(), batteryPowerModeController: TestOperationFactory(for: self).batteryPowerModeController())
                     let parent = NSPanel(contentRect: NSRect(x: 650, y: 80, width: 312, height: 580),
                         styleMask: .borderless, backing: .buffered, defer: false)
                     let visible = NSRect(x: 0, y: 0, width: 1280, height: 760)
@@ -1562,15 +1651,35 @@ final class ControlPaletteTests: XCTestCase {
                     defer { coordinator.teardown() }
                     let host = try XCTUnwrap(coordinator.panel.contentView as? NSHostingView<AnyView>)
                     coordinator.toggle(.fan, anchorScreenRect: NSRect(x: 650, y: 120, width: 280, height: 24), parentWindow: parent)
+                    var compactHeight: CGFloat?
                     for expanded in [false, true] {
                         coordinator.state.setFanControlsExpanded(expanded)
                         let fits = await eventually {
                             host.layoutSubtreeIfNeeded()
                             coordinator.panel.displayIfNeeded()
                             guard let measured = coordinator.state.measuredContentHeight else { return false }
+                            // Expansion publishes asynchronously. An old compact
+                            // measurement matching the old frame is not acceptance.
+                            guard coordinator.state.hasNaturalContentMeasurement,
+                                  !expanded || measured > (compactHeight ?? measured) else { return false }
                             return abs(coordinator.panel.frame.height - measured) < 0.5
                         }
                         XCTAssertTrue(fits, "\(state) must fit its measured content, expanded=\(expanded)")
+                        if !expanded {
+                            compactHeight = coordinator.state.measuredContentHeight
+                            if state == .fanAutomatic {
+                                XCTAssertLessThanOrEqual(compactHeight ?? .infinity, 230,
+                                    "Confirmed automatic mode should remain a compact three-choice palette")
+                            } else if state == .fanManual65 || state == .dualFanManual {
+                                XCTAssertLessThanOrEqual(compactHeight ?? .infinity, 280,
+                                    "Manual mode should fit its slider without opening a tall inspector")
+                                if state == .dualFanManual {
+                                    XCTAssertLessThanOrEqual(compactHeight ?? .infinity, 276,
+                                        "Both synchronization states need at least 4 pt of headroom")
+                                }
+                            }
+                            print("风扇紧凑高度：\(state.rawValue) sync=\(synchronized) \(language.rawValue) \(dark ? "深色" : "浅色") \(compactHeight ?? .infinity) pt")
+                        }
                         XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
                         XCTAssertTrue(visible.insetBy(dx: 6, dy: 6).contains(coordinator.panel.frame))
                         XCTAssertLessThanOrEqual(host.fittingSize.width, ControlPaletteMetrics.fanSize.width + 0.5)
@@ -1581,7 +1690,7 @@ final class ControlPaletteTests: XCTestCase {
                             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
                             host.cacheDisplay(in: host.bounds, to: bitmap)
                             let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                            let name = "\(language.rawValue)-\(state.rawValue)-\(dark ? "dark" : "light")-\(expanded ? "expanded" : "compact").png"
+                            let name = "\(language.rawValue)-\(state.rawValue)-sync-\(synchronized)-\(dark ? "dark" : "light")-\(expanded ? "expanded" : "compact").png"
                             try png.write(to: artifactDirectory.appendingPathComponent(name))
                         }
                     }
@@ -1589,7 +1698,241 @@ final class ControlPaletteTests: XCTestCase {
             }
         }
     }
+
+    private func checkCompactTargetFanNames(language: AppLanguage) async throws {
+        // Own AppKit initialization even when this is the only selected test.
+        #if DEBUG
+        let applicationWasInitialized = NSApp != nil
+        let initialFailureCount = testRun?.failureCount ?? 0
+        var layoutDiagnostics: [Data] = []
+        defer {
+            if (testRun?.failureCount ?? 0) > initialFailureCount {
+                for evidence in layoutDiagnostics {
+                    FileHandle.standardError.write(evidence)
+                }
+            }
+        }
+        #endif
+        _ = NSApplication.shared
+        let longNames = [
+            "Optical Drive Cooling Fan With An Extended Hardware Name",
+            "Power Supply Exhaust Fan With Another Extended Hardware Name",
+        ]
+        // Pure name mapping is tested outside the fixture's DEBUG/BETA guard.
+        XCTAssertGreaterThan((longNames[0] as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width, 80)
+        #if DEBUG
+        let readings = longNames.enumerated().map { index, name in
+            SystemFanReading(index: index, identity: language == .english ? .named(name) : (index == 0 ? .left : .right),
+                actualRPM: 2_800, minimumRPM: 1_200, maximumRPM: 5_400, targetRPM: 2_800)
+        }
+        let base = MiniWindowDemoData.fixture.snapshot
+        let telemetry = FanTelemetryState.resolve(snapshot: SystemMonitorSnapshot(
+            generatedAt: base.generatedAt, metrics: base.metrics, networkThroughput: nil,
+            thermalState: .nominal, fanReadings: readings,
+            temperatureReadings: [], sensorAvailability: base.sensorAvailability))
+        let states = ProcessInfo.processInfo.environment["STORAGE_CLEANER_FAN_SYNC_ORDER"] == "reversed"
+            ? [false, true] : [true, false]
+        let recorder = ControlPaletteFanFrameRecorder()
+        let state = ControlPaletteFanLayoutDraft(telemetry: telemetry, synchronized: states[0])
+        let size = CGSize(width: 260, height: 120)
+        // Both samples must belong to one fixed viewport and coordinate space.
+        // The production palette also disables automatic hosting size options.
+        let host = NSHostingView(rootView: ControlPaletteFanLayoutContent(
+            state: state, telemetry: telemetry, recorder: recorder)
+            .frame(width: 260)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .environment(\.locale, L10n.locale)
+            .environment(\.colorScheme, .light)
+            .environment(\.displayScale, 2))
+        host.sizingOptions = []
+        host.frame = CGRect(origin: .zero, size: size)
+        host.autoresizingMask = [.width, .height]
+        let window = NSWindow(contentRect: CGRect(origin: .zero, size: size),
+            styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
+        window.contentView = host
+        window.setContentSize(size)
+        defer { window.contentView = nil; window.close() }
+        var syncFrames: [CGRect] = []
+        for synchronized in states {
+            recorder.frames = [:]
+            state.draft.setSynchronized(synchronized)
+            var lastFrames: [String: CGRect]?
+            var stableSamples = 0
+            // The borderless menu draws its label through AppKit, so a probe on the label
+            // never reports. Measure the menu frame, and the short title in the label font
+            // (MenuBarPanelTypography.caption, 11 pt) plus room for the menu indicator.
+            let measured = await eventually {
+                host.needsLayout = true
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                // Never accept the first merely nonempty preference delivery.
+                // Stability is independent of the later position expectations.
+                guard let root = recorder.frames["fan.manual.fixture"],
+                      abs(root.width - 260) <= 0.5,
+                      abs(root.minX) <= 0.5, abs(root.minY) <= 0.5,
+                      host.bounds.size == size, host.frame.size == size,
+                      let toggle = recorder.frames["fan.sync.toggle"],
+                      toggle.width >= 30,
+                      toggle.height >= MiniWindowStyleTokens.controlRowHeight,
+                      root.insetBy(dx: -0.5, dy: -0.5).contains(toggle) else {
+                    lastFrames = nil; stableSamples = 0
+                    return false
+                }
+                if synchronized {
+                    guard recorder.frames["fan.target.menu"] == nil else {
+                        lastFrames = nil; stableSamples = 0
+                        return false
+                    }
+                } else {
+                    guard let menu = recorder.frames["fan.target.menu"], menu.width > 0,
+                          root.insetBy(dx: -0.5, dy: -0.5).contains(menu) else {
+                        lastFrames = nil; stableSamples = 0
+                        return false
+                    }
+                }
+                let current = recorder.frames
+                stableSamples = current == lastFrames ? stableSamples + 1 : 0
+                lastFrames = current
+                return stableSamples >= 2
+            }
+            let frames = recorder.frames
+            let rect: (CGRect) -> [Double] = { [Double($0.minX), Double($0.minY), Double($0.width), Double($0.height)] }
+            let evidence: [String: Any] = [
+                "language": language.rawValue, "synchronized": synchronized, "order": states,
+                "applicationWasInitialized": applicationWasInitialized, "measured": measured,
+                "appLanguage": L10n.appLanguage.rawValue, "usesChinese": L10n.usesChinese,
+                "locale": L10n.locale.identifier, "systemLocale": Locale.current.identifier,
+                "preferredLanguages": Locale.preferredLanguages,
+                "fontName": NSFont.systemFont(ofSize: 11).fontName,
+                "fontSize": Double(NSFont.systemFont(ofSize: 11).pointSize),
+                "appearance": host.effectiveAppearance.name.rawValue,
+                "applicationWindowCount": NSApp?.windows.count ?? 0,
+                "hostFrame": rect(host.frame), "hostBounds": rect(host.bounds),
+                "windowContent": rect(window.contentLayoutRect), "stableSamples": stableSamples,
+                "frames": frames.mapValues(rect),
+            ]
+            let evidenceData = try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+            layoutDiagnostics.append(Data(("FAN_SYNC_LAYOUT " + String(decoding: evidenceData, as: UTF8.self) + "\n").utf8))
+            XCTAssertTrue(measured)
+            syncFrames.append(try XCTUnwrap(frames["fan.sync.toggle"]))
+            if !synchronized {
+                let menu = try XCTUnwrap(frames["fan.target.menu"])
+                XCTAssertEqual(menu.width, 80, accuracy: 0.5)
+                let shortTitle = FanTargetPickerPresentation(reading: readings[0], usesChinese: L10n.usesChinese).buttonTitle
+                let titleWidth = (shortTitle as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
+                XCTAssertLessThanOrEqual(titleWidth + 24, menu.width,
+                    "The complete short name and the menu indicator must fit inside the fixed-width menu button")
+                XCTAssertLessThanOrEqual(host.fittingSize.width, 260.5)
+            }
+        }
+        XCTAssertEqual(syncFrames[0].maxX, syncFrames[1].maxX, accuracy: 0.5)
+        XCTAssertEqual(syncFrames[0].minY, syncFrames[1].minY, accuracy: 0.5)
+        #endif
+    }
     #endif
+
+    /// 文档没有电源高度预算；测生产内容自然高度，锁定面板跟随测量且不裁切。
+    /// 仅 SwiftUI 内容与假闭包，不创建 ScanStore、不调用真实充电或健康服务。
+    func testPowerPaletteFitsMeasuredNaturalHeightInBothLanguages() async throws {
+        let preferences = TestVolatilePreferences()
+        defer { preferences.restore() }
+        let manual90 = try XCTUnwrap(BatteryChargeTarget(rawValue: 90))
+        let targets: [BatteryChargeTarget] = [.protected, manual90, .full]
+        let cases: [(String, BatteryChargeLimitState?, BatteryPowerSource)] = [
+            ("optimized80", BatteryChargeLimitState(target: .full, availableTargets: targets,
+                effectiveLimit: 80, source: .optimized), .acPower),
+            ("optimized80-battery", BatteryChargeLimitState(target: .full, availableTargets: targets,
+                effectiveLimit: 80, source: .optimized), .batteryPower),
+            ("manual80", BatteryChargeLimitState(target: .protected, availableTargets: targets,
+                effectiveLimit: 80, source: .manual), .acPower),
+            ("combined80", BatteryChargeLimitState(target: manual90, availableTargets: targets,
+                effectiveLimit: 80, source: .manualAndOptimized), .acPower),
+            ("system-only-optimized80", BatteryChargeLimitState(target: .full, availableTargets: [],
+                effectiveLimit: 80, source: .optimized), .acPower),
+            ("smart-paused100", BatteryChargeLimitState(target: .full, availableTargets: targets,
+                effectiveLimit: 100, source: .none, smartChargingTemporarilyDisabled: true), .acPower),
+            ("manual-lifted100", BatteryChargeLimitState(target: .protected, availableTargets: targets,
+                effectiveLimit: 100, source: .manual, manualLimitTemporarilyDisabled: true), .acPower),
+            ("many-segments", BatteryChargeLimitState(target: .protected,
+                availableTargets: [70, 75, 80, 85, 90, 95, 100].compactMap(BatteryChargeTarget.init(rawValue:)),
+                effectiveLimit: 80, source: .manual), .acPower),
+            ("nil", nil, .acPower),
+        ]
+        let artifactDirectory = ProcessInfo.processInfo.environment["STORAGE_CLEANER_LAYOUT_EVIDENCE"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let artifactDirectory {
+            try FileManager.default.createDirectory(at: artifactDirectory, withIntermediateDirectories: true)
+        }
+        for language in [AppLanguage.zhHans, .english] {
+            preferences.set(language.rawValue, forKey: L10n.languageDefaultsKey)
+            XCTAssertEqual(L10n.usesChinese, language == .zhHans)
+            for dark in [false, true] {
+                for (name, state, powerSource) in cases {
+                    if let state, !state.availableTargets.isEmpty {
+                        XCTAssertTrue(state.availableTargets.contains(state.target), "\(name) 的手动目标须在选项内")
+                    }
+                    let visible = NSRect(x: 0, y: 0, width: 1280, height: 760)
+                    let parent = NSPanel(contentRect: NSRect(x: 400, y: 200, width: 304, height: 553),
+                        styleMask: .borderless, backing: .buffered, defer: false)
+                    let coordinator = ControlPaletteCoordinator(fixedVisibleFrame: visible, presentsPanelOnShow: false) { presentation in
+                        // 与 ControlPaletteRootView 一样观察 presentation：切到电源页后重新测量。
+                        AnyView(ControlPaletteObservingTestContent(presentation: presentation, content: AnyView(MetricPanelShell {
+                            VStack(alignment: .leading, spacing: 0) {
+                                GeekEnergyModeHoverDetail(
+                                    batteryMode: .automatic, batterySupportedModes: [.lowPower, .automatic, .highPower],
+                                    adapterMode: .automatic, adapterSupportedModes: [.lowPower, .automatic, .highPower],
+                                    powerSource: powerSource, isCharging: false,
+                                    showsChargeTargetSetting: true, showsFullChargeAction: powerSource == .acPower,
+                                    chargeLimitState: state, batteryPowerWatts: 0,
+                                    adapterPowerWatts: powerSource == .acPower ? 94 : nil, adjustmentState: .idle,
+                                    controlsEnabled: true, chargeLimitControlsEnabled: true,
+                                    onChargeToFull: { XCTFail("布局测试不得写入"); return .unsupported },
+                                    onSetChargeTarget: { _ in XCTFail("布局测试不得改上限"); return .unsupported },
+                                    onOpenBatterySettings: {}, onChangeMode: { _, _ in XCTFail("不得改能源模式") }
+                                )
+                            }
+                            .controlSize(.small)
+                            .padding(GeekPanelLayout.contentPadding)
+                        }
+                        .modifier(PanelMetricColorEnvironment())
+                        .environment(\.colorScheme, dark ? .dark : .light)
+                        .environment(\.displayScale, 2))))
+                    }
+                    defer { coordinator.teardown() }
+                    coordinator.toggle(.power, anchorScreenRect: NSRect(x: 420, y: 520, width: 264, height: 25), parentWindow: parent)
+                    let host = try XCTUnwrap(coordinator.panel.contentView as? NSHostingView<AnyView>)
+                    let fits = await eventually {
+                        // 与风扇调板的测量测试相同：标记需要布局并显示一次，原生测量才会上报。
+                        host.needsLayout = true
+                        host.layoutSubtreeIfNeeded()
+                        coordinator.panel.displayIfNeeded()
+                        guard coordinator.state.hasNaturalContentMeasurement,
+                              let height = coordinator.state.measuredContentHeight else { return false }
+                        return abs(coordinator.panel.frame.height - height) < 0.5
+                    }
+                    XCTAssertTrue(fits, "\(language.rawValue) \(name) 的自然高度须传给面板")
+                    let height = try XCTUnwrap(coordinator.state.measuredContentHeight)
+                    XCTAssertGreaterThan(height, 0)
+                    XCTAssertEqual(coordinator.panel.frame.height, height, accuracy: 0.5)
+                    XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.powerSize.width)
+                    XCTAssertLessThanOrEqual(host.fittingSize.width, ControlPaletteMetrics.powerSize.width + 0.5)
+                    XCTAssertTrue(visible.insetBy(dx: 6, dy: 6).contains(coordinator.panel.frame))
+                    print("电源自然高度：\(language.rawValue) \(dark ? "深色" : "浅色") \(name) \(height) pt")
+                    if let artifactDirectory {
+                        host.displayIfNeeded()
+                        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                        host.cacheDisplay(in: host.bounds, to: bitmap)
+                        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                        try png.write(to: artifactDirectory.appendingPathComponent(
+                            "power-r2-\(language.rawValue)-\(dark ? "dark" : "light")-\(name).png"))
+                    }
+                }
+            }
+        }
+    }
 
     private func eventually(
         attempts: Int = 100,
@@ -1613,6 +1956,52 @@ private final class MiniWindowSegmentTestSelection {
 private final class ControlPaletteTestLayout: ObservableObject {
     @Published var height: CGFloat = 248
 }
+
+private struct ControlPaletteObservingTestContent: View {
+    @ObservedObject var presentation: ControlPalettePresentationState
+    let content: AnyView
+
+    var body: some View {
+        content.controlPaletteContentLayout(presentation)
+    }
+}
+
+@MainActor
+private final class ControlPaletteFanFrameRecorder {
+    var frames: [String: CGRect] = [:]
+}
+
+#if DEBUG
+@MainActor
+private final class ControlPaletteFanLayoutDraft: ObservableObject {
+    @Published var draft: FanControlDraft
+
+    init(telemetry: FanTelemetryState, synchronized: Bool) {
+        draft = FanControlDraft(telemetry: telemetry, observedMode: .manual, synchronizesFans: synchronized)
+    }
+}
+
+@MainActor
+private struct ControlPaletteFanLayoutContent: View {
+    @ObservedObject var state: ControlPaletteFanLayoutDraft
+    let telemetry: FanTelemetryState
+    let recorder: ControlPaletteFanFrameRecorder
+
+    var body: some View {
+        let synchronized = state.draft.synchronizesFans
+        return FanManualSliderList(draft: $state.draft, telemetry: telemetry, isDisabled: false, compact: true)
+            .frame(width: 260)
+            .layoutProbe("fan.manual.fixture")
+            .onPreferenceChange(LayoutFramePreferenceKey.self) { frames in
+                Task { @MainActor in
+                    // Ignore a queued delivery for the state we just replaced.
+                    guard state.draft.synchronizesFans == synchronized else { return }
+                    recorder.frames = frames
+                }
+            }
+    }
+}
+#endif
 
 private struct ControlPaletteTestContent: View {
     @ObservedObject var presentation: ControlPalettePresentationState

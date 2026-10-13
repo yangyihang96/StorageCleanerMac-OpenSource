@@ -2,6 +2,7 @@ import XCTest
 import SwiftUI
 @testable import StorageCleanerMac
 
+@MainActor
 final class PanelChartNormalizationTests: XCTestCase {
     func testCPUColumnsMatchForChronologicalAndOutOfOrderHistory() {
         let end = Date(timeIntervalSince1970: 100_000)
@@ -402,12 +403,9 @@ final class PanelChartNormalizationTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: projectRoot.appendingPathComponent(
+        let source = try r2ProductionSource(at: projectRoot.appendingPathComponent(
                 "Sources/StorageCleanerMac/Views/MenuBarAdvanced/PanelChartTimeline.swift"
-            ),
-            encoding: .utf8
-        )
+            ))
 
         XCTAssertTrue(source.contains("var scheduleStart: Date { anchor.wallDate }"))
         XCTAssertTrue(source.contains(
@@ -416,13 +414,15 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertFalse(source.contains(".periodic(from: .now, by: interval)"))
     }
 
-    func testCompactPanelDensityBudgetRemainsBounded() {
+    func testCompactPanelDensityBudgetRemainsBounded() throws {
         XCTAssertEqual(PanelDensity.simple.idealSize, .init(width: 420, height: 280))
         XCTAssertEqual(PanelDensity.complex.idealSize, MiniWindowStyleTokens.overviewSize)
         XCTAssertEqual(PanelDensity.geek.idealSize, MiniWindowStyleTokens.overviewSize)
         XCTAssertEqual(PanelDensity.complex.minimumSize, PanelDensity.complex.idealSize)
         XCTAssertEqual(PanelDensity.geek.minimumSize, PanelDensity.geek.idealSize)
-        XCTAssertEqual(PanelLayoutMetrics.navigationWidth, 44)
+        let chrome = try source("Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift")
+        XCTAssertFalse(chrome.contains("navigationWidth"))
+        XCTAssertEqual(PanelLayoutMetrics.primaryChartHeight, GeekPanelLayout.primaryChartHeight)
         XCTAssertLessThanOrEqual(GeekPanelLayout.moduleMinimumWidth, 220)
         XCTAssertLessThanOrEqual(GeekPanelLayout.metricMinimumHeight, 60)
         XCTAssertLessThanOrEqual(GeekPanelLayout.primaryChartHeight, 64)
@@ -852,11 +852,11 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertEqual(GeekChartWindow.barSpacing, MiniWindowStyleTokens.barSpacing)
     }
 
-    func testActiveMiniWindowCardBorderReplacesTheHairlineAtOneAndTwoTimesScale() throws {
+    func testActiveMiniWindowCardBorderKeepsTheHairlineAtOneAndTwoTimesScale() throws {
         for scale in [CGFloat(1), CGFloat(2)] {
             XCTAssertEqual(
                 GeekVisualTokens.cardBorderLineWidth(isActive: true, displayScale: scale),
-                1
+                1 / scale
             )
             XCTAssertEqual(
                 GeekVisualTokens.cardBorderLineWidth(isActive: false, displayScale: scale),
@@ -909,7 +909,10 @@ final class PanelChartNormalizationTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift"
         )
 
-        XCTAssertTrue(overview.contains(".padding(GeekPanelLayout.contentPadding)"))
+        let shared = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPanel.swift")
+        XCTAssertTrue(overview.contains("GeekOverviewPanel(modules: geekVisibleOverviewModules)"))
+        XCTAssertTrue(shared.contains(".padding(GeekPanelLayout.contentPadding)"))
+        XCTAssertFalse(overview.contains(".padding(GeekPanelLayout.contentPadding)"), "Padding belongs to the shared composition once")
         XCTAssertTrue(overview.contains(
             ".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)"
         ))
@@ -1518,14 +1521,15 @@ final class PanelChartNormalizationTests: XCTestCase {
 
         let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift")
         let cpuHistory = try XCTUnwrap(detail.components(separatedBy: "struct GeekProcessorActivityHoverDetail: View {").last?.components(separatedBy: "struct GeekGPUHoverDetail").first)
-        let memoryHistory = try XCTUnwrap(detail.components(separatedBy: "struct GeekMemoryHistoryHoverDetail: View {").last?.components(separatedBy: "struct GeekSwapHoverDetail").first)
+        let memoryHistory = try XCTUnwrap(detail.components(separatedBy: "struct GeekMemoryHistoryHoverDetail: View {").last?.components(separatedBy: "struct GeekSwapDetailData").first)
         XCTAssertTrue(memoryHistory.contains("showsTimelineLabels: false"))
-        XCTAssertTrue(memoryHistory.contains("showsValueLabels: true"))
+        XCTAssertFalse(memoryHistory.contains("showsValueLabels: true"))
         XCTAssertFalse(memoryHistory.contains("GeekHistoryStatisticsRow("))
         XCTAssertFalse(memoryHistory.contains("GeekHistoryCoverageRow("))
         XCTAssertFalse(memoryHistory.contains(".swapUsedBytes"))
 
         XCTAssertTrue(cpuHistory.contains("showsTimelineLabels: false"))
+        XCTAssertFalse(cpuHistory.contains("showsValueLabels: true"))
         XCTAssertFalse(cpuHistory.contains("GeekHistoryStatisticsRow("))
         XCTAssertFalse(cpuHistory.contains("GeekHistoryCoverageRow("))
         XCTAssertFalse(cpuHistory.contains("固定柱槽"))
@@ -1535,7 +1539,7 @@ final class PanelChartNormalizationTests: XCTestCase {
         )
         XCTAssertTrue(chartSource.contains("isEstimated: mark.isEstimated, showsTitle: false"))
         XCTAssertTrue(cpuHistory.contains("showsLegend: false"))
-        XCTAssertTrue(cpuHistory.contains("title: \"\","))
+        XCTAssertTrue(cpuHistory.contains("title: \"CPU\","))
 
         let powerSource = try source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsPowerHoverDetails.swift"
@@ -1669,10 +1673,18 @@ final class PanelChartNormalizationTests: XCTestCase {
                 .components(separatedBy: "private struct GeekStackedBarSeries: View").first
         )
 
+        // D39: the latest history sample while the history is current, the
+        // live reading while it is not prepared or still a kept window.
+        // BOARD N16-3 (r2-live-fixes-2): of the network's own history (was
+        // the open page's `selectedDisplayedHistory`, twice), keeping the
+        // last rates through a sample without them.
         XCTAssertEqual(
-            components.components(separatedBy: "if let latest = geekChartHistory.last").count - 1,
-            2
+            components.components(separatedBy: "current: currentReading(of: networkDisplayedHistory)").count - 1,
+            1
         )
+        XCTAssertTrue(components.contains("rateText(networkCurrentRates.down)"))
+        XCTAssertTrue(components.contains("rateText(networkCurrentRates.up)"))
+        XCTAssertFalse(components.contains("if let latest = currentReading(of: selectedDisplayedHistory)"))
         XCTAssertTrue(charts.contains("struct GeekPreparedNetworkFrame"))
         XCTAssertTrue(charts.contains("TimeBucketAggregator.lastValid("))
         XCTAssertFalse(mirroredBars.contains("TimeBucketAggregator.average("))
@@ -1921,12 +1933,15 @@ final class PanelChartNormalizationTests: XCTestCase {
         )
 
         XCTAssertFalse(settings.contains("Show Fans in Panel Overview"))
-        XCTAssertTrue(settings.contains("Panel Color Theme"))
-        XCTAssertTrue(settings.contains("ForEach(PanelColorTheme.allCases)"))
+        XCTAssertTrue(settings.contains("Chart Colors"))
+        XCTAssertTrue(settings.contains("items: PanelColorTheme.allCases, selection: selectedPanelColorTheme"))
         XCTAssertTrue(settings.contains("Panel Background Color"))
         XCTAssertTrue(settings.contains("Bar Chart Color"))
         XCTAssertTrue(settings.contains("ColorPicker("))
-        XCTAssertTrue(panel.contains("if !geekOverviewFanReadings.isEmpty"))
+        let sensors = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift")
+        XCTAssertTrue(sensors.contains("geekFanTelemetry.readings"))
+        XCTAssertTrue(sensors.contains("if geekFanTelemetry.readings.isEmpty"))
+        XCTAssertFalse(panel.contains("var geekFansCard:"))
         XCTAssertFalse(panel.contains("panelShowsFans"))
         XCTAssertFalse(panel.contains("modules.insert(.fans"))
     }
@@ -1948,16 +1963,14 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(root.contains("var resolvedEnergyTint: Color"))
         XCTAssertTrue(root.contains("var resolvedUploadTint: Color"))
         XCTAssertTrue(root.contains("var resolvedDownloadTint: Color"))
-        XCTAssertTrue(root.contains("var resolvedPrimaryTint: Color {\n        AppChartPalette.cpuUser"))
-        XCTAssertTrue(root.contains("var resolvedSecondaryTint: Color {\n        AppChartPalette.cpuSystem"))
-        XCTAssertTrue(root.contains("var resolvedUploadTint: Color {\n        MenuBarNetworkPalette.upload"))
-        XCTAssertTrue(root.contains("var resolvedDownloadTint: Color {\n        MenuBarNetworkPalette.download"))
+        XCTAssertTrue(root.contains("@Environment(\\.panelMetricColors) var panelMetricColors"))
+        XCTAssertTrue(root.contains("var resolvedPrimaryTint: Color {\n        panelMetricColors.cpuUser"))
+        XCTAssertTrue(root.contains("var resolvedSecondaryTint: Color {\n        panelMetricColors.cpuSystem"))
+        XCTAssertTrue(root.contains("var resolvedUploadTint: Color {\n        panelMetricColors.networkUpload"))
+        XCTAssertTrue(root.contains("var resolvedDownloadTint: Color {\n        panelMetricColors.networkDownload"))
 
         let geekFiles = [
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarProcessorPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarNetworkPanel.swift",
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarCombinedPanel.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekProcessorView.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekNetworkView.swift",
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift",
@@ -1968,6 +1981,18 @@ final class PanelChartNormalizationTests: XCTestCase {
         ]
         for file in geekFiles {
             let source = try source(file)
+            if file.hasSuffix("MenuBarAdvancedComponents.swift") {
+                // D64 removed the unused processorChartSeries. The remaining
+                // memory ring uses the same central resolver directly.
+                let segments = try r2SourceDeclaration("var memoryRingSegments:", in: source)
+                let resolver = try self.source("Sources/StorageCleanerMac/Support/PanelMetricColors.swift")
+                for role in ["memoryApp", "memoryWired", "memoryCompressed"] {
+                    XCTAssertTrue(segments.contains("color: panelMetricColors.\(role)"), role)
+                    XCTAssertTrue(resolver.contains("self.\(role) = resolved(.\(role), \(role))"), role)
+                }
+                XCTAssertFalse(source.contains("var processorChartSeries:"))
+                continue
+            }
             XCTAssertTrue(
                 source.contains("resolvedPrimaryTint")
                     || source.contains("resolvedSecondaryTint")
@@ -1976,6 +2001,9 @@ final class PanelChartNormalizationTests: XCTestCase {
                     || source.contains("resolvedEnergyTint")
                     || source.contains("resolvedUploadTint")
                     || source.contains("resolvedDownloadTint")
+                    || (file.hasSuffix("GeekDiskView.swift")
+                        && source.contains("panelMetricColors.diskRead")
+                        && source.contains("panelMetricColors.diskWrite"))
                     // Battery charts intentionally keep semantic colors
                     // (external power/battery/health) instead of the user
                     // accent, so the legend stays truthful when the theme
@@ -2013,7 +2041,7 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(geek.contains("PanelChartSamplingPlaceholder()"))
         XCTAssertTrue(geek.contains("case .percent:"))
         XCTAssertTrue(geek.contains("MenuBarChartGeometry.niceCeiling"))
-        XCTAssertTrue(geek.contains("let targetMaximum = prepared.maximum"))
+        XCTAssertTrue(geek.contains("let targetMaximum = mode.maximum(for: prepared)"))
         XCTAssertTrue(geek.contains("@StateObject private var dynamicAxisScale"))
         XCTAssertTrue(geek.contains("GeekChartWindow.barBucketSnapshots("))
         XCTAssertTrue(geek.contains("TimeBucketAggregator.nearestFilled("))
@@ -2090,7 +2118,9 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertFalse(geekPanelSource.contains("ForEach(geekDashboardBlocks)"))
         XCTAssertTrue(components.contains("ViewThatFits(in: .horizontal)"))
         XCTAssertTrue(components.contains("struct GeekResponsiveColumns"))
-        XCTAssertTrue(components.contains("minimumScaleFactor(0.72)"))
+        XCTAssertTrue(components.contains("minimumScaleFactor(0.75)"))
+        XCTAssertTrue(components.contains(".frame(width: contentBoxSide, height: contentBoxSide)"))
+        XCTAssertFalse(components.contains(".fixedSize(horizontal: true, vertical: true)"))
     }
 
     func testGoldenOverviewKeepsRealHistoryAndSeparatePressureAndRPMReadouts() throws {
@@ -2107,10 +2137,10 @@ final class PanelChartNormalizationTests: XCTestCase {
         )
         let memoryPage = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift")
         XCTAssertTrue(memoryPage.contains("points: memoryHistory"))
-        XCTAssertTrue(panel.contains("geekMemoryPressureRing(size: GeekVisualTokens.overviewMemoryGaugeSize)"))
+        XCTAssertTrue(panel.contains("pressure: memorySnapshot?.pressureEstimatePercent"))
         XCTAssertTrue(panel.contains("value: memoryRingUsedPercentText"))
         XCTAssertTrue(panel.contains("progress: memoryRingUsedProgress"))
-        XCTAssertTrue(panel.contains("geekFanTelemetry.actualRPM.map(String.init)"))
+        XCTAssertTrue(panel.contains("geekFanTelemetry.actualRPM.map(SystemFanSpeedFormat.number)"))
         XCTAssertFalse(panel.contains(".environment(\\.geekCombinedCardUsesDivider, true)"))
         let pressureRing = try XCTUnwrap(panel.components(separatedBy: "func geekMemoryPressureRing(size: CGFloat)").last?
             .components(separatedBy: "var geekNetworkCard").first)
@@ -2121,12 +2151,12 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(charts.contains("proxy.size.width - horizontalInset * 2"))
 
         let processorCard = try XCTUnwrap(
-            panel.components(separatedBy: "var geekProcessorCard: some View").last?
-                .components(separatedBy: "var geekProcessorFrequencyTextCompact").first
+            panel.components(separatedBy: "struct GeekProcessorPresentation: View").last?
+                .components(separatedBy: "struct GeekMemoryPresentation: View").first
         )
         let networkCard = try XCTUnwrap(
-            panel.components(separatedBy: "var geekNetworkCard: some View").last?
-                .components(separatedBy: "var geekDiskCard: some View").first
+            panel.components(separatedBy: "struct GeekNetworkPresentation: View").last?
+                .components(separatedBy: "struct GeekDiskPresentation: View").first
         )
         // Horizontal legend spacing is intentional; the chart retains its fixed height below.
         XCTAssertTrue(processorCard.contains(
@@ -2148,13 +2178,19 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(panel.contains("L10n.text(\"网络\", \"Network\")"))
         XCTAssertTrue(panel.contains("L10n.text(\"传感器\", \"Sensors\")"))
         XCTAssertTrue(panel.contains("storageSnapshot.totalBytes"))
-        XCTAssertTrue(panel.contains("Image(systemName: AppSymbols.Monitor.battery)"))
-        XCTAssertTrue(panel.contains("batterySnapshot?.chargePercent.map"))
+        // Batch 2b review: the battery card uses the shared module header,
+        // whose icon takes the section-header color like every overview card.
+        XCTAssertTrue(panel.contains(
+            "GeekModuleHeader(systemImage: AppSymbols.Monitor.battery, title: L10n.text(\"电池\", \"Battery\"))"
+        ))
+        XCTAssertTrue(panel.contains("percent: batterySnapshot?.chargePercent"))
         XCTAssertTrue(panel.contains("value: geekCompactTemperatureText"))
         XCTAssertFalse(panel.contains("geekProcessorFrequencyAndTemperatureText"))
         XCTAssertFalse(scene.contains("if MiniWindowDemoData.isEnabled { return nil }"))
-        XCTAssertTrue(scene.contains("PanelColorTheme.resolvedBackgroundHex("))
-        XCTAssertTrue(scene.contains("PanelColorTheme.chartColor("))
+        let appearance = try source("Sources/StorageCleanerMac/Support/PanelAppearanceEnvironment.swift")
+        XCTAssertTrue(scene.contains("PanelAppearanceEnvironment(forcedVisualMode: captureVisualMode)"))
+        XCTAssertTrue(appearance.contains("PanelColorTheme.backgroundTint("))
+        XCTAssertTrue(appearance.contains("PanelColorTheme.chartColor("))
     }
 
     func testMemoryRingsUseMeasuredCompositionAndThreeStableSemanticColors() throws {
@@ -2162,10 +2198,10 @@ final class PanelChartNormalizationTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
         )
         let geek = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift"
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift"
         )
         let combined = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarCombinedPanel.swift"
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift"
         )
         let palette = try source(
             "Sources/StorageCleanerMac/Support/AppChartPalette.swift"
@@ -2184,48 +2220,63 @@ final class PanelChartNormalizationTests: XCTestCase {
             "composition.appOrOtherRatio",
             "composition.wiredRatio",
             "composition.compressedRatio",
-            "AppChartPalette.memoryAppOrOther",
-            "AppChartPalette.memoryWired",
-            "AppChartPalette.memoryCompressed",
+            "panelMetricColors.memoryApp",
+            "panelMetricColors.memoryWired",
+            "panelMetricColors.memoryCompressed",
         ] {
             XCTAssertTrue(segments.contains(required), required)
         }
         XCTAssertFalse(segments.contains("measurements.appBytes"))
-        XCTAssertTrue(palette.contains(
-            "memoryAppOrOther = AppDesignTokens.Palette.storage"
-        ))
-        XCTAssertTrue(palette.contains(
-            "memoryWired = AppDesignTokens.Palette.diagnostic"
-        ))
-        XCTAssertTrue(palette.contains("memoryCompressed = activityRose"))
+        XCTAssertTrue(palette.contains("memoryAppOrOther = AppDesignTokens.Palette.information"))
+        XCTAssertTrue(palette.contains("memoryWired = activityRose"))
+        XCTAssertTrue(palette.contains("memoryCompressed = compressedGold"))
         XCTAssertTrue(components.contains("memorySnapshot?.measuredUsedRatio"))
         XCTAssertFalse(components.contains("?? metricPercent(.memoryUsage)"))
         XCTAssertTrue(geek.contains("value: memoryRingUsedPercentText"))
         XCTAssertTrue(geek.contains("progress: memoryRingUsedProgress"))
         XCTAssertTrue(combined.contains("segments: memoryRingSegments"))
-        XCTAssertFalse(geek.contains(".help(memoryRingExplanation"))
-        XCTAssertTrue(combined.contains(".accessibilityHint(memoryRingExplanation)"))
+        XCTAssertFalse(geek.contains("Text(memoryRingExplanation)"))
+        XCTAssertTrue(combined.contains(".help(memoryRingExplanation)"))
     }
 
     func testMemoryStatusAgesWithoutANewSampleAndKeepsPauseResumeDistinct() {
         let snapshot = memoryStatusSnapshot()
-        let timestamp = PanelTimestampFormat.display(snapshot.generatedAt)
         func status(at seconds: TimeInterval, paused: Bool = false) -> String {
             MemorySampleStatusPresentation.text(
                 snapshot: snapshot, isPaused: paused,
                 referenceDate: snapshot.generatedAt.addingTimeInterval(seconds)
             )
         }
-        XCTAssertEqual(status(at: 59), timestamp)
-        XCTAssertEqual(status(at: 61), L10n.text("已过期 · ", "Stale · ") + timestamp)
-        XCTAssertEqual(status(at: 61, paused: true), L10n.text("已暂停 · ", "Paused · ") + timestamp)
-        XCTAssertEqual(status(at: 62), L10n.text("已过期 · ", "Stale · ") + timestamp)
+        XCTAssertEqual(status(at: 59), PanelTimestampFormat.age(snapshot.generatedAt, now: snapshot.generatedAt.addingTimeInterval(59)))
+        XCTAssertEqual(status(at: 61), L10n.text("已过期 · ", "Stale · ") + PanelTimestampFormat.age(snapshot.generatedAt, now: snapshot.generatedAt.addingTimeInterval(61)))
+        XCTAssertEqual(status(at: 61, paused: true), L10n.text("已暂停 · ", "Paused · ") + PanelTimestampFormat.age(snapshot.generatedAt, now: snapshot.generatedAt.addingTimeInterval(61)))
+        XCTAssertEqual(status(at: 62), L10n.text("已过期 · ", "Stale · ") + PanelTimestampFormat.age(snapshot.generatedAt, now: snapshot.generatedAt.addingTimeInterval(62)))
         XCTAssertEqual(MemorySampleStatusPresentation.text(
             snapshot: nil, isPaused: false, referenceDate: snapshot.generatedAt
         ), L10n.text("首次采样中", "Sampling"))
         XCTAssertEqual(MemorySampleStatusPresentation.text(
             snapshot: nil, isPaused: true, referenceDate: snapshot.generatedAt
         ), L10n.text("已暂停 · 尚未采样", "Paused · Not sampled"))
+    }
+
+    // Batch 2b: the memory page header labels a bare sample time so it is not
+    // read as the current clock; states that name themselves stay unchanged.
+    func testMemoryHeaderLabelsOnlyTheBareSampleTime() {
+        let snapshot = memoryStatusSnapshot()
+        let timestamp = PanelTimestampFormat.age(snapshot.generatedAt, now: snapshot.generatedAt.addingTimeInterval(5))
+        XCTAssertEqual(MemorySampleStatusPresentation.headerText(
+            snapshot: snapshot, isPaused: false, referenceDate: snapshot.generatedAt.addingTimeInterval(5)
+        ), L10n.text("采样 ", "Sampled ") + timestamp)
+        for (seconds, paused) in [(61.0, false), (61.0, true), (5.0, true)] {
+            let date = snapshot.generatedAt.addingTimeInterval(seconds)
+            XCTAssertEqual(
+                MemorySampleStatusPresentation.headerText(snapshot: snapshot, isPaused: paused, referenceDate: date),
+                MemorySampleStatusPresentation.text(snapshot: snapshot, isPaused: paused, referenceDate: date)
+            )
+        }
+        XCTAssertEqual(MemorySampleStatusPresentation.headerText(
+            snapshot: nil, isPaused: false, referenceDate: snapshot.generatedAt
+        ), L10n.text("首次采样中", "Sampling"))
     }
 
     func testMemoryStatusRejectsInvalidPresentValuesAndPreservesMeasuredZero() {
@@ -2249,7 +2300,7 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertEqual(zeroUsed.measuredUsedRatio, 0)
         XCTAssertEqual(MemorySampleStatusPresentation.text(
             snapshot: zeroUsed, isPaused: false, referenceDate: zeroUsed.generatedAt
-        ), PanelTimestampFormat.display(zeroUsed.generatedAt))
+        ), PanelTimestampFormat.age(zeroUsed.generatedAt, now: zeroUsed.generatedAt))
     }
 
     func testMemoryStatusLabelsUseIndependentLowFrequencyClockWithoutSampling() throws {
@@ -2276,7 +2327,98 @@ final class PanelChartNormalizationTests: XCTestCase {
         let timestamp = snapshot.generatedAt.formatted(.dateTime.year().month().day().hour().minute().second())
         let evidence = MemorySampleStatusPresentation.evidence(snapshot: snapshot)
         XCTAssertTrue(evidence.contains(timestamp))
-        XCTAssertTrue(evidence.contains(L10n.text("本应用根据系统数据评估", "app-assessed grade based on system data")))
+        // Review P2-4: one name for the headroom everywhere, 系统压力余量.
+        XCTAssertTrue(evidence.contains(L10n.text("系统压力余量", "system pressure headroom")))
+        XCTAssertTrue(evidence.contains(L10n.text("仅用于趋势", "for trends only")))
+    }
+
+    /// Live test 2026-10-06 (r2-live-fixes-1, item 3): after D28 the level
+    /// is the system's (Activity Monitor's source); only the percentage is
+    /// an estimate. The old sentence said the opposite of what the card
+    /// shows. Both languages, every memory explanation.
+    func testMemoryExplanationsSayTheLevelIsTheSystemsAndOnlyThePercentIsEstimated() throws {
+        // The current interface language, as in the test above; the source
+        // checks below cover the other language.
+        let both = MemorySampleStatusPresentation.evidence(
+            snapshot: memoryPressureSnapshot(level: .elevated, freePercentage: 40)
+        )
+        XCTAssertTrue(both.contains(L10n.text("取自 macOS 系统，与活动监视器一致", "comes from macOS, the same source as Activity Monitor")), both)
+        XCTAssertTrue(both.contains(L10n.text("100% 减去系统压力余量，是估算，仅用于趋势", "an estimate, 100% minus system pressure headroom, for trends only")), both)
+        XCTAssertFalse(both.contains(L10n.text("不等同于活动监视器", "not Activity Monitor's pressure level")), both)
+        XCTAssertFalse(both.contains(L10n.text("本次", "for this sample")), both)
+
+        let estimated = MemorySampleStatusPresentation.evidence(
+            snapshot: memoryPressureSnapshot(level: nil, freePercentage: 10)
+        )
+        XCTAssertTrue(estimated.contains(L10n.text(
+            "本次未读到系统的压力等级，等级按百分比估算（85% 起为升高、95% 起为高）",
+            "macOS did not report a level for this sample, so it is estimated from the percentage (Elevated from 85%, High from 95%)"
+        )), estimated)
+        let noPercent = MemorySampleStatusPresentation.evidence(
+            snapshot: memoryPressureSnapshot(level: .normal, freePercentage: nil)
+        )
+        XCTAssertTrue(noPercent.contains(L10n.text(
+            "本次未读到系统压力余量，没有压力百分比", "macOS did not report pressure headroom for this sample, so there is no percentage"
+        )), noPercent)
+        let neither = MemorySampleStatusPresentation.evidence(
+            snapshot: memoryPressureSnapshot(level: nil, freePercentage: nil)
+        )
+        XCTAssertTrue(neither.contains(L10n.text(
+            "本次未读到系统的压力等级和压力余量，等级不可用",
+            "macOS reported neither a level nor pressure headroom for this sample, so the level is unavailable"
+        )), neither)
+
+        // Both languages are written out, and the other memory explanations
+        // name the same split.
+        let components = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift")
+        XCTAssertTrue(components.contains("压力等级（正常／升高／高）取自 macOS 系统，与活动监视器一致"))
+        XCTAssertTrue(components.contains("The pressure level (Normal / Elevated / High) comes from macOS, the same source as Activity Monitor"))
+        let panel = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift")
+        let ring = try XCTUnwrap(panel.components(separatedBy: "func geekMemoryPressureRing(size: CGFloat) -> some View {")
+            .dropFirst().first?.components(separatedBy: "    var geekNetworkCard").first)
+        XCTAssertTrue(ring.contains("与活动监视器一致"))
+        XCTAssertTrue(ring.contains("the same source as Activity Monitor"))
+        let utilities = try source("Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
+        XCTAssertTrue(utilities.contains("压力等级取自 macOS 系统（与活动监视器一致）"))
+        XCTAssertTrue(utilities.contains("The pressure level comes from macOS (the same source as Activity Monitor)"))
+        // Review P2-4: the ring help and the main window's explanations also
+        // say when the level is an estimate, by the same rule as the evidence.
+        let estimateNote = "系统未给出等级时按百分比估算（85% 起为升高、95% 起为高）"
+        let englishEstimateNote = "when macOS reports no level, it is estimated from the percentage (Elevated from 85%, High from 95%)"
+        XCTAssertTrue(ring.contains(estimateNote))
+        XCTAssertTrue(ring.contains(englishEstimateNote))
+        XCTAssertEqual(utilities.components(separatedBy: estimateNote).count - 1, 2, "指标说明 and the ring help")
+        XCTAssertEqual(utilities.components(separatedBy: englishEstimateNote).count - 1, 2)
+        let files = FileManager.default.enumerator(
+            at: projectRoot.appendingPathComponent("Sources/StorageCleanerMac"),
+            includingPropertiesForKeys: nil
+        )?.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" } ?? []
+        XCTAssertFalse(files.isEmpty)
+        for file in files {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            XCTAssertFalse(text.contains("不等同于活动监视器的压力等级"), file.lastPathComponent)
+            XCTAssertFalse(text.contains("it is not Activity Monitor's pressure level"), file.lastPathComponent)
+            XCTAssertFalse(text.contains("内存余量"), file.lastPathComponent)
+            XCTAssertFalse(text.contains("memory headroom"), file.lastPathComponent)
+        }
+    }
+
+    private func memoryPressureSnapshot(level: MemoryPressureLevel?, freePercentage: Int?) -> MemorySnapshot {
+        MemorySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 100_000),
+            physicalBytes: 8_000,
+            freeBytes: 0, inactiveBytes: 0, speculativeBytes: 0,
+            fileBackedBytes: 0, purgeableBytes: 0, wiredBytes: 1_000,
+            compressedBytes: 500, swapUsedBytes: 0,
+            pressureFreePercentage: freePercentage, pressureSummary: "", topProcesses: [],
+            measurements: MemoryMeasurements(
+                pressure: level.map { .available($0) } ?? .unavailable(.unavailable, reason: "Not reported."),
+                physicalBytes: .available(8_000), availableBytes: .available(2_000),
+                appBytes: .available(0), wiredBytes: .available(1_000), compressedBytes: .available(500),
+                cachedBytes: .available(0), swapUsedBytes: .available(0),
+                swapInRate: .available(0), swapOutRate: .available(0)
+            )
+        )
     }
 
     private func memoryStatusSnapshot(
@@ -2324,10 +2466,10 @@ final class PanelChartNormalizationTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
         )
         let status = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarAdvancedComponents.swift"
         )
         let combined = try source(
-            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarCombinedPanel.swift"
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift"
         )
         let overview = try source(
             "Sources/StorageCleanerMac/Views/OverviewView.swift"
@@ -2342,21 +2484,26 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(components.contains("var memoryPressureDisplayText: String"))
         XCTAssertTrue(components.contains("L10n.text(\"高\", \"High\")"))
         XCTAssertTrue(components.contains("L10n.text(\"正常\", \"Normal\")"))
-        XCTAssertTrue(components.contains("var memoryPressureStateProgress: Double?"))
+        XCTAssertFalse(components.contains("memoryPressureStateProgress"))
         XCTAssertTrue(components.contains("memorySnapshot?.reportablePressureLevel"))
-        XCTAssertTrue(components.contains("2 / 3"))
+        let geek = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekPanel.swift")
+        let pressureRing = try r2SourceDeclaration("func geekMemoryPressureRing", in: geek)
+        XCTAssertTrue(pressureRing.contains("memorySnapshot?.pressureEstimatePercent"))
+        XCTAssertTrue(pressureRing.contains("progress: percent.map { Double($0) / 100 }"))
+        XCTAssertTrue(pressureRing.contains("tint: memoryTint"))
         XCTAssertFalse(components.contains("memoryPressureEstimateProgress"))
         XCTAssertFalse(components.contains("不是 iStat 或活动监视器的压力百分比"))
         XCTAssertFalse(components.contains("iStat or Activity Monitor pressure percentage"))
         XCTAssertFalse(components.contains("圆环表示三级状态，不是百分比"))
-        XCTAssertTrue(components.contains("余量不可用"))
+        XCTAssertTrue(components.contains("本次未读到系统压力余量，没有压力百分比。"))
         XCTAssertFalse(components.contains("pressure state and headroom are unavailable"))
-        XCTAssertTrue(combined.contains("L10n.text(\"内存压力\", \"Memory Pressure\")"))
-        XCTAssertTrue(combined.contains("value: memoryPressureDisplayText"))
-        XCTAssertTrue(status.contains("for: .memoryUsage"))
-        XCTAssertTrue(status.contains("displayMemorySnapshot?.reportablePressureLevel"))
-        XCTAssertFalse(status.contains("displayMemorySnapshot?.pressureLevel"))
-        XCTAssertTrue(overview.contains("$0.reportablePressureLevel?.title"))
+        XCTAssertTrue(combined.contains("geekMemoryPressureRing(size:"))
+        XCTAssertTrue(combined.contains("memoryPressureDisplayText"))
+        XCTAssertTrue(status.contains("let hasPercent = snapshot.pressureEstimatePercent != nil"))
+        XCTAssertTrue(status.contains("memorySnapshot?.reportablePressureLevel"))
+        XCTAssertFalse(status.contains("memorySnapshot?.pressureLevel"))
+        // D64 (r2-declutter-c): the legacy overview status section was dead code and was removed.
+        XCTAssertFalse(overview.contains("systemStatusSection"))
         XCTAssertTrue(utilities.contains("snapshot.reportablePressureLevel"))
         XCTAssertTrue(utilities.contains("private var pressureSummary: some View"))
         XCTAssertTrue(utilities.contains("snapshot.pressureHeadroomPercent.map"))
@@ -2375,13 +2522,20 @@ final class PanelChartNormalizationTests: XCTestCase {
         let sensorSource = try source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift"
         )
+        let panelComponents = try source(
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPanelComponents.swift"
+        )
+        let disclosureIcon = try XCTUnwrap(
+            panelComponents.components(separatedBy: "struct GeekDisclosureIcon: View").last?
+                .components(separatedBy: "struct GeekSecondaryProcessIcon: View").first
+        )
         let overview = try XCTUnwrap(
             panelSource.components(separatedBy: "var geekCanvas: some View").last?
                 .components(separatedBy: "var geekProcessorPage: some View").first
         )
         let networkCard = try XCTUnwrap(
-            panelSource.components(separatedBy: "var geekNetworkCard: some View").last?
-                .components(separatedBy: "var geekDiskCard: some View").first
+            panelSource.components(separatedBy: "struct GeekNetworkPresentation: View").last?
+                .components(separatedBy: "struct GeekDiskPresentation: View").first
         )
         XCTAssertTrue(overview.contains("geekProcessorCard"))
         XCTAssertTrue(overview.contains("geekNetworkCard"))
@@ -2399,7 +2553,14 @@ final class PanelChartNormalizationTests: XCTestCase {
             116
         )
         XCTAssertFalse(sensorSource.contains("GeekTemperatureMiniRing("))
-        XCTAssertTrue(sensorSource.contains("Image(systemName: AppSymbols.Panel.disclosure)"))
+        XCTAssertTrue(sensorSource.contains("GeekDisclosureIcon()"))
+        XCTAssertTrue(disclosureIcon.contains("var systemImage = AppSymbols.Panel.disclosure"))
+        XCTAssertTrue(disclosureIcon.contains(
+            "AppSymbolGlyph(systemImage: systemImage, size: MiniWindowStyleTokens.disclosureGlyphSize"
+        ))
+        XCTAssertTrue(disclosureIcon.contains(
+            ".frame(width: MiniWindowStyleTokens.disclosureIconSlotSize"
+        ))
         XCTAssertTrue(sensorSource.contains(
             "minHeight: GeekSensorTemperatureLayout.gridRowHeight"
         ))
@@ -2422,7 +2583,7 @@ final class PanelChartNormalizationTests: XCTestCase {
             sensorSource.components(
                 separatedBy: "GeekSensorTemperatureLayout.temperatureCardHeight("
             ).count - 1,
-            1
+            1 // regional history; individual probes open a snapshot-only inspector
         )
         XCTAssertFalse(sensorSource.contains("GeekCombinedCard(height: 59)"))
         XCTAssertFalse(sensorSource.contains("GeekCombinedCard(height: 76)"))
@@ -2434,7 +2595,8 @@ final class PanelChartNormalizationTests: XCTestCase {
         )
         XCTAssertEqual(
             GeekPanelPresentationMetrics.detailVerticalOffset(for: .sensors),
-            0
+            max(0, GeekPanelPresentationMetrics.overviewSize.height
+                - GeekPanelPresentationMetrics.sensorsDetailHeight)
         )
         XCTAssertFalse(sensorSource.contains("geekFrequencyCard"))
         XCTAssertTrue(sensorSource.contains("compactFanHistoryRow"))
@@ -2454,12 +2616,15 @@ final class PanelChartNormalizationTests: XCTestCase {
                 .components(separatedBy: "var geekSensorsCard: some View").first
         )
 
-        XCTAssertTrue(diskCard.contains("storageSnapshot.userAvailableBytes"))
-        XCTAssertTrue(diskCard.contains("storageSnapshot.totalBytes"))
-        XCTAssertTrue(diskCard.contains("if let health = geekPrimaryDiskHealthText"))
+        let diskPresentation = try XCTUnwrap(panelSource.components(separatedBy: "struct GeekDiskPresentation: View").last?
+            .components(separatedBy: "struct GeekBatteryPresentation: View").first)
+        XCTAssertTrue(diskCard.contains("GeekDiskPresentation(storageSnapshot: storageSnapshot"))
+        XCTAssertTrue(diskPresentation.contains("storageSnapshot.userAvailableBytes"))
+        XCTAssertTrue(diskPresentation.contains("storageSnapshot.totalBytes"))
+        XCTAssertTrue(diskPresentation.contains("if let health = geekPrimaryDiskHealthText"))
         XCTAssertTrue(diskCard.contains("GeekDiskHealthTimestamp.checkedAt("))
         XCTAssertTrue(diskCard.contains("fallbackRemainingLifePercent: healthSummary?.diskRemainingLifePercent"))
-        XCTAssertTrue(diskCard.contains("AppSymbols.Monitor.storage"))
+        XCTAssertTrue(diskPresentation.contains("AppSymbols.Monitor.storage"))
     }
 
     func testGeekDiskChartUsesTimestampedSamplesForRenderability() throws {
@@ -2467,7 +2632,7 @@ final class PanelChartNormalizationTests: XCTestCase {
         let worker = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarPreparedChart.swift")
         let disk = try XCTUnwrap(charts.components(separatedBy: "struct GeekDiskIOChart: View {").last?
             .components(separatedBy: "struct GeekHoverValue").first)
-        XCTAssertTrue(disk.contains("GeekPreparedDiskSummary(points: points, duration: duration)"))
+        XCTAssertTrue(disk.contains("GeekPreparedDiskSummary(points: points, duration: duration, referenceDate: referenceDate)"))
         XCTAssertTrue(disk.contains("GeekPreparedDiskFrame(points: points"))
         XCTAssertFalse(disk.contains("GeekChartWindow.displayBuckets("))
         XCTAssertFalse(disk.contains("points.map"))
@@ -2578,9 +2743,6 @@ final class PanelChartNormalizationTests: XCTestCase {
     }
 
     private func source(_ relativePath: String) throws -> String {
-        try String(
-            contentsOf: projectRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        try r2ProductionSource(at: projectRoot.appendingPathComponent(relativePath))
     }
 }

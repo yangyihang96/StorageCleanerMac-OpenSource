@@ -98,6 +98,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         ])
         let noBatteryService = BatteryHealthService(
             runner: noBatteryRunner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { nil },
             now: { sampledAt }
         )
@@ -109,6 +110,7 @@ final class BatteryHealthServiceTests: XCTestCase {
             runner: RecordingBatteryHealthRunner(
                 defaultResponse: .failure(BatteryHealthCommandFailure.permissionDenied)
             ),
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { nil },
             now: { sampledAt }
         )
@@ -132,6 +134,7 @@ final class BatteryHealthServiceTests: XCTestCase {
                     BatteryHealthService.profilerCommand: .success(profilerData),
                     BatteryHealthService.powerModesCommand: .success(Data()),
                 ]),
+                powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
                 powerSampleProvider: { nil },
                 now: { sampledAt }
             )
@@ -372,6 +375,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         let sampledAt = sampledAt
         let service = BatteryHealthService(
             runner: runner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { powerSample },
             now: { sampledAt }
         )
@@ -408,6 +412,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         let sampledAt = sampledAt
         let snapshot = try await BatteryHealthService(
             runner: runner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { powerSample },
             now: { sampledAt }
         ).snapshot()
@@ -436,6 +441,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         let sampledAt = sampledAt
         let service = BatteryHealthService(
             runner: runner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { powerSample },
             now: { sampledAt }
         )
@@ -1205,6 +1211,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         let sampledAt = sampledAt
         let service = BatteryHealthService(
             runner: runner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { nil },
             now: { sampledAt }
         )
@@ -1237,6 +1244,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         let sampledAt = sampledAt
         let service = BatteryHealthService(
             runner: runner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { powerSample },
             now: { sampledAt }
         )
@@ -1292,6 +1300,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         let sampledAt = sampledAt
         let service = BatteryHealthService(
             runner: runner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: {
                 BatteryPowerSample(
                     snapshot: BatteryPowerSnapshot(
@@ -1347,6 +1356,7 @@ final class BatteryHealthServiceTests: XCTestCase {
         let sampledAt = sampledAt
         let service = BatteryHealthService(
             runner: runner,
+            powerModeWriter: TestOperationFactory(for: self).batteryPowerModeWriter(),
             powerSampleProvider: { nil },
             now: { sampledAt },
             beforeSnapshotPublication: { await barrier.pauseFirstPublication() }

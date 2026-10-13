@@ -103,6 +103,11 @@ actor WebsiteUpdateWorkflow {
     }
 
     @discardableResult
+    func enqueue(applications: [InstalledApplication]) async throws -> WebsiteUpdateQueueSnapshot {
+        try await queue.start(applications: applications, preservingPending: true)
+    }
+
+    @discardableResult
     func restore(applications: [InstalledApplication]) async throws -> WebsiteUpdateQueueSnapshot? {
         try await queue.restore(applications: applications)
     }
@@ -175,13 +180,16 @@ actor WebsiteUpdateWorkflow {
         }
         let observedApplication = observedSnapshot.application
         let observedSignature = observedSnapshot.signature
-        let expectedTeam = item.source.expectedTeamIdentifier
-            ?? item.source.applicationIdentity.signingTeamIdentifier
+        // Without an expected (Apple-anchored) Team ID the recheck cannot tell
+        // the developer's update from a look-alike, so it fails closed.
+        let expectedTeam = (item.source.expectedTeamIdentifier
+            ?? item.source.applicationIdentity.signingTeamIdentifier)?.trimmed.nonEmpty
         let expectedCodeIdentifier = item.source.applicationIdentity.codeSigningIdentifier
         guard observedApplication.bundleIdentifier == item.source.expectedBundleIdentifier,
               observedApplication.bundleIdentifier == item.source.applicationIdentity.bundleIdentifier,
               observedSignature.isValid,
-              expectedTeam == nil || observedSignature.teamIdentifier == expectedTeam,
+              expectedTeam != nil,
+              observedSignature.teamIdentifier == expectedTeam,
               expectedCodeIdentifier == nil || observedSignature.codeSigningIdentifier == expectedCodeIdentifier,
               item.source.expectedDesignatedRequirement == nil
                 || observedSignature.designatedRequirement == item.source.expectedDesignatedRequirement else {

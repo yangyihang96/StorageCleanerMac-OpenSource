@@ -258,20 +258,50 @@ final class CleanupExecutionSafetyTests: XCTestCase {
             [.skipped(.duplicateRetainedCopyChanged)]
         )
 
+        // D25: checking the whole group keeps one copy instead of failing the
+        // plan. The most recently modified copy (`Example.app`) is kept.
         var allCopies = CleanupSelection()
         allCopies.setCandidates(
             [candidate.id, retainedCandidate.id],
             selected: true,
             in: session
         )
-        XCTAssertThrowsError(try CleanPlanBuilder.makePlan(
+        XCTAssertEqual(allCopies.selectedCandidateIDs, [candidate.id])
+        let groupIDs = [candidate.id, retainedCandidate.id]
+        XCTAssertEqual(allCopies.groupState(for: groupIDs, in: session), .checked)
+        var cleared = allCopies
+        cleared.setCandidates(groupIDs, selected: false, in: session)
+        XCTAssertEqual(cleared.groupState(for: groupIDs, in: session), .unchecked)
+        let groupPlan = try CleanPlanBuilder.makePlan(
             session: session,
             selection: allCopies,
             activeRules: rules,
             disposition: .trash
-        )) {
-            XCTAssertEqual($0 as? CleanPlanBuildError, .invalidCandidate)
-        }
+        )
+        XCTAssertEqual(groupPlan.protectedItems.map(\.sourceURL), [source])
+        XCTAssertEqual(
+            groupPlan.protectedItems.first?.protectedRetainedCopies.map(\.url),
+            [retainedSource]
+        )
+        // Checking the last unchecked copy on its own keeps it unchecked.
+        allCopies.setCandidate(retainedCandidate.id, selected: true, in: session)
+        XCTAssertEqual(allCopies.selectedCandidateIDs, [candidate.id])
+        // A selection built with every copy is reduced the same way by the plan.
+        let forgedAllCopies = CleanupSelection(
+            selectedCandidateIDs: [candidate.id, retainedCandidate.id],
+            explicitlySelectedCandidateIDs: [candidate.id, retainedCandidate.id]
+        )
+        let forgedPlan = try CleanPlanBuilder.makePlan(
+            session: session,
+            selection: forgedAllCopies,
+            activeRules: rules,
+            disposition: .trash
+        )
+        XCTAssertEqual(forgedPlan.protectedItems.map(\.sourceURL), [source])
+        XCTAssertEqual(
+            forgedPlan.protectedItems.first?.protectedRetainedCopies.map(\.url),
+            [retainedSource]
+        )
 
         XCTAssertThrowsError(try CleanPlanBuilder.makePlan(
             session: session,
@@ -283,6 +313,8 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         }
     }
 
+    /// D25: app bundles are not listed in the junk scan any more, so a rule
+    /// that would remove a whole (non-duplicate) app is rejected.
     func testAllowlistedProtectedApplicationDoesNotRequireDuplicateCopy() throws {
         let source = URL(fileURLWithPath: "/Applications/Final Cut Pro.app")
         let root = URL(fileURLWithPath: "/Applications")
@@ -392,15 +424,15 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         var selection = CleanupSelection()
         selection.setCandidate(candidate.id, selected: true, in: session)
 
-        let plan = try CleanPlanBuilder.makePlan(
+        XCTAssertThrowsError(try CleanupRuleValidator.validate(rules))
+        XCTAssertThrowsError(try CleanPlanBuilder.makePlan(
             session: session,
             selection: selection,
             activeRules: rules,
             disposition: .trash
-        )
-
-        XCTAssertEqual(plan.protectedItems.map(\.sourceURL), [source])
-        XCTAssertTrue(plan.protectedItems[0].protectedRetainedCopies.isEmpty)
+        )) {
+            XCTAssertEqual($0 as? CleanPlanBuildError, .rulesChanged)
+        }
     }
 
     func testPlanFreezesSelectionAndRejectsCancelledSession() throws {
@@ -614,6 +646,205 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         })
     }
 
+    func testPreflightStillInUseReasonsSurviveTheExistingConfirmationRoute() async throws {
+        for reason in [CleanSkipReason.candidateBecameActive, .relatedAppStillRunning] {
+            let base = makeFixture(count: 2,
+                requiredClosedBundleIDs: reason == .relatedAppStillRunning ? ["fixture.running"] : [])
+            var candidates = base.candidates
+            if reason == .candidateBecameActive {
+                candidates[0].ownerResolution = .unresolved
+                candidates[0].latestContentModificationTimeNanoseconds = 999
+            }
+            let fixture = CleanupExecutionFixture(homeURL: base.homeURL, rules: base.rules,
+                candidates: candidates, session: makeSession(id: base.session.id, candidates: candidates,
+                    rulesVersion: base.rules.rulesVersion, outcome: .complete), states: base.states)
+            let plan = try makePlan(fixture)
+            let outcomes: [String: RecordingMoveOutcome] = Dictionary(uniqueKeysWithValues: plan.items.map {
+                ($0.sourceURL.path, .success($0.sourceURL.appendingPathExtension("trash")))
+            })
+            let mover = RecordingCleanupMover(outcomes: outcomes)
+            let executor = SafeCleanupExecutor(metadataReader: FixtureMetadataReader(states: fixture.states),
+                mover: mover, volumeChecker: FixedVolumeChecker(available: true),
+                runningApplicationChecker: FirstCheckRunningApplicationChecker(),
+                capacityReader: FixedCapacityReader(values: []), coordinator: HeavyWorkCoordinator())
+            let preflight = await executor.preflight(plan: plan, context: context(for: fixture))
+            XCTAssertEqual(preflight.readyCount, 1)
+            XCTAssertEqual(preflight.skippedCount, 1)
+            let skipped = try XCTUnwrap(preflight.items.first { $0.status == .skipped(reason) })
+            // Match ScanStore: only pass ready IDs, on the same executor. No
+            // store edit or explicit test-only context wiring carries the reason.
+            let approved = Set(preflight.items.compactMap { $0.status == .ready ? $0.planItemID : nil })
+            let report = await executor.execute(plan: plan,
+                context: context(for: fixture, approvedPlanItemIDs: approved), progress: { _ in })
+            XCTAssertEqual(report.items.first { $0.planItemID == skipped.planItemID }?.outcome, .skipped(reason))
+            XCTAssertEqual(report.summary.movedItemCount, 1)
+            XCTAssertEqual(report.summary.skippedItemCount, 1)
+            XCTAssertEqual(report.summary.failedItemCount, 0)
+            XCTAssertEqual(CleanupReportIssueGroup.group(for: .skipped(reason)), .stillInUse)
+            XCTAssertEqual(try JSONDecoder().decode(CleanReport.self, from: JSONEncoder().encode(report)), report)
+            let paths = await mover.paths
+            XCTAssertEqual(paths.count, 1)
+            let skippedPlanItem = try XCTUnwrap(plan.items.first { $0.id == skipped.planItemID })
+            XCTAssertFalse(paths.contains(skippedPlanItem.sourceURL.path))
+        }
+    }
+
+    func testPreflightReasonCacheDoesNotCrossImmutablePlans() async throws {
+        let scenario = try makePreflightReasonScenario()
+        let preflight = await scenario.executor.preflight(plan: scenario.plan, context: context(for: scenario.fixture))
+        XCTAssertEqual(preflight.skippedCount, 1)
+        let otherPlan = try makePlan(scenario.fixture)
+        XCTAssertNotEqual(otherPlan.id, scenario.plan.id)
+        let report = await scenario.executor.execute(plan: otherPlan,
+            context: context(for: scenario.fixture, approvedPlanItemIDs: [otherPlan.items[1].id]), progress: { _ in })
+        XCTAssertEqual(report.items.first { $0.planItemID == otherPlan.items[0].id }?.outcome,
+            .skipped(.preflightNotApproved))
+        XCTAssertEqual(report.summary.movedItemCount, 1)
+        let paths = await scenario.mover.paths
+        XCTAssertEqual(paths, [otherPlan.items[1].sourceURL.path])
+
+        // A wrong cache lookup can consume the original report without matching
+        // otherPlan's fresh item UUIDs. Execute the original plan to expose it.
+        let originalReport = await scenario.executor.execute(plan: scenario.plan,
+            context: context(for: scenario.fixture, approvedPlanItemIDs: [scenario.plan.items[1].id]), progress: { _ in })
+        XCTAssertEqual(originalReport.items.first { $0.planItemID == scenario.plan.items[0].id }?.outcome,
+            .skipped(.relatedAppStillRunning))
+        XCTAssertEqual(originalReport.summary.movedItemCount, 1)
+        let finalPaths = await scenario.mover.paths
+        XCTAssertEqual(finalPaths, [otherPlan.items[1].sourceURL.path, scenario.plan.items[1].sourceURL.path])
+        XCTAssertEqual(Set(finalPaths), Set([scenario.plan.items[1].sourceURL.path]),
+            "Across both executions only the explicitly approved source path may reach the mover")
+    }
+
+    func testRepeatedPreflightUsesOnlyLatestCompletedReasons() async throws {
+        for excludesFirstItem in [false, true] {
+            let scenario = try makePreflightReasonScenario()
+            let original = await scenario.executor.preflight(plan: scenario.plan, context: context(for: scenario.fixture))
+            XCTAssertEqual(original.items.first?.status, .skipped(.relatedAppStillRunning))
+            let latest = await scenario.executor.preflight(plan: scenario.plan,
+                context: context(for: scenario.fixture,
+                    excludedURLs: excludesFirstItem ? [scenario.plan.items[0].sourceURL] : []))
+            XCTAssertNil(latest.failure)
+            XCTAssertEqual(latest.items.first?.status, excludesFirstItem ? .skipped(.excludedByUser) : .ready)
+            let report = await scenario.executor.execute(plan: scenario.plan,
+                context: context(for: scenario.fixture, approvedPlanItemIDs: [scenario.plan.items[1].id]), progress: { _ in })
+            XCTAssertEqual(report.items.first { $0.planItemID == scenario.plan.items[0].id }?.outcome,
+                .skipped(excludesFirstItem ? .excludedByUser : .preflightNotApproved))
+            XCTAssertEqual(report.summary.movedItemCount, 1)
+            let paths = await scenario.mover.paths
+            XCTAssertEqual(paths, [scenario.plan.items[1].sourceURL.path])
+        }
+    }
+
+    func testFailedPreflightClearsEarlierReasonsWithoutChangingApproval() async throws {
+        for failureKind in 0..<3 {
+            let scenario = try makePreflightReasonScenario()
+            let original = await scenario.executor.preflight(plan: scenario.plan, context: context(for: scenario.fixture))
+            XCTAssertEqual(original.items.first?.status, .skipped(.relatedAppStillRunning))
+            let invalidContext = CleanupExecutionContext(
+                featureConfiguration: CleanupFeatureConfiguration(mode: failureKind == 0 ? .v2ScanOnly : .v2Full),
+                activeSessionID: failureKind == 1 ? ScanSessionID() : scenario.fixture.session.id,
+                activeRules: failureKind == 2
+                    ? CleanupRuleSet(schemaVersion: 2, rulesVersion: "changed-rules", rules: scenario.fixture.rules.rules)
+                    : scenario.fixture.rules,
+                userHomeURL: scenario.fixture.homeURL, excludedURLs: [], approvedPlanItemIDs: nil)
+            let failed = await scenario.executor.preflight(plan: scenario.plan, context: invalidContext)
+            XCTAssertEqual(failed.failure?.code, failureKind == 0 ? .featureDisabled : .planIntegrityFailed)
+            XCTAssertTrue(failed.items.isEmpty)
+            let report = await scenario.executor.execute(plan: scenario.plan,
+                context: context(for: scenario.fixture, approvedPlanItemIDs: [scenario.plan.items[1].id]), progress: { _ in })
+            XCTAssertEqual(report.items.first { $0.planItemID == scenario.plan.items[0].id }?.outcome,
+                .skipped(.preflightNotApproved))
+            XCTAssertEqual(report.summary.movedItemCount, 1)
+            let paths = await scenario.mover.paths
+            XCTAssertEqual(paths, [scenario.plan.items[1].sourceURL.path])
+        }
+    }
+
+    func testCancelledPreflightClearsEarlierReasonsWithoutChangingApproval() async throws {
+        let scenario = try makePreflightReasonScenario()
+        let original = await scenario.executor.preflight(plan: scenario.plan, context: context(for: scenario.fixture))
+        XCTAssertEqual(original.items.first?.status, .skipped(.relatedAppStillRunning))
+        let preflightContext = context(for: scenario.fixture)
+        let executor = scenario.executor
+        let plan = scenario.plan
+        let cancelledTask = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await executor.preflight(plan: plan, context: preflightContext)
+        }
+        let cancelled = await cancelledTask.value
+        XCTAssertEqual(cancelled.failure?.detailCode, "cancelled")
+        XCTAssertTrue(cancelled.items.isEmpty)
+        XCTAssertFalse(Task.isCancelled, "Only the child preflight task is cancelled")
+        let report = await executor.execute(plan: plan,
+            context: context(for: scenario.fixture, approvedPlanItemIDs: [plan.items[1].id]), progress: { _ in })
+        XCTAssertEqual(report.items.first { $0.planItemID == plan.items[0].id }?.outcome, .skipped(.preflightNotApproved))
+        XCTAssertEqual(report.summary.movedItemCount, 1)
+        let paths = await scenario.mover.paths
+        XCTAssertEqual(paths, [plan.items[1].sourceURL.path])
+    }
+
+    func testCachedReasonsNeitherApproveMovesNorReplaceLiveRechecks() async throws {
+        for stillRunning in [false, true] {
+            let checker = ControllableRunningApplicationChecker(running: true)
+            let scenario = try makePreflightReasonScenario(runningApplicationChecker: checker)
+            let original = await scenario.executor.preflight(plan: scenario.plan, context: context(for: scenario.fixture))
+            XCTAssertEqual(original.skippedCount, 2)
+            await checker.setRunning(stillRunning)
+            let report = await scenario.executor.execute(plan: scenario.plan,
+                context: context(for: scenario.fixture, approvedPlanItemIDs: [scenario.plan.items[1].id]), progress: { _ in })
+            // The unapproved item always stays untouched, even after the app exits.
+            XCTAssertEqual(report.items.first { $0.planItemID == scenario.plan.items[0].id }?.outcome,
+                .skipped(.relatedAppStillRunning))
+            XCTAssertEqual(report.summary.movedItemCount, stillRunning ? 0 : 1)
+            if stillRunning {
+                XCTAssertEqual(report.items.first { $0.planItemID == scenario.plan.items[1].id }?.outcome,
+                    .skipped(.relatedAppStillRunning))
+            }
+            let paths = await scenario.mover.paths
+            XCTAssertEqual(paths, stillRunning ? [] : [scenario.plan.items[1].sourceURL.path])
+        }
+    }
+
+    func testRejectedApprovalRetainsReasonsForTheNextValidExecution() async throws {
+        let scenario = try makePreflightReasonScenario()
+        let preflight = await scenario.executor.preflight(plan: scenario.plan, context: context(for: scenario.fixture))
+        XCTAssertEqual(preflight.items.first?.status, .skipped(.relatedAppStillRunning))
+        for approval in [Set<UUID>(), Set([UUID()])] {
+            let rejected = await scenario.executor.execute(plan: scenario.plan,
+                context: context(for: scenario.fixture, approvedPlanItemIDs: approval), progress: { _ in })
+            XCTAssertEqual(rejected.outcome, .failed)
+            let paths = await scenario.mover.paths
+            XCTAssertTrue(paths.isEmpty)
+        }
+        let report = await scenario.executor.execute(plan: scenario.plan,
+            context: context(for: scenario.fixture, approvedPlanItemIDs: [scenario.plan.items[1].id]), progress: { _ in })
+        XCTAssertEqual(report.items.first { $0.planItemID == scenario.plan.items[0].id }?.outcome,
+            .skipped(.relatedAppStillRunning))
+        XCTAssertEqual(report.summary.movedItemCount, 1)
+        let paths = await scenario.mover.paths
+        XCTAssertEqual(paths, [scenario.plan.items[1].sourceURL.path])
+    }
+
+    private func makePreflightReasonScenario(
+        runningApplicationChecker: any CleanupRunningApplicationChecking = FirstCheckRunningApplicationChecker()
+    ) throws -> (fixture: CleanupExecutionFixture, plan: CleanPlan, mover: RecordingCleanupMover, executor: SafeCleanupExecutor) {
+        let fixture = makeFixture(count: 2, requiredClosedBundleIDs: ["fixture.running"])
+        let plan = try makePlan(fixture)
+        var states = fixture.states
+        var outcomes: [String: RecordingMoveOutcome] = [:]
+        for item in plan.items {
+            let destination = item.sourceURL.appendingPathExtension("trash")
+            states[destination.path] = .snapshot(item.expectedSnapshot)
+            outcomes[item.sourceURL.path] = .success(destination)
+        }
+        let mover = RecordingCleanupMover(outcomes: outcomes)
+        let executor = SafeCleanupExecutor(metadataReader: FixtureMetadataReader(states: states), mover: mover,
+            volumeChecker: FixedVolumeChecker(available: true), runningApplicationChecker: runningApplicationChecker,
+            capacityReader: FixedCapacityReader(values: []), coordinator: HeavyWorkCoordinator())
+        return (fixture, plan, mover, executor)
+    }
+
     func testVerifiedDuplicatePlanRequiresOneFrozenRetainedCopy() throws {
         let fixture = makeVerifiedDuplicateFixture(groupCount: 1)
         let request = try XCTUnwrap(fixture.requests.first)
@@ -644,6 +875,81 @@ final class CleanupExecutionSafetyTests: XCTestCase {
             userHomeURL: fixture.homeURL
         )) {
             XCTAssertEqual($0 as? VerifiedDuplicatePlanBuildError, .noRetainedCopy)
+        }
+    }
+
+    func testN6CancelledBlockingHashKeepsOriginalAndReleasesCleanupLease() async throws {
+        let fixture = makeVerifiedDuplicateFixture(groupCount: 1)
+        let bundle = try VerifiedDuplicateCleanPlanBuilder.makePlan(
+            requests: fixture.requests, disposition: .trash, userHomeURL: fixture.homeURL
+        )
+        let context = verifiedDuplicateContext(bundle, homeURL: fixture.homeURL,
+            approvedPlanItemIDs: Set(bundle.plan.items.map(\.id)))
+        let coordinator = HeavyWorkCoordinator()
+        let mover = RecordingCleanupMover()
+        let gate = ContentReadGate()
+        defer { gate.release() }
+        let executor = SafeCleanupExecutor(
+            metadataReader: FixtureMetadataReader(states: fixture.states),
+            contentDigestReader: N6BlockingDigestReader(gate: gate), mover: mover,
+            volumeChecker: FixedVolumeChecker(available: true),
+            runningApplicationChecker: FixedRunningApplicationChecker(running: false),
+            capacityReader: FixedCapacityReader(values: []), coordinator: coordinator
+        )
+        let worker = Task { await executor.execute(plan: bundle.plan, context: context, progress: { _ in }) }
+        await fulfillment(of: [gate.entered], timeout: 1)
+        let start = ProcessInfo.processInfo.systemUptime
+        worker.cancel()
+        let report = await worker.value
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 1)
+        XCTAssertEqual(report.outcome, .cancelled)
+        let moved = await mover.paths
+        XCTAssertTrue(moved.isEmpty)
+        let owner = await coordinator.activeOwner
+        XCTAssertNil(owner)
+        XCTAssertFalse(gate.didReturn)
+    }
+
+    func testN6PreflightAndFinalWriteRecheckPreserveReadRefusalReasons() async throws {
+        let cases: [(FileContentReadError, CleanSkipReason)] = [
+            (.cloudOnly, .contentCloudOnly), (.downloading, .contentDownloading),
+            (.timedOut, .contentReadTimedOut), (.busy, .contentReadUnavailable)
+        ]
+        for (error, reason) in cases {
+            for retainedFails in [false, true] {
+                let fixture = makeVerifiedDuplicateFixture(groupCount: 1)
+                let bundle = try VerifiedDuplicateCleanPlanBuilder.makePlan(
+                    requests: fixture.requests, disposition: .trash, userHomeURL: fixture.homeURL
+                )
+                let request = try XCTUnwrap(fixture.requests.first)
+                let target = retainedFails ? try XCTUnwrap(request.retainedCopies.first).url : request.sourceURL
+                for failOnCall in [1, 3] {
+                    let digestReader = N6RefusingDigestReader(
+                        failingPath: target.path, failOnCall: failOnCall, error: error, digest: fixture.digest
+                    )
+                    let mover = RecordingCleanupMover()
+                    let executor = SafeCleanupExecutor(
+                        metadataReader: FixtureMetadataReader(states: fixture.states), contentDigestReader: digestReader,
+                        mover: mover, volumeChecker: FixedVolumeChecker(available: true),
+                        runningApplicationChecker: FixedRunningApplicationChecker(running: false),
+                        capacityReader: FixedCapacityReader(values: []), coordinator: HeavyWorkCoordinator()
+                    )
+                    let context = verifiedDuplicateContext(bundle, homeURL: fixture.homeURL,
+                        approvedPlanItemIDs: Set(bundle.plan.items.map(\.id)))
+                    if failOnCall == 1 {
+                        let report = await executor.preflight(plan: bundle.plan, context: context)
+                        XCTAssertEqual(report.items.map(\.status), [.skipped(reason)])
+                        XCTAssertEqual(report.readyCount, 0)
+                    } else {
+                        let report = await executor.execute(plan: bundle.plan, context: context, progress: { _ in })
+                        XCTAssertEqual(report.items.map(\.outcome), [.skipped(reason)])
+                        XCTAssertEqual(report.summary.movedItemCount, 0)
+                    }
+                    let moved = await mover.paths
+                    XCTAssertTrue(moved.isEmpty)
+                    XCTAssertFalse(CleanSkipReasonPresentation.title(reason).isEmpty)
+                }
+            }
         }
     }
 
@@ -686,8 +992,8 @@ final class CleanupExecutionSafetyTests: XCTestCase {
             disposition: .quarantine,
             userHomeURL: fixture.homeURL
         )
-        let first = fixture.requests[0]
-        let second = fixture.requests[1]
+        let first = try XCTUnwrap(fixture.requests.first)
+        let second = try XCTUnwrap(fixture.requests.dropFirst().first)
         let firstRetained = try XCTUnwrap(first.retainedCopies.first)
         let secondRetained = try XCTUnwrap(second.retainedCopies.first)
         let secondDestination = fixture.homeURL.appendingPathComponent("quarantine-second.bin")
@@ -696,8 +1002,9 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         let digestReader = SequencedDigestReader(values: [
             first.sourceURL.path: [fixture.digest, Data(repeating: 0xDD, count: 32)],
             firstRetained.url.path: [fixture.digest],
-            second.sourceURL.path: [fixture.digest, fixture.digest],
-            secondRetained.url.path: [fixture.digest, fixture.digest]
+            // The third read occurs after the durable intent checkpoint.
+            second.sourceURL.path: [fixture.digest, fixture.digest, fixture.digest],
+            secondRetained.url.path: [fixture.digest, fixture.digest, fixture.digest]
         ])
         let mover = RecordingCleanupMover(outcomes: [
             second.sourceURL.path: .success(secondDestination)
@@ -750,8 +1057,8 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         let executor = SafeCleanupExecutor(
             metadataReader: FixtureMetadataReader(states: states),
             contentDigestReader: SequencedDigestReader(values: [
-                request.sourceURL.path: [fixture.digest, fixture.digest],
-                retained.url.path: [fixture.digest, fixture.digest]
+                request.sourceURL.path: [fixture.digest, fixture.digest, fixture.digest],
+                retained.url.path: [fixture.digest, fixture.digest, fixture.digest]
             ]),
             mover: RecordingCleanupMover(outcomes: [
                 request.sourceURL.path: .success(destination)
@@ -1005,8 +1312,8 @@ final class CleanupExecutionSafetyTests: XCTestCase {
     }
 
     func testProductionQuarantineMoveAndIdentityCheckedRestoreUseOnlyTemporaryFixture() async throws {
-        let root = URL(fileURLWithPath: "/Users/Shared", isDirectory: true)
-            .appendingPathComponent("cleanup-quarantine-\(UUID().uuidString)", isDirectory: true)
+        let root = TestFileSystem.uniqueOperationRoot("CleanupQuarantine")
+        TestFileSystem.registerCleanup(of: root, for: self)
         let home = root.appendingPathComponent("home", isDirectory: true)
         let cache = home.appendingPathComponent("Library/Caches", isDirectory: true)
         let source = cache.appendingPathComponent("fixture.bin")
@@ -1018,7 +1325,7 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
         try Data("fixture".utf8).write(to: source)
         try Data("fixture-2".utf8).write(to: secondSource)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
         try FileManager.default.createDirectory(
             at: quarantine,
             withIntermediateDirectories: true
@@ -1085,8 +1392,8 @@ final class CleanupExecutionSafetyTests: XCTestCase {
     }
 
     func testRecoveryRejectsReplacementAtQuarantineReceiptPath() async throws {
-        let root = URL(fileURLWithPath: "/Users/Shared", isDirectory: true)
-            .appendingPathComponent("cleanup-restore-swap-\(UUID().uuidString)", isDirectory: true)
+        let root = TestFileSystem.uniqueOperationRoot("CleanupRestoreSwap")
+        TestFileSystem.registerCleanup(of: root, for: self)
         let home = root.appendingPathComponent("home", isDirectory: true)
         let cache = home.appendingPathComponent("Library/Caches", isDirectory: true)
         let quarantine = home.appendingPathComponent("quarantine", isDirectory: true)
@@ -1096,7 +1403,7 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         try FileManager.default.createDirectory(at: quarantine, withIntermediateDirectories: true)
         try Data("original".utf8).write(to: movedURL)
         let current = try FoundationReadOnlyFileSystem().snapshot(at: movedURL)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { TestFileSystem.remove(root) }
 
         let receipt = CleanupMoveReceipt(
             originalPath: source.path,
@@ -1123,9 +1430,9 @@ final class CleanupExecutionSafetyTests: XCTestCase {
     }
 
     func testMigrationIsIdempotentPreservesLegacyKeysAndRejectsOutsideHome() throws {
-        let suite = "cleanup-migration-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let home = URL(fileURLWithPath: "/tmp/fixture-home-\(UUID().uuidString)")
         let valid = home.appendingPathComponent("Library/Caches/keep").path
         let existingV2 = home.appendingPathComponent("Library/Logs/preserved").path
@@ -1176,9 +1483,9 @@ final class CleanupExecutionSafetyTests: XCTestCase {
     }
 
     func testCleanReportStoreRoundTripsOneReportPerPlan() throws {
-        let suite = "cleanup-reports-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let fixture = makeFixture(count: 1)
         let plan = try makePlan(fixture)
         let report = makeReport(plan: plan)
@@ -1189,9 +1496,9 @@ final class CleanupExecutionSafetyTests: XCTestCase {
 
     @MainActor
     func testNewStoreReconnectsOnlyLatestRestorableVerifiedDuplicateReport() throws {
-        let suite = "duplicate-cleanup-reports-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let older = makePersistedVerifiedDuplicateReport(
             completedAt: Date(timeIntervalSinceReferenceDate: 100)
         )
@@ -1201,7 +1508,7 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         XCTAssertTrue(CleanReportStore.record(older, defaults: defaults))
         XCTAssertTrue(CleanReportStore.record(expected, defaults: defaults))
 
-        let store = ScanStore(cleanReportLoader: {
+        let store = try ScanStore.makeForTests(for: self, cleanReportLoader: {
             CleanReportStore.load(defaults: defaults)
         })
 
@@ -1212,43 +1519,43 @@ final class CleanupExecutionSafetyTests: XCTestCase {
 
     @MainActor
     func testPersistedDuplicateCleanupRecoveryFailsClosedForCorruptOrConsumedReports() throws {
-        let suite = "duplicate-cleanup-consumed-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let report = makePersistedVerifiedDuplicateReport()
         let consumed = CleanReportStore.removingRestoredReceipts(
             from: report,
-            originalPaths: [report.restorableReceipts[0].originalPath]
+            originalPaths: [try XCTUnwrap(report.restorableReceipts.first).originalPath]
         )
         XCTAssertTrue(CleanReportStore.record(consumed, defaults: defaults))
 
-        let consumedStore = ScanStore(cleanReportLoader: {
+        let consumedStore = try ScanStore.makeForTests(for: self, cleanReportLoader: {
             CleanReportStore.load(defaults: defaults)
         })
         XCTAssertNil(consumedStore.duplicateCleanupReport)
 
-        defaults.removePersistentDomain(forName: suite)
+        TestPreferenceDomain.cleanup(suiteName: suite)
         XCTAssertTrue(CleanReportStore.record(
             makePersistedVerifiedDuplicateReport(rulesVersion: "ordinary-cleanup-v1"),
             defaults: defaults
         ))
-        let nonDuplicateStore = ScanStore(cleanReportLoader: {
+        let nonDuplicateStore = try ScanStore.makeForTests(for: self, cleanReportLoader: {
             CleanReportStore.load(defaults: defaults)
         })
         XCTAssertNil(nonDuplicateStore.duplicateCleanupReport)
 
-        defaults.removePersistentDomain(forName: suite)
+        TestPreferenceDomain.cleanup(suiteName: suite)
         XCTAssertTrue(CleanReportStore.record(
             makePersistedVerifiedDuplicateReport(restorable: false),
             defaults: defaults
         ))
-        let noReceiptStore = ScanStore(cleanReportLoader: {
+        let noReceiptStore = try ScanStore.makeForTests(for: self, cleanReportLoader: {
             CleanReportStore.load(defaults: defaults)
         })
         XCTAssertNil(noReceiptStore.duplicateCleanupReport)
 
         defaults.set(Data("not-json".utf8), forKey: CleanReportStore.defaultsKey)
-        let corruptStore = ScanStore(cleanReportLoader: {
+        let corruptStore = try ScanStore.makeForTests(for: self, cleanReportLoader: {
             CleanReportStore.load(defaults: defaults)
         })
         XCTAssertNil(corruptStore.duplicateCleanupReport)
@@ -1267,14 +1574,15 @@ final class CleanupExecutionSafetyTests: XCTestCase {
 
     private func context(
         for fixture: CleanupExecutionFixture,
-        approvedPlanItemIDs: Set<UUID>? = nil
+        approvedPlanItemIDs: Set<UUID>? = nil,
+        excludedURLs: [URL] = []
     ) -> CleanupExecutionContext {
         CleanupExecutionContext(
             featureConfiguration: CleanupFeatureConfiguration(mode: .v2Full),
             activeSessionID: fixture.session.id,
             activeRules: fixture.rules,
             userHomeURL: fixture.homeURL,
-            excludedURLs: [],
+            excludedURLs: excludedURLs,
             approvedPlanItemIDs: approvedPlanItemIDs
         )
     }
@@ -1836,6 +2144,22 @@ private struct FixedVolumeChecker: CleanupVolumeChecking {
     }
 }
 
+private actor FirstCheckRunningApplicationChecker: CleanupRunningApplicationChecking {
+    private var checks = 0
+    func isRunning(bundleIdentifier: String) async -> Bool {
+        checks += 1
+        return checks == 1
+    }
+}
+
+private actor ControllableRunningApplicationChecker: CleanupRunningApplicationChecking {
+    private var running: Bool
+
+    init(running: Bool) { self.running = running }
+    func setRunning(_ running: Bool) { self.running = running }
+    func isRunning(bundleIdentifier: String) async -> Bool { running }
+}
+
 private struct FixedRunningApplicationChecker: CleanupRunningApplicationChecking {
     let running: Bool
 
@@ -1857,6 +2181,39 @@ private actor FixedCapacityReader: CleanupCapacityReading {
 }
 
 extension CleanupExecutionSafetyTests {
+    func testPostJournalReplacementIsRecheckedBeforeMove() async throws {
+        for change in 0..<3 {
+            let fixture = makeFixture(count: 1)
+            let plan = try makePlan(fixture)
+            let original = try XCTUnwrap(plan.items.first).expectedSnapshot
+            let replacement: FixtureMetadataState = switch change {
+            case 0: .snapshot(changedIdentity(original))
+            case 1: .snapshot(changedSymlink(original))
+            default: .error(.permissionDenied)
+            }
+            let reader = JournalSwapMetadataReader(state: .snapshot(original))
+            let mover = RecordingCleanupMover()
+            let executor = SafeCleanupExecutor(
+                metadataReader: reader, mover: mover,
+                volumeChecker: FixedVolumeChecker(available: true),
+                runningApplicationChecker: FixedRunningApplicationChecker(running: false),
+                capacityReader: FixedCapacityReader(values: []), coordinator: HeavyWorkCoordinator(),
+                persistReport: { report, _ in
+                    if report.items.contains(where: {
+                        if case .failed(let failure) = $0.outcome { return failure.code == .moveOutcomeUnknown }
+                        return false
+                    }) { reader.replace(with: replacement) }
+                }
+            )
+            let report = await executor.execute(plan: plan,
+                context: context(for: fixture, approvedPlanItemIDs: Set(plan.items.map(\.id))), progress: { _ in })
+            let paths = await mover.paths
+            XCTAssertTrue(paths.isEmpty, "Post-journal change \(change) reached the mover")
+            XCTAssertEqual(report.summary.movedItemCount, 0)
+            XCTAssertEqual(report.summary.skippedItemCount, 1)
+        }
+    }
+
     func testJournalFailureBeforeFirstMoveLeavesAllFilesUntouched() async throws {
         let fixture = makeFixture(count: 2)
         let plan = try makePlan(fixture)
@@ -1879,7 +2236,7 @@ extension CleanupExecutionSafetyTests {
     func testJournalFailureAfterMoveKeepsReceiptAndStopsNextMove() async throws {
         let fixture = makeFixture(count: 2)
         let plan = try makePlan(fixture)
-        let first = plan.items[0]
+        let first = try XCTUnwrap(plan.items.first)
         let destination = URL(fileURLWithPath: first.sourceURL.path + ".trash")
         var states = fixture.states
         states[destination.path] = .snapshot(first.expectedSnapshot)
@@ -1905,25 +2262,51 @@ extension CleanupExecutionSafetyTests {
     }
 
     func testJournalReloadRetainsIdentityAndRejectsChangedIntent() throws {
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        // 回执夹具在隐藏家目录内，直接满足原有 home 和逐级符号链接检查。
+        let root = TestFileSystem.uniqueOperationRoot("JournalFixture")
+        defer { TestFileSystem.remove(root) }
+        // Fixtures never touch the real ~/Library (P2-11).
+        let realLibrary = PathSafety.lexicalPath(
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library").path
+        )
+        guard !PathSafety.isContained(
+            PathSafety.lexicalPath(root.path),
+            in: realLibrary,
+            resolvingSymlinks: false
+        ) else {
+            return XCTFail("The fixture must not be created in the real Library: \(root.path)")
+        }
         let journal = CleanupReportJournal(directory: root)
         let fixture = makeFixture(count: 1)
         let plan = try makePlan(fixture)
         let report = makeReport(plan: plan)
-        let identities = [plan.items[0].sourceURL.path: plan.items[0].fileIdentity]
+        let item = try XCTUnwrap(plan.items.first)
+        let identities = [item.sourceURL.path: item.fileIdentity]
         try journal.checkpoint(report, expectedIdentities: identities)
         XCTAssertEqual(try journal.load(), [report])
         try Data("corrupted".utf8).write(to: root.appendingPathComponent("damaged.json"))
         let loaded = try journal.loadAvailable()
         XCTAssertEqual(loaded.reports, [report])
         XCTAssertEqual(loaded.unreadableEntries, ["damaged.json"])
-        let changed = [plan.items[0].sourceURL.path: FileIdentity(deviceID: 99, inode: 99,
+        let changed = [item.sourceURL.path: FileIdentity(deviceID: 99, inode: 99,
             entryKind: .regularFile, creationTimeNanoseconds: nil)]
         XCTAssertThrowsError(try journal.checkpoint(report, expectedIdentities: changed))
         XCTAssertEqual(try journal.load(), [report])
     }
+}
+
+private final class JournalSwapMetadataReader: ReadOnlyFileSystem, @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: FixtureMetadataState
+    init(state: FixtureMetadataState) { self.state = state }
+    func replace(with state: FixtureMetadataState) { lock.withLock { self.state = state } }
+    func snapshot(at url: URL) throws -> FileSnapshot {
+        switch lock.withLock({ state }) {
+        case .snapshot(let snapshot): return snapshot
+        case .error(let error): throw error
+        }
+    }
+    func children(of directory: URL) throws -> [URL] { [] }
 }
 
 private final class FailingJournalProbe: @unchecked Sendable {
@@ -1938,6 +2321,38 @@ private final class FailingJournalProbe: @unchecked Sendable {
             count += 1
             if count >= failAt { throw CocoaError(.fileWriteOutOfSpace) }
             saved.append(report)
+        }
+    }
+}
+
+private final class N6RefusingDigestReader: CleanupContentDigestReading, @unchecked Sendable {
+    let failingPath: String
+    let failOnCall: Int
+    let error: FileContentReadError
+    let digest: Data
+    private let lock = NSLock()
+    private var calls = 0
+    init(failingPath: String, failOnCall: Int, error: FileContentReadError, digest: Data) {
+        self.failingPath = failingPath; self.failOnCall = failOnCall; self.error = error; self.digest = digest
+    }
+    func sha256(at url: URL) throws -> Data {
+        if url.path == failingPath {
+            let count = lock.withLock { calls += 1; return calls }
+            if count >= failOnCall { throw error }
+        }
+        return digest
+    }
+}
+
+private struct N6BlockingDigestReader: CleanupContentDigestReading {
+    let gate: ContentReadGate
+    private let pool = FileContentReadPool(maximumReaders: 1)
+    init(gate: ContentReadGate) { self.gate = gate }
+    func sha256(at url: URL) throws -> Data {
+        try pool.read(timeout: 10) { control in
+            gate.block()
+            try control.check()
+            return Data(repeating: 0xAB, count: 32)
         }
     }
 }

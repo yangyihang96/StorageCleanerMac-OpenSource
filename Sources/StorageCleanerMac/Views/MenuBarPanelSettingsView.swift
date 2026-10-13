@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 final class MenuBarPanelSettingsState: ObservableObject {
@@ -19,6 +20,7 @@ final class MenuBarPanelSettingsState: ObservableObject {
     @Published private(set) var cascadeLayout: MenuBarCascadeLayout?
     @Published private(set) var refreshGeneration = 0
     private var configurationBeforeEditing: GeekDashboardConfiguration?
+    private var configurationSubscription: AnyCancellable?
     private let defaults: UserDefaults
 
     init(
@@ -44,6 +46,12 @@ final class MenuBarPanelSettingsState: ObservableObject {
 #endif
         geekChartRanges = Self.chartRanges(in: defaults)
         if isGeekEditorPresented { configurationBeforeEditing = geekDashboardConfiguration }
+        if defaults === UserDefaults.standard {
+            configurationSubscription = GeekDashboardConfigurationStore.shared.$configuration
+                .dropFirst().sink { [weak self] configuration in
+                    self?.geekDashboardConfiguration = configuration
+                }
+        }
     }
 
     func presentGeekEditor() {
@@ -148,6 +156,7 @@ final class MenuBarPanelSettingsState: ObservableObject {
         var next = geekChartRanges
         next[key] = range.normalized
         guard next != geekChartRanges else { return }
+        MenuBarPresentationTrace.rangeSelected(range.normalized.rawValue, key: key)
         geekChartRanges = next
         guard let data = try? JSONEncoder().encode(next) else { return }
         defaults.set(data, forKey: Self.chartRangesDefaultsKey)

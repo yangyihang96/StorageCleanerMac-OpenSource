@@ -38,6 +38,32 @@ final class MemoryCoordinatorTests: XCTestCase {
         }
     }
 
+    /// D28: the result records the system level, or the percent rule's
+    /// estimate for a sample without it, never the app's own estimate.
+    func testPressureBeforeAndAfterAreTheSystemLevelOrThePercentRule() async throws {
+        // No system level, 50 % pressure and 6 % available memory: the old
+        // estimate said elevated, the percent rule reads normal.
+        let before = makeSnapshot(
+            availableBytes: 500,
+            pressure: .unavailable(.unsupported, reason: "The system level could not be read.")
+        )
+        let after = makeSnapshot(availableBytes: 600, pressure: .available(.critical))
+        let process = makeProcess(id: 110, bytes: 1_500)
+        let applications = FakeMemoryApplicationController(
+            statuses: [process.id: [.ready, .ready, .targetExited]]
+        )
+        let coordinator = MemoryCoordinator(
+            probe: FakeMemoryProbe(snapshots: [after]),
+            applications: applications,
+            clock: ImmediateMemoryClock()
+        )
+        let plan = try coordinator.makePlan(processes: [process], snapshot: before)
+        let result = try await coordinator.execute(planID: plan.id, before: before)
+
+        XCTAssertEqual(result.pressureBefore, .normal)
+        XCTAssertEqual(result.pressureAfter, .critical, "the system level of the verification sample")
+    }
+
     func testIdentityChangeFailsPreflightWithoutSendingQuitRequest() async throws {
         let snapshot = makeSnapshot()
         let process = makeProcess(id: 102)
@@ -215,10 +241,11 @@ final class MemoryCoordinatorTests: XCTestCase {
     private func makeSnapshot(
         appBytes: UInt64 = 2_000,
         availableBytes: UInt64 = 4_000,
-        quality: MeasurementQuality = .complete
+        quality: MeasurementQuality = .complete,
+        pressure: MemoryMeasurement<MemoryPressureLevel> = .available(.normal)
     ) -> MemorySnapshot {
         let measurements = MemoryMeasurements(
-            pressure: .available(.normal),
+            pressure: pressure,
             physicalBytes: .available(8_000),
             availableBytes: .available(availableBytes),
             appBytes: .available(appBytes),

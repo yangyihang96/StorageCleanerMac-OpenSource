@@ -3,8 +3,16 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class MacBenchmarkPresentationTests: XCTestCase {
+    private var languagePreferences: TestVolatilePreferences!
+
+    override func setUp() {
+        super.setUp()
+        languagePreferences = TestVolatilePreferences()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey)
+        languagePreferences.restore()
+        languagePreferences = nil
         super.tearDown()
     }
 
@@ -67,7 +75,7 @@ final class MacBenchmarkPresentationTests: XCTestCase {
         XCTAssertEqual(rows.count, 6)
         XCTAssertEqual(gpu.unit, .millionTrianglesPerSecond)
 
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(
             MacBenchmarkPresentation.componentTitle(gpu.component, unit: gpu.unit),
             "Metal GPU 3D"
@@ -86,7 +94,7 @@ final class MacBenchmarkPresentationTests: XCTestCase {
         )
         XCTAssertNil(MacBenchmarkPresentation.capacityScoreDetail(for: .gpu, result: result))
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(
             MacBenchmarkPresentation.capacityScoreDetail(for: .memory, result: result),
             "48 GB · 25% weight"
@@ -161,16 +169,16 @@ final class MacBenchmarkPresentationTests: XCTestCase {
         XCTAssertEqual(MacBenchmarkPresentation.scoreText(nil), "—")
         XCTAssertEqual(MacBenchmarkPresentation.variabilityText(0.0123), "CV 1.2%")
 
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(MacBenchmarkPresentation.durationText(59.6), "60 秒")
         XCTAssertEqual(MacBenchmarkPresentation.durationText(61), "1 分 1 秒")
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(MacBenchmarkPresentation.durationText(61), "1 min 1 sec")
     }
 
     func testBenchmarkCorePresentationIsLocalizedInChineseAndEnglish() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(MacBenchmarkPresentation.performanceIndexTitle, "性能指数")
         XCTAssertEqual(MacBenchmarkPresentation.profileTitle(.standard), "标准")
         XCTAssertEqual(
@@ -199,7 +207,7 @@ final class MacBenchmarkPresentationTests: XCTestCase {
             MacBenchmarkPresentation.rawOnlyTitle(.baselineUnavailable).contains("仅保留原始值")
         )
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(MacBenchmarkPresentation.performanceIndexTitle, "Performance Index")
         XCTAssertEqual(MacBenchmarkPresentation.profileTitle(.standard), "Standard")
         XCTAssertEqual(
@@ -223,7 +231,7 @@ final class MacBenchmarkPresentationTests: XCTestCase {
     }
 
     func testPerformanceIndexCopySupportsMultipleAppleChipFamiliesWithoutClaimingRank() throws {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
 
         XCTAssertEqual(MacBenchmarkPresentation.referenceScoreText, "1000")
         XCTAssertEqual(MacBenchmarkPresentation.referenceTotalScoreText, "6000")
@@ -251,7 +259,7 @@ final class MacBenchmarkPresentationTests: XCTestCase {
     }
 
     func testSafetyAndFailureMessagesStateAnActionableBoundary() {
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
 
         XCTAssertTrue(
             MacBenchmarkPresentation.failureDetail(.busy(activeTask: "private task name"))
@@ -288,101 +296,75 @@ final class MacBenchmarkPresentationTests: XCTestCase {
     }
 
     func testDashboardSourcePreservesManualSafetyExplainabilityAndLayoutContracts() throws {
+        // D64 removes the unreferenced v6 views, not scoring/history services or presentation value tests.
         let root = projectRoot
-        let dashboard = try source(
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkDashboardView.swift",
-            root: root
-        )
-        let resultSections = try source(
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkResultSections.swift",
-            root: root
-        )
-        let leaderboard = try source(
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacBenchmarkLeaderboardSection.swift",
-            root: root
-        )
-        let accelerator = try source(
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacAcceleratorBenchmarkSection.swift",
-            root: root
-        )
-        let sustained = try source(
-            "Sources/StorageCleanerMac/Views/ComputerHealth/MacSustainedBenchmarkSection.swift",
-            root: root
-        )
-        let benchmarkV7Dashboard = try source(
-            "Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift",
-            root: root
-        )
-
-        XCTAssertTrue(dashboard.contains("struct MacBenchmarkDashboardView: View"))
-        XCTAssertTrue(dashboard.contains("MacBenchmarkPresentationProgress"))
+        let dashboard = try source("Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7DashboardView.swift", root: root)
+        let leaderboard = try source("Sources/StorageCleanerMac/Views/ComputerHealth/BenchmarkV7LeaderboardSection.swift", root: root)
+        let raw = try source("Sources/StorageCleanerMac/Views/ComputerHealth/MSeriesRawResultView.swift", root: root)
+        for name in ["MacBenchmarkDashboardView", "MacBenchmarkResultSections", "MacBenchmarkLeaderboardSection", "MacAcceleratorBenchmarkSection", "MacSustainedBenchmarkSection"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Sources/StorageCleanerMac/Views/ComputerHealth/" + name + ".swift").path), name)
+        }
+        XCTAssertTrue(dashboard.contains("struct BenchmarkV7DashboardView: View"))
         XCTAssertTrue(dashboard.contains("accessibilityReduceMotion"))
         XCTAssertTrue(dashboard.contains("transaction.animation = reduceMotion ? nil"))
-        XCTAssertTrue(dashboard.contains("开始完整测试"))
-        XCTAssertTrue(dashboard.contains("第 1/3 项"))
-        XCTAssertTrue(dashboard.contains("我已接通电源"))
-        XCTAssertFalse(accelerator.contains("运行加速测试"))
-        XCTAssertFalse(sustained.contains("运行持续测试"))
-        XCTAssertTrue(dashboard.contains("取消并清理"))
-        XCTAssertTrue(dashboard.contains("MacBenchmarkPresentation.activeReferenceSummary"))
-        XCTAssertTrue(dashboard.contains("Standard v6"))
-        XCTAssertTrue(dashboard.contains("本机离线"))
-        XCTAssertTrue(dashboard.contains("AppEmptyState("))
-        XCTAssertTrue(dashboard.contains("AppSymbols.Benchmark.performance"))
-        XCTAssertTrue(dashboard.contains("不是同型号排名"))
-        XCTAssertTrue(dashboard.contains("hasVerifiedActiveBaseline"))
-        XCTAssertTrue(dashboard.contains("v6 冻结参照未能载入 · 仅原始值"))
-        XCTAssertTrue(dashboard.contains("clock.badge.exclamationmark"))
-        XCTAssertTrue(dashboard.contains("private let benchmarkProfile: BenchmarkProfile = .standard"))
+        XCTAssertTrue(dashboard.contains("开始性能测试"))
+        XCTAssertTrue(dashboard.contains("benchmarkPrimaryAction"))
+        XCTAssertTrue(dashboard.contains("onStart"))
+        XCTAssertTrue(dashboard.contains("onCancel"))
+        XCTAssertTrue(dashboard.contains("isCurrentComparableOfficialResult"))
+        XCTAssertTrue(dashboard.contains("localBestResult"))
+        XCTAssertTrue(dashboard.contains("onDeleteHistoryRecord"))
+        XCTAssertTrue(dashboard.contains("onExportHistoryRecord"))
+        XCTAssertTrue(dashboard.contains("BenchmarkV7RunProgressView("))
+        XCTAssertTrue(dashboard.contains("!latest.isCompleteCore"))
+        XCTAssertTrue(dashboard.contains("onDeleteHistoryRecord(recordID)"))
+        XCTAssertTrue(dashboard.contains("guard let data = onExportHistoryRecord(recordID)"))
+        XCTAssertTrue(dashboard.contains("if result.failure == nil, !result.isCurrentComparableOfficialResult"))
+        XCTAssertTrue(dashboard.contains("comparisonRecordIDs.contains(recordID)"))
+        XCTAssertTrue(dashboard.contains(".filter(\\.isCurrentComparableOfficialResult)"))
+        XCTAssertTrue(dashboard.contains("if let computerName = result.hardwareProfile?.computerName"))
+        XCTAssertTrue(dashboard.contains("if let computerModel = result.hardwareProfile?.computerModel"))
+        XCTAssertTrue(dashboard.contains("if let modelIdentifier = result.hardwareProfile?.modelIdentifier"))
+        XCTAssertTrue(dashboard.contains("if let gpuCoreCount = result.hardwareProfile?.gpuCoreCount"))
+        XCTAssertTrue(dashboard.contains("if let storageModel = result.hardwareProfile?.storageModel"))
+        XCTAssertTrue(dashboard.contains("physicalMemoryBytes"))
+        XCTAssertTrue(dashboard.contains("systemDiskCapacityBytes"))
+        XCTAssertTrue(dashboard.contains("LazyVStack("))
+        XCTAssertTrue(dashboard.contains("GridItem(.adaptive(minimum: 170)"))
+        XCTAssertTrue(dashboard.contains("ViewThatFits(in: .horizontal)"))
+        XCTAssertTrue(dashboard.contains("原始指标与技术详情"))
+        XCTAssertTrue(dashboard.contains("仅保存在本机"))
+        XCTAssertTrue(dashboard.contains("删除后无法从应用内恢复"))
+        XCTAssertTrue(dashboard.contains("if case .failure = historyFeedback"))
         XCTAssertFalse(dashboard.contains("selectedProfile"))
-        XCTAssertFalse(dashboard.contains("Picker("))
-        XCTAssertFalse(dashboard.contains(".pickerStyle(.segmented)"))
-        XCTAssertFalse(dashboard.contains(".onAppear"))
-        XCTAssertFalse(dashboard.contains(".task {"))
         XCTAssertFalse(dashboard.contains("repeatForever"))
-        XCTAssertTrue(dashboard.contains("Metal 3D 离屏渲染"))
-        XCTAssertTrue(dashboard.contains("262,144 INSTANCES  ·  600 FRAMES"))
-        XCTAssertTrue(dashboard.contains("1.887B TRIANGLES / SAMPLE"))
-        XCTAssertTrue(dashboard.contains("低频静态进度"))
-        XCTAssertTrue(dashboard.contains("ProgressView(value: normalizedProgress)"))
-        XCTAssertFalse(dashboard.contains("TimelineView(.animation(minimumInterval: 1.0 / 30.0"))
-        XCTAssertFalse(dashboard.contains("Canvas {"))
-        XCTAssertTrue(benchmarkV7Dashboard.contains("if let computerName = result.hardwareProfile?.computerName"))
-        XCTAssertTrue(benchmarkV7Dashboard.contains("if let computerModel = result.hardwareProfile?.computerModel"))
-        XCTAssertTrue(benchmarkV7Dashboard.contains("if let modelIdentifier = result.hardwareProfile?.modelIdentifier"))
-        XCTAssertTrue(benchmarkV7Dashboard.contains("if let gpuCoreCount = result.hardwareProfile?.gpuCoreCount"))
-        XCTAssertTrue(benchmarkV7Dashboard.contains("if let storageModel = result.hardwareProfile?.storageModel"))
-
-        XCTAssertTrue(dashboard.contains("case longLocalizedText"))
-        XCTAssertTrue(dashboard.contains(".frame(width: 980, height: 680)"))
-        XCTAssertTrue(resultSections.contains("MacBenchmarkComponentGrid"))
-        XCTAssertTrue(resultSections.contains("MacBenchmarkHistorySection"))
-        XCTAssertTrue(resultSections.contains("Table(rows)"))
-        XCTAssertFalse(dashboard.contains("DisclosureGroup"))
-        XCTAssertFalse(resultSections.contains("MacBenchmarkMethodDisclosure"))
-        XCTAssertFalse(resultSections.contains(".popover("))
-        XCTAssertTrue(resultSections.contains("MacBenchmarkScoreComparisonBars"))
-        XCTAssertTrue(resultSections.contains("高于基准"))
-        XCTAssertTrue(resultSections.contains("低于基准"))
-        XCTAssertTrue(resultSections.contains("ProgressView(value: value, total: scale)"))
-        XCTAssertTrue(resultSections.contains("MacBenchmarkScoring.referenceTotalScore"))
-        XCTAssertTrue(resultSections.contains("MacBenchmarkScoring.referenceScore"))
-        XCTAssertTrue(resultSections.contains("GridItem(.adaptive(minimum: 270"))
-        XCTAssertTrue(resultSections.contains("ViewThatFits(in: .horizontal)"))
-        XCTAssertTrue(resultSections.contains("MacBenchmarkPresentation.capacityScoreDetail"))
-        XCTAssertTrue(resultSections.contains("仅显示原始值"))
-        XCTAssertTrue(resultSections.contains("稳定性"))
-        XCTAssertFalse(resultSections.contains("title: L10n.text(\"样本\""))
-        XCTAssertFalse(resultSections.contains("算法版本"))
+        XCTAssertFalse(dashboard.contains("MacBenchmarkDashboardView"))
         XCTAssertFalse(dashboard.contains("一次完成 Standard v6"))
-        XCTAssertTrue(leaderboard.contains("社区性能排行榜 · v6"))
-        XCTAssertTrue(leaderboard.contains("MacBenchmarkPresentation.standardLeaderboardScoreTitle"))
-        XCTAssertTrue(leaderboard.contains("entry.physicalMemoryBytes"))
-        XCTAssertTrue(leaderboard.contains("entry.systemDiskCapacityBytes"))
-        XCTAssertTrue(leaderboard.contains("用户 ID：\\(store.automaticDisplayName)"))
-        XCTAssertFalse(leaderboard.contains("当前公共榜单使用冻结的 Standard v6"))
+        XCTAssertTrue(raw.contains("result.metrics"))
+        XCTAssertTrue(raw.contains("statistics.sampleCount"))
+        XCTAssertTrue(raw.contains("statistics.median"))
+        XCTAssertTrue(raw.contains("statistics.confidence.rawValue"))
+        XCTAssertTrue(raw.contains("sample stability, not statistical confidence"))
+        XCTAssertTrue(raw.contains("awaiting reference calibration"))
+        XCTAssertTrue(raw.contains("result.extensions"))
+        XCTAssertTrue(raw.contains("result.writtenBytes"))
+        XCTAssertTrue(raw.contains("result.plan"))
+        XCTAssertFalse(raw.contains("运行加速测试"))
+        XCTAssertFalse(raw.contains("运行持续测试"))
+        XCTAssertFalse(raw.contains("Canvas {"))
+        XCTAssertFalse(raw.contains("TimelineView(.animation("))
+        XCTAssertTrue(leaderboard.contains("全球 Mac 排行榜"))
+        XCTAssertTrue(leaderboard.contains("entry.memoryGB"))
+        XCTAssertTrue(leaderboard.contains("entry.processorModel"))
+        XCTAssertTrue(leaderboard.contains("publishConfirmationMessage"))
+        XCTAssertTrue(leaderboard.contains("showsPublishConfirmation"))
+        XCTAssertTrue(leaderboard.contains("showsRemovalConfirmation"))
+        XCTAssertTrue(leaderboard.contains("canPublish"))
+        XCTAssertTrue(leaderboard.contains("store.submit"))
+        XCTAssertTrue(leaderboard.contains("store.remove"))
+        XCTAssertTrue(leaderboard.contains("系统"))
+        XCTAssertTrue(leaderboard.contains("匿名名称"))
         XCTAssertFalse(leaderboard.contains("有效成绩完成后自动上传"))
-        XCTAssertFalse(leaderboard.contains("确认上传"))
         XCTAssertFalse(leaderboard.contains("社区性能排行榜 · v4"))
     }
 

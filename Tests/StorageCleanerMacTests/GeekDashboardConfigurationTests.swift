@@ -75,19 +75,61 @@ final class GeekDashboardConfigurationTests: XCTestCase {
         )
 
         XCTAssertTrue(hover.contains("if showsRangePicker"))
-        XCTAssertTrue(hover.contains("struct TimeRangeSelector"))
+        // Batch 2b removed the unused Menu-based TimeRangeSelector; the range
+        // control is the history header's own picker with inline choices.
+        XCTAssertFalse(hover.contains("struct TimeRangeSelector"))
         XCTAssertTrue(hover.contains("ForEach(availableRanges)"))
-        XCTAssertTrue(hover.contains("Image(systemName: \"chevron.up.chevron.down\")"))
-        XCTAssertTrue(hover.contains(".menuIndicator(.hidden)"))
+        XCTAssertTrue(hover.contains("\"chevron.up.chevron.down\""))
         XCTAssertFalse(hover.contains("Image(systemName: \"chevron.down\")"))
-        XCTAssertTrue(hover.contains(".id(chartRangeSelection.range)"))
-        XCTAssertTrue(hover.contains("TimeRangeSelector.rangeChangeAnimationDuration"))
+        XCTAssertFalse(hover.contains(".id(chartRangeSelection.range)"), "Range changes must preserve the mounted history surface")
+        XCTAssertTrue(hover.contains(".transaction { $0.animation = nil }"))
+        XCTAssertTrue(hover.contains("beginHistoryInteraction()"), "Range controls must protect the current route from hover dismissal")
         XCTAssertTrue(panel.contains("select: selectGeekChartRange"))
         XCTAssertTrue(panel.contains("selectedChartRangeMetric"))
         XCTAssertTrue(panel.contains("panelSettingsState.setGeekChartRange(range, for: metric)"))
         XCTAssertTrue(panel.contains("var historyReferenceDate: Date"))
         XCTAssertFalse(panel.contains("return MiniWindowDemoData.nativeDiskIOHistory"))
         XCTAssertTrue(panel.contains("var batteryPowerHistory"))
+    }
+
+    @MainActor
+    func testTertiaryRangeSelectionRoutesByMetricEvenWhenAnotherSectionIsSelected() throws {
+        let fixture = try makeDefaultsFixture()
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
+        let state = MenuBarPanelSettingsState(
+            initialDensity: .geek,
+            selectedSection: .processor,
+            defaults: fixture.defaults
+        )
+        let selection = GeekChartRangeSelection(
+            range: .fifteenMinutes,
+            select: { state.setGeekChartRange($0, for: PanelSection.processor) },
+            rangeForMetric: { state.geekChartRange(for: $0, fallbackTo: .processor) },
+            selectForMetric: { state.setGeekChartRange($0, for: $1) }
+        )
+
+        selection.apply(.oneHour, to: .cpu)
+        selection.apply(.threeHours, to: .memory)
+        selection.apply(.sixHours, to: .disk)
+        XCTAssertEqual(selection.resolvedRange(for: .cpu), .oneHour)
+        XCTAssertEqual(selection.resolvedRange(for: .memory), .threeHours)
+        XCTAssertEqual(selection.resolvedRange(for: .disk), .sixHours)
+        XCTAssertEqual(selection.resolvedRange(for: nil), .fifteenMinutes)
+
+        let reopened = MenuBarPanelSettingsState(initialDensity: .geek, defaults: fixture.defaults)
+        XCTAssertEqual(reopened.geekChartRange(for: .cpu, fallbackTo: .processor), .oneHour)
+        XCTAssertEqual(reopened.geekChartRange(for: .memory, fallbackTo: .memory), .threeHours)
+        XCTAssertEqual(reopened.geekChartRange(for: .disk, fallbackTo: .disk), .sixHours)
+    }
+
+    func testNetworkVolumeRequiresReportedPositiveCapacity() {
+        XCTAssertFalse(GeekDiskVolumePresentation.hasReadableCapacity(nil))
+        XCTAssertFalse(GeekDiskVolumePresentation.hasReadableCapacity(
+            StorageCapacitySnapshot(totalBytes: 0, availableBytes: 0)
+        ))
+        XCTAssertTrue(GeekDiskVolumePresentation.hasReadableCapacity(
+            StorageCapacitySnapshot(totalBytes: 1_000, availableBytes: 200)
+        ))
     }
 
     func testFastAndPowerRangesPersistIndependently() throws {
@@ -171,7 +213,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
     @MainActor
     func testShortHistorySelectionPersistsWithoutChangingSamplingFrequency() throws {
         let fixture = try makeDefaultsFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         fixture.defaults.set("twoSeconds", forKey: "menuBar.refreshInterval")
         let state = MenuBarPanelSettingsState(initialDensity: .geek, defaults: fixture.defaults)
         state.setGeekChartRange(.oneMinute, for: .cpu)
@@ -185,7 +227,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
 
     func testStoredFallsBackToDefaultForCorruptPayload() throws {
         let fixture = try makeDefaultsFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         fixture.defaults.set(Data("not-json".utf8), forKey: GeekDashboardConfiguration.defaultsKey)
 
         XCTAssertEqual(
@@ -252,7 +294,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
 
     func testStoredLegacyDefaultMigratesToCompactCombinedLayout() throws {
         let fixture = try makeDefaultsFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let legacy = GeekDashboardConfiguration(
             modules: GeekDashboardModule.allCases.map { module in
                 GeekDashboardModuleConfiguration(
@@ -341,7 +383,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
     func testCustomizerCancelRestoresPreferencesAndDoneKeepsChanges() throws {
         let fixture = try makeDefaultsFixture()
         let defaults = fixture.defaults
-        defer { defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         var initial = GeekDashboardConfiguration.defaultValue
         initial.chartRange = .oneDay
         initial.setModule(.disk, isVisible: false)
@@ -384,7 +426,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
     @MainActor
     func testCustomizerCancelDoesNotCreatePreviouslyAbsentDefaults() throws {
         let fixture = try makeDefaultsFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let state = MenuBarPanelSettingsState(
             initialDensity: .geek,
             isGeekEditorPresented: true,
@@ -405,7 +447,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
     @MainActor
     func testDashboardUpdatesOutsideEditorContinueToPersist() throws {
         let fixture = try makeDefaultsFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         let state = MenuBarPanelSettingsState(initialDensity: .geek, defaults: fixture.defaults)
         state.updateGeekDashboardConfiguration { $0.chartRange = .sixHours }
         XCTAssertEqual(GeekDashboardConfiguration.stored(in: fixture.defaults).chartRange, .sixHours)
@@ -417,9 +459,9 @@ final class GeekDashboardConfigurationTests: XCTestCase {
 
     @MainActor
     func testMetricRangesPersistIndependentlyFromLegacyConfiguration() throws {
-        let suiteName = "GeekDashboardConfigurationTests.Ranges.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
         let first = MenuBarPanelSettingsState(initialDensity: .geek, defaults: defaults)
         first.setGeekChartRange(.sixHours, for: PanelSection.processor)
@@ -501,7 +543,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
 
     func testUserDefaultsCodableRoundTripStoresNormalizedConfiguration() throws {
         let fixture = try makeDefaultsFixture()
-        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
         var configuration = GeekDashboardConfiguration.defaultValue
         configuration.setModule(.disk, isVisible: false)
         configuration.setModule(.network, width: .full)
@@ -537,9 +579,8 @@ final class GeekDashboardConfigurationTests: XCTestCase {
         defaults: UserDefaults,
         suiteName: String
     ) {
-        let suiteName = "GeekDashboardConfigurationTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.removePersistentDomain(forName: suiteName)
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
         return (defaults, suiteName)
     }
 }

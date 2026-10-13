@@ -2,20 +2,28 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class L10nTests: XCTestCase {
+    private var languagePreferences: TestVolatilePreferences!
+
+    override func setUp() {
+        super.setUp()
+        languagePreferences = TestVolatilePreferences()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey)
+        languagePreferences.restore()
+        languagePreferences = nil
         super.tearDown()
     }
 
     func testChineseLanguageModeUsesChineseText() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
 
         XCTAssertEqual(L10n.text("中文", "English"), "中文")
         XCTAssertEqual(L10n.items(3), "3 项")
     }
 
     func testEnglishLanguageModeUsesEnglishText() {
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
 
         XCTAssertEqual(L10n.text("中文", "English"), "English")
         XCTAssertEqual(L10n.items(1), "1 item")
@@ -34,21 +42,21 @@ final class L10nTests: XCTestCase {
     }
 
     func testAppearanceTitlesFollowLanguageMode() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(AppAppearance.dark.title, "深色")
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(AppAppearance.dark.title, "Dark")
     }
 
     func testBulkTrashMessageKeepsTrashAndFreeSpaceBoundaryClear() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         let chinese = L10n.bulkTrashMessage(count: 2, bytes: "100 MB")
         XCTAssertTrue(chinese.contains("移到废纸篓"))
         XCTAssertTrue(chinese.contains("清空废纸篓后才会真正释放空间"))
         XCTAssertFalse(chinese.contains("预计释放"))
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         let english = L10n.bulkTrashMessage(count: 2, bytes: "100 MB")
         XCTAssertTrue(english.contains("Move 2 items marked safe to clean to Trash"))
         XCTAssertTrue(english.contains("Free space changes after Trash is emptied"))
@@ -76,14 +84,14 @@ final class L10nTests: XCTestCase {
             "Login Items & Background Tasks", "Memory Management", "Energy", "Uninstall", "App Updates"
         ]
 
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(ReviewFilter.allCases.map(\.title), chineseTitles)
         XCTAssertEqual(ReviewFilter.green.sidebarTitle, "安全清理")
         XCTAssertEqual(ReviewFilter.privacy.sidebarTitle, "浏览器隐私")
         XCTAssertEqual(ReviewFilter.largeFiles.sidebarTitle, "文件分析")
         XCTAssertEqual(ReviewFilter.migration.sidebarTitle, "文件搬家")
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(ReviewFilter.allCases.map(\.title), englishTitles)
         XCTAssertEqual(ReviewFilter.green.sidebarTitle, "Safe Cleanup")
         XCTAssertEqual(ReviewFilter.privacy.sidebarTitle, "Browser Privacy")
@@ -92,15 +100,15 @@ final class L10nTests: XCTestCase {
     }
 
     func testMenuBarPanelExposesGeekVocabularyOnly() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(PanelDensity.menuBarChoices.map(\.title), ["极客"])
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(PanelDensity.menuBarChoices.map(\.title), ["Geek"])
     }
 
     func testComputerHealthDashboardCoreLabelsAreLocalized() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(HealthDashboardText.dataInsufficient, "数据不足")
         XCTAssertEqual(HealthDashboardText.environmentTitle, "环境状态（不计入总分）")
         XCTAssertEqual(HealthDashboardText.scoreEvidenceTitle, "评分构成与原始证据")
@@ -115,7 +123,7 @@ final class L10nTests: XCTestCase {
         XCTAssertEqual(BatteryTimeEstimateKind.untilFull.localizedLabel, "预计充满")
         XCTAssertEqual(BatteryTimeEstimateKind.remaining.localizedLabel, "预计剩余")
 
-        UserDefaults.standard.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences.set(AppLanguage.english.rawValue, forKey: L10n.languageDefaultsKey)
         XCTAssertEqual(HealthDashboardText.dataInsufficient, "Data Insufficient")
         XCTAssertEqual(HealthDashboardText.environmentTitle, "Environment (Not Scored)")
         XCTAssertEqual(HealthDashboardText.scoreEvidenceTitle, "Score Breakdown & Raw Evidence")

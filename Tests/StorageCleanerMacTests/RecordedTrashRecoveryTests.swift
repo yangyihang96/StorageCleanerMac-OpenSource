@@ -3,10 +3,32 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class RecordedTrashRecoveryTests: XCTestCase {
+    func testPermissionDenialWithOriginalStillPresentIsNotAnUnknownMove() throws {
+        let fm = FileManager.default
+        let root = TestFileSystem.uniqueOperationRoot("uninstall-denial")
+        defer { TestFileSystem.remove(root) }
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("Fixture.app")
+        try Data("fixture".utf8).write(to: source)
+        let identity = try FoundationReadOnlyFileSystem().snapshot(at: source).identity
+        let report = RecordedTrashOperation.run(
+            items: [.init(path: source.path, bytes: 7, identity: identity)],
+            ruleID: "fixture.uninstall", validate: { _ in },
+            move: { _ in throw CocoaError(.fileWriteNoPermission) },
+            persist: { _, _ in }
+        )
+        XCTAssertEqual(report.summary.movedItemCount, 0)
+        XCTAssertTrue(fm.fileExists(atPath: source.path))
+        guard case .failed(let failure) = try XCTUnwrap(report.items.first).outcome else {
+            return XCTFail("Expected an explicit denial")
+        }
+        XCTAssertEqual(failure.code, .trashMoveRejected)
+    }
+
     func testAmbiguousSecondMoveKeepsFirstReceiptAndRecoversByIdentityWithoutOverwriting() async throws {
         let fm = FileManager.default
-        let root = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
-        defer { try? fm.removeItem(at: root) }
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        defer { TestFileSystem.remove(root) }
         let trash = root.appendingPathComponent("fixture-trash")
         try fm.createDirectory(at: trash, withIntermediateDirectories: true)
         let a = root.appendingPathComponent("A"), b = root.appendingPathComponent("B")
@@ -43,8 +65,8 @@ final class RecordedTrashRecoveryTests: XCTestCase {
 
     func testLegacyMultiPathFailureKeepsSuccessfulPathInDurableReport() throws {
         let fm = FileManager.default
-        let root = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
-        defer { try? fm.removeItem(at: root) }
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        defer { TestFileSystem.remove(root) }
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         let a = root.appendingPathComponent("a"), b = root.appendingPathComponent("b")
         try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
@@ -52,7 +74,7 @@ final class RecordedTrashRecoveryTests: XCTestCase {
             sizeBytes: 2, tier: .green, kind: "cache", reason: "fixture", recommendation: "fixture",
             risk: "low", requiresClose: "", trashPaths: [a.path, b.path], openPath: root.path, status: .available)
         let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))
-        let report = CleanupService.moveToTrashRecorded(item, allowedPaths: [a.path, b.path], excludedPaths: [],
+        let report = CleanupService.moveToTrashRecorded(item, allowedPaths: [a.path, b.path], excludedPaths: [], homeDirectory: root,
             trashItemOperation: { url in
                 if url == b { throw CocoaError(.fileWriteNoPermission) }
                 let target = root.appendingPathComponent("moved-a")
@@ -69,8 +91,8 @@ final class RecordedTrashRecoveryTests: XCTestCase {
 
     func testStagingCleanupCannotDeleteReplacedDirectoryAndLeavesDurableResidual() throws {
         let fm = FileManager.default
-        let root = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/StorageCleanerFixture-" + UUID().uuidString)
-        defer { try? fm.removeItem(at: root) }
+        let root = TestFileSystem.uniqueOperationRoot("StorageCleanerFixture")
+        defer { TestFileSystem.remove(root) }
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         let staging = try MigrationStagingDirectory(parentURL: root)
         let journal = CleanupReportJournal(directory: root.appendingPathComponent("receipts"))

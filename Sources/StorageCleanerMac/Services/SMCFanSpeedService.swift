@@ -7,12 +7,20 @@ enum SMCFanSpeedService {
         let fanReadings: [SystemFanReading]
         let fanCount: Int?
         let temperatureReadings: [SystemTemperatureReading]
+        let temperatureDetails: [SystemTemperatureDetailReading]
         let chipTemperatureCelsius: Double?
+        /// The hottest per-PMU SMC reading (`TPDX/TRDX/TUDX`), the fallback
+        /// for the "电源管理芯片" probe when the HID `PMU tdie*` are missing.
+        var powerManagementTemperatureCelsius: Double? = nil
+        /// Zones whose meaning is inferred from SMC key names (D57: palm rest
+        /// `Ts0P/Ts1P`, Thunderbolt `TaLT/TaRT`); the third level says so.
+        var inferredZones: Set<SystemTemperatureZone> = []
 
         static let empty = HardwareReadings(
             fanReadings: [],
             fanCount: nil,
             temperatureReadings: [],
+            temperatureDetails: [],
             chipTemperatureCelsius: nil
         )
     }
@@ -49,14 +57,26 @@ enum SMCFanSpeedService {
         (.wifi, ["TW0P", "TW0p"])
     ]
 
+    /// Apple silicon only: Asahi's common sensors name `TCHP` the charge
+    /// regulator ("充电电路", D57). The external adapter is not readable.
+    private static let appleSiliconPeripheralTemperatureKeys: [(SystemTemperatureZone, [String])] = [
+        (.chargingCircuit, ["TCHP"])
+    ]
+
     // These M5 chassis keys are only interpreted after the complete M5 CPU
-    // topology has been observed.  Ts0P/Ts1P are SSD controllers on M5 and
-    // must never be presented as palm-rest temperature.
+    // topology has been observed. D57: palm rest is `Ts0P/Ts1P` (the keys
+    // iStat collects on Mac17,9; they stay flat under SSD load, so they are
+    // not SSD sensors) and Thunderbolt is `TaLT/TaRT`. Neither group has a
+    // public definition, so their meaning is inferred from the key names
+    // (`inferredZones`) until the names are checked in iStat.
     private static let m5ChassisTemperatureKeys: [(SystemTemperatureZone, [String])] = [
-        (.palmRest, ["TDeL", "TDeR"]),
+        (.palmRest, ["Ts0P", "Ts1P"]),
         (.thunderboltLeft, ["TaLT"]),
         (.thunderboltRight, ["TaRT"])
     ]
+
+    /// The hottest sensor of each power-management IC (research §4.1).
+    private static let powerManagementTemperatureKeys = ["TPDX", "TRDX", "TUDX"]
 
     private static let primaryChipTemperatureKeys = [
         "TCMz", "TCMb"
@@ -93,51 +113,71 @@ enum SMCFanSpeedService {
         currentFanReadings().map(\.actualRPM)
     }
 
-    static func currentFanReadings() -> [SystemFanReading] {
-        guard let connection = SMCConnection() else { return [] }
-        return fanReadings(
-            readValue: { connection.readDouble($0) },
-            readName: { connection.readFanName($0) },
-            isPortable: isPortableHardware
-        )
-    }
-
-    static func currentHardwareReadings() -> HardwareReadings {
-        guard let connection = SMCConnection() else { return .empty }
-
-        // A single thermal pass can ask for the same core keys while grouping
-        // zones and resolving the headline chip value. Cache within this pass
-        // so AppleSMC is never queried twice for the same key.
-        var attemptedKeys = Set<String>()
-        var valuesByKey: [String: Double] = [:]
-        func readCached(_ key: String) -> Double? {
-            if attemptedKeys.contains(key) {
-                return valuesByKey[key]
-            }
-            attemptedKeys.insert(key)
-            let value = connection.readDouble(key)
-            if let value {
-                valuesByKey[key] = value
-            }
-            return value
+    static func currentFanReadings(connection: SMCReadSession = .shared, isPortable: Bool? = nil) -> [SystemFanReading] {
+        connection.withReadPass(fallback: []) { reader in
+            fanReadings(
+                readValue: { reader.readDouble($0) },
+                readName: { reader.readFanName($0) },
+                isPortable: isPortable ?? isPortableHardware
+            )
         }
-
-        return HardwareReadings(
-            fanReadings: fanReadings(
-                readValue: readCached,
-                readName: { connection.readFanName($0) },
-                isPortable: isPortableHardware
-            ),
-            fanCount: fanCount(readValue: readCached),
-            temperatureReadings: temperatureReadings(readValue: readCached),
-            chipTemperatureCelsius: chipTemperatureCelsius(readValue: readCached)
-        )
     }
 
-    static func currentChipTemperatureCelsius() -> Double? {
-        guard let connection = SMCConnection() else { return nil }
-        return chipTemperatureCelsius { key in
-            connection.readDouble(key)
+    static func currentHardwareReadings(connection: SMCReadSession = .shared, isPortable: Bool? = nil) -> HardwareReadings {
+        connection.withReadPass(fallback: .empty) { reader in
+            // A single thermal pass can ask for the same core keys while grouping
+            // zones and resolving the headline chip value. Cache within this pass
+            // so AppleSMC is never queried twice for the same key.
+            var attemptedKeys = Set<String>()
+            var valuesByKey: [String: Double] = [:]
+            func readCached(_ key: String) -> Double? {
+                if attemptedKeys.contains(key) {
+                    return valuesByKey[key]
+                }
+                attemptedKeys.insert(key)
+                let value = reader.readDouble(key)
+                if let value {
+                    valuesByKey[key] = value
+                }
+                return value
+            }
+
+            let temperatureReadings = temperatureReadings(readValue: readCached, platform: reader.platform)
+            let chipTemperature = chipTemperatureCelsius(readValue: readCached)
+            return HardwareReadings(
+                fanReadings: fanReadings(
+                    readValue: readCached,
+                    readName: { reader.readFanName($0) },
+                    isPortable: isPortable ?? isPortableHardware
+                ),
+                fanCount: fanCount(readValue: readCached),
+                temperatureReadings: temperatureReadings,
+                temperatureDetails: detailedTemperatureReadings(readValue: readCached),
+                chipTemperatureCelsius: chipTemperature,
+                powerManagementTemperatureCelsius: powerManagementTemperatureCelsius(readValue: readCached),
+                inferredZones: inferredTemperatureZones(readValue: readCached)
+            )
+        }
+    }
+
+    /// The hottest valid `TPDX/TRDX/TUDX` reading.
+    static func powerManagementTemperatureCelsius(readValue: (String) -> Double?) -> Double? {
+        temperatures(for: powerManagementTemperatureKeys, readValue: readValue).max()
+    }
+
+    /// The zones `temperatureReadings` filled from key names alone.
+    static func inferredTemperatureZones(readValue: (String) -> Double?) -> Set<SystemTemperatureZone> {
+        guard m5TemperatureGroups(readValue: readValue).isCompleteTopology else { return [] }
+        return Set(m5ChassisTemperatureKeys.compactMap { zone, keys in
+            temperatures(for: keys, readValue: readValue).isEmpty ? nil : zone
+        })
+    }
+
+    static func currentChipTemperatureCelsius(connection: SMCReadSession = .shared) -> Double? {
+        connection.withReadPass(fallback: nil) { reader in
+            chipTemperatureCelsius { key in
+                reader.readDouble(key)
+            }
         }
     }
 
@@ -327,7 +367,8 @@ enum SMCFanSpeedService {
     }
 
     static func temperatureReadings(
-        readValue: (String) -> Double?
+        readValue: (String) -> Double?,
+        platform: SMCPlatform = .current
     ) -> [SystemTemperatureReading] {
         var valueByZone: [SystemTemperatureZone: Double] = [:]
         let m5Groups = m5TemperatureGroups(readValue: readValue)
@@ -348,7 +389,10 @@ enum SMCFanSpeedService {
             }
         }
 
-        for (zone, keys) in peripheralTemperatureKeys {
+        let peripheralKeys = platform == .appleSilicon
+            ? peripheralTemperatureKeys + appleSiliconPeripheralTemperatureKeys
+            : peripheralTemperatureKeys
+        for (zone, keys) in peripheralKeys {
             let values = temperatures(for: keys, readValue: readValue)
             if let average = averageTemperature(values) {
                 valueByZone[zone] = average
@@ -360,6 +404,61 @@ enum SMCFanSpeedService {
                 SystemTemperatureReading(zone: zone, celsius: $0)
             }
         }
+    }
+
+    /// Only the complete known M5 topology gives these SMC keys a verified
+    /// per-core meaning. Other Macs use the named HID sensor details instead.
+    static func detailedTemperatureReadings(
+        readValue: (String) -> Double?
+    ) -> [SystemTemperatureDetailReading] {
+        let groups = m5TemperatureGroups(readValue: readValue)
+        guard groups.isCompleteTopology else { return [] }
+
+        func coreRows(
+            keys: [String], zone: SystemTemperatureZone,
+            title: (Int) -> String
+        ) -> [SystemTemperatureDetailReading] {
+            keys.enumerated().compactMap { offset, key in
+                guard let value = readValue(key), isReasonableTemperature(value) else { return nil }
+                return SystemTemperatureDetailReading(
+                    id: "smc.\(key)", name: title(offset + 1), zone: zone, celsius: value
+                )
+            }
+        }
+
+        var result = coreRows(
+            keys: m5SuperCoreTemperatureKeys, zone: .superCores,
+            title: { L10n.text("超级核心 \($0)", "Super Core \($0)") }
+        ) + coreRows(
+            keys: m5PerformanceCoreTemperatureKeys, zone: .performanceCores,
+            title: { L10n.text("性能核心 \($0)", "Performance Core \($0)") }
+        )
+        let midpoint = m5GPUTemperatureKeys.count / 2
+        for (index, keys) in [
+            Array(m5GPUTemperatureKeys[..<midpoint]),
+            Array(m5GPUTemperatureKeys[midpoint...])
+        ].enumerated() {
+            let values = temperatures(for: keys, readValue: readValue)
+            guard let average = averageTemperature(values) else { continue }
+            result.append(SystemTemperatureDetailReading(
+                id: "smc.gpu-region-\(index + 1)",
+                name: L10n.text("GPU 区域 \(index + 1) 均值", "GPU Region \(index + 1) Average"),
+                zone: .gpu, celsius: average
+            ))
+        }
+        return result
+    }
+
+    /// Metadata only: use the existing verified recipe, without another read.
+    /// GPU detail rows are explicitly named regional averages, not single probes.
+    static func rawTemperatureKeys(forDetailID id: String) -> [String] {
+        let prefix = "smc.gpu-region-"
+        if id.hasPrefix(prefix), let region = Int(id.dropFirst(prefix.count)), (1...2).contains(region) {
+            let midpoint = m5GPUTemperatureKeys.count / 2
+            return region == 1 ? Array(m5GPUTemperatureKeys[..<midpoint]) : Array(m5GPUTemperatureKeys[midpoint...])
+        }
+        if id == SystemTemperatureDetailReading.powerManagementID { return powerManagementTemperatureKeys }
+        return id.hasPrefix("smc.") ? [String(id.dropFirst(4))] : []
     }
 
     static func averageRPM(from speeds: [Int]) -> Int? {
@@ -426,7 +525,134 @@ enum SMCFanSpeedService {
     }
 }
 
-private final class SMCConnection {
+/// The hardware family whose SMC is being read. The integer byte order of a
+/// key depends on it (research 2026-10-07 §4.1): the classic Intel SMC is
+/// big-endian throughout, while on Apple silicon `#KEY` is big-endian but the
+/// battery integer keys are little-endian.
+enum SMCPlatform: Equatable, Sendable {
+    case appleSilicon
+    case intel
+
+    /// Decided from the hardware, not the build architecture, so a
+    /// translated process on Apple silicon still decodes Apple silicon keys.
+    static let current: SMCPlatform = {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        let result = sysctlbyname("hw.optional.arm64", &value, &size, nil, 0)
+        return result == 0 && value == 1 ? .appleSilicon : .intel
+    }()
+}
+
+enum SMCByteOrder: Equatable, Sendable {
+    case bigEndian
+    case littleEndian
+}
+
+/// The raw result of asking AppleSMC for one key.
+enum SMCKeyRead: Equatable, Sendable {
+    /// The driver explicitly reports that this key does not exist on this Mac.
+    case missing
+    /// Discovery or value reading failed temporarily; support is not known.
+    case unreadable
+    case present(dataType: String, bytes: [UInt8])
+}
+
+/// Decodes an SMC value by key and platform. Multi-byte integers are only
+/// decoded when the key's byte order is known: an unknown Apple silicon
+/// integer key fails closed instead of being guessed (the old decoder read
+/// every `ui16`/`ui32` big-endian, which turns the little-endian battery keys
+/// into nonsense, e.g. `B0AV` 12 302 mV as 3 632).
+enum SMCValueDecoder {
+    /// Apple silicon integer keys stored little-endian: the battery family.
+    /// Measured on Mac17,9 (`B0AV` 0e30 = 12 302 mV, `B0CT` 3d00 = 61
+    /// cycles, matching the system report); Asahi documents `B0RM` as
+    /// "ui16 in reverse byte order".
+    static let appleSiliconLittleEndianKeys: Set<String> = [
+        "B0AC", "B0AV", "B0AP", "B0AT", "B0RM", "B0CT", "B0FC", "B0DC", "B0TF",
+        "BC1V", "BC2V", "BC3V", "BC4V"
+    ]
+
+    /// Apple silicon integer keys stored big-endian (`#KEY` = 0x00000e1d =
+    /// 3 613 keys on Mac17,9).
+    static let appleSiliconBigEndianKeys: Set<String> = ["#KEY"]
+
+    static func integerByteOrder(forKey key: String, platform: SMCPlatform) -> SMCByteOrder? {
+        switch platform {
+        case .intel:
+            return .bigEndian
+        case .appleSilicon:
+            if appleSiliconLittleEndianKeys.contains(key) { return .littleEndian }
+            if appleSiliconBigEndianKeys.contains(key) { return .bigEndian }
+            return nil
+        }
+    }
+
+    static func decode(
+        key: String,
+        dataType: String,
+        bytes: [UInt8],
+        platform: SMCPlatform
+    ) -> Double? {
+        switch dataType {
+        case "ui8 ":
+            return bytes.first.map(Double.init)
+        case "si8 ":
+            return bytes.first.map { Double(Int8(bitPattern: $0)) }
+        case "ui16", "si16", "ui32", "si32", "ui64", "si64":
+            return integer(key: key, dataType: dataType, bytes: bytes, platform: platform)
+        case "flt ":
+            // Single-precision float in host (little-endian) order on both
+            // Apple silicon and the T2 SMC.
+            guard bytes.count >= 4 else { return nil }
+            let raw = UInt32(bytes[0])
+                | UInt32(bytes[1]) << 8
+                | UInt32(bytes[2]) << 16
+                | UInt32(bytes[3]) << 24
+            let value = Double(Float(bitPattern: raw))
+            return value.isFinite ? value : nil
+        // Classic Intel fixed-point formats (big-endian), unchanged.
+        case "fpe2":
+            guard bytes.count >= 2 else { return nil }
+            return Double((Int(bytes[0]) << 6) + (Int(bytes[1]) >> 2))
+        case "sp78":
+            guard bytes.count >= 2 else { return nil }
+            return Double(Int(bytes[0]) * 256 + Int(bytes[1])) / 256
+        case "spf0":
+            guard bytes.count >= 2 else { return nil }
+            return Double(Int(bytes[0]) * 256 + Int(bytes[1]))
+        default:
+            return nil
+        }
+    }
+
+    private static func integer(
+        key: String,
+        dataType: String,
+        bytes: [UInt8],
+        platform: SMCPlatform
+    ) -> Double? {
+        let width: Int
+        switch dataType {
+        case "ui16", "si16": width = 2
+        case "ui32", "si32": width = 4
+        default: width = 8
+        }
+        guard bytes.count >= width,
+              let order = integerByteOrder(forKey: key, platform: platform) else { return nil }
+        let ordered = order == .littleEndian
+            ? Array(bytes[0..<width].reversed())
+            : Array(bytes[0..<width])
+        let unsigned = ordered.reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+        guard dataType.hasPrefix("si") else { return Double(unsigned) }
+        let shift = UInt64(64 - width * 8)
+        return Double(Int64(bitPattern: unsigned << shift) >> Int64(shift))
+    }
+}
+
+/// A read-only AppleSMC connection. It only sends the read selectors
+/// (key information 9, read bytes 5, key by index 8); there is no write
+/// path, so nothing here can change fans, charging, power or brightness.
+final class SMCConnection: SMCReadDriver {
     private enum Command: UInt8 {
         case kernelIndex = 2
         case readBytes = 5
@@ -481,73 +707,66 @@ private final class SMCConnection {
         )
     }
 
-    private struct Value {
-        let dataType: String
-        let bytes: [UInt8]
-    }
-
     private var connection: io_connect_t = 0
 
-    init?() {
+    func open() -> Bool {
+        if connection != 0 { return true }
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"))
-        guard service != 0 else { return nil }
+        guard service != 0 else { return false }
         defer { IOObjectRelease(service) }
 
         var openedConnection: io_connect_t = 0
         guard IOServiceOpen(service, mach_task_self_, 0, &openedConnection) == kIOReturnSuccess else {
-            return nil
+            return false
         }
         connection = openedConnection
+        return true
     }
 
-    deinit {
+    deinit { close() }
+
+    func close() {
         if connection != 0 {
             IOServiceClose(connection)
+            connection = 0
         }
     }
 
-    func readDouble(_ key: String) -> Double? {
-        guard let value = read(key) else { return nil }
-        return decodeDouble(dataType: value.dataType, bytes: value.bytes)
-    }
-
-    func readFanName(_ key: String) -> String? {
-        guard let value = read(key) else { return nil }
-        return SMCFanSpeedService.decodeFanName(
-            dataType: value.dataType,
-            bytes: value.bytes
-        )
-    }
-
-    private func read(_ key: String) -> Value? {
-        guard let keyCode = smcKeyCode(key) else { return nil }
-
+    func keyInfo(for key: UInt32) -> SMCDriverRead<SMCKeyInfo> {
         var input = KeyData()
         var output = KeyData()
-        input.key = keyCode
+        input.key = key
         input.data8 = Command.readKeyInfo.rawValue
 
-        guard call(input: &input, output: &output) == kIOReturnSuccess,
-              output.result == 0 else {
-            return nil
+        guard call(input: &input, output: &output) == kIOReturnSuccess else {
+            return SMCReadFailure.classify(transportSucceeded: false, deviceResult: output.result)
         }
+        guard output.result == 0 else {
+            // AppleSMC's key-not-found result is 0x84. Other controller
+            // errors (busy, denied, etc.) must not become negative metadata.
+            return SMCReadFailure.classify(transportSucceeded: true, deviceResult: output.result)
+        }
+        return .success(SMCKeyInfo(dataSize: output.keyInfo.dataSize, dataType: output.keyInfo.dataType.smcString))
+    }
 
-        let dataSize = output.keyInfo.dataSize
-        let dataType = output.keyInfo.dataType.smcString
-        guard dataSize > 0 else { return nil }
-
-        input.keyInfo.dataSize = dataSize
+    func readBytes(for key: UInt32, info: SMCKeyInfo) -> SMCDriverRead<[UInt8]> {
+        var input = KeyData()
+        var output = KeyData()
+        input.key = key
+        input.keyInfo.dataSize = info.dataSize
         input.data8 = Command.readBytes.rawValue
 
-        guard call(input: &input, output: &output) == kIOReturnSuccess,
-              output.result == 0 else {
-            return nil
+        guard call(input: &input, output: &output) == kIOReturnSuccess else {
+            return SMCReadFailure.classify(transportSucceeded: false, deviceResult: output.result)
+        }
+        guard output.result == 0 else {
+            return SMCReadFailure.classify(transportSucceeded: true, deviceResult: output.result)
         }
 
         let bytes = withUnsafeBytes(of: output.bytes) { rawBuffer in
-            Array(rawBuffer.prefix(Int(min(dataSize, 32))))
+            Array(rawBuffer.prefix(Int(min(info.dataSize, 32))))
         }
-        return Value(dataType: dataType, bytes: bytes)
+        return .success(bytes)
     }
 
     private func call(input: inout KeyData, output: inout KeyData) -> kern_return_t {
@@ -561,50 +780,6 @@ private final class SMCConnection {
             &output,
             &outputSize
         )
-    }
-
-    private func decodeDouble(dataType: String, bytes: [UInt8]) -> Double? {
-        switch dataType {
-        case "ui8 ":
-            return bytes.first.map(Double.init)
-        case "ui16":
-            guard bytes.count >= 2 else { return nil }
-            return Double(UInt16(bytes[0]) << 8 | UInt16(bytes[1]))
-        case "ui32":
-            guard bytes.count >= 4 else { return nil }
-            return Double(
-                UInt32(bytes[0]) << 24
-                    | UInt32(bytes[1]) << 16
-                    | UInt32(bytes[2]) << 8
-                    | UInt32(bytes[3])
-            )
-        case "flt ":
-            guard bytes.count >= 4 else { return nil }
-            let raw = UInt32(bytes[0])
-                | UInt32(bytes[1]) << 8
-                | UInt32(bytes[2]) << 16
-                | UInt32(bytes[3]) << 24
-            return Double(Float(bitPattern: raw))
-        case "fpe2":
-            guard bytes.count >= 2 else { return nil }
-            return Double((Int(bytes[0]) << 6) + (Int(bytes[1]) >> 2))
-        case "sp78":
-            guard bytes.count >= 2 else { return nil }
-            return Double(Int(bytes[0]) * 256 + Int(bytes[1])) / 256
-        case "spf0":
-            guard bytes.count >= 2 else { return nil }
-            return Double(Int(bytes[0]) * 256 + Int(bytes[1]))
-        default:
-            return nil
-        }
-    }
-
-    private func smcKeyCode(_ key: String) -> UInt32? {
-        let bytes = Array(key.utf8)
-        guard bytes.count == 4 else { return nil }
-        return bytes.reduce(UInt32(0)) { partialResult, byte in
-            partialResult << 8 | UInt32(byte)
-        }
     }
 }
 

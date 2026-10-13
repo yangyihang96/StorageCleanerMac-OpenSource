@@ -98,7 +98,12 @@ enum CleanupHistoryService {
         date: Date = Date(),
         defaults: UserDefaults = .standard
     ) {
-        let movedItems = items.filter { $0.sizeBytes > 0 }
+        // A verified move of an empty file is still a move the user may undo.
+        let recordedPaths = Set(moveRecords.map { PathSafety.lexicalPath($0.originalPath) })
+        let movedItems = items.filter { item in
+            item.sizeBytes > 0 || (item.trashPaths.isEmpty ? [item.path] : item.trashPaths)
+                .contains { recordedPaths.contains(PathSafety.lexicalPath($0)) }
+        }
         guard !movedItems.isEmpty else { return }
 
         let movedPaths = movedItems.flatMap { item in
@@ -166,6 +171,33 @@ enum CleanupHistoryService {
                 moveRecords: entry.moveRecords.filter { !recordIDs.contains($0.id) }
             )
         }
+        save(updatedEntries, defaults: defaults)
+    }
+
+    /// Keeps this history in step with restores made from Operation History,
+    /// so "Restore latest cleanup" does not offer files that are already back.
+    static func removeMoveRecords(
+        restoredBy receipts: [CleanupMoveReceipt],
+        defaults: UserDefaults = .standard
+    ) {
+        guard !receipts.isEmpty else { return }
+        let entries = load(defaults: defaults)
+        let updatedEntries = entries.map { entry in
+            CleanupHistoryEntry(
+                id: entry.id,
+                date: entry.date,
+                title: entry.title,
+                itemCount: entry.itemCount,
+                totalBytes: entry.totalBytes,
+                paths: entry.paths,
+                // Same file only: a record for a different item that reused
+                // the path and Trash name stays restorable.
+                moveRecords: entry.moveRecords.filter { record in
+                    !receipts.contains { LegacyCleanupRestore.describesSameFile(record, $0) }
+                }
+            )
+        }
+        guard updatedEntries != entries else { return }
         save(updatedEntries, defaults: defaults)
     }
 

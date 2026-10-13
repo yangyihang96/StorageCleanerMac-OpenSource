@@ -228,14 +228,17 @@ struct DirectoryEntry: Identifiable, Hashable, Sendable {
     let sizeBytes: Int64
     let denied: Bool
     let isDirectory: Bool
+    let modifiedAt: Date?
 
-    init(name: String, path: String, sizeBytes: Int64, denied: Bool = false, isDirectory: Bool = false) {
+    init(name: String, path: String, sizeBytes: Int64, denied: Bool = false, isDirectory: Bool = false,
+         modifiedAt: Date? = nil) {
         self.id = PathSafety.normalizedPath(path)
         self.name = name
         self.path = path
         self.sizeBytes = sizeBytes
         self.denied = denied
         self.isDirectory = isDirectory
+        self.modifiedAt = modifiedAt
     }
 }
 
@@ -275,6 +278,7 @@ struct StorageItem: Identifiable, Hashable, Sendable {
     let trashPaths: [String]
     let openPath: String
     let isDirectory: Bool
+    let modifiedAt: Date?
     let duplicateGroupID: String?
     let duplicateMatchKind: String?
     let duplicateRelationship: String?
@@ -301,6 +305,7 @@ struct StorageItem: Identifiable, Hashable, Sendable {
         trashPaths: [String],
         openPath: String,
         isDirectory: Bool = false,
+        modifiedAt: Date? = nil,
         duplicateGroupID: String? = nil,
         duplicateMatchKind: String? = nil,
         duplicateRelationship: String? = nil,
@@ -322,6 +327,7 @@ struct StorageItem: Identifiable, Hashable, Sendable {
         self.trashPaths = trashPaths
         self.openPath = openPath
         self.isDirectory = isDirectory
+        self.modifiedAt = modifiedAt
         self.duplicateGroupID = duplicateGroupID
         self.duplicateMatchKind = duplicateMatchKind
         self.duplicateRelationship = duplicateRelationship
@@ -374,6 +380,8 @@ struct ScanResult: Sendable {
         }
     }
     let deniedPaths: [String]
+    /// D85：这次扫描里大文件清单的门槛与截断情况；未扫大文件时为 nil。
+    var largeFileListing: LargeFileListingSummary?
     private var decisionNormalizedPaths: [String: String]
     private var decisionByteTotals: DecisionByteTotals
 

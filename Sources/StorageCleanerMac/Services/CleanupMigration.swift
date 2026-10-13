@@ -106,16 +106,36 @@ enum CleanReportStore {
     private static let maximumReportCount = 40
     private static let maximumEncodedBytes = 4 * 1_024 * 1_024
 
+    /// Store callers run on the main actor. There the journal lock is only
+    /// tried, never awaited, so a lock held by a worker read as a failed save,
+    /// and the fsync blocked the UI. Off the main thread the lock is awaited.
+    static func recordDetached(_ report: CleanReport, journal: CleanupReportJournal = .live) async -> Bool {
+        await Task.detached(priority: .utility) { record(report, journal: journal) }.value
+    }
+
     @discardableResult
     static func record(
         _ report: CleanReport,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        journal: CleanupReportJournal = .live
     ) -> Bool {
         if defaults === UserDefaults.standard {
-            do { try CleanupReportJournal.live.checkpoint(report, expectedIdentities: [:]) }
+            do { try journal.checkpoint(report, expectedIdentities: [:]) }
             catch { return false }
+            // The legacy cache only mirrors the live journal for old listings;
+            // an injected (isolated) journal never feeds it.
+            guard journal.directory == CleanupReportJournal.live.directory else { return true }
         }
-        var reports = load(defaults: defaults)
+        // P2-2: an older app version decodes this cache as a whole, fails on
+        // outcomes it does not know and then overwrites it, losing every
+        // older receipt. Receipts with a permanent deletion stay in the
+        // journal only; they are saved when the journal took them.
+        guard report.isReadableByOlderVersions else {
+            return defaults === UserDefaults.standard
+        }
+        // The durable journal is authoritative. Updating this bounded legacy
+        // cache must not decode every historical operation on each new receipt.
+        var reports = cachedReports(defaults: defaults)
         reports.removeAll { $0.id == report.id || $0.planID == report.planID }
         reports.insert(report, at: 0)
         reports = Array(reports.prefix(maximumReportCount))
@@ -132,12 +152,42 @@ enum CleanReportStore {
         return false
     }
 
-    static func load(defaults: UserDefaults = .standard) -> [CleanReport] {
-        let cached: [CleanReport]
+    private static func cachedReports(defaults: UserDefaults = .standard) -> [CleanReport] {
         if let data = defaults.data(forKey: defaultsKey), data.count <= maximumEncodedBytes,
            let decoded = try? JSONDecoder().decode([CleanReport].self, from: data) {
-            cached = decoded
-        } else { cached = [] }
+            return decoded
+        }
+        return []
+    }
+
+    static func summaryPage(after cursor: CleanupReportIndex.Cursor? = nil, limit: Int = 40,
+                            journal: CleanupReportJournal = .live) throws -> CleanupReportJournal.SummaryPage {
+        let page = try journal.summaryPage(after: cursor, limit: limit)
+        let legacy = (journal.directory == CleanupReportJournal.live.directory ? cachedReports() : []).filter {
+            !FileManager.default.fileExists(atPath: journal.reportURL(for: $0.planID).path)
+        }.map { CleanupReportIndex(report: $0, orderingDate: $0.completedAt) }.filter { $0.follows(cursor) }
+        var byPlan = Dictionary(legacy.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for item in page.reports { byPlan[item.id] = item }
+        let merged = byPlan.values.sorted(by: CleanupReportIndex.newestFirst)
+        let selected = Array(merged.prefix(limit))
+        return .init(reports: selected,
+            next: merged.count > limit ? selected.last?.cursor : page.next,
+            unreadableEntries: page.unreadableEntries)
+    }
+
+    static func report(planID: CleanPlanID, journal: CleanupReportJournal = .live) throws -> CleanReport {
+        if FileManager.default.fileExists(atPath: journal.reportURL(for: planID).path) {
+            return try journal.read(planID: planID)
+        }
+        guard journal.directory == CleanupReportJournal.live.directory,
+              let report = cachedReports().first(where: { $0.planID == planID }) else {
+            throw CleanupReportJournal.Failure.invalidEntry
+        }
+        return report
+    }
+
+    static func load(defaults: UserDefaults = .standard) -> [CleanReport] {
+        let cached = cachedReports(defaults: defaults)
         guard defaults === UserDefaults.standard else {
             return Array(cached.sorted { $0.completedAt > $1.completedAt }.prefix(maximumReportCount))
         }
@@ -164,5 +214,23 @@ enum CleanReportStore {
             CleanupRecoveryReport(completedAt: Date(), items: restored, attemptID: UUID())
         ]
         return updated
+    }
+}
+
+extension CleanReport {
+    /// P2-2: whether an app version before permanent deletion (D23) can
+    /// decode this receipt. It cannot read a deleted outcome or the
+    /// deletion-outcome-unknown failure.
+    var isReadableByOlderVersions: Bool {
+        !items.contains { item in
+            switch item.outcome {
+            case .deleted:
+                true
+            case let .failed(failure):
+                failure.code == .deletionOutcomeUnknown
+            case .moved, .skipped, .notProcessed:
+                false
+            }
+        }
     }
 }

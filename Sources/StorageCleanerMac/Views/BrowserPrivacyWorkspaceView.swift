@@ -1,23 +1,42 @@
 import SwiftUI
 
 struct BrowserPrivacyWorkspaceView: View {
-    @Environment(\.moduleTheme) private var theme
+#if DEBUG
+    @Environment(\.featurePresentationIsFixture) private var isPresentationFixture
+    @Environment(\.featureDemoPrimaryAction) private var demoAction
+#endif
+    @State private var showingDataTypes = false
+    @State private var dataWorking = false
     @ObservedObject var browserPrivacyStore: BrowserPrivacyStore
 
     var body: some View {
+        // D91: the data-type switch lives inside the locked D67 skeleton
+        // (status-bar action on landing/result, header row in the data page);
+        // nothing may be stacked above the lightfield title/content frames.
         Group {
-            if browserPrivacyStore.state == .scanning && !browserPrivacyStore.hasCachedResults {
-                FeatureRuntimePage(
-                    module: .privacy,
-                    title: L10n.text("正在读取浏览器记录", "Reading Browser Records"),
-                    subtitle: L10n.text("正在检查可访问的浏览器与历史记录", "Checking accessible browsers and history"),
-                    trustText: L10n.text("只读扫描 · 删除前确认", "Read-only scan · Confirm before deletion")
-                ) {
-                    EmptyView()
-                } actions: {
-                    AppButton(title: L10n.text("取消扫描", "Cancel Scan"), systemImage: "xmark.circle",
-                              action: browserPrivacyStore.cancel)
-                }
+            if showingDataTypes {
+                BrowserPrivacyDataView(onWorkingChange: { dataWorking = $0 },
+                    onShowHistory: { if !dataWorking { showingDataTypes = false } })
+            } else {
+                historyWorkspace
+            }
+        }
+        .featureFlowTransition(value: browserPrivacyStore.state == .scanning)
+        .onAppear {
+#if DEBUG
+            guard !FeaturePresentationDemo.isEnabled, !isPresentationFixture else { return }
+#endif
+            BrowserPrivacyRecoveryMaintenance.purgeIfEnabled()
+        }
+#if DEBUG
+        .layoutProbe(LayoutProbeID.workspace)
+#endif
+    }
+
+    private var historyWorkspace: some View {
+        Group {
+            if browserPrivacyStore.state == .scanning {
+                BrowserPrivacyRunningPage(onCancel: browserPrivacyStore.cancel)
 #if DEBUG
                 .layoutProbe(LayoutProbeID.privacy)
 #endif
@@ -30,103 +49,66 @@ struct BrowserPrivacyWorkspaceView: View {
                 .layoutProbe(LayoutProbeID.privacy)
 #endif
             } else {
-                ManagementListPage(
-                    title: ReviewFilter.privacy.title,
-                    subtitle: ReviewFilter.privacy.pageSubtitle,
-                    systemImage: ReviewFilter.privacy.systemImage
-                ) {
-                    GlassToolbarButton(
-                        title: browserPrivacyStore.state == .scanning
-                            ? L10n.text("取消扫描", "Cancel Scan")
-                            : L10n.text("重新扫描", "Scan Again"),
-                        systemImage: browserPrivacyStore.state == .scanning
-                            ? "xmark"
-                            : "arrow.clockwise"
-                    ) {
-                        if browserPrivacyStore.state == .scanning {
-                            browserPrivacyStore.cancel()
-                        } else {
-                            browserPrivacyStore.startScan()
-                        }
-                    }
-                } controls: {
-                    if browserPrivacyStore.state == .scanning {
-                        RuntimeInlineStatus(title: L10n.text("正在重新读取浏览器记录", "Refreshing Browser Records"),
-                            detail: L10n.text("上次结果保留到本次读取完成", "Previous results remain visible until this read finishes"))
-                    }
-                } content: {
-                    privacyContent
-                }
+                privacyContent
             }
         }
-#if DEBUG
-        .layoutProbe(LayoutProbeID.workspace)
-#endif
     }
 
     private var heroPage: some View {
-        HeroScanPage(
-            title: ReviewFilter.privacy.title,
-            subtitle: ReviewFilter.privacy.pageSubtitle,
-            headerSystemImage: ReviewFilter.privacy.systemImage,
-            configurationTitle: L10n.text("日期范围", "Date Range"),
-            actionTitle: browserPrivacyStore.state == .scanning
-                ? L10n.text("取消扫描", "Cancel Scan")
-                : L10n.text("扫描浏览器记录", "Scan Browser Records"),
-            actionDetail: "",
-            actionSystemImage: browserPrivacyStore.state == .scanning ? "xmark" : "viewfinder",
-            status: heroStatus,
-            isLoading: browserPrivacyStore.state == .scanning,
-            allowsActionWhileLoading: true,
-            trustText: L10n.text("只读扫描 · 删除前确认", "Read-only scan · Confirm before deletion"),
-            showsAccessory: true
-        ) {
-            if browserPrivacyStore.state == .scanning {
-                browserPrivacyStore.cancel()
-            } else {
+        FeatureLightfieldPage(module: .privacy, phase: .landing, title: ReviewFilter.privacy.title,
+            status: browserPrivacyStore.state == .idle ? L10n.text("尚未读取记录", "Records not read") : L10n.text("等待重新扫描", "Ready to scan again"),
+            safety: L10n.text("只读扫描 · 删除前确认", "Read-only scan · Confirm before deletion"),
+            actionTitle: L10n.text("扫描浏览器记录", "Scan Browser Records"),
+            statusActionTitle: Self.dataTypesTitle,
+            statusActionEnabled: browserPrivacyStore.state != .scanning,
+            statusAction: showDataTypes, action: {
+#if DEBUG
+                if let demoAction { demoAction(); return }
+#endif
                 browserPrivacyStore.startScan()
-            }
-        } accessory: {
-            VStack(alignment: .leading, spacing: 12) {
-                BrowserPrivacyDateControls(store: browserPrivacyStore, showsSearch: true)
+            }) {
+            FeatureOptionsScrollView(probePrefix: "lightfield.options", usesLightfield: true) {
                 VStack(spacing: 0) {
-                    HStack {
-                        Text(L10n.text("网站", "Website"))
-                        Spacer()
-                        Text(L10n.text("记录", "Records"))
+                    ForEach(BrowserPrivacyLightfieldPresentation.datePresets) { preset in
+                        LightfieldOptionRow(title: preset == .week ? L10n.text("7 天", "7 days") : preset.title,
+                            icon: .privacyTimeline, module: .privacy,
+                            selection: Binding(get: {
+                                BrowserPrivacyDatePreset.matching(browserPrivacyStore.filters, now: Date()) == preset
+                            }, set: { selected in
+                                guard selected else { return }
+                                var filters = browserPrivacyStore.filters
+                                preset.apply(to: &filters, now: Date())
+                                browserPrivacyStore.filters = filters
+                            }))
                     }
-                    .font(AppTypography.body)
-                    .foregroundStyle(.secondary)
-                    .padding(12)
-                    Divider()
-                    VStack(spacing: 10) {
-                        Image(systemName: "globe")
-                            .font(.system(size: 28, weight: .light))
+                    LightfieldOptionRow(title: L10n.text("按浏览器与域名整理", "Organize by browser and domain"),
+                        icon: .privacyGrouping, module: .privacy)
+                    LightfieldOptionRow(title: L10n.text("敏感网站折叠 · 删除前备份", "Conceal sensitive sites · Back up before deletion"),
+                        icon: .privacyConfirm, module: .privacy)
+                    if browserPrivacyStore.state == .permissionDenied {
+                        Button(L10n.text("检查授权", "Check Access")) { PrivacySystemSettingsOpener.openFullDiskAccess() }
+                            .buttonStyle(FeatureLightfieldRowButtonStyle())
                     }
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 92)
-                }
-                .background(AppAppearanceColors.ink.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
-            }
-            if browserPrivacyStore.state == .permissionDenied {
-                GlassToolbarButton(
-                    title: L10n.text("检查授权", "Check Access"),
-                    systemImage: "lock.open"
-                ) {
-                    PrivacySystemSettingsOpener.openFullDiskAccess()
+#if DEBUG
+                    Color.clear.frame(height: 1).layoutProbe("lightfield.optionsEnd")
+#endif
                 }
             }
         }
     }
 
     private var privacyContent: some View {
-        BrowserPrivacyRecordResultsView(store: browserPrivacyStore)
-            .padding(.horizontal, AppDesignTokens.Spacing.medium)
-            .padding(.vertical, AppDesignTokens.Spacing.compact)
+        BrowserPrivacyRecordResultsView(store: browserPrivacyStore, onShowDataTypes: showDataTypes)
 #if DEBUG
             .layoutProbe(LayoutProbeID.privacy)
 #endif
+    }
+
+    static let dataTypesTitle = L10n.text("Cookie 与其他数据", "Cookies and Other Data")
+
+    private func showDataTypes() {
+        guard browserPrivacyStore.state != .scanning else { return }
+        showingDataTypes = true
     }
 
     private var shouldUseHeroPresentation: Bool {
@@ -142,86 +124,4 @@ struct BrowserPrivacyWorkspaceView: View {
         }
     }
 
-    private var heroStatus: ScanStatusPresentation {
-        switch browserPrivacyStore.state {
-        case .idle:
-            .neverScanned
-        case .scanning:
-            .scanning(L10n.text(
-                "正在扫描",
-                "Scanning"
-            ))
-        case .permissionDenied:
-            .failed(L10n.text("需要检查授权", "Access needs review"))
-        case .cancelled:
-            .idle(L10n.text("扫描已取消", "Scan cancelled"))
-        case .failed:
-            .failed(L10n.text("读取失败，请重试", "Read failed; try again"))
-        case .completed:
-            .completed(L10n.text("扫描完成", "Scan complete"))
-        case .partial:
-            .completed(L10n.text("部分扫描完成", "Partial scan complete"))
-        }
-    }
-
-}
-
-struct BrowserPrivacyDateControls: View {
-    @ObservedObject var store: BrowserPrivacyStore
-    var showsSearch = false
-    @Environment(\.moduleTheme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 2) {
-                ForEach(BrowserPrivacyDatePreset.allCases) { preset in
-                    let selected = BrowserPrivacyDatePreset.matching(store.filters, now: Date()) == preset
-                    Button {
-                        var filters = store.filters
-                        preset.apply(to: &filters, now: Date())
-                        store.filters = filters
-                    } label: {
-                        Text(preset.title)
-                            .font(AppTypography.body)
-                            .frame(maxWidth: .infinity, minHeight: 30)
-                            .background(selected ? theme.accent.opacity(0.18) : Color.clear,
-                                        in: RoundedRectangle(cornerRadius: 5))
-                            .overlay(RoundedRectangle(cornerRadius: 5)
-                                .strokeBorder(selected ? theme.accent : .clear, lineWidth: 1))
-                    }
-                    .buttonStyle(ResponsivePlainButtonStyle())
-                    .accessibilityAddTraits(selected ? [.isSelected] : [])
-                    .accessibilityIdentifier("privacy-date-\(preset.rawValue)")
-                }
-            }
-            .padding(2)
-            .background(AppAppearanceColors.ink.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
-            HStack {
-                Picker(L10n.text("分组", "Grouping"), selection: $store.groupsByWebsite) {
-                    Text(L10n.text("按网站分组", "Group by website")).tag(true)
-                    Text(L10n.text("记录列表", "Record list")).tag(false)
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .fixedSize()
-                if showsSearch {
-                    TaskSearchField(
-                        placeholder: L10n.text("搜索网站或记录", "Search websites or records"),
-                        text: $store.filters.query,
-                        tint: theme.accent
-                    )
-                } else {
-                    Spacer(minLength: 0)
-                }
-                if BrowserPrivacyDatePreset.matching(store.filters, now: Date()) == nil,
-                   let start = store.filters.startDate {
-                    Text(start.formatted(date: .numeric, time: .omitted))
-                        .font(AppTypography.metadata)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .disabled(store.state == .scanning || store.isProcessing)
-    }
 }

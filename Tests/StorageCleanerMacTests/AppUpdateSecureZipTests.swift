@@ -292,7 +292,7 @@ final class AppUpdateSecureZipTests: XCTestCase {
     }
 }
 
-private struct StoredZipFixture {
+struct StoredZipFixture {
     struct Entry {
         let centralName: String
         let localName: String

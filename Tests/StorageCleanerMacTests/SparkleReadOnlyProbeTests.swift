@@ -85,7 +85,8 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
 
         let result = try await SparkleProvider(
             probe: probe,
-            signatureInspector: validSignatureInspector
+            signatureInspector: validSignatureInspector,
+            automaticAdapter: nil
         ).checkForUpdate(application)
 
         XCTAssertEqual(result.status, .latestVersionUnknown)
@@ -100,7 +101,8 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
 
         let noUpdate = try await SparkleProvider(
             probe: RecordingSparkleProbe(outcome: .noUpdate),
-            signatureInspector: validSignatureInspector
+            signatureInspector: validSignatureInspector,
+            automaticAdapter: nil
         ).checkForUpdate(application)
         XCTAssertEqual(noUpdate.status, .upToDate)
         XCTAssertNil(noUpdate.availableVersion)
@@ -111,7 +113,8 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
                 version: ApplicationVersion(marketing: "2.0", build: "200"),
                 releaseDate: releaseDate
             )),
-            signatureInspector: validSignatureInspector
+            signatureInspector: validSignatureInspector,
+            automaticAdapter: nil
         ).checkForUpdate(application)
         XCTAssertEqual(available.status, .updateAvailable)
         XCTAssertEqual(available.availableVersion, ApplicationVersion(marketing: "2.0", build: "200"))
@@ -125,7 +128,8 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
         let result = try await SparkleProvider(
             probe: probe,
             signatureInspector: validSignatureInspector,
-            probeTimeout: .milliseconds(20)
+            probeTimeout: .milliseconds(20),
+            automaticAdapter: nil
         ).checkForUpdate(application(for: fixture.bundle))
 
         XCTAssertEqual(result.status, .latestVersionUnknown)
@@ -140,7 +144,8 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
         let provider = SparkleProvider(
             probe: probe,
             signatureInspector: validSignatureInspector,
-            probeTimeout: .seconds(30)
+            probeTimeout: .seconds(30),
+            automaticAdapter: nil
         )
         let application = try application(for: fixture.bundle)
         let task = Task { try await provider.checkForUpdate(application) }
@@ -165,7 +170,8 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
         let application = try application(for: fixture.bundle)
         let provider = SparkleProvider(
             probe: RecordingSparkleProbe(outcome: .noUpdate),
-            signatureInspector: validSignatureInspector
+            signatureInspector: validSignatureInspector,
+            automaticAdapter: nil
         )
 
         let source = try await provider.inspect(application)
@@ -192,17 +198,14 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
         ] {
             let fixture = try makeBundle()
             defer { try? FileManager.default.removeItem(at: fixture.root) }
-            let targetDefaults = try targetDefaults(for: fixture.bundle)
-            defer { targetDefaults.defaults.removePersistentDomain(forName: targetDefaults.domain) }
             let recorder = ShadowSessionRecorder(behavior: .outcome(outcome))
             let provider = shadowHostProvider(recorder: recorder)
 
             _ = try await provider.checkForUpdate(application(for: fixture.bundle))
 
-            XCTAssertEqual(
-                targetDefaults.defaults.object(forKey: "SULastCheckTime") as? Date,
-                targetDefaults.sentinel
-            )
+            // The target app's defaults cannot be touched: the shadow host's
+            // settings live in its own temporary folder (N23 isolates this
+            // test from the real ~/Library/Preferences as well).
             await assertShadowHostWasRemoved(recorder)
         }
     }
@@ -227,8 +230,6 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
     func testShadowHostLeavesTargetDefaultsUntouchedAfterTimeout() async throws {
         let fixture = try makeBundle()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let targetDefaults = try targetDefaults(for: fixture.bundle)
-        defer { targetDefaults.defaults.removePersistentDomain(forName: targetDefaults.domain) }
         let recorder = ShadowSessionRecorder(behavior: .blockUntilCancelled)
         let provider = shadowHostProvider(
             recorder: recorder,
@@ -238,10 +239,6 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
         let result = try await provider.checkForUpdate(application(for: fixture.bundle))
 
         XCTAssertEqual(result.status, .latestVersionUnknown)
-        XCTAssertEqual(
-            targetDefaults.defaults.object(forKey: "SULastCheckTime") as? Date,
-            targetDefaults.sentinel
-        )
         let wasCancelled = await recorder.wasCancelled
         XCTAssertTrue(wasCancelled)
         await assertShadowHostWasRemoved(recorder)
@@ -250,8 +247,6 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
     func testShadowHostLeavesTargetDefaultsUntouchedAfterCallerCancellation() async throws {
         let fixture = try makeBundle()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let targetDefaults = try targetDefaults(for: fixture.bundle)
-        defer { targetDefaults.defaults.removePersistentDomain(forName: targetDefaults.domain) }
         let recorder = ShadowSessionRecorder(behavior: .blockUntilCancelled)
         let provider = shadowHostProvider(recorder: recorder, timeout: .seconds(30))
         let application = try application(for: fixture.bundle)
@@ -266,13 +261,50 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
             XCTFail("Expected cancellation")
         } catch is CancellationError {}
 
-        XCTAssertEqual(
-            targetDefaults.defaults.object(forKey: "SULastCheckTime") as? Date,
-            targetDefaults.sentinel
-        )
         let wasCancelled = await recorder.wasCancelled
         XCTAssertTrue(wasCancelled)
         await assertShadowHostWasRemoved(recorder)
+    }
+
+    // MARK: - N23: no files in ~/Library/Preferences
+
+    func testShadowHostKeepsSparkleSettingsOutOfTheRealPreferencesFolder() async throws {
+        let fixture = try makeBundle()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let recorder = ShadowSessionRecorder(behavior: .outcome(.noUpdate))
+
+        _ = try await shadowHostProvider(recorder: recorder)
+            .checkForUpdate(application(for: fixture.bundle))
+
+        // Settings went to "<probe folder>/…plist", that folder is gone, and
+        // no "<probe id>.plist" exists in ~/Library/Preferences.
+        await assertShadowHostWasRemoved(recorder)
+    }
+
+    /// Sparkle records the first failed feed-signature check in the main
+    /// app's standard defaults under a key named after the host bundle, and the
+    /// probe's host identifier is new every time. With the grace period off
+    /// (interval 0) Sparkle never writes that key; a read-only probe never
+    /// used the grace period anyway, since each probe starts a new count.
+    func testShadowHostTurnsOffTheSignedFeedFailureGracePeriod() async throws {
+        for targetInterval: Any? in [nil, 86_400.0] {
+            let fixture = try makeBundle(extraInfo: targetInterval.map {
+                ["SUSignedFeedFailureExpirationInterval": $0]
+            } ?? [:])
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let recorder = ShadowSessionRecorder(behavior: .outcome(.noUpdate))
+
+            _ = try await shadowHostProvider(recorder: recorder)
+                .checkForUpdate(application(for: fixture.bundle))
+
+            let observations = await recorder.observations
+            let observation = try XCTUnwrap(observations.first)
+            XCTAssertEqual(observation.signedFeedFailureExpirationInterval, 0, "Target interval: \(String(describing: targetInterval))")
+        }
+    }
+
+    private static var realPreferencesFolder: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences", isDirectory: true)
     }
 
     private var validSignatureInspector: FixedSparkleSignatureInspector {
@@ -296,19 +328,9 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
                 )
             },
             signatureInspector: validSignatureInspector,
-            probeTimeout: timeout
+            probeTimeout: timeout,
+            automaticAdapter: nil
         )
-    }
-
-    private func targetDefaults(
-        for bundleURL: URL
-    ) throws -> (defaults: UserDefaults, domain: String, sentinel: Date) {
-        let domain = try XCTUnwrap(Bundle(url: bundleURL)?.bundleIdentifier)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defaults.removePersistentDomain(forName: domain)
-        let sentinel = Date(timeIntervalSince1970: 1_700_000_123)
-        defaults.set(sentinel, forKey: "SULastCheckTime")
-        return (defaults, domain, sentinel)
     }
 
     private func assertShadowHostWasRemoved(
@@ -320,7 +342,16 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
         XCTAssertEqual(observations.count, 1, file: file, line: line)
         guard let observation = observations.first else { return }
         XCTAssertNotEqual(observation.hostIdentifier, "com.example.sparkle", file: file, line: line)
-        XCTAssertEqual(observation.hostIdentifier, observation.defaultsDomain, file: file, line: line)
+        // N23: Sparkle's settings for the probe go to an absolute-path domain
+        // inside the probe's temporary folder, never to the target app's
+        // domain and never to a new file in ~/Library/Preferences.
+        XCTAssertTrue(
+            observation.defaultsDomain.hasPrefix(observation.shadowRoot.path + "/"),
+            "Settings domain \(observation.defaultsDomain) is not inside \(observation.shadowRoot.path)",
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(observation.storedSettingsInShadowRoot, file: file, line: line)
         XCTAssertEqual(
             observation.feedURL,
             "https://updates.example.com/appcast.xml",
@@ -332,8 +363,9 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
             file: file,
             line: line
         )
-        XCTAssertTrue(
-            UserDefaults.standard.persistentDomain(forName: observation.defaultsDomain)?.isEmpty ?? true,
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: Self.realPreferencesFolder
+                .appendingPathComponent(observation.hostIdentifier + ".plist").path),
             file: file,
             line: line
         )
@@ -379,7 +411,8 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
         feedURL: String = "https://updates.example.com/appcast.xml",
         publicEDKey: String? = Data(repeating: 7, count: 32).base64EncodedString(),
         requiresSignedFeed: Bool = true,
-        frameworkIsEscapingSymlink: Bool = false
+        frameworkIsEscapingSymlink: Bool = false,
+        extraInfo: [String: Any] = [:]
     ) throws -> (root: URL, bundle: URL) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("SparkleReadOnlyProbeTests-\(UUID().uuidString)", isDirectory: true)
@@ -405,6 +438,7 @@ final class SparkleReadOnlyProbeTests: XCTestCase {
             "SUSendProfileInfo": true,
         ]
         info["SUPublicEDKey"] = publicEDKey
+        info.merge(extraInfo) { _, extra in extra }
         let data = try PropertyListSerialization.data(
             fromPropertyList: info,
             format: .xml,
@@ -471,10 +505,12 @@ private actor ShadowSessionRecorder {
     struct Observation: Sendable {
         let hostIdentifier: String
         let defaultsDomain: String
+        let storedSettingsInShadowRoot: Bool
         let feedURL: String
         let shadowRoot: URL
         let systemProfiling: Bool?
         let sendProfileInfo: Bool?
+        let signedFeedFailureExpirationInterval: Double?
     }
 
     private let behavior: Behavior
@@ -499,15 +535,28 @@ private actor ShadowSessionRecorder {
               let feedURL = hostBundle.object(forInfoDictionaryKey: "SUFeedURL") as? String else {
             throw ApplicationScanningError.invalidApplicationBundle(hostBundleURL.path)
         }
-        let shadowDefaults = UserDefaults(suiteName: defaultsDomain)
-        shadowDefaults?.set(Date(timeIntervalSince1970: 1_800_000_000), forKey: "SULastCheckTime")
+        // Stand in for Sparkle saving its settings, but only where the probe's
+        // own temporary folder keeps them: a plain domain name would create a
+        // file in the real ~/Library/Preferences (N23).
+        let shadowRoot = hostBundleURL.deletingLastPathComponent()
+        var storedSettingsInShadowRoot = false
+        if defaultsDomain.hasPrefix(shadowRoot.path + "/") {
+            let defaults = TestPreferenceDomain.open(suiteName: defaultsDomain)
+            defaults?.set(Date(timeIntervalSince1970: 1_800_000_000), forKey: "SULastCheckTime")
+            _ = defaults?.synchronize()
+            storedSettingsInShadowRoot = FileManager.default.fileExists(atPath: defaultsDomain + ".plist")
+        }
         observations.append(Observation(
             hostIdentifier: hostIdentifier,
             defaultsDomain: defaultsDomain,
+            storedSettingsInShadowRoot: storedSettingsInShadowRoot,
             feedURL: feedURL,
-            shadowRoot: hostBundleURL.deletingLastPathComponent(),
+            shadowRoot: shadowRoot,
             systemProfiling: hostBundle.object(forInfoDictionaryKey: "SUEnableSystemProfiling") as? Bool,
             sendProfileInfo: hostBundle.object(forInfoDictionaryKey: "SUSendProfileInfo") as? Bool,
+            signedFeedFailureExpirationInterval: (hostBundle.object(
+                forInfoDictionaryKey: "SUSignedFeedFailureExpirationInterval"
+            ) as? NSNumber)?.doubleValue
         ))
         guard feedURL == expectedFeedURL.absoluteString else {
             throw ApplicationScanningError.providerUnsupported("sparkle-shadow-feed-mismatch")

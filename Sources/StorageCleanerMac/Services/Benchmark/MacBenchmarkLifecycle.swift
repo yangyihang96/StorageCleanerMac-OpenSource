@@ -23,22 +23,3 @@ struct SystemMacBenchmarkLifecycleCleaner: MacBenchmarkLifecycleCleaning {
         _ = try? await diskKernel.cleanupOrphans(olderThan: orphanAge)
     }
 }
-
-extension HeavyWorkCoordinator {
-    /// Waits for both the active lease and any cleanup quarantine owned by the
-    /// benchmark. Cancellation is the bounded-shutdown escape hatch.
-    func waitUntilOwnerInactive(
-        _ owner: Owner,
-        pollInterval: Duration = .milliseconds(20)
-    ) async -> Bool {
-        while activeOwner == owner {
-            guard !Task.isCancelled else { return false }
-            do {
-                try await Task.sleep(for: pollInterval)
-            } catch {
-                return false
-            }
-        }
-        return true
-    }
-}

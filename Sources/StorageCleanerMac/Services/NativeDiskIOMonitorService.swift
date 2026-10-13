@@ -20,6 +20,7 @@ struct NativeDiskIOPoint: Identifiable, Codable, Equatable, Sendable {
     let writeOperationsPerSecond: Double
     /// Present for new counter samples; absent in legacy point-only history.
     var intervalStart: Date? = nil
+    var bucketStatistics: MenuBarHistoryStatistics? = nil
 }
 
 enum NativeDiskIOMonitorService {

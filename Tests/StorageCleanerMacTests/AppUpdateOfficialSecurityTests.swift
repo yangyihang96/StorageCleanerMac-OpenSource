@@ -1,3 +1,4 @@
+import FileOperationShared
 import CryptoKit
 import Foundation
 import XCTest
@@ -1026,7 +1027,8 @@ final class AppUpdateOfficialSecurityTests: XCTestCase {
                 ),
                 originalVersion: ApplicationVersion(marketing: "1.0"),
                 targetVersion: ApplicationVersion(marketing: "2.0"),
-                transactionURL: transactionURL
+                transactionURL: transactionURL,
+                authenticatedDigest: try AuthenticatedApplicationDigest.compute(staged)
             ) { _ in
                 throw CocoaError(.fileReadCorruptFile)
             }
@@ -1047,7 +1049,8 @@ final class AppUpdateOfficialSecurityTests: XCTestCase {
             expectedIdentity: fixture.identity,
             originalVersion: fixture.oldVersion,
             targetVersion: fixture.targetVersion,
-            transactionURL: fixture.transactionURL
+            transactionURL: fixture.transactionURL,
+            authenticatedDigest: try AuthenticatedApplicationDigest.compute(fixture.staged)
         ) { destination in
             XCTAssertEqual(
                 try Data(contentsOf: destination.appendingPathComponent("marker")),
@@ -1234,6 +1237,7 @@ final class AppUpdateOfficialSecurityTests: XCTestCase {
             marker: "new",
             version: targetVersion
         )
+        let authenticatedDigest = try AuthenticatedApplicationDigest.compute(staged)
         let transaction = { phase in
             OfficialApplicationReplacementTransaction(
                 id: transactionID,
@@ -1244,7 +1248,8 @@ final class AppUpdateOfficialSecurityTests: XCTestCase {
                 expectedIdentity: identity,
                 originalVersion: oldVersion,
                 targetVersion: targetVersion,
-                phase: phase
+                phase: phase,
+                authenticatedDigest: authenticatedDigest
             )
         }
         let identityVerifier: OfficialApplicationReplacement.IdentityVerifier = { url, expected in

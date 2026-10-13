@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -26,6 +27,10 @@ enum CleanupRuleSetLoader {
                 + bundledRuleSet.rules
         )
         try CleanupRuleValidator.validate(ruleSet)
+        try CleanupRuleMaintenanceValidator.validate(ruleSet)
+        for rule in bundledRuleSet.rules where rule.maintenance?.source != .json {
+            throw CleanupRuleMaintenanceError.sourceMismatch(rule.id)
+        }
         return ruleSet
     }
 }
@@ -36,6 +41,7 @@ enum CleanupRuleValidator {
     private static let maximumBytes: Int64 = 1_000_000_000_000_000
     private static let safeRoots = [
         "Library/Caches",
+        "Library/Logs",
         "Library/Developer/Xcode/DerivedData",
         "Library/Developer/Xcode/iOS DeviceSupport",
         ".cache",
@@ -81,8 +87,17 @@ enum CleanupRuleValidator {
                   rule.exclude.extensions.allSatisfy(validExtension) else {
                 throw CleanupRuleValidationError.invalidRelativePath(ruleID: rule.id)
             }
-            guard validNameMatcher(rule.include.nameMatcher) else {
+            guard validNameMatcher(rule.include.nameMatcher),
+                  (rule.exclude.namePrefixes ?? []).allSatisfy(validNameValue) else {
                 throw CleanupRuleValidationError.invalidNameMatcher(ruleID: rule.id)
+            }
+            if rule.ownerInference != nil {
+                // Only one-row-per-child rules infer an owner per row.
+                guard rule.isContainerRule,
+                      rule.requiredClosedBundleIDs.isEmpty,
+                      rule.action.isExecutable else {
+                    throw CleanupRuleValidationError.invalidAttributionMetadata(ruleID: rule.id)
+                }
             }
             guard (rule.developerTool == nil) == (rule.developerArtifactKind == nil) else {
                 throw CleanupRuleValidationError.invalidDeveloperArtifactMetadata(ruleID: rule.id)
@@ -120,45 +135,22 @@ enum CleanupRuleValidator {
                       rule.include.nameMatcher.mode == .any,
                       rule.include.nameMatcher.values.isEmpty,
                       rule.exclude.relativePrefixes.isEmpty,
-                      rule.exclude.extensions.isEmpty else {
+                      rule.exclude.extensions.isEmpty,
+                      (rule.exclude.namePrefixes ?? []).isEmpty else {
                     throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
                 }
             }
             if rule.effectiveCandidateScope == .descendantAggregate {
-                guard rule.root.kind == .homeRelative,
-                      rule.action == .revealOnly,
-                      rule.risk == .reviewOnly,
-                      rule.recommendation == .advisoryOnly,
-                      rule.defaultSelection == .forbidden,
-                      rule.executionEligibility == .advisoryOnly,
-                      rule.measurementRequirement == .bestEffort,
-                      !rule.allowsManualSelection,
-                      rule.include.entryKinds == [.directory],
-                      rule.include.extensions.isEmpty,
-                      rule.include.nameMatcher.mode == .exact,
-                      !rule.include.nameMatcher.values.isEmpty,
-                      CleanupCoverageCatalog.permitsDescendantAggregateRule(rule) else {
-                    throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
-                }
+                // D19/D24: a read-only aggregate cannot be selected or removed,
+                // so no rule may list one (the only user was Mail library
+                // attachments, which are no longer listed).
+                throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
             }
             if rule.root.kind == .applicationsDirectory {
-                let validInformationalApplicationsRule = rule.risk == .informational
-                    && rule.recommendation == .advisoryOnly
-                    && rule.defaultSelection == .forbidden
-                    && rule.executionEligibility == .advisoryOnly
-                    && rule.measurementRequirement == .bestEffort
-                    && rule.action == .revealOnly
-                    && !rule.allowsManualSelection
-                    && rule.cloudPolicy == .metadataOnly
-                    && rule.include.entryKinds == [.directory]
-                    && rule.include.extensions.isEmpty
-                    && rule.include.nameMatcher.mode == .any
-                    && rule.include.nameMatcher.values.isEmpty
-                    && rule.maximumDepth == maximumDepth
-                    && rule.effectiveIncludedBundleIdentifiers.isEmpty
-                    && !rule.effectiveRequiresDuplicateBundleIdentifier
-                let validProtectedApplicationsRule = rule.risk == .protected
-                    && rule.recommendation != .advisoryOnly
+                // D25: app bundles are removed from the Uninstall page. The
+                // junk scan only lists extra copies of the same app.
+                let validDuplicateApplicationsRule = rule.risk == .protected
+                    && rule.recommendation == .notRecommended
                     && rule.defaultSelection == .unselected
                     && rule.executionEligibility == .eligibleAfterProtectedReview
                     && rule.measurementRequirement == .complete
@@ -169,10 +161,9 @@ enum CleanupRuleValidator {
                     && rule.include.extensions == ["app"]
                     && rule.include.nameMatcher.mode == .any
                     && rule.include.nameMatcher.values.isEmpty
-                    && rule.maximumDepth == 0
-                    && (rule.effectiveRequiresDuplicateBundleIdentifier
-                        == rule.effectiveIncludedBundleIdentifiers.isEmpty)
-                guard validInformationalApplicationsRule || validProtectedApplicationsRule else {
+                    && rule.effectiveRequiresDuplicateBundleIdentifier
+                    && rule.effectiveIncludedBundleIdentifiers.isEmpty
+                guard validDuplicateApplicationsRule else {
                     throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
                 }
             }
@@ -200,7 +191,7 @@ enum CleanupRuleValidator {
             if automatic {
                 guard !automaticRules.contains(where: {
                     pathsOverlap($0.root.path, rule.root.path)
-                        && !haveDisjointExactNames($0, rule)
+                        && !haveDisjointNames($0, rule)
                 }) else {
                     throw CleanupRuleValidationError.forbiddenRoot(ruleID: rule.id)
                 }
@@ -236,8 +227,22 @@ enum CleanupRuleValidator {
                 && rule.executionEligibility == .advisoryOnly
                 && rule.measurementRequirement == .bestEffort
                 && !rule.allowsManualSelection
+            // D23: emptying the Trash is one root item, red, never preselected,
+            // and only ever applies to the user's own `~/.Trash`.
+            let validEmptyTrashAction = rule.action == .emptyTrash
+                && rule.root.kind == .homeRelative
+                && rule.root.path == ".Trash"
+                && rule.effectiveCandidateScope == .root
+                && rule.risk == .protected
+                && rule.recommendation == .notRecommended
+                && rule.defaultSelection == .unselected
+                && rule.executionEligibility == .eligibleAfterProtectedReview
+                && rule.measurementRequirement == .complete
+                && rule.allowsManualSelection
+                && rule.requiredClosedBundleIDs.isEmpty
             guard validSafeAction || validReviewedAction
-                || validProtectedReviewedAction || validRevealAction else {
+                || validProtectedReviewedAction || validRevealAction
+                || validEmptyTrashAction else {
                 throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
             }
             if rule.defaultSelection == .selected {
@@ -259,28 +264,123 @@ enum CleanupRuleValidator {
                 }
             }
         }
+        try validateContainerExclusions(ruleSet.rules)
+    }
+
+    /// A container rule lists one row per child of its root. It must exclude
+    /// every child that a more specific rule lists (directly, or because the
+    /// specific rule lives inside that child), so no path is listed twice and
+    /// no row contains another row.
+    private static func validateContainerExclusions(_ rules: [CleanupRule]) throws {
+        for container in rules where container.isContainerRule && container.action.isExecutable {
+            for other in rules where other.id != container.id && other.root.kind == .homeRelative {
+                switch claimedChildren(of: other, under: container) {
+                case .none:
+                    continue
+                case let .names(names):
+                    guard names.allSatisfy({ container.exclude.excludes(childName: $0) }) else {
+                        throw CleanupRuleValidationError.overlappingRules(ruleID: container.id)
+                    }
+                case .unbounded:
+                    throw CleanupRuleValidationError.overlappingRules(ruleID: container.id)
+                }
+            }
+        }
+    }
+
+    private enum ClaimedChildren {
+        case none
+        case names([String])
+        case unbounded
+    }
+
+    /// The children of `container.root` that `rule` lists.
+    private static func claimedChildren(
+        of rule: CleanupRule,
+        under container: CleanupRule
+    ) -> ClaimedChildren {
+        let containerRoot = container.root.path
+        let ruleRoot = rule.root.path
+        if ruleRoot.hasPrefix(containerRoot + "/") {
+            let child = ruleRoot.dropFirst(containerRoot.count + 1)
+                .split(separator: "/")
+                .first
+                .map(String.init) ?? ""
+            return .names([child])
+        }
+        if containerRoot.hasPrefix(ruleRoot + "/") {
+            // The other rule would list the container root or one of its
+            // ancestors. Only exact names that miss the path are disjoint.
+            let next = containerRoot.dropFirst(ruleRoot.count + 1)
+                .split(separator: "/")
+                .first
+                .map(String.init) ?? ""
+            guard rule.effectiveCandidateScope == .immediateChildren,
+                  rule.include.nameMatcher.mode == .exact,
+                  !rule.include.nameMatcher.values.contains(where: {
+                      $0.precomposedStringWithCanonicalMapping
+                          == next.precomposedStringWithCanonicalMapping
+                  }) else {
+                return .unbounded
+            }
+            return .none
+        }
+        guard ruleRoot == containerRoot else { return .none }
+        switch rule.effectiveCandidateScope {
+        case .root, .descendantAggregate:
+            return .unbounded
+        case .immediateChildren:
+            switch rule.include.nameMatcher.mode {
+            case .exact:
+                return .names(rule.include.nameMatcher.values)
+            case .prefix:
+                return .unbounded
+            case .any:
+                // Two container rules on one root (Downloads installers and
+                // large items) share children; file identity keeps them apart.
+                return .none
+            }
+        }
+    }
+
+    private static func validNameValue(_ value: String) -> Bool {
+        !value.isEmpty
+            && value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+            && !value.contains("/")
+            && !value.contains("\0")
+            && !value.contains("*")
+            && !value.contains("?")
+            && !value.contains("[")
+            && !value.contains("]")
     }
 
     private static func validNameMatcher(_ matcher: CleanupNameMatcher) -> Bool {
         let values = matcher.values
         let normalizedValues = values.map(\.precomposedStringWithCanonicalMapping)
         guard Set(normalizedValues).count == normalizedValues.count,
-              values.allSatisfy({ value in
-                  !value.isEmpty
-                      && value == value.trimmingCharacters(in: .whitespacesAndNewlines)
-                      && !value.contains("/")
-                      && !value.contains("\0")
-                      && !value.contains("*")
-                      && !value.contains("?")
-                      && !value.contains("[")
-                      && !value.contains("]")
-              }) else { return false }
+              values.allSatisfy(validNameValue) else { return false }
         switch matcher.mode {
         case .any:
             return values.isEmpty
         case .exact, .prefix:
             return !values.isEmpty
         }
+    }
+
+    /// Two automatic rules on overlapping roots are allowed only when they can
+    /// never list the same path.
+    private static func haveDisjointNames(
+        _ lhs: CleanupRule,
+        _ rhs: CleanupRule
+    ) -> Bool {
+        if haveDisjointExactNames(lhs, rhs) { return true }
+        for (container, other) in [(lhs, rhs), (rhs, lhs)] where container.isContainerRule {
+            if case let .names(names) = claimedChildren(of: other, under: container),
+               names.allSatisfy({ container.exclude.excludes(childName: $0) }) {
+                return true
+            }
+        }
+        return false
     }
 
     private static func haveDisjointExactNames(
@@ -337,7 +437,7 @@ enum CleanupRuleValidator {
             && !value.contains("/")
     }
 
-    private static func validBundleIdentifier(_ value: String) -> Bool {
+    static func validBundleIdentifier(_ value: String) -> Bool {
         let components = value.split(separator: ".", omittingEmptySubsequences: false)
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
         return components.count >= 2
@@ -362,11 +462,230 @@ protocol ReadOnlyFileSystem: Sendable {
     func snapshot(at url: URL) throws -> FileSnapshot
     func aggregateSnapshot(at url: URL) throws -> FileSnapshot
     func children(of directory: URL) throws -> [URL]
+    /// The stored destination of a symbolic link, without following it.
+    func symbolicLinkDestination(of url: URL) throws -> String
 }
 
 extension ReadOnlyFileSystem {
     func aggregateSnapshot(at url: URL) throws -> FileSnapshot {
         try snapshot(at: url)
+    }
+
+    func symbolicLinkDestination(of url: URL) throws -> String {
+        do {
+            return try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
+        } catch {
+            throw CleanupFileSystemError.unreadable
+        }
+    }
+}
+
+/// D23: a Trash entry that is a symbolic link is only removed when it points
+/// back inside the Trash. Removing a link never touches its target, but a link
+/// that points elsewhere is left alone so emptying the Trash cannot be read as
+/// deleting something outside it.
+enum CleanupTrashEntryPolicy {
+    static func symbolicLinkStaysInside(
+        _ url: URL,
+        trashPath: String,
+        fileSystem: any ReadOnlyFileSystem
+    ) -> Bool {
+        guard let destination = try? fileSystem.symbolicLinkDestination(of: url),
+              !destination.isEmpty else { return false }
+        let target = destination.hasPrefix("/")
+            ? destination
+            : url.deletingLastPathComponent().appendingPathComponent(destination).path
+        let lexicalTarget = PathSafety.lexicalPath(target)
+        return PathSafety.isContained(lexicalTarget, in: trashPath, resolvingSymlinks: false)
+            && PathSafety.isContained(lexicalTarget, in: trashPath, resolvingSymlinks: true)
+    }
+}
+
+/// P2-1: copies of an app are duplicates only when bundle identifier,
+/// version (`CFBundleShortVersionString`) and build (`CFBundleVersion`) all
+/// match. Info.plist is read from disk each scan (no bundle cache), so an app
+/// updated in place is compared as it is now.
+struct CleanupApplicationRelease: Hashable, Sendable {
+    static let activeDeveloperDirectoryCode = "active-developer-directory"
+    private static let maximumInfoPlistBytes = 4 * 1_024 * 1_024
+
+    let bundleIdentifier: String
+    let shortVersion: String
+    let build: String
+
+    var groupKey: String {
+        [bundleIdentifier, shortVersion, build].joined(separator: "\u{0}")
+    }
+
+    var evidenceCodes: [String] {
+        [
+            "app-bundle-identifier:\(bundleIdentifier)",
+            "app-short-version:\(shortVersion)",
+            "app-build:\(build)",
+        ]
+    }
+
+    static func read(from applicationURL: URL) -> CleanupApplicationRelease? {
+        let plistURL = applicationURL.appendingPathComponent("Contents/Info.plist")
+        if let data = try? Data(contentsOf: plistURL, options: [.mappedIfSafe]),
+           data.count <= maximumInfoPlistBytes,
+           let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
+            as? [String: Any] {
+            return release(from: plist)
+        }
+        // Other layouts, such as wrapped iOS apps, through Bundle.
+        return Bundle(url: applicationURL)?.infoDictionary.flatMap(release(from:))
+    }
+
+    private static func release(from plist: [String: Any]) -> CleanupApplicationRelease? {
+        guard let identifier = plist["CFBundleIdentifier"] as? String,
+              !identifier.isEmpty else { return nil }
+        return CleanupApplicationRelease(
+            bundleIdentifier: identifier,
+            shortVersion: plist["CFBundleShortVersionString"] as? String ?? "",
+            build: plist["CFBundleVersion"] as? String ?? ""
+        )
+    }
+}
+
+/// P2-7: the user's own data that some apps keep among their caches. A row
+/// holding it is not junk: moving the row would take the data with it.
+enum CleanupProtectedContentPolicy {
+    /// IDE local edit history, such as JetBrains
+    /// `~/Library/Caches/JetBrains/<product>/LocalHistory`.
+    private static let localHistoryFolderNames: Set<String> = [
+        "localhistory", "local-history", "local_history", "local history",
+    ]
+
+    /// Folders where a developer tool cache keeps the user's own data:
+    /// Deno stores `Deno.openKv()` databases and localStorage under
+    /// `$DENO_DIR/location_data` (by default `~/Library/Caches/deno`), and
+    /// Poetry keeps project virtual environments in `pypoetry/virtualenvs`.
+    private static let toolDataFolderNames: Set<String> = [
+        "location_data", "virtualenvs",
+    ]
+
+    /// D83 (repair 1): the agent-state markers below apply only to the AI
+    /// tool rules added by D83 and the two Playwright rules. Ordinary package
+    /// caches (npx, uv, pip, user caches…) legitimately contain folders named
+    /// `config`, `models`, `mcp-server` or `*.pt` files from installed
+    /// packages; they keep the integration-baseline protection unchanged.
+    /// Membership is code policy like the name lists themselves, so it does
+    /// not alter rule content hashes.
+    static let persistentAgentStateRuleIDs: Set<String> = [
+        "developer.claude-desktop-web-cache", "developer.codex-desktop-web-cache",
+        "developer.vscode-web-cache", "developer.vscode-logs",
+        "developer.lmstudio-web-cache", "developer.rod-browser-downloads",
+        "developer.playwright-mcp-cache", "developer.playwright-browsers",
+    ]
+
+    static func protectsPersistentAgentState(ruleID: String) -> Bool {
+        persistentAgentStateRuleIDs.contains(ruleID)
+    }
+
+    /// D83: recognize persistent state by names only, without opening it.
+    /// These markers protect a mixed cache row even if its parent is named
+    /// "Caches". Persistent MCP profiles must never be trashed as a whole.
+    private static let agentDataNames: Set<String> = [
+        "sessions", "archived_sessions", "claude-code-sessions", "local-agent-mode-sessions",
+        "checkpoints", "history", "file-history", "shell-snapshots", "shell_snapshots",
+        "projects", "project-state", "workspacestorage", "globalstorage", "backups",
+        "models", "model", "credentials", "config", "configuration", "settings",
+        "local storage", "session storage", "indexeddb", "webstorage",
+        "cookies", "login data", "local state", "auth.json", "credentials.json",
+        "claude_desktop_config.json", "config.json", "config.toml", "settings.json",
+        "history.jsonl", "state.sqlite", "state.db",
+    ]
+    private static let modelExtensions: Set<String> = ["gguf", "ggml", "safetensors", "onnx", "ckpt", "pth", "pt"]
+
+    static func isProtectedAgentEntry(named name: String) -> Bool {
+        let normalized = name.precomposedStringWithCanonicalMapping.lowercased()
+        return agentDataNames.contains(normalized)
+            || normalized.hasPrefix("mcp-")
+            || modelExtensions.contains((normalized as NSString).pathExtension)
+    }
+
+    static func isLocalHistoryFolder(named name: String) -> Bool {
+        localHistoryFolderNames.contains(name.precomposedStringWithCanonicalMapping.lowercased())
+    }
+
+    /// A folder whose contents are the user's data, so the row holding it is
+    /// counted, not listed.
+    static func isProtectedDataFolder(named name: String) -> Bool {
+        let normalized = name.precomposedStringWithCanonicalMapping.lowercased()
+        return localHistoryFolderNames.contains(normalized) || toolDataFolderNames.contains(normalized)
+    }
+}
+
+/// The running and installed apps used for preselection (D22; D47 holds back
+/// only rows whose app is running).
+struct CleanupApplicationSnapshot: Sendable {
+    var runningBundleIdentifiers: Set<String> = []
+    var runningBundlePaths: Set<String> = []
+    /// The subset of the asked identifiers that belong to an installed app.
+    var installedBundleIdentifiers: Set<String> = []
+
+    static let empty = CleanupApplicationSnapshot()
+}
+
+protocol CleanupApplicationEnvironment: Sendable {
+    func snapshot(checkingInstalled bundleIdentifiers: Set<String>) async -> CleanupApplicationSnapshot
+}
+
+/// Nothing running and no app installed: rows whose owner must be inferred
+/// stay unresolved. The default for scanners built in tests.
+struct NoCleanupApplicationEnvironment: CleanupApplicationEnvironment {
+    func snapshot(checkingInstalled _: Set<String>) async -> CleanupApplicationSnapshot {
+        .empty
+    }
+}
+
+struct WorkspaceCleanupApplicationEnvironment: CleanupApplicationEnvironment {
+    func snapshot(checkingInstalled bundleIdentifiers: Set<String>) async -> CleanupApplicationSnapshot {
+        await MainActor.run {
+            let workspace = NSWorkspace.shared
+            let running = workspace.runningApplications
+            return CleanupApplicationSnapshot(
+                runningBundleIdentifiers: Set(running.compactMap(\.bundleIdentifier)),
+                runningBundlePaths: Set(running.compactMap {
+                    $0.bundleURL.map { PathSafety.lexicalPath($0.path) }
+                }),
+                installedBundleIdentifiers: Set(bundleIdentifiers.filter {
+                    workspace.urlForApplication(withBundleIdentifier: $0) != nil
+                })
+            )
+        }
+    }
+}
+
+enum CleanupOwnerInferencePolicy {
+    /// A row named `com.vendor.app.Helper` may belong to `com.vendor.app`.
+    /// Names need at least three reverse-DNS parts so plain file names such as
+    /// `install.log` are never read as an app.
+    static func bundleIdentifierCandidates(forName name: String) -> [String] {
+        let components = name.split(separator: ".", omittingEmptySubsequences: false)
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
+        guard components.count >= 3,
+              components.allSatisfy({
+                  !$0.isEmpty && String($0).unicodeScalars.allSatisfy(allowed.contains)
+              }) else { return [] }
+        return (3...components.count).reversed().map {
+            components.prefix($0).joined(separator: ".")
+        }
+    }
+
+    /// The longest candidate that is an installed app's bundle identifier.
+    static func owner(
+        forName name: String,
+        installedBundleIdentifiers: Set<String>
+    ) -> String? {
+        bundleIdentifierCandidates(forName: name).first(where: installedBundleIdentifiers.contains)
+    }
+
+    /// Item 10: macOS folders with no owning app, such as crash and
+    /// diagnostic reports.
+    static func isOwnerless(name: String) -> Bool {
+        ["DiagnosticReports"].contains(name)
     }
 }
 
@@ -389,15 +708,7 @@ struct FoundationReadOnlyFileSystem: ReadOnlyFileSystem {
         do {
             values = try url.resourceValues(forKeys: keys)
         } catch {
-            let nsError = error as NSError
-            switch nsError.code {
-            case NSFileReadNoPermissionError, NSFileWriteNoPermissionError:
-                throw CleanupFileSystemError.permissionDenied
-            case NSFileNoSuchFileError:
-                throw CleanupFileSystemError.vanished
-            default:
-                throw CleanupFileSystemError.unreadable
-            }
+            throw Self.cleanupError(for: error)
         }
         let logicalSize = kind == .regularFile
             ? Int64(max(0, values.fileSize ?? Int(status.st_size)))
@@ -469,15 +780,44 @@ struct FoundationReadOnlyFileSystem: ReadOnlyFileSystem {
                 options: []
             )
         } catch {
-            let cocoaError = error as NSError
-            if cocoaError.code == NSFileReadNoPermissionError {
-                throw CleanupFileSystemError.permissionDenied
-            }
-            if cocoaError.code == NSFileNoSuchFileError {
-                throw CleanupFileSystemError.vanished
-            }
-            throw CleanupFileSystemError.unreadable
+            throw Self.cleanupError(for: error)
         }
+    }
+
+    /// Maps an error from listing or reading an item (P2-4). Codes are read in
+    /// their own domain, and underlying errors are read too, so a POSIX
+    /// EPERM or EACCES (for example the Trash without Full Disk Access) is a
+    /// permission problem and the scan can show the Full Disk Access guidance.
+    static func cleanupError(for error: Error) -> CleanupFileSystemError {
+        var current: NSError? = error as NSError
+        var depth = 0
+        while let nsError = current, depth < 4 {
+            switch nsError.domain {
+            case NSCocoaErrorDomain:
+                switch nsError.code {
+                case NSFileReadNoPermissionError, NSFileWriteNoPermissionError:
+                    return .permissionDenied
+                case NSFileNoSuchFileError, NSFileReadNoSuchFileError:
+                    return .vanished
+                default:
+                    break
+                }
+            case NSPOSIXErrorDomain:
+                switch Int32(truncatingIfNeeded: nsError.code) {
+                case EPERM, EACCES:
+                    return .permissionDenied
+                case ENOENT:
+                    return .vanished
+                default:
+                    break
+                }
+            default:
+                break
+            }
+            current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        return .unreadable
     }
 
     private func nanoseconds(_ date: Date) -> Int64 {
@@ -534,8 +874,12 @@ private struct CleanupAggregateMeasurement {
     var allocatedSizeBytes: Int64?
     var completeness: MeasurementCompleteness
     var latestModificationTimeNanoseconds: Int64? = nil
+    /// P2-7: a protected folder (such as IDE local history) was found inside.
+    /// It is not read or counted.
+    var containsProtectedData = false
 
     mutating func add(_ child: CleanupAggregateMeasurement) {
+        containsProtectedData = containsProtectedData || child.containsProtectedData
         logicalSizeBytes = CleanupByteCount.adding(
             child.logicalSizeBytes,
             to: logicalSizeBytes
@@ -555,9 +899,18 @@ private struct CleanupAggregateMeasurement {
         merge(child.completeness)
     }
 
+    /// The first reason is kept, except that a skipped symbolic link gives way
+    /// to any reason that leaves part of the folder unread. A lower bound whose
+    /// reason is `symbolicLinkSkipped` therefore means only links were skipped.
     mutating func markLowerBound(_ reason: CleanupMeasurementIssue) {
-        guard completeness.isComplete else { return }
-        completeness = .lowerBound(reason: reason)
+        switch completeness {
+        case .complete:
+            completeness = .lowerBound(reason: reason)
+        case .lowerBound(.symbolicLinkSkipped) where reason != .symbolicLinkSkipped:
+            completeness = .lowerBound(reason: reason)
+        case .lowerBound, .failed:
+            break
+        }
     }
 
     private mutating func merge(_ child: MeasurementCompleteness) {
@@ -571,48 +924,80 @@ private struct CleanupAggregateMeasurement {
     }
 }
 
-private struct CleanupDescendantDiscovery {
-    let candidateURLs: [URL]
-    let visitedEntryCount: Int
-    let visitedDirectoryPaths: Set<String>
-    let issues: [ScanIssue]
-
-    var measurementCompleteness: MeasurementCompleteness {
-        for issue in issues {
-            switch issue.kind {
-            case .permissionDenied:
-                return .lowerBound(reason: .permissionDenied)
-            case .symbolicLinkSkipped:
-                return .lowerBound(reason: .symbolicLinkSkipped)
-            case .cloudPlaceholderSkipped:
-                return .lowerBound(reason: .excludedDescendant)
-            case .vanished, .unreadable, .metadataUnavailable,
-                 .volumeUnavailable, .outsideAllowedRoot, .timedOut:
-                return .lowerBound(reason: .unreadableDescendant)
-            case .hardLinkDeduplicated:
-                continue
-            }
-        }
-        return .complete
-    }
-}
-
 actor ReadOnlyCleanupScanner {
     private static let maximumCandidatesPerRule = 40
-    private static let installedApplicationsRuleID = "applications.installed-apps"
     private let fileSystem: any ReadOnlyFileSystem
     private let ruleSet: CleanupRuleSet
+    private let rulesProvenance: CleanupRuleSetProvenance
     private let applicationsURL: URL
+    private let applicationEnvironment: any CleanupApplicationEnvironment
+    /// `xcode-select`'s link to the active developer directory.
+    private let developerDirectoryLinkURL: URL
 
     init(
         fileSystem: any ReadOnlyFileSystem,
         ruleSet: CleanupRuleSet,
-        applicationsURL: URL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        applicationsURL: URL = URL(fileURLWithPath: "/Applications", isDirectory: true),
+        applicationEnvironment: any CleanupApplicationEnvironment = NoCleanupApplicationEnvironment(),
+        developerDirectoryLinkURL: URL = URL(fileURLWithPath: "/var/db/xcode_select_link")
     ) throws {
         try CleanupRuleValidator.validate(ruleSet)
         self.fileSystem = fileSystem
         self.ruleSet = ruleSet
+        self.rulesProvenance = ruleSet.effectiveProvenance
         self.applicationsURL = applicationsURL
+        self.applicationEnvironment = applicationEnvironment
+        self.developerDirectoryLinkURL = developerDirectoryLinkURL
+    }
+
+    /// Bookkeeping shared by every rule in one scan.
+    private struct ScanLedger {
+        var issues = [ScanIssue]()
+        var visitedEntryCount = 0
+        var visitedDirectoryPaths = Set<String>()
+        var deduplicatedIdentityCount = 0
+        var truncatedCandidateCount = 0
+        var notActionableCandidateCount = 0
+        var excludedPathCandidateCount = 0
+        var protectedDataCandidateCount = 0
+        var seenIdentityKeys = Set<String>()
+
+        /// D19: found but not listed, with the reason kept in the issues.
+        mutating func recordNotActionable(ruleID: String, path: String, kind: ScanIssueKind) {
+            issues.append(ScanIssue(ruleID: ruleID, path: path, kind: kind))
+            notActionableCandidateCount += 1
+            if kind == .candidateContainsExcludedPath {
+                excludedPathCandidateCount += 1
+            } else if kind == .candidateContainsProtectedData {
+                protectedDataCandidateCount += 1
+            }
+        }
+    }
+
+    /// P2-1: the app `xcode-select` points at (its link holds
+    /// `<App>.app/Contents/Developer`). Only the link is read; no process runs.
+    private func activeDeveloperApplicationPath() -> String? {
+        guard let destination = try? FileManager.default.destinationOfSymbolicLink(
+            atPath: developerDirectoryLinkURL.path
+        ), !destination.isEmpty else { return nil }
+        var url = destination.hasPrefix("/")
+            ? URL(fileURLWithPath: destination)
+            : developerDirectoryLinkURL.deletingLastPathComponent().appendingPathComponent(destination)
+        while url.path != "/", !url.path.isEmpty {
+            if url.pathExtension.lowercased() == "app" {
+                return PathSafety.lexicalPath(url.path)
+            }
+            url.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    /// An item that holds a path the user excluded would always be skipped by
+    /// cleanup (`SafeCleanupExecutor` uses the same check), so it is not
+    /// actionable. Items inside an excluded path are skipped before this.
+    private func holdsExcludedPath(_ path: String, excludedPaths: [String]) -> Bool {
+        !excludedPaths.isEmpty
+            && ScanExclusionService.intersectsExcludedTree(path, excludedPaths: excludedPaths)
     }
 
     func scan(
@@ -626,18 +1011,12 @@ actor ReadOnlyCleanupScanner {
         let excludedPaths = request.excludedURLs.map {
             PathSafety.lexicalPath($0.path)
         }
-        var issues = [ScanIssue]()
+        var ledger = ScanLedger()
         var permissions = [CleanupPermissionReport]()
-        var visitedEntryCount = 0
-        var visitedDirectoryPaths = Set<String>()
-        var deduplicatedIdentityCount = 0
-        var truncatedCandidateCount = 0
-        var seenIdentityKeys = Set<String>()
         var completedSubcategories = [CleanupScanSubcategory]()
         var skippedRuleIDs = Set<String>()
         var failedRuleIDs = Set<String>()
         var outcome = ScanOutcome.complete
-        var protectedApplicationCandidates = [String: [ScanCandidate]]()
 
         await progress(progressSnapshot(
             phase: .preparing,
@@ -653,7 +1032,7 @@ actor ReadOnlyCleanupScanner {
                 break
             }
             if Date() >= deadline {
-                issues.append(ScanIssue(ruleID: nil, path: nil, kind: .timedOut))
+                ledger.issues.append(ScanIssue(ruleID: nil, path: nil, kind: .timedOut))
                 outcome = .partial
                 break
             }
@@ -675,7 +1054,7 @@ actor ReadOnlyCleanupScanner {
                 rootPath: rootPath,
                 homePath: homePath
             ) else {
-                issues.append(ScanIssue(
+                ledger.issues.append(ScanIssue(
                     ruleID: rule.id,
                     path: rootPath,
                     kind: .outsideAllowedRoot
@@ -693,27 +1072,11 @@ actor ReadOnlyCleanupScanner {
                 continue
             }
 
-            if rule.root.kind == .applicationsDirectory,
-               rule.risk == .protected {
-                completedSubcategories.append(subcategory(
-                    rule: rule,
-                    candidates: protectedApplicationCandidates[rule.id] ?? []
-                ))
-                await progress(progressSnapshot(
-                    phase: .enumerating,
-                    currentRuleTitle: ruleTitle,
-                    completedSubcategories: completedSubcategories,
-                    skippedRuleIDs: skippedRuleIDs,
-                    failedRuleIDs: failedRuleIDs
-                ))
-                continue
-            }
-
             var ruleCandidates = [ScanCandidate]()
             var reachedDeadline = false
             do {
                 let rootSnapshot = try fileSystem.snapshot(at: rootURL)
-                visitedDirectoryPaths.insert(rootSnapshot.standardizedPath)
+                ledger.visitedDirectoryPaths.insert(rootSnapshot.standardizedPath)
                 guard rootSnapshot.identity.entryKind == .directory,
                       !rootSnapshot.hasSymbolicLinkComponent else {
                     permissions.append(CleanupPermissionReport(
@@ -721,7 +1084,7 @@ actor ReadOnlyCleanupScanner {
                         path: rootPath,
                         status: .unreadable
                     ))
-                    issues.append(ScanIssue(
+                    ledger.issues.append(ScanIssue(
                         ruleID: rule.id,
                         path: rootPath,
                         kind: .symbolicLinkSkipped
@@ -741,7 +1104,7 @@ actor ReadOnlyCleanupScanner {
                         path: rootPath,
                         status: .unreadable
                     ))
-                    issues.append(ScanIssue(
+                    ledger.issues.append(ScanIssue(
                         ruleID: rule.id,
                         path: rootPath,
                         kind: .outsideAllowedRoot
@@ -757,210 +1120,233 @@ actor ReadOnlyCleanupScanner {
                     status: .readable
                 ))
 
-                let candidateURLs: [URL]
-                var descendantDiscoveryCompleteness = MeasurementCompleteness.complete
-                switch rule.effectiveCandidateScope {
-                case .root:
-                    candidateURLs = [rootURL]
-                case .immediateChildren:
-                    candidateURLs = try fileSystem.children(of: rootURL).sorted(by: {
-                        $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
-                    })
-                case .descendantAggregate:
-                    let discovery = try descendantCandidateURLs(
+                if rule.root.kind == .applicationsDirectory {
+                    ruleCandidates = try duplicateApplicationCandidates(
+                        sessionID: sessionID,
+                        rule: rule,
                         rootURL: rootURL,
                         rootPath: rootPath,
-                        rule: rule,
                         excludedPaths: excludedPaths,
                         deadline: deadline,
-                        referenceDate: startedAt
+                        referenceDate: startedAt,
+                        ledger: &ledger
                     )
-                    candidateURLs = discovery.candidateURLs
-                    visitedEntryCount += discovery.visitedEntryCount
-                    visitedDirectoryPaths.formUnion(
-                        discovery.visitedDirectoryPaths
-                    )
-                    issues.append(contentsOf: discovery.issues)
-                    descendantDiscoveryCompleteness = discovery.measurementCompleteness
-                    if !descendantDiscoveryCompleteness.isComplete {
-                        outcome = .partial
-                    }
-                }
-                for (candidateIndex, childURL) in candidateURLs.enumerated() {
-                    try checkDeadline(deadline)
-                    if candidateIndex.isMultiple(of: 8) {
-                        await progress(progressSnapshot(
-                            phase: .enumerating,
-                            currentRuleID: rule.id,
-                            currentRuleTitle: ruleTitle,
-                            currentPath: PathSafety.lexicalPath(childURL.path),
-                            currentRuleCompletedItemCount: candidateIndex,
-                            currentRuleTotalItemCount: candidateURLs.count,
-                            completedSubcategories: completedSubcategories,
-                            skippedRuleIDs: skippedRuleIDs,
-                            failedRuleIDs: failedRuleIDs
-                        ))
-                    }
-                    if isExcluded(childURL.path, by: excludedPaths) {
-                        continue
-                    }
-
-                    do {
-                        var snapshot = try fileSystem.snapshot(at: childURL)
-                        if rule.effectiveCandidateScope != .descendantAggregate {
-                            visitedEntryCount += 1
-                            if snapshot.identity.entryKind == .directory {
-                                visitedDirectoryPaths.insert(snapshot.standardizedPath)
-                            }
-                        }
-                        guard PathSafety.isContained(
-                            snapshot.standardizedPath,
-                            in: rootPath,
-                            resolvingSymlinks: false
-                        ) else {
-                            issues.append(ScanIssue(
-                                ruleID: rule.id,
-                                path: snapshot.standardizedPath,
-                                kind: .outsideAllowedRoot
-                            ))
-                            outcome = .partial
-                            continue
-                        }
-                        guard snapshot.identity.entryKind != .symbolicLink,
-                              !snapshot.hasSymbolicLinkComponent else {
-                            issues.append(ScanIssue(
-                                ruleID: rule.id,
-                                path: snapshot.standardizedPath,
-                                kind: .symbolicLinkSkipped
-                            ))
-                            continue
-                        }
-                        guard PathSafety.isContained(
-                            snapshot.standardizedPath,
-                            in: rootPath,
-                            resolvingSymlinks: true
-                        ) else {
-                            issues.append(ScanIssue(
-                                ruleID: rule.id,
-                                path: snapshot.standardizedPath,
-                                kind: .outsideAllowedRoot
-                            ))
-                            outcome = .partial
-                            continue
-                        }
-                        guard !rule.action.movesToTrash || snapshot.isWritableVolume else {
-                            issues.append(ScanIssue(
-                                ruleID: rule.id,
-                                path: snapshot.standardizedPath,
-                                kind: .volumeUnavailable
-                            ))
-                            outcome = .partial
-                            continue
-                        }
-                        if shouldSkipCloudItem(snapshot, policy: rule.cloudPolicy) {
-                            issues.append(ScanIssue(
-                                ruleID: rule.id,
-                                path: snapshot.standardizedPath,
-                                kind: .cloudPlaceholderSkipped
-                            ))
-                            continue
-                        }
-                        if !DeveloperCleanupAgePolicy.applies(to: rule),
-                           rule.minimumAgeDays > 0,
-                           snapshot.modificationTimeNanoseconds == nil {
-                            issues.append(ScanIssue(
-                                ruleID: rule.id,
-                                path: snapshot.standardizedPath,
-                                kind: .metadataUnavailable
-                            ))
-                            outcome = .partial
-                            continue
-                        }
-                        guard matches(
-                            snapshot: snapshot,
-                            url: childURL,
-                            rule: rule,
-                            referenceDate: startedAt
-                        ) else {
-                            continue
-                        }
-                        let identityKey = snapshot.identity.deduplicationKey
-                        guard !seenIdentityKeys.contains(identityKey) else {
-                            deduplicatedIdentityCount += 1
-                            issues.append(ScanIssue(
-                                ruleID: rule.id,
-                                path: snapshot.standardizedPath,
-                                kind: .hardLinkDeduplicated
-                            ))
-                            continue
-                        }
-
-                        let aggregate = try aggregateSize(
-                            snapshot: snapshot,
-                            url: childURL,
-                            depth: 0,
-                            maximumDepth: rule.maximumDepth,
-                            ruleID: rule.id,
-                            allowedRootPath: rootPath,
-                            excludedPaths: excludedPaths,
-                            seenIdentityKeys: &seenIdentityKeys,
-                            issues: &issues,
-                            visitedEntryCount: &visitedEntryCount,
-                            visitedDirectoryPaths: &visitedDirectoryPaths,
-                            deduplicatedIdentityCount: &deduplicatedIdentityCount,
-                            deadline: deadline
-                        )
-                        let estimatedSize = aggregate.allocatedSizeBytes
-                            ?? aggregate.logicalSizeBytes
-                        guard estimatedSize >= rule.minimumBytes else {
-                            continue
-                        }
-                        snapshot = snapshotWithSizes(
-                            snapshot,
-                            logical: aggregate.logicalSizeBytes,
-                            allocated: aggregate.allocatedSizeBytes
-                        )
-                        ruleCandidates.append(candidate(
-                            sessionID: sessionID,
-                            rule: rule,
-                            rootURL: rootURL,
-                            sourceURL: childURL,
-                            snapshot: snapshot,
-                            measurementCompleteness: aggregate.completeness,
-                            latestContentModificationTimeNanoseconds:
-                                aggregate.latestModificationTimeNanoseconds,
-                            developerInactivityThresholdDays:
-                                request.developerInactivityThresholdDays,
-                            referenceDate: startedAt
-                        ))
-                    } catch is CancellationError {
-                        throw CancellationError()
-                    } catch is CleanupScanDeadlineExceeded {
-                        throw CleanupScanDeadlineExceeded()
-                    } catch {
-                        issues.append(ScanIssue(
-                            ruleID: rule.id,
-                            path: childURL.path,
-                            kind: issueKind(for: error)
-                        ))
-                        outcome = .partial
-                    }
-                }
-                if rule.effectiveCandidateScope == .descendantAggregate {
-                    ruleCandidates = aggregateDescendantCandidates(
+                } else if rule.action == .emptyTrash {
+                    ruleCandidates = try trashCandidates(
                         sessionID: sessionID,
                         rule: rule,
                         rootURL: rootURL,
                         rootSnapshot: rootSnapshot,
-                        candidates: ruleCandidates,
-                        discoveryCompleteness: descendantDiscoveryCompleteness
+                        excludedPaths: excludedPaths,
+                        deadline: deadline,
+                        referenceDate: startedAt,
+                        ledger: &ledger
                     )
+                } else {
+                    let candidateURLs: [URL]
+                    switch rule.effectiveCandidateScope {
+                    case .root:
+                        candidateURLs = [rootURL]
+                    case .immediateChildren:
+                        candidateURLs = try fileSystem.children(of: rootURL).sorted(by: {
+                            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+                        })
+                    case .descendantAggregate:
+                        // Rejected by the validator; such a result could never be acted on.
+                        candidateURLs = []
+                    }
+                    for (candidateIndex, childURL) in candidateURLs.enumerated() {
+                        try checkDeadline(deadline)
+                        if candidateIndex.isMultiple(of: 8) {
+                            await progress(progressSnapshot(
+                                phase: .enumerating,
+                                currentRuleID: rule.id,
+                                currentRuleTitle: ruleTitle,
+                                currentPath: PathSafety.lexicalPath(childURL.path),
+                                currentRuleCompletedItemCount: candidateIndex,
+                                currentRuleTotalItemCount: candidateURLs.count,
+                                completedSubcategories: completedSubcategories,
+                                skippedRuleIDs: skippedRuleIDs,
+                                failedRuleIDs: failedRuleIDs
+                            ))
+                        }
+                        if isExcluded(childURL.path, by: excludedPaths) {
+                            continue
+                        }
+
+                        do {
+                            var snapshot = try fileSystem.snapshot(at: childURL)
+                            ledger.visitedEntryCount += 1
+                            if snapshot.identity.entryKind == .directory {
+                                ledger.visitedDirectoryPaths.insert(snapshot.standardizedPath)
+                            }
+                            guard PathSafety.isContained(
+                                snapshot.standardizedPath,
+                                in: rootPath,
+                                resolvingSymlinks: false
+                            ) else {
+                                ledger.issues.append(ScanIssue(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .outsideAllowedRoot
+                                ))
+                                outcome = .partial
+                                continue
+                            }
+                            guard snapshot.identity.entryKind != .symbolicLink,
+                                  !snapshot.hasSymbolicLinkComponent else {
+                                ledger.issues.append(ScanIssue(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .symbolicLinkSkipped
+                                ))
+                                continue
+                            }
+                            guard PathSafety.isContained(
+                                snapshot.standardizedPath,
+                                in: rootPath,
+                                resolvingSymlinks: true
+                            ) else {
+                                ledger.issues.append(ScanIssue(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .outsideAllowedRoot
+                                ))
+                                outcome = .partial
+                                continue
+                            }
+                            guard !rule.action.isExecutable || snapshot.isWritableVolume else {
+                                ledger.issues.append(ScanIssue(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .volumeUnavailable
+                                ))
+                                outcome = .partial
+                                continue
+                            }
+                            if shouldSkipCloudItem(snapshot, policy: rule.cloudPolicy) {
+                                ledger.issues.append(ScanIssue(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .cloudPlaceholderSkipped
+                                ))
+                                continue
+                            }
+                            if !DeveloperCleanupAgePolicy.applies(to: rule),
+                               rule.minimumAgeDays > 0,
+                               snapshot.modificationTimeNanoseconds == nil {
+                                ledger.issues.append(ScanIssue(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .metadataUnavailable
+                                ))
+                                outcome = .partial
+                                continue
+                            }
+                            guard matches(
+                                snapshot: snapshot,
+                                url: childURL,
+                                rule: rule,
+                                referenceDate: startedAt
+                            ) else {
+                                continue
+                            }
+                            let identityKey = snapshot.identity.deduplicationKey
+                            guard !ledger.seenIdentityKeys.contains(identityKey) else {
+                                ledger.deduplicatedIdentityCount += 1
+                                ledger.issues.append(ScanIssue(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .hardLinkDeduplicated
+                                ))
+                                continue
+                            }
+                            guard !holdsExcludedPath(
+                                snapshot.standardizedPath,
+                                excludedPaths: excludedPaths
+                            ) else {
+                                ledger.recordNotActionable(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .candidateContainsExcludedPath
+                                )
+                                continue
+                            }
+
+                            let aggregate = try aggregateSize(
+                                snapshot: snapshot,
+                                url: childURL,
+                                depth: 0,
+                                maximumDepth: rule.maximumDepth,
+                                ruleID: rule.id,
+                                allowedRootPath: rootPath,
+                                excludedPaths: excludedPaths,
+                                deadline: deadline,
+                                ledger: &ledger
+                            )
+                            // P2-7: moving the row would take the user's own
+                            // data with it, so it is counted, not listed.
+                            guard !aggregate.containsProtectedData,
+                                  !CleanupProtectedContentPolicy.isProtectedDataFolder(
+                                      named: childURL.lastPathComponent
+                                  ),
+                                  !(CleanupProtectedContentPolicy.protectsPersistentAgentState(ruleID: rule.id)
+                                    && CleanupProtectedContentPolicy.isProtectedAgentEntry(
+                                        named: childURL.lastPathComponent
+                                    )) else {
+                                ledger.recordNotActionable(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .candidateContainsProtectedData
+                                )
+                                continue
+                            }
+                            let estimatedSize = aggregate.allocatedSizeBytes
+                                ?? aggregate.logicalSizeBytes
+                            // A folder that cannot be listed has no known size,
+                            // so the threshold cannot drop it: it reaches the
+                            // D19 filter below and is counted as not listed.
+                            guard aggregate.completeness.isFailed
+                                || estimatedSize >= rule.minimumBytes else {
+                                continue
+                            }
+                            snapshot = snapshotWithSizes(
+                                snapshot,
+                                logical: aggregate.logicalSizeBytes,
+                                allocated: aggregate.allocatedSizeBytes
+                            )
+                            ruleCandidates.append(candidate(
+                                sessionID: sessionID,
+                                rule: rule,
+                                rootURL: rootURL,
+                                sourceURL: childURL,
+                                snapshot: snapshot,
+                                measurementCompleteness: aggregate.completeness,
+                                latestContentModificationTimeNanoseconds:
+                                    aggregate.latestModificationTimeNanoseconds,
+                                developerInactivityThresholdDays:
+                                    request.developerInactivityThresholdDays,
+                                referenceDate: startedAt
+                            ))
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch is CleanupScanDeadlineExceeded {
+                            throw CleanupScanDeadlineExceeded()
+                        } catch {
+                            ledger.issues.append(ScanIssue(
+                                ruleID: rule.id,
+                                path: childURL.path,
+                                kind: issueKind(for: error)
+                            ))
+                            outcome = .partial
+                        }
+                    }
                 }
             } catch is CancellationError {
                 outcome = .cancelled
                 skippedRuleIDs.insert(rule.id)
             } catch is CleanupScanDeadlineExceeded {
-                issues.append(ScanIssue(ruleID: rule.id, path: rootPath, kind: .timedOut))
+                ledger.issues.append(ScanIssue(ruleID: rule.id, path: rootPath, kind: .timedOut))
                 outcome = .partial
                 reachedDeadline = true
                 failedRuleIDs.insert(rule.id)
@@ -976,7 +1362,7 @@ actor ReadOnlyCleanupScanner {
                     skippedRuleIDs.insert(rule.id)
                 } else {
                     failedRuleIDs.insert(rule.id)
-                    issues.append(ScanIssue(
+                    ledger.issues.append(ScanIssue(
                         ruleID: rule.id,
                         path: rootPath,
                         kind: issueKind(for: error)
@@ -985,57 +1371,31 @@ actor ReadOnlyCleanupScanner {
                 }
             }
 
-            if rule.id == Self.installedApplicationsRuleID {
-                let sortedCandidates = ruleCandidates.sorted(by: candidateSort)
-                let cappedCandidates = Array(sortedCandidates.prefix(Self.maximumCandidatesPerRule))
-                truncatedCandidateCount += max(0, sortedCandidates.count - cappedCandidates.count)
-                let duplicateGroups = duplicateApplicationGroups(in: ruleCandidates)
-                var protectedPaths = Set<String>()
-                for protectedRule in ruleSet.rules where
-                    protectedRule.root.kind == .applicationsDirectory
-                        && protectedRule.risk == .protected {
-                    let candidates = cappedCandidates.compactMap { candidate -> ScanCandidate? in
-                        let path = candidate.snapshot.standardizedPath
-                        let bundleID = Bundle(url: candidate.sourceURL)?.bundleIdentifier
-                        var evidenceCodes = [String]()
-                        if protectedRule.effectiveRequiresDuplicateBundleIdentifier {
-                            guard let groupID = duplicateGroups[path] else { return nil }
-                            evidenceCodes = [
-                                "duplicate-bundle-identifier",
-                                "duplicate-bundle-group:\(groupID)",
-                            ]
-                        } else {
-                            guard let bundleID,
-                                  protectedRule.effectiveIncludedBundleIdentifiers.contains(bundleID) else {
-                                return nil
-                            }
-                            evidenceCodes = [
-                                "approved-application-bundle-identifier",
-                                "application-bundle-identifier:\(bundleID)",
-                            ]
-                        }
-                        protectedPaths.insert(path)
-                        return self.candidate(
-                            sessionID: sessionID,
-                            rule: protectedRule,
-                            rootURL: rootURL,
-                            sourceURL: candidate.sourceURL,
-                            snapshot: candidate.snapshot,
-                            measurementCompleteness: candidate.measurementCompleteness,
-                            evidenceCodes: evidenceCodes
-                        )
-                    }
-                    protectedApplicationCandidates[protectedRule.id] = candidates
-                }
-                ruleCandidates = cappedCandidates.filter {
-                    !protectedPaths.contains($0.snapshot.standardizedPath)
+            // D19: list only what can be selected and removed. Anything else is
+            // counted under "some scopes were safely skipped".
+            var actionableCandidates = [ScanCandidate]()
+            for candidate in ruleCandidates {
+                if candidate.isSelectable {
+                    actionableCandidates.append(candidate)
+                } else {
+                    ledger.recordNotActionable(
+                        ruleID: rule.id,
+                        path: candidate.snapshot.standardizedPath,
+                        kind: .candidateNotActionable
+                    )
                 }
             }
-
-            let sortedCandidates = ruleCandidates.sorted(by: candidateSort)
-            let retainedCandidates = Array(sortedCandidates.prefix(Self.maximumCandidatesPerRule))
-            if rule.id != Self.installedApplicationsRuleID {
-                truncatedCandidateCount += max(0, sortedCandidates.count - retainedCandidates.count)
+            let retainedCandidates: [ScanCandidate]
+            if rule.root.kind == .applicationsDirectory {
+                // Whole duplicate groups, already kept within the cap.
+                retainedCandidates = actionableCandidates
+            } else {
+                let sortedCandidates = actionableCandidates.sorted(by: candidateSort)
+                retainedCandidates = Array(sortedCandidates.prefix(Self.maximumCandidatesPerRule))
+                ledger.truncatedCandidateCount += max(
+                    0,
+                    sortedCandidates.count - retainedCandidates.count
+                )
             }
             completedSubcategories.append(subcategory(
                 rule: rule,
@@ -1061,8 +1421,14 @@ actor ReadOnlyCleanupScanner {
             failedRuleIDs: failedRuleIDs
         ))
 
-        let categories = categories(from: completedSubcategories)
+        let categories = categories(
+            from: droppingDuplicateGroupsInUse(
+                await resolvingOwners(in: completedSubcategories),
+                ledger: &ledger
+            )
+        )
         let candidates = categories.flatMap(\.candidates)
+        let issues = ledger.issues
         if outcome != .cancelled,
            candidates.contains(where: { !$0.measurementCompleteness.isComplete }) {
             outcome = .partial
@@ -1072,7 +1438,8 @@ actor ReadOnlyCleanupScanner {
                switch issue.kind {
                case .permissionDenied, .vanished, .unreadable,
                     .metadataUnavailable, .volumeUnavailable, .outsideAllowedRoot,
-                    .timedOut:
+                    .timedOut, .candidateNotActionable, .candidateContainsExcludedPath,
+                    .candidateContainsProtectedData:
                    return true
                case .symbolicLinkSkipped, .hardLinkDeduplicated,
                     .cloudPlaceholderSkipped:
@@ -1091,10 +1458,10 @@ actor ReadOnlyCleanupScanner {
             issues: issues,
             permissions: permissions,
             metrics: ScanMetrics(
-                visitedEntryCount: visitedEntryCount,
-                visitedDirectoryCount: visitedDirectoryPaths.count,
+                visitedEntryCount: ledger.visitedEntryCount,
+                visitedDirectoryCount: ledger.visitedDirectoryPaths.count,
                 candidateCount: candidates.count,
-                deduplicatedIdentityCount: deduplicatedIdentityCount,
+                deduplicatedIdentityCount: ledger.deduplicatedIdentityCount,
                 estimatedCandidateBytes: CleanupByteCount.sum(
                     candidates.map(\.estimatedSizeBytes)
                 ),
@@ -1116,183 +1483,448 @@ actor ReadOnlyCleanupScanner {
                 timedOutRuleCount: Set(issues.compactMap {
                     $0.kind == .timedOut ? $0.ruleID : nil
                 }).count,
-                truncatedCandidateCount: truncatedCandidateCount,
-                duration: Date().timeIntervalSince(startedAt)
+                truncatedCandidateCount: ledger.truncatedCandidateCount,
+                duration: Date().timeIntervalSince(startedAt),
+                notActionableCandidateCount: ledger.notActionableCandidateCount,
+                excludedPathCandidateCount: ledger.excludedPathCandidateCount,
+                protectedDataCandidateCount: ledger.protectedDataCandidateCount
             ),
             system: systemSnapshot(homeURL: request.userHomeURL),
             developerInactivityThresholdDays: request.developerInactivityThresholdDays,
             includedCategoryIDs: request.includedCategoryIDs,
-            includedRuleIDs: request.includedRuleIDs
+            includedRuleIDs: request.includedRuleIDs,
+            rulesProvenance: rulesProvenance
         )
     }
 
-    private func descendantCandidateURLs(
+    /// D25/P2-1: lists only extra copies of the same release of an app (the
+    /// same bundle identifier, version and build) directly inside
+    /// `/Applications`. Info.plist is read first and only copies in a duplicate
+    /// group are measured, so large apps without a twin are never traversed.
+    /// Whole groups are kept within the per-rule cap, so every listed copy has
+    /// a listed sibling that can be kept.
+    private func duplicateApplicationCandidates(
+        sessionID: ScanSessionID,
+        rule: CleanupRule,
         rootURL: URL,
         rootPath: String,
-        rule: CleanupRule,
         excludedPaths: [String],
         deadline: Date,
-        referenceDate: Date
-    ) throws -> CleanupDescendantDiscovery {
-        var pending = try fileSystem.children(of: rootURL)
-            .sorted(by: {
-                $0.lastPathComponent.localizedStandardCompare(
-                    $1.lastPathComponent
-                ) == .orderedDescending
-            })
-            .map { (url: $0, depth: 1) }
-        var candidateURLs = [URL]()
-        var visitedEntryCount = 0
-        var visitedDirectoryPaths = Set<String>()
-        var issues = [ScanIssue]()
-
-        while let current = pending.popLast() {
+        referenceDate: Date,
+        ledger: inout ScanLedger
+    ) throws -> [ScanCandidate] {
+        var bundles = [(url: URL, snapshot: FileSnapshot, release: CleanupApplicationRelease)]()
+        let children = try fileSystem.children(of: rootURL).sorted(by: {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        })
+        for childURL in children {
             try checkDeadline(deadline)
-            let currentPath = PathSafety.lexicalPath(current.url.path)
-            if isExcluded(currentPath, by: excludedPaths) {
+            if isExcluded(childURL.path, by: excludedPaths) {
                 continue
             }
-
             do {
-                let snapshot = try fileSystem.snapshot(at: current.url)
-                visitedEntryCount += 1
-                if snapshot.identity.entryKind == .directory {
-                    visitedDirectoryPaths.insert(snapshot.standardizedPath)
-                }
-                guard PathSafety.isContained(
-                    snapshot.standardizedPath,
-                    in: rootPath,
-                    resolvingSymlinks: false
-                ) else {
-                    issues.append(ScanIssue(
-                        ruleID: rule.id,
-                        path: snapshot.standardizedPath,
-                        kind: .outsideAllowedRoot
-                    ))
-                    continue
-                }
+                let snapshot = try fileSystem.snapshot(at: childURL)
+                ledger.visitedEntryCount += 1
                 guard snapshot.identity.entryKind != .symbolicLink,
-                      !snapshot.hasSymbolicLinkComponent else {
-                    issues.append(ScanIssue(
-                        ruleID: rule.id,
-                        path: snapshot.standardizedPath,
-                        kind: .symbolicLinkSkipped
-                    ))
+                      !snapshot.hasSymbolicLinkComponent,
+                      PathSafety.isContained(snapshot.standardizedPath, in: rootPath, resolvingSymlinks: false),
+                      PathSafety.isContained(snapshot.standardizedPath, in: rootPath, resolvingSymlinks: true) else {
+                    if childURL.pathExtension.lowercased() == "app" {
+                        ledger.issues.append(ScanIssue(
+                            ruleID: rule.id,
+                            path: snapshot.standardizedPath,
+                            kind: .symbolicLinkSkipped
+                        ))
+                    }
                     continue
                 }
-                guard PathSafety.isContained(
-                    snapshot.standardizedPath,
-                    in: rootPath,
-                    resolvingSymlinks: true
-                ) else {
-                    issues.append(ScanIssue(
-                        ruleID: rule.id,
-                        path: snapshot.standardizedPath,
-                        kind: .outsideAllowedRoot
-                    ))
-                    continue
-                }
-                if shouldSkipCloudItem(snapshot, policy: rule.cloudPolicy) {
-                    issues.append(ScanIssue(
-                        ruleID: rule.id,
-                        path: snapshot.standardizedPath,
-                        kind: .cloudPlaceholderSkipped
-                    ))
-                    continue
-                }
-                if matches(
+                guard matches(
                     snapshot: snapshot,
-                    url: current.url,
+                    url: childURL,
                     rule: rule,
                     referenceDate: referenceDate
-                ) {
-                    candidateURLs.append(current.url)
+                ) else { continue }
+                guard snapshot.isWritableVolume else {
+                    ledger.issues.append(ScanIssue(
+                        ruleID: rule.id,
+                        path: snapshot.standardizedPath,
+                        kind: .volumeUnavailable
+                    ))
                     continue
                 }
-                guard snapshot.identity.entryKind == .directory,
-                      current.depth < rule.maximumDepth else {
-                    continue
-                }
-                let children = try fileSystem.children(of: current.url)
-                    .sorted(by: {
-                        $0.lastPathComponent.localizedStandardCompare(
-                            $1.lastPathComponent
-                        ) == .orderedDescending
-                    })
-                pending.append(contentsOf: children.map {
-                    (url: $0, depth: current.depth + 1)
-                })
+                guard let release = CleanupApplicationRelease.read(from: childURL) else { continue }
+                ledger.visitedDirectoryPaths.insert(snapshot.standardizedPath)
+                bundles.append((childURL, snapshot, release))
             } catch is CancellationError {
                 throw CancellationError()
             } catch is CleanupScanDeadlineExceeded {
                 throw CleanupScanDeadlineExceeded()
             } catch {
-                issues.append(ScanIssue(
+                ledger.issues.append(ScanIssue(
                     ruleID: rule.id,
-                    path: currentPath,
+                    path: childURL.path,
                     kind: issueKind(for: error)
                 ))
             }
         }
 
-        return CleanupDescendantDiscovery(
-            candidateURLs: candidateURLs,
-            visitedEntryCount: visitedEntryCount,
-            visitedDirectoryPaths: visitedDirectoryPaths,
-            issues: issues
-        )
+        var listedGroups = [(groupID: String, candidates: [ScanCandidate], bytes: Int64)]()
+        let groups = Dictionary(grouping: bundles, by: \.release)
+            .filter { $0.value.count > 1 }
+            .sorted { $0.key.groupKey < $1.key.groupKey }
+        let activeDeveloperApplication = activeDeveloperApplicationPath()
+        for (release, members) in groups {
+            let bundleIdentifier = release.bundleIdentifier
+            let groupID = ScanCandidateID(stableKey: release.groupKey).rawValue.uuidString
+            var measured = [ScanCandidate]()
+            for member in members {
+                try checkDeadline(deadline)
+                guard !ledger.seenIdentityKeys.contains(member.snapshot.identity.deduplicationKey) else {
+                    ledger.deduplicatedIdentityCount += 1
+                    ledger.issues.append(ScanIssue(
+                        ruleID: rule.id,
+                        path: member.snapshot.standardizedPath,
+                        kind: .hardLinkDeduplicated
+                    ))
+                    continue
+                }
+                guard !holdsExcludedPath(
+                    member.snapshot.standardizedPath,
+                    excludedPaths: excludedPaths
+                ) else {
+                    ledger.recordNotActionable(
+                        ruleID: rule.id,
+                        path: member.snapshot.standardizedPath,
+                        kind: .candidateContainsExcludedPath
+                    )
+                    continue
+                }
+                let aggregate = try aggregateSize(
+                    snapshot: member.snapshot,
+                    url: member.url,
+                    depth: 0,
+                    maximumDepth: rule.maximumDepth,
+                    ruleID: rule.id,
+                    allowedRootPath: rootPath,
+                    excludedPaths: excludedPaths,
+                    deadline: deadline,
+                    ledger: &ledger
+                )
+                var copy = candidate(
+                    sessionID: sessionID,
+                    rule: rule,
+                    rootURL: rootURL,
+                    sourceURL: member.url,
+                    snapshot: snapshotWithSizes(
+                        member.snapshot,
+                        logical: aggregate.logicalSizeBytes,
+                        allocated: aggregate.allocatedSizeBytes
+                    ),
+                    measurementCompleteness: aggregate.completeness,
+                    evidenceCodes: [
+                        "duplicate-bundle-identifier",
+                        "duplicate-bundle-group:\(groupID)",
+                    ] + release.evidenceCodes + (
+                        PathSafety.lexicalPath(member.url.path) == activeDeveloperApplication
+                            ? [CleanupApplicationRelease.activeDeveloperDirectoryCode]
+                            : []
+                    ),
+                    referenceDate: referenceDate
+                )
+                copy.ownerResolution = .applicationBundle
+                copy.ownerBundleIdentifiers = [bundleIdentifier]
+                measured.append(copy)
+            }
+            let actionable = measured.filter(\.isSelectable)
+            // A copy is only listed while another listed copy can be kept.
+            let unlisted = actionable.count > 1 ? measured.filter { !$0.isSelectable } : measured
+            for copy in unlisted {
+                ledger.recordNotActionable(
+                    ruleID: rule.id,
+                    path: copy.snapshot.standardizedPath,
+                    kind: .candidateNotActionable
+                )
+            }
+            guard actionable.count > 1,
+                  actionable.contains(where: { $0.estimatedSizeBytes >= rule.minimumBytes }) else {
+                continue
+            }
+            listedGroups.append((
+                groupID,
+                actionable.sorted(by: candidateSort),
+                CleanupByteCount.sum(actionable.map(\.estimatedSizeBytes))
+            ))
+        }
+
+        var listed = [ScanCandidate]()
+        for group in listedGroups.sorted(by: {
+            $0.bytes == $1.bytes ? $0.groupID < $1.groupID : $0.bytes > $1.bytes
+        }) {
+            guard listed.isEmpty
+                || listed.count + group.candidates.count <= Self.maximumCandidatesPerRule else {
+                ledger.truncatedCandidateCount += group.candidates.count
+                continue
+            }
+            listed.append(contentsOf: group.candidates)
+        }
+        return listed
     }
 
-    private func aggregateDescendantCandidates(
+    /// D23: one item for the Trash. It carries the top-level entries frozen at
+    /// scan time; only those are ever deleted. Entries are measured without
+    /// following links, and a link pointing outside the Trash is left out.
+    private func trashCandidates(
         sessionID: ScanSessionID,
         rule: CleanupRule,
         rootURL: URL,
         rootSnapshot: FileSnapshot,
-        candidates: [ScanCandidate],
-        discoveryCompleteness: MeasurementCompleteness
-    ) -> [ScanCandidate] {
-        guard !candidates.isEmpty else { return [] }
-        var aggregate = CleanupAggregateMeasurement(
+        excludedPaths: [String],
+        deadline: Date,
+        referenceDate: Date,
+        ledger: inout ScanLedger
+    ) throws -> [ScanCandidate] {
+        let trashPath = PathSafety.lexicalPath(rootSnapshot.standardizedPath)
+        let children = try fileSystem.children(of: rootURL).sorted(by: {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        })
+        var entries = [FileSnapshot]()
+        var total = CleanupAggregateMeasurement(
             logicalSizeBytes: 0,
             allocatedSizeBytes: 0,
             completeness: .complete
         )
-        if !discoveryCompleteness.isComplete {
-            switch discoveryCompleteness {
-            case .complete:
-                break
-            case let .lowerBound(reason), let .failed(reason):
-                aggregate.markLowerBound(reason)
+        for childURL in children {
+            try checkDeadline(deadline)
+            if isExcluded(childURL.path, by: excludedPaths) {
+                total.markLowerBound(.excludedDescendant)
+                continue
+            }
+            // An entry holding a path the user excluded is never frozen, so
+            // emptying the Trash leaves it, and the exclusion, in place.
+            if holdsExcludedPath(PathSafety.lexicalPath(childURL.path), excludedPaths: excludedPaths) {
+                ledger.recordNotActionable(
+                    ruleID: rule.id,
+                    path: PathSafety.lexicalPath(childURL.path),
+                    kind: .candidateContainsExcludedPath
+                )
+                total.markLowerBound(.excludedDescendant)
+                continue
+            }
+            do {
+                let entry = try fileSystem.snapshot(at: childURL)
+                ledger.visitedEntryCount += 1
+                guard PathSafety.lexicalPath(childURL.deletingLastPathComponent().path) == trashPath,
+                      PathSafety.isContained(entry.standardizedPath, in: trashPath, resolvingSymlinks: false) else {
+                    ledger.issues.append(ScanIssue(
+                        ruleID: rule.id,
+                        path: entry.standardizedPath,
+                        kind: .outsideAllowedRoot
+                    ))
+                    total.markLowerBound(.unknown)
+                    continue
+                }
+                // P2-5: a cloud file that is not downloaded is skipped and
+                // counted; it is never frozen, so it cannot fail the plan.
+                if shouldSkipCloudItem(entry, policy: rule.cloudPolicy) {
+                    ledger.issues.append(ScanIssue(
+                        ruleID: rule.id,
+                        path: entry.standardizedPath,
+                        kind: .cloudPlaceholderSkipped
+                    ))
+                    continue
+                }
+                let identityKey = entry.identity.deduplicationKey
+                guard !ledger.seenIdentityKeys.contains(identityKey) else {
+                    ledger.deduplicatedIdentityCount += 1
+                    ledger.issues.append(ScanIssue(
+                        ruleID: rule.id,
+                        path: entry.standardizedPath,
+                        kind: .hardLinkDeduplicated
+                    ))
+                    continue
+                }
+                if entry.identity.entryKind == .symbolicLink {
+                    guard CleanupTrashEntryPolicy.symbolicLinkStaysInside(
+                        childURL,
+                        trashPath: trashPath,
+                        fileSystem: fileSystem
+                    ) else {
+                        ledger.issues.append(ScanIssue(
+                            ruleID: rule.id,
+                            path: entry.standardizedPath,
+                            kind: .symbolicLinkSkipped
+                        ))
+                        total.markLowerBound(.symbolicLinkSkipped)
+                        continue
+                    }
+                    ledger.seenIdentityKeys.insert(identityKey)
+                    entries.append(entry)
+                    total.add(CleanupAggregateMeasurement(
+                        logicalSizeBytes: entry.logicalSizeBytes,
+                        allocatedSizeBytes: entry.allocatedSizeBytes,
+                        completeness: .complete
+                    ))
+                    continue
+                }
+                guard !entry.hasSymbolicLinkComponent,
+                      PathSafety.isContained(entry.standardizedPath, in: trashPath, resolvingSymlinks: true) else {
+                    ledger.issues.append(ScanIssue(
+                        ruleID: rule.id,
+                        path: entry.standardizedPath,
+                        kind: .outsideAllowedRoot
+                    ))
+                    total.markLowerBound(.unknown)
+                    continue
+                }
+                guard entry.isWritableVolume else {
+                    ledger.issues.append(ScanIssue(
+                        ruleID: rule.id,
+                        path: entry.standardizedPath,
+                        kind: .volumeUnavailable
+                    ))
+                    total.markLowerBound(.unknown)
+                    continue
+                }
+                if entry.identity.entryKind == .directory {
+                    ledger.visitedDirectoryPaths.insert(entry.standardizedPath)
+                }
+                let aggregate = try aggregateSize(
+                    snapshot: entry,
+                    url: childURL,
+                    depth: 0,
+                    maximumDepth: rule.maximumDepth,
+                    ruleID: rule.id,
+                    allowedRootPath: trashPath,
+                    excludedPaths: excludedPaths,
+                    deadline: deadline,
+                    ledger: &ledger
+                )
+                guard !aggregate.completeness.isFailed else {
+                    // An entry that cannot be listed is not frozen for deletion.
+                    total.markLowerBound(.unreadableDescendant)
+                    continue
+                }
+                entries.append(snapshotWithSizes(
+                    entry,
+                    logical: aggregate.logicalSizeBytes,
+                    allocated: aggregate.allocatedSizeBytes
+                ))
+                total.add(aggregate)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is CleanupScanDeadlineExceeded {
+                throw CleanupScanDeadlineExceeded()
+            } catch {
+                ledger.issues.append(ScanIssue(
+                    ruleID: rule.id,
+                    path: childURL.path,
+                    kind: issueKind(for: error)
+                ))
+                total.markLowerBound(measurementIssue(for: error))
             }
         }
-        for candidate in candidates {
-            aggregate.add(CleanupAggregateMeasurement(
-                logicalSizeBytes: candidate.snapshot.logicalSizeBytes,
-                allocatedSizeBytes: candidate.snapshot.allocatedSizeBytes,
-                completeness: candidate.measurementCompleteness,
-                latestModificationTimeNanoseconds:
-                    candidate.latestContentModificationTimeNanoseconds
-            ))
-        }
-        let aggregateSnapshot = snapshotWithSizes(
-            rootSnapshot,
-            logical: aggregate.logicalSizeBytes,
-            allocated: aggregate.allocatedSizeBytes
-        )
-        return [candidate(
+        let estimatedSize = total.allocatedSizeBytes ?? total.logicalSizeBytes
+        guard !entries.isEmpty, estimatedSize >= rule.minimumBytes else { return [] }
+        var trash = candidate(
             sessionID: sessionID,
             rule: rule,
             rootURL: rootURL,
             sourceURL: rootURL,
-            snapshot: aggregateSnapshot,
-            measurementCompleteness: aggregate.completeness,
-            evidenceCodes: [
-                "read-only-descendant-aggregate",
-                "matched-descendant-count:\(candidates.count)",
-            ],
-            latestContentModificationTimeNanoseconds:
-                aggregate.latestModificationTimeNanoseconds
-        )]
+            snapshot: snapshotWithSizes(
+                rootSnapshot,
+                logical: total.logicalSizeBytes,
+                allocated: total.allocatedSizeBytes
+            ),
+            measurementCompleteness: total.completeness,
+            evidenceCodes: ["frozen-trash-entry-count:\(entries.count)"],
+            referenceDate: referenceDate
+        )
+        trash.permanentDeletionEntries = entries
+        return [trash]
+    }
+
+    /// D22: resolves row owners from installed apps and records which owners
+    /// were running when the scan finished. Preselection skips those rows, and
+    /// cleanup checks the owners again before moving anything.
+    private func resolvingOwners(
+        in subcategories: [CleanupScanSubcategory]
+    ) async -> [CleanupScanSubcategory] {
+        let inferringRuleIDs = Set(ruleSet.rules.filter {
+            $0.ownerInference == .candidateName
+        }.map(\.id))
+        var askedIdentifiers = Set<String>()
+        for candidate in subcategories.flatMap(\.candidates)
+            where inferringRuleIDs.contains(candidate.ruleID) {
+            askedIdentifiers.formUnion(CleanupOwnerInferencePolicy.bundleIdentifierCandidates(
+                forName: candidate.sourceURL.lastPathComponent
+            ))
+        }
+        let applications = await applicationEnvironment.snapshot(
+            checkingInstalled: askedIdentifiers
+        )
+        return subcategories.map { subcategory in
+            CleanupScanSubcategory(
+                id: subcategory.id,
+                title: subcategory.title,
+                risk: subcategory.risk,
+                recommendation: subcategory.recommendation,
+                reason: subcategory.reason,
+                candidates: subcategory.candidates.map { candidate in
+                    var resolved = candidate
+                    if inferringRuleIDs.contains(candidate.ruleID) {
+                        if CleanupOwnerInferencePolicy.isOwnerless(
+                            name: candidate.sourceURL.lastPathComponent
+                        ) {
+                            resolved.ownerResolution = .noApplication
+                            resolved.ownerBundleIdentifiers = []
+                        } else if let owner = CleanupOwnerInferencePolicy.owner(
+                            forName: candidate.sourceURL.lastPathComponent,
+                            installedBundleIdentifiers: applications.installedBundleIdentifiers
+                        ) {
+                            resolved.ownerResolution = .inferredFromName
+                            resolved.ownerBundleIdentifiers = [owner]
+                        } else {
+                            resolved.ownerResolution = .unresolved
+                            resolved.ownerBundleIdentifiers = []
+                        }
+                    }
+                    return resolved.withRunningOwners(from: applications)
+                }
+            )
+        }
+    }
+
+    /// Round 3 (P2-7): a duplicate group whose every copy is running or used
+    /// by the command line tools has nothing to remove, so it is not listed
+    /// (D19) and its copies are counted as not listed.
+    private func droppingDuplicateGroupsInUse(
+        _ subcategories: [CleanupScanSubcategory],
+        ledger: inout ScanLedger
+    ) -> [CleanupScanSubcategory] {
+        subcategories.map { subcategory in
+            let groups = Dictionary(
+                grouping: subcategory.candidates.filter { $0.duplicateApplicationGroupCode != nil },
+                by: { $0.duplicateApplicationGroupCode ?? "" }
+            )
+            let inUse = groups.values.filter { $0.allSatisfy(DuplicateApplicationRetentionPolicy.isProtected) }
+            guard !inUse.isEmpty else { return subcategory }
+            let dropped = Set(inUse.flatMap { $0.map(\.id) })
+            for copy in inUse.flatMap({ $0 }) {
+                ledger.recordNotActionable(
+                    ruleID: copy.ruleID,
+                    path: copy.snapshot.standardizedPath,
+                    kind: .candidateNotActionable
+                )
+            }
+            return CleanupScanSubcategory(
+                id: subcategory.id,
+                title: subcategory.title,
+                risk: subcategory.risk,
+                recommendation: subcategory.recommendation,
+                reason: subcategory.reason,
+                candidates: subcategory.candidates.filter { !dropped.contains($0.id) }
+            )
+        }
     }
 
     private func rootURL(for rule: CleanupRule, request: CleanupScanRequest) -> URL {
@@ -1373,12 +2005,8 @@ actor ReadOnlyCleanupScanner {
         ruleID: String,
         allowedRootPath: String,
         excludedPaths: [String],
-        seenIdentityKeys: inout Set<String>,
-        issues: inout [ScanIssue],
-        visitedEntryCount: inout Int,
-        visitedDirectoryPaths: inout Set<String>,
-        deduplicatedIdentityCount: inout Int,
-        deadline: Date
+        deadline: Date,
+        ledger: inout ScanLedger
     ) throws -> CleanupAggregateMeasurement {
         try checkDeadline(deadline)
         guard PathSafety.isContained(
@@ -1390,7 +2018,7 @@ actor ReadOnlyCleanupScanner {
             in: allowedRootPath,
             resolvingSymlinks: true
         ) else {
-            issues.append(ScanIssue(
+            ledger.issues.append(ScanIssue(
                 ruleID: ruleID,
                 path: snapshot.standardizedPath,
                 kind: .outsideAllowedRoot
@@ -1403,9 +2031,9 @@ actor ReadOnlyCleanupScanner {
             )
         }
         let identityKey = snapshot.identity.deduplicationKey
-        guard seenIdentityKeys.insert(identityKey).inserted else {
-            deduplicatedIdentityCount += 1
-            issues.append(ScanIssue(
+        guard ledger.seenIdentityKeys.insert(identityKey).inserted else {
+            ledger.deduplicatedIdentityCount += 1
+            ledger.issues.append(ScanIssue(
                 ruleID: ruleID,
                 path: snapshot.standardizedPath,
                 kind: .hardLinkDeduplicated
@@ -1441,7 +2069,7 @@ actor ReadOnlyCleanupScanner {
         do {
             childURLs = try fileSystem.children(of: url)
         } catch {
-            issues.append(ScanIssue(
+            ledger.issues.append(ScanIssue(
                 ruleID: ruleID,
                 path: snapshot.standardizedPath,
                 kind: issueKind(for: error)
@@ -1468,18 +2096,25 @@ actor ReadOnlyCleanupScanner {
             }
             do {
                 let child = try fileSystem.aggregateSnapshot(at: childURL)
-                visitedEntryCount += 1
+                ledger.visitedEntryCount += 1
                 if child.identity.entryKind == .directory {
-                    visitedDirectoryPaths.insert(child.standardizedPath)
+                    ledger.visitedDirectoryPaths.insert(child.standardizedPath)
                 }
                 guard child.identity.entryKind != .symbolicLink,
                       !child.hasSymbolicLinkComponent else {
-                    issues.append(ScanIssue(
+                    ledger.issues.append(ScanIssue(
                         ruleID: ruleID,
                         path: child.standardizedPath,
                         kind: .symbolicLinkSkipped
                     ))
                     measurement.markLowerBound(.symbolicLinkSkipped)
+                    continue
+                }
+                if (child.identity.entryKind == .directory
+                        && CleanupProtectedContentPolicy.isProtectedDataFolder(named: childURL.lastPathComponent))
+                    || (CleanupProtectedContentPolicy.protectsPersistentAgentState(ruleID: ruleID)
+                        && CleanupProtectedContentPolicy.isProtectedAgentEntry(named: childURL.lastPathComponent)) {
+                    measurement.containsProtectedData = true
                     continue
                 }
                 let childSize = try aggregateSize(
@@ -1490,12 +2125,8 @@ actor ReadOnlyCleanupScanner {
                     ruleID: ruleID,
                     allowedRootPath: allowedRootPath,
                     excludedPaths: excludedPaths,
-                    seenIdentityKeys: &seenIdentityKeys,
-                    issues: &issues,
-                    visitedEntryCount: &visitedEntryCount,
-                    visitedDirectoryPaths: &visitedDirectoryPaths,
-                    deduplicatedIdentityCount: &deduplicatedIdentityCount,
-                    deadline: deadline
+                    deadline: deadline,
+                    ledger: &ledger
                 )
                 measurement.add(childSize)
             } catch is CancellationError {
@@ -1503,7 +2134,7 @@ actor ReadOnlyCleanupScanner {
             } catch is CleanupScanDeadlineExceeded {
                 throw CleanupScanDeadlineExceeded()
             } catch {
-                issues.append(ScanIssue(
+                ledger.issues.append(ScanIssue(
                     ruleID: ruleID,
                     path: childURL.path,
                     kind: issueKind(for: error)
@@ -1534,10 +2165,7 @@ actor ReadOnlyCleanupScanner {
         if rule.exclude.extensions.contains(fileExtension) {
             return false
         }
-        let relativePath = url.lastPathComponent
-        if rule.exclude.relativePrefixes.contains(where: {
-            relativePath == $0 || relativePath.hasPrefix($0 + "/")
-        }) {
+        if rule.exclude.excludes(childName: url.lastPathComponent) {
             return false
         }
         guard !DeveloperCleanupAgePolicy.applies(to: rule),
@@ -1625,7 +2253,16 @@ actor ReadOnlyCleanupScanner {
                 thresholdDays: developerInactivityThresholdDays
             )
         } ?? []
-        return ScanCandidate(
+        // Item 10: records whether a log was written in the last 7 days. D47
+        // preselects the row either way; the row shows the state.
+        let logEvidence = CleanupLogPreselectionPolicy.applies(to: rule)
+            ? [CleanupLogPreselectionPolicy.evidenceCode(for: CleanupLogPreselectionPolicy.state(
+                latestWriteNanoseconds: latestContentModificationTimeNanoseconds,
+                measurementCompleteness: measurementCompleteness,
+                referenceDate: referenceDate
+            ))]
+            : []
+        var candidate = ScanCandidate(
             id: ScanCandidateID(stableKey: [
                 rule.id,
                 String(rule.selectionPolicyVersion),
@@ -1653,7 +2290,7 @@ actor ReadOnlyCleanupScanner {
                     "storage-analyzer-macos-policy",
                     "bundled-rule",
                     "read-only-metadata",
-                ] + developerEvidence + evidenceCodes
+                ] + developerEvidence + logEvidence + evidenceCodes
             ),
             defaultSelection: developerDecision?.defaultSelection ?? rule.defaultSelection,
             executionEligibility: developerDecision?.executionEligibility
@@ -1667,24 +2304,20 @@ actor ReadOnlyCleanupScanner {
             latestContentModificationTimeNanoseconds:
                 latestContentModificationTimeNanoseconds,
             developerTool: rule.developerTool,
-            developerArtifactKind: rule.developerArtifactKind
+            developerArtifactKind: rule.developerArtifactKind,
+            ruleRevision: rule.maintenance?.revision,
+            rulesProvenance: rulesProvenance,
+            ruleOwnerDisplayName: rule.ownerDisplayName,
+            cleanupImpactText: rule.maintenance?.impact
         )
-    }
-
-    private func duplicateApplicationGroups(
-        in candidates: [ScanCandidate]
-    ) -> [String: String] {
-        var candidatesByBundleID = [String: [ScanCandidate]]()
-        for candidate in candidates where candidate.sourceURL.pathExtension.lowercased() == "app" {
-            guard let bundleID = Bundle(url: candidate.sourceURL)?.bundleIdentifier,
-                  !bundleID.isEmpty else { continue }
-            candidatesByBundleID[bundleID, default: []].append(candidate)
+        if !rule.requiredClosedBundleIDs.isEmpty {
+            candidate.ownerResolution = .declared
+            candidate.ownerBundleIdentifiers = rule.requiredClosedBundleIDs
+        } else if rule.ownerInference != nil {
+            // Resolved from installed apps when the scan finishes.
+            candidate.ownerResolution = .unresolved
         }
-        return candidatesByBundleID.reduce(into: [:]) { result, entry in
-            guard entry.value.count > 1 else { return }
-            let groupID = ScanCandidateID(stableKey: entry.key).rawValue.uuidString
-            entry.value.forEach { result[$0.snapshot.standardizedPath] = groupID }
-        }
+        return candidate
     }
 
     private func subcategory(
@@ -1750,11 +2383,15 @@ actor ReadOnlyCleanupScanner {
             currentRuleTotalItemCount: currentRuleTotalItemCount,
             completedRuleCount: completedSubcategories.count,
             totalRuleCount: ruleSet.rules.count,
+            // Same basis as the three risk cards: items that can be cleaned,
+            // without emptying the Trash, which is counted on its own.
             discoveredItemCount: completedSubcategories.reduce(0) {
-                $0 + $1.candidates.count
+                $0 + $1.candidates.filter { !$0.action.permanentlyDeletes }.count
             },
             discoveredBytes: CleanupByteCount.sum(
-                completedSubcategories.map(\.discoveredBytes)
+                completedSubcategories.flatMap(\.candidates)
+                    .filter { !$0.action.permanentlyDeletes }
+                    .map(\.estimatedSizeBytes)
             ),
             groups: ruleSet.rules.map { rule in
                 let subcategory = completedByID[rule.id]
@@ -1887,7 +2524,7 @@ enum CleanupRuleCopy {
         case "cleanup.category.downloads":
             L10n.text("下载项目", "Downloads")
         case "cleanup.category.applications":
-            L10n.text("已安装应用", "Installed Applications")
+            L10n.text("重复的应用副本", "Duplicate App Copies")
         case "cleanup.category.userData":
             L10n.text("应用数据", "Application Data")
         case "cleanup.category.personalFiles":
@@ -1896,8 +2533,8 @@ enum CleanupRuleCopy {
             L10n.text("用户缓存", "User Caches")
         case "cleanup.rule.userCaches.reason":
             L10n.text(
-                "缓存通常可以重建，但其中可能有正在使用或由系统管理的内容；这里只显示归属和体积，不会直接加入清理计划。",
-                "Caches are usually rebuildable, but some may be active or system-managed; this only shows ownership and size and does not add them directly to a cleanup plan."
+                "按应用分行列出用户缓存，可重新生成；默认勾选，所属应用正在运行的行除外，需先退出。未识别所属应用的行无法在清理前确认它是否在运行。只会移入废纸篓，重新打开应用时可能稍慢。",
+                "User caches, one row per app. They can be rebuilt. Rows are selected by default unless their app is running; quit it first. For a row whose app is unknown, whether it runs cannot be checked before cleanup. Items only move to Trash, and the app may open a little slower next time."
             )
         case "cleanup.rule.browserCache.title":
             L10n.text("浏览器缓存", "Browser Cache")
@@ -1907,52 +2544,50 @@ enum CleanupRuleCopy {
             L10n.text("开发缓存", "Developer Cache")
         case "cleanup.reason.knownRegenerableCache":
             L10n.text(
-                "该目录位于应用的缓存范围并已精确匹配所属软件；关闭软件后可手动清理，首次重新打开或加载内容可能更慢。",
-                "This exact cache path is attributed to its owning app. After quitting the app, it can be cleaned manually; the first launch or content load may be slower."
+                "该目录位于应用的缓存范围并已精确匹配所属软件，可重新生成；软件未运行时默认勾选，正在运行时需先退出。首次重新打开或加载内容可能更慢。",
+                "This exact cache path belongs to its app and can be rebuilt. It is selected by default while the app is not running; quit the app first if it is. The first launch or content load may be slower."
             )
         case "cleanup.rule.mailDownloads.title":
-            L10n.text("下载的邮件附件", "Downloaded Mail Attachments")
-        case "cleanup.rule.mailLibraryAttachments.title":
-            L10n.text("邮件库附件", "Mail Library Attachments")
-        case "cleanup.reason.mailAttachments":
+            L10n.text("邮件附件副本", "Mail Attachment Copies")
+        case "cleanup.reason.mailDownloads":
             L10n.text(
-                "附件与邮件记录关联；这里只读统计和定位，不会直接修改 Mail 数据库或删除附件。请优先在邮件应用中管理。",
-                "Attachments are linked to mail records. This scan only measures and reveals them; it does not modify the Mail database or delete attachments. Manage them in Mail first."
+                "打开邮件附件时系统另存的副本，邮件里的原附件仍保留；是否还需要这些副本由你判断，默认不选。清理前请退出“邮件”。",
+                "Copies the system saved when you opened mail attachments; the attachments stay in your mail. Decide whether you still need these copies; they are not selected by default. Quit Mail before cleanup."
             )
         case "cleanup.rule.systemManagedCache.title":
             L10n.text("系统管理缓存", "System-Managed Cache")
         case "cleanup.reason.systemManagedCache":
             L10n.text(
-                "该缓存由 macOS 服务持续管理；这里只读统计和定位，不会把系统状态目录直接加入清理计划。",
-                "This cache is continuously managed by macOS services. It is measured and revealed only, and is not added directly to a cleanup plan."
+                "由 macOS 的 iCloud 服务管理的缓存，可以移入废纸篓，系统会按需重新下载；可能暂时影响 iCloud 应用的离线内容，因此需要你判断，默认不选。",
+                "A cache managed by macOS iCloud services. It can move to Trash and is downloaded again as needed, but iCloud apps may lose offline content for a while, so it needs your judgment and is not selected by default."
             )
         case "cleanup.rule.diagnosticLogs.title":
             L10n.text("诊断日志", "Diagnostic Logs")
         case "cleanup.reason.diagnosticLogs":
             L10n.text(
-                "系统诊断记录可能仍用于问题排查；这里只读统计和定位，不会直接删除。",
-                "System diagnostics may still be needed for troubleshooting. They are measured and revealed only, not deleted directly."
+                "系统诊断记录，删除不影响系统运行，默认勾选；最近 7 天内仍有写入时会在行内注明。如需排查问题，请先取消勾选。",
+                "System diagnostic records. Removing them does not affect macOS. They are selected by default; a row still written in the last 7 days says so. Clear the check if you still need them for troubleshooting."
             )
         case "cleanup.rule.applicationLogs.title":
             L10n.text("应用日志", "Application Logs")
         case "cleanup.reason.applicationLogs":
             L10n.text(
-                "应用日志可能包含仍需排查的问题线索；这里只读统计并标明所属软件。",
-                "Application logs may contain useful troubleshooting evidence. They are measured read-only and attributed to their app."
+                "应用日志，删除不影响应用使用；应用未运行时默认勾选，最近 7 天内仍有写入时会在行内注明。",
+                "App logs. Removing them does not affect the app. They are selected by default while the app is not running; a row still written in the last 7 days says so."
             )
         case "cleanup.rule.userTrash.title":
-            L10n.text("个人废纸篓", "User Trash")
+            L10n.text("清空废纸篓", "Empty Trash")
         case "cleanup.reason.userTrash":
             L10n.text(
-                "这里只读统计废纸篓占用；清空属于不可恢复操作，请使用专门的废纸篓确认流程。",
-                "This only measures Trash usage. Emptying Trash is irreversible and must use the dedicated confirmation flow."
+                "永久删除扫描时废纸篓里的项目，不可恢复；默认不选，执行前需要单独二次确认。扫描后放入废纸篓的项目（包括本次清理移入的）不会被删除。",
+                "Permanently deletes the items that were in the Trash during the scan. This cannot be undone; it is not selected by default and needs its own two confirmations. Items put in the Trash after the scan, including this cleanup's items, are not deleted."
             )
         case "cleanup.rule.userLogs.title":
             L10n.text("用户日志", "User Logs")
         case "cleanup.rule.userLogs.reason":
             L10n.text(
-                "日志可能用于故障排查；确认不再需要后可手动选择。",
-                "Logs may be needed for troubleshooting; select them manually only after review."
+                "按来源分行列出用户日志，删除不影响应用使用；默认勾选，所属应用正在运行的行除外，最近 7 天内仍有写入的行会在行内注明。如需排查问题，请先取消勾选相关日志。",
+                "User logs, one row per source. Removing them does not affect apps. Rows are selected by default unless their app is running; rows still written in the last 7 days say so. Clear the check for logs you still need for troubleshooting."
             )
         case "cleanup.rule.xcodeDerivedData.title":
             L10n.text("Xcode Derived Data", "Xcode Derived Data")
@@ -2001,14 +2636,19 @@ enum CleanupRuleCopy {
             )
         case "cleanup.reason.developerToolLogs":
             L10n.text(
-                "日志可能仍用于排查问题，因此只标明来源并提供 Finder 定位，不会自动加入清理计划。",
-                "Logs may still be needed for troubleshooting, so their source is identified and they can be revealed in Finder, but they are not added to a cleanup plan automatically."
+                "开发工具运行时写入的日志，删除不影响工具使用；所属应用未运行时默认勾选，最近 7 天内仍有写入时会在行内注明。如需排查问题，请先取消勾选。",
+                "Logs written by the developer tool. Removing them does not affect the tool. They are selected by default while its app is not running; a row still written in the last 7 days says so. Clear the check if you still need them for troubleshooting."
             )
-        case "cleanup.reason.developerToolState":
-            L10n.text(
-                "这里可能包含 Agent 会话、检查点或用户产物；只读取文件系统元数据并提供 Finder 定位，不会加入清理计划。",
-                "This may contain agent sessions, checkpoints, or user artifacts. Only file-system metadata is read, and it can be revealed in Finder but never added to a cleanup plan."
-            )
+        case "cleanup.reason.developerInactiveYear":
+            L10n.text("超过一年未修改的开发缓存，可重新生成", "Developer cache unchanged for over a year; it can be rebuilt")
+        case "cleanup.reason.developerInactiveReview":
+            L10n.text("较长时间未修改的开发缓存，请核对用途后再清理", "Developer cache unchanged for a while; check its use before cleanup")
+        case "cleanup.reason.developerRecent":
+            L10n.text("近期仍有修改的开发产物，可能仍在使用", "Developer files changed recently and may still be in use")
+        case "cleanup.reason.developerActivityUnverified":
+            L10n.text("部分内容无法读取，不能确认是否仍在使用", "Part of the folder could not be read, so recent use cannot be ruled out")
+        case "cleanup.reason.developerActivityUnknown":
+            L10n.text("无法确认最近修改时间", "The latest change time could not be verified")
         case "cleanup.rule.developerToolArtifact.title":
             L10n.text("开发工具残留", "Developer Tool Artifact")
         case "cleanup.rule.coreSimulator.title":
@@ -2039,68 +2679,12 @@ enum CleanupRuleCopy {
                 "下载内容可能是个人文件或仍在使用的资料；核对后可手动选择。",
                 "Downloads may be personal or still needed; select them manually only after review."
             )
-        case "cleanup.rule.installedApps.title":
-            L10n.text("大型已安装应用", "Large Installed Applications")
-        case "cleanup.rule.installedApps.reason":
-            L10n.text(
-                "不要直接删除应用包或关联数据；请使用应用卸载器或系统提供的卸载入口。",
-                "Do not directly delete app bundles or related data; use the app's uninstaller or a system uninstall flow."
-            )
         case "cleanup.rule.duplicateInstalledApps.title":
-            L10n.text("重复安装的应用", "Duplicate Installed Applications")
+            L10n.text("重复安装的应用副本", "Duplicate App Copies")
         case "cleanup.rule.duplicateInstalledApps.reason":
             L10n.text(
-                "检测到相同 Bundle ID 的多个应用；核对版本、用途和备份后，可在额外确认下移入废纸篓。",
-                "Multiple apps share the same Bundle ID. After checking versions, purpose, and backups, you may move one to Trash with extra confirmation."
-            )
-        case "cleanup.rule.largeCreativeApps.title":
-            L10n.text("大型视频与创作应用", "Large Video & Creative Apps")
-        case "cleanup.rule.largeCreativeApps.reason":
-            L10n.text(
-                "应用本体不是缓存；确认不再使用并完成备份后，才可逐项移入废纸篓。",
-                "App bundles are not caches. Move an app to Trash only after confirming it is unused and required data is backed up."
-            )
-        case "cleanup.rule.picturesLibrary.title":
-            L10n.text("Pictures 图片库", "Pictures Library")
-        case "cleanup.rule.picturesLibrary.reason":
-            L10n.text(
-                "照片与素材可能是唯一副本；请先确认备份，再使用照片应用或 Finder 审查。",
-                "Photos and media may be the only copies. Verify backups before reviewing them in Photos or Finder."
-            )
-        case "cleanup.rule.wechat.title":
-            L10n.text("微信沙盒数据", "WeChat Sandbox Data")
-        case "cleanup.rule.wechat.reason":
-            L10n.text(
-                "其中混合聊天记录、媒体和数据库，应优先使用微信内置存储管理。",
-                "This mixes chat history, media, and databases; use WeChat's storage manager first."
-            )
-        case "cleanup.rule.chrome.title":
-            L10n.text("Google Chrome 用户数据", "Google Chrome User Data")
-        case "cleanup.rule.chrome.reason":
-            L10n.text(
-                "其中包含 Profile、历史、Cookie、扩展和设置，应优先使用 Chrome 内置清理。",
-                "This contains profiles, history, cookies, extensions, and settings; use Chrome's built-in cleanup first."
-            )
-        case "cleanup.rule.codexSessions.title":
-            L10n.text("Codex 会话历史", "Codex Session History")
-        case "cleanup.rule.codexSessions.reason":
-            L10n.text(
-                "这是本地会话和运行记录，不是临时缓存；请先确认保留需求。",
-                "This is local session and run history, not temporary cache; confirm retention needs first."
-            )
-        case "cleanup.rule.egoLite.title":
-            L10n.text("ego lite 应用数据与本地模型", "ego lite Data & Local Models")
-        case "cleanup.rule.egoLite.reason":
-            L10n.text(
-                "该目录同时包含本地模型与 Profile，应优先使用应用内管理入口。",
-                "This directory mixes local models and profiles; use the app's management controls first."
-            )
-        case "cleanup.rule.crossover.title":
-            L10n.text("CrossOver Bottles 与运行时", "CrossOver Bottles & Runtime")
-        case "cleanup.rule.crossover.reason":
-            L10n.text(
-                "Bottles 可能包含应用、存档和配置，应使用 CrossOver 内置 Bottle 管理。",
-                "Bottles may contain apps, saves, and settings; use CrossOver's Bottle manager."
+                "发现同一应用的多个副本（应用标识、版本和构建号都相同）；核对用途后，可在双重确认下把多余副本移入废纸篓。正在运行的副本和命令行工具当前使用的 Xcode 总会保留、不能勾选；其余副本整组勾选时自动保留一份（优先直接位于“应用程序”文件夹的、最近更新的）。删除应用本身请使用“卸载”页。",
+                "Several copies of the same app were found (same identifier, version and build). After checking their purpose, you can move extra copies to Trash with two confirmations. A copy that is running, and the Xcode the command line tools use, are always kept and cannot be checked; checking all other copies keeps one of them (preferring one directly in Applications, then the most recently updated). To remove an app itself, use Uninstall."
             )
         case "cleanup.rule.applicationSupport.title":
             L10n.text("Application Support", "Application Support")
@@ -2144,7 +2728,8 @@ enum CleanupScanOperations {
         )
         let scanner = try ReadOnlyCleanupScanner(
             fileSystem: FoundationReadOnlyFileSystem(),
-            ruleSet: ruleSet
+            ruleSet: ruleSet,
+            applicationEnvironment: WorkspaceCleanupApplicationEnvironment()
         )
         return try await scanner.scan(request: request, progress: progress)
     }
@@ -2161,7 +2746,8 @@ enum CleanupScanOperations {
             rules: ruleSet.rules.filter { rule in
                 (includedCategoryIDs?.contains(rule.categoryID) ?? true)
                     && (includedRuleIDs?.contains(rule.id) ?? true)
-            }
+            },
+            fullSetProvenance: ruleSet.effectiveProvenance
         )
     }
 }

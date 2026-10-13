@@ -5,8 +5,8 @@ import XCTest
 @MainActor
 final class FanCurveStoreTests: XCTestCase {
     func testDraftChangesNeverMutateAppliedProfile() throws {
-        let (store, defaults, suite) = makeStore()
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let (store, _, suite) = makeStore()
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         let applied = try store.preparedProfile(targetFanIDs: [0])
         store.markApplied(applied)
         let point = try XCTUnwrap(store.draftProfile.points.first)
@@ -23,9 +23,9 @@ final class FanCurveStoreTests: XCTestCase {
     }
 
     func testCorruptPersistenceFallsBackWithoutStartingControl() {
-        let suite = "FanCurveStoreTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         defaults.set(Data("not-json".utf8), forKey: "fanCurve.savedProfile.v1")
         defaults.set(Data("not-json".utf8), forKey: "fanCurve.draftProfile.v1")
 
@@ -40,8 +40,8 @@ final class FanCurveStoreTests: XCTestCase {
     }
 
     func testPointCountAndFullSpeedPointStayConstrained() throws {
-        let (store, defaults, suite) = makeStore()
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let (store, _, suite) = makeStore()
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
 
         for _ in 0..<12 { store.addPoint() }
         XCTAssertLessThanOrEqual(store.draftProfile.points.count, 8)
@@ -64,7 +64,7 @@ final class FanCurveStoreTests: XCTestCase {
 
     func testOnlyProfilesPersistNotRuntimeOrLeaseState() throws {
         let (store, defaults, suite) = makeStore()
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         store.markApplied(try store.preparedProfile(targetFanIDs: [0, 1]))
 
         let keys = Set(defaults.dictionaryRepresentation().keys.filter {
@@ -76,9 +76,8 @@ final class FanCurveStoreTests: XCTestCase {
     }
 
     private func makeStore() -> (FanCurveStore, UserDefaults, String) {
-        let suite = "FanCurveStoreTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = TestPreferenceDomain.open(suiteName: suite)!
         return (FanCurveStore(defaults: defaults), defaults, suite)
     }
 }

@@ -34,13 +34,6 @@ struct BenchmarkV7DashboardView: View {
             }
         }
 
-        var symbol: String {
-            switch self {
-            case .success: "checkmark.circle"
-            case .failure: "exclamationmark.triangle"
-            }
-        }
-
         var color: Color {
             switch self {
             case .success: AppDesignTokens.Palette.success
@@ -51,11 +44,13 @@ struct BenchmarkV7DashboardView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.moduleTheme) private var moduleTheme
-    @Environment(\.windowLayoutMetrics) private var layout
     @State private var selectedPage: Page = .benchmark
     @State private var pendingDeletionRecordID: UUID?
     @State private var historyFeedback: HistoryFeedback?
     @State private var comparisonRecordIDs: [UUID] = []
+    /// The scroll area's size, for the status bar's compact temperature
+    /// reading (review P2-4). The page content reads the live geometry.
+    @State private var scrollViewportSize: CGSize = .zero
 
     let state: BenchmarkV7State
     let latestResult: BenchmarkV7Result?
@@ -74,28 +69,51 @@ struct BenchmarkV7DashboardView: View {
     let onDeleteHistoryRecord: (UUID) -> Void
     let onExportHistoryRecord: (UUID) -> Data?
     var liveTelemetry: [MenuBarTelemetryPoint] = []
+    var usesCompactResultContainer = false
 
     private let officialPlan = OfficialBenchmarkPlan.current
     private var accent: Color { moduleTheme.accent }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: AppDesignTokens.Layout.pageSpacing) {
-                    pagePicker
-                    pageContent
-                }
-                .padding(AppDesignTokens.Layout.pagePadding)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+        Group {
+        if usesCompactResultContainer {
+            LightfieldResultContent(usesLazyRows: false, listHeader: AnyView(compactPagePicker.padding(.bottom, 12))) {
+                LightfieldSummary(module: .performance, label: L10n.text("历史记录 · 原始分项", "History · Raw measurements"),
+                    value: latestResult?.mSeries.map { String($0.metrics.count) } ?? String(latestResult?.metrics.count ?? 0),
+                    unit: L10n.text("项", "items"), note: latestResult?.versions.planVersion)
+            } rows: {
+                pageContent(layout: BenchmarkLandingLayout(scrollViewportSize: .zero))
             }
-            // Reset only when changing page/run state, keeping cancellation
-            // visible without resetting the scroll position on every sample.
-            .id(ScrollIdentity(page: selectedPage, running: isRunning))
+        } else {
+        VStack(spacing: 0) {
+            // U1 029: the landing monitor is sized from the visible scroll
+            // area, so its temperature dial is never cut off by the status bar.
+            GeometryReader { viewport in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: AppDesignTokens.Layout.pageSpacing) {
+                        pagePicker
+                        pageContent(layout: BenchmarkLandingLayout(scrollViewportSize: viewport.size))
+                    }
+                    .padding(AppDesignTokens.Layout.pagePadding)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                // Reset only when changing page/run state, keeping cancellation
+                // visible without resetting the scroll position on every sample.
+                .id(ScrollIdentity(page: selectedPage, running: isRunning))
+                .onAppear { scrollViewportSize = viewport.size }
+                .onChange(of: viewport.size) { _, size in scrollViewportSize = size }
+            }
             // Reserve real layout space. A transparent safe-area inset lets
             // scrolling content draw underneath these status labels on macOS.
-            if selectedPage == .benchmark && !isRunning {
-                benchmarkStatusBar.padding(.horizontal, AppDesignTokens.Layout.pagePadding)
+            if selectedPage == .benchmark {
+                benchmarkStatusBar(
+                    showsCompactTemperature: BenchmarkLandingLayout(scrollViewportSize: scrollViewportSize)
+                        .showsCompactTemperature
+                )
+                .padding(.horizontal, AppDesignTokens.Layout.pagePadding)
             }
+        }
+        }
         }
         .environment(\.scrollSafeGlass, true)
         .transaction { transaction in
@@ -129,14 +147,7 @@ struct BenchmarkV7DashboardView: View {
 
     private var pagePicker: some View {
         Picker(L10n.text("性能测试页面", "Performance benchmark page"), selection: $selectedPage) {
-            Text(L10n.text("性能测试", "Performance test"))
-                .tag(Page.benchmark)
-            Text(L10n.text("本机最佳", "Local best"))
-                .tag(Page.localBest)
-            Text(L10n.text("历史记录", "History"))
-                .tag(Page.history)
-            Text(L10n.text("社区提交榜", "Community submissions"))
-                .tag(Page.leaderboard)
+            pageOptions
         }
         .pickerStyle(.segmented)
         .labelsHidden()
@@ -147,14 +158,48 @@ struct BenchmarkV7DashboardView: View {
         ))
     }
 
+    private var compactPagePicker: some View {
+        ViewThatFits(in: .horizontal) {
+            pagePicker.fixedSize(horizontal: true, vertical: false)
+            Picker(L10n.text("性能测试页面", "Performance benchmark page"), selection: $selectedPage) { pageOptions }
+                .pickerStyle(.menu).labelsHidden()
+                .accessibilityLabel(L10n.text("性能测试页面", "Performance benchmark page"))
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private var pageOptions: some View {
+            Text(L10n.text("性能测试", "Performance test"))
+                .tag(Page.benchmark)
+            Text(L10n.text("本机最佳", "Local best"))
+                .tag(Page.localBest)
+            Text(L10n.text("历史记录", "History"))
+                .tag(Page.history)
+            Text(L10n.text("社区提交榜", "Community submissions"))
+                .tag(Page.leaderboard)
+    }
+
     @ViewBuilder
-    private var pageContent: some View {
+    private func pageContent(layout: BenchmarkLandingLayout) -> some View {
         switch selectedPage {
         case .benchmark:
-            if isRunning {
-                runningCard
+            if usesCompactResultContainer, let result = latestResult {
+                VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
+                    if let raw = result.mSeries {
+                        MSeriesRawResultView(result: raw)
+                            .lightfieldComponentProbe("benchmark.legacy.raw")
+                    } else {
+                        resultCard(result, title: L10n.text("所选结果", "Selected result"))
+                    }
+                    // Retain version/environment/raw legacy details. A record
+                    // selected from history must never be replaced by the best
+                    // comparable current-protocol result or a live monitor.
+                    historyDetails(result)
+                }
+                .lightfieldComponentProbe("benchmark.legacy.result")
+            } else if isRunning {
+                runningCard(layout: layout)
             } else {
-                benchmarkLanding
+                benchmarkLanding(layout: layout)
             }
         case .localBest:
             localBestPage
@@ -171,20 +216,12 @@ struct BenchmarkV7DashboardView: View {
         }
     }
 
-    private var benchmarkLanding: some View {
+    /// U1 029: the test card and the monitor stay side by side down to a
+    /// 900 pt wide window, so the monitor starts in the first row and its
+    /// dial is visible without scrolling.
+    private func benchmarkLanding(layout: BenchmarkLandingLayout) -> some View {
         VStack(spacing: AppDesignTokens.Spacing.large) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: AppDesignTokens.Spacing.large) {
-                    actionCard
-                        .frame(minWidth: 340, idealWidth: 410, maxWidth: 440)
-                    benchmarkMonitor
-                        .frame(minWidth: 360, maxWidth: .infinity)
-                }
-                VStack(spacing: AppDesignTokens.Spacing.large) {
-                    actionCard
-                    benchmarkMonitor
-                }
-            }
+            firstScreen(layout: layout) { actionCard }
             if let result = visibleLatestResult?.mSeries { MSeriesRawResultView(result: result) }
             if let latest = latestResult?.mSeries, !latest.isCompleteCore,
                latest.sessionID != visibleLatestResult?.mSeries?.sessionID {
@@ -193,36 +230,135 @@ struct BenchmarkV7DashboardView: View {
         }
     }
 
-    private var benchmarkMonitor: some View {
+    /// The first screen keeps one arrangement, idle or running (review
+    /// P2-3): the leading card on the left and the monitor on the right while
+    /// both fit, otherwise stacked. The monitor keeps its place and size when
+    /// a test starts; only the leading card changes.
+    @ViewBuilder
+    private func firstScreen<Leading: View>(
+        layout: BenchmarkLandingLayout,
+        @ViewBuilder leading: () -> Leading
+    ) -> some View {
+        if layout.placesMonitorBeside {
+            HStack(alignment: .top, spacing: AppDesignTokens.Spacing.large) {
+                leading()
+                    .frame(minWidth: BenchmarkLandingLayout.cardMinimumWidth,
+                           idealWidth: BenchmarkLandingLayout.cardIdealWidth,
+                           maxWidth: BenchmarkLandingLayout.cardMaximumWidth)
+                benchmarkMonitor(height: layout.monitorHeight)
+                    .frame(minWidth: BenchmarkLandingLayout.monitorMinimumWidth,
+                           idealWidth: BenchmarkLandingLayout.monitorIdealWidth,
+                           maxWidth: .infinity)
+            }
+        } else {
+            VStack(spacing: AppDesignTokens.Spacing.large) {
+                leading()
+                benchmarkMonitor(height: layout.monitorHeight)
+            }
+        }
+    }
+
+    private func benchmarkMonitor(height: CGFloat) -> some View {
         BenchmarkSystemMonitor(
             telemetryPoints: liveTelemetry,
             accent: accent,
-            chartHeight: layout.isShort ? 200 : 250
+            availableHeight: height
         )
     }
 
-    private var benchmarkStatusBar: some View {
-        HStack(spacing: AppDesignTokens.Spacing.section) {
-            Label(
-                visibleLatestResult == nil
-                    ? L10n.text("完成测试后生成结果", "Complete the test to generate a result")
-                    : L10n.text("上一次完整结果仍保留", "The last complete result is preserved"),
-                systemImage: "info.circle"
-            )
-            .foregroundStyle(accent)
-
-            Spacer(minLength: AppDesignTokens.Spacing.medium)
-
-            Label(
-                L10n.text("可请求取消；收尾状态另行显示", "Cancellation can be requested; cleanup is tracked separately"),
-                systemImage: "checkmark.shield.fill"
-            )
-            .foregroundStyle(AppDesignTokens.Palette.success)
+    private func benchmarkStatusBar(showsCompactTemperature: Bool) -> some View {
+        // One fixed primary action remains reachable when results, warnings or
+        // larger monitoring artwork require scrolling. Do not duplicate it in
+        // the landing card or let a resize move cancellation into scroll content.
+        // Where the dial is not on the first screen, a compact temperature
+        // reading sits beside the action (review P2-4).
+        ContentPanel {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    benchmarkStatusMessage.fixedSize(horizontal: true, vertical: true)
+                    Spacer(minLength: 8)
+                    if showsCompactTemperature { compactTemperature }
+                    benchmarkPrimaryAction
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    benchmarkStatusMessage
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 12) {
+                        if showsCompactTemperature { compactTemperature }
+                        Spacer(minLength: 0)
+                        benchmarkPrimaryAction
+                    }
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    benchmarkStatusMessage
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if showsCompactTemperature { compactTemperature }
+                    HStack {
+                        Spacer(minLength: 0)
+                        benchmarkPrimaryAction
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
-        .font(AppDesignTokens.Typography.metadata)
-        .padding(.horizontal, AppDesignTokens.Spacing.section)
-        .frame(maxWidth: .infinity, minHeight: layout.footerHeight)
-        .fullBleedSection()
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("benchmark.persistentActions")
+#if DEBUG
+        .layoutProbe("benchmark.persistentActions")
+#endif
+    }
+
+    private var compactTemperature: some View {
+        BenchmarkCompactTemperature(telemetryPoints: liveTelemetry, accent: accent)
+    }
+
+    private var benchmarkStatusMessage: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: isRunning ? "hourglass" : "info.circle")
+                .font(.title3)
+                .foregroundStyle(accent)
+                .accessibilityHidden(true)
+            Text(isRunning
+                ? (state.phase == .cancelling
+                    ? L10n.text("正在收尾", "Finishing cancellation")
+                    : L10n.text("测试进行中", "Test in progress"))
+                : L10n.text("结果仅保存在本机；完成校准前显示原始数据。",
+                            "Results stay on this Mac; raw data is shown until calibration."))
+                .font(AppDesignTokens.Typography.metadata)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+#if DEBUG
+        .layoutProbe("benchmark.persistentStatus")
+#endif
+    }
+
+    @ViewBuilder
+    private var benchmarkPrimaryAction: some View {
+        Group {
+            if isRunning {
+                Button(role: .cancel, action: onCancel) {
+                    Label(L10n.text("取消测试", "Cancel test"), systemImage: "stop.circle")
+                }
+                .appButtonChrome(.secondary)
+                .disabled(!Self.allowsCancellation(during: state.phase))
+            } else {
+                Button(action: onStart) {
+                    Label(actionTitle, systemImage: "speedometer")
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(moduleTheme.actionFill)
+                .disabled(!canStart)
+                .accessibilityHint(L10n.text("自动检查环境并运行全部项目", "Checks the environment and runs all workloads"))
+            }
+        }
+        .fixedSize(horizontal: true, vertical: true)
+#if DEBUG
+        .layoutProbe("benchmark.persistentActionButton")
+#endif
     }
 
     private var actionCard: some View {
@@ -274,19 +410,7 @@ struct BenchmarkV7DashboardView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Button(action: onStart) {
-                    Label(actionTitle, systemImage: "speedometer")
-                        .font(.system(size: 22, weight: .semibold))
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(accent)
-                .disabled(!canStart || isRunning)
-                .accessibilityHint(L10n.text(
-                    "开始后将自动检查环境并运行全部项目",
-                    "Starts the automatic environment check and all benchmark stages"
-                ))
+
             }
             .padding(AppDesignTokens.Layout.sectionPadding)
         }
@@ -304,7 +428,7 @@ struct BenchmarkV7DashboardView: View {
                     VStack(spacing: AppDesignTokens.Spacing.small) {
                         Image(systemName: categorySystemImage(category))
                             .font(.system(size: 32, weight: .regular))
-                            .foregroundStyle(accent)
+                            .foregroundStyle(AppIconPalette.benchmark(category, night: accent))
                             .frame(height: 40)
                             .accessibilityHidden(true)
                         Text(categoryTitle(category))
@@ -358,27 +482,36 @@ struct BenchmarkV7DashboardView: View {
         }
     }
 
-    private var runningCard: some View {
-        BenchmarkV7RunProgressView(
-            state: state,
-            isPreflighting: isPreflighting,
-            accent: accent,
-            canCancel: Self.allowsCancellation(during: state.phase),
-            onCancel: onCancel,
-            telemetryPoints: liveTelemetry
-        )
-        .padding(AppDesignTokens.Layout.sectionPadding)
-        .fullBleedSection()
+    /// Review P2-3: the progress takes the test card's place and the monitor
+    /// stays where it was, at the landing size (it was stacked below the
+    /// progress at a fixed 330 pt, with a dial of about 162 pt).
+    private func runningCard(layout: BenchmarkLandingLayout) -> some View {
+        firstScreen(layout: layout) {
+            BenchmarkV7RunProgressView(
+                state: state,
+                isPreflighting: isPreflighting,
+                accent: accent,
+                canCancel: false, // Cancellation stays in the persistent action bar.
+                onCancel: onCancel
+            )
+            .fullBleedSection()
+        }
         .accessibilityElement(children: .contain)
     }
 
     private var latestResultCard: some View {
+        resultCard(visibleLatestResult, title: L10n.text("最新结果", "Latest result"))
+    }
+
+    /// A record opened from history passes itself; it is never replaced by
+    /// the newest comparable current-protocol result.
+    private func resultCard(_ shown: BenchmarkV7Result?, title: String) -> some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-            Label(L10n.text("最新结果", "Latest result"), systemImage: "chart.bar.xaxis")
+            Text(title)
                 .font(AppDesignTokens.Typography.cardTitle)
                 .foregroundStyle(accent)
 
-            if let result = visibleLatestResult {
+            if let result = shown {
                 HStack(alignment: .firstTextBaseline) {
                     Text(result.coreScore?.overallScore.formatted(.number.precision(.fractionLength(0))) ?? "—")
                         .font(.system(size: 36, weight: .semibold, design: .rounded))
@@ -459,17 +592,9 @@ struct BenchmarkV7DashboardView: View {
 
     private var localBestPage: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-            Label(L10n.text("本机最佳", "Local best"), systemImage: "trophy")
+            Text(L10n.text("本机最佳", "Local best"))
                 .font(AppDesignTokens.Typography.cardTitle)
                 .foregroundStyle(accent)
-
-            Text(L10n.text(
-                "本机安全保存、成功完成且与当前评分版本可比的记录。",
-                "Safely saved, successfully completed local records comparable with the current scoring version."
-            ))
-            .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
 
             if let result = localBestResult {
                 HStack(alignment: .firstTextBaseline) {
@@ -512,14 +637,9 @@ struct BenchmarkV7DashboardView: View {
                 }
                 .font(AppDesignTokens.Typography.metadata)
             } else {
-                ContentUnavailableView(
-                    L10n.text("尚无可比较的本机最佳成绩", "No comparable local best result"),
-                    systemImage: "trophy",
-                    description: Text(L10n.text(
-                        "完成并安全保存一次当前版本的性能测试后，这里会显示最佳成绩。",
-                        "Complete and safely save a current-version benchmark to see a best result here."
-                    ))
-                )
+                ContentUnavailableView {
+                    Text(L10n.text("尚无可比较的本机最佳成绩", "No comparable local best result"))
+                }
             }
         }
         .padding(AppDesignTokens.Layout.sectionPadding)
@@ -554,33 +674,19 @@ struct BenchmarkV7DashboardView: View {
     private var historyPage: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
             HStack(alignment: .firstTextBaseline) {
-                Label(L10n.text("本机历史", "Local history"), systemImage: "clock.arrow.circlepath")
+                Text(L10n.text("本机历史", "Local history"))
                     .font(AppDesignTokens.Typography.cardTitle)
                     .foregroundStyle(accent)
                 Spacer()
-                Text(L10n.text("最新在前", "Newest first"))
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
             }
 
             Text(L10n.text(
-                "仅保存在本机；失败或取消的记录不会显示为成功成绩。",
-                "Records stay on this Mac; failed or cancelled runs are never shown as successful scores."
+                "仅保存在本机",
+                "Stored only on this Mac"
             ))
             .font(AppDesignTokens.Typography.secondary)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-
-            #if DEBUG || STORAGE_CLEANER_BETA
-            if MiniWindowDemoData.isEnabled {
-                Text(L10n.text(
-                    "本机实际测试记录，与 FIXTURE 固定监控数据无关。",
-                    "Actual local benchmark records, independent of FIXTURE monitor samples."
-                ))
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
-            }
-            #endif
 
             if let message = historyStatusMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
@@ -590,7 +696,13 @@ struct BenchmarkV7DashboardView: View {
             }
 
             if let historyFeedback {
-                Label(historyFeedback.text, systemImage: historyFeedback.symbol)
+                Group {
+                    if case .failure = historyFeedback {
+                        Label(historyFeedback.text, systemImage: "exclamationmark.triangle")
+                    } else {
+                        Text(historyFeedback.text)
+                    }
+                }
                     .font(AppDesignTokens.Typography.metadata)
                     .foregroundStyle(historyFeedback.color)
                     .fixedSize(horizontal: false, vertical: true)
@@ -599,14 +711,9 @@ struct BenchmarkV7DashboardView: View {
             comparisonCard
 
             if chronologicalHistory.isEmpty {
-                ContentUnavailableView(
-                    L10n.text("暂无本机历史记录", "No local history yet"),
-                    systemImage: "clock.arrow.circlepath",
-                    description: Text(L10n.text(
-                        "完成、失败或取消的测试记录会在这里按时间显示。",
-                        "Completed, failed, and cancelled benchmark records appear here over time."
-                    ))
-                )
+                ContentUnavailableView {
+                    Text(L10n.text("暂无本机历史记录", "No local history yet"))
+                }
             } else {
                 ForEach(Array(chronologicalHistory.enumerated()), id: \.offset) { entry in
                     historyCard(entry.element)
@@ -664,10 +771,10 @@ struct BenchmarkV7DashboardView: View {
             }
 
             if result.failure == nil, !result.isCurrentComparableOfficialResult {
-                Label(L10n.text(
-                    "此记录已保留，但与当前完整评分版本不直接可比，不参与本机最佳或结果比较。",
-                    "This record is preserved but is not directly comparable with the current full scoring version, so it is excluded from local best and comparison."
-                ), systemImage: "arrow.triangle.branch")
+                Text(L10n.text(
+                    "记录已保留；版本不可比，不计入最佳或比较",
+                    "Record kept; incompatible version, excluded from best and comparison"
+                ))
                 .font(AppDesignTokens.Typography.metadata)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -741,7 +848,7 @@ struct BenchmarkV7DashboardView: View {
         let firstScore = first.coreScore?.overallScore ?? 0
         let secondScore = second.coreScore?.overallScore ?? 0
         return VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-            Label(L10n.text("结果比较", "Result comparison"), systemImage: "arrow.left.arrow.right")
+            Text(L10n.text("结果比较", "Result comparison"))
                 .font(AppDesignTokens.Typography.secondary.weight(.semibold))
                 .foregroundStyle(accent)
 
@@ -1179,7 +1286,8 @@ struct BenchmarkV7DashboardView: View {
             case .thermalCritical:
                 L10n.text("系统报告危险温度压力，暂不运行测试。", check.detail)
             case .highBackgroundLoad:
-                L10n.text("当前后台负载较高，结果可能受影响。", check.detail)
+                // BOARD N22: shown with the result (the preflight is kept with it).
+                L10n.text("开始前后台负载高，结果可能偏低。", "Background load was high before the test; results may read low.")
             case .lowAvailableMemory:
                 L10n.text("当前可用内存不足 1 GiB。", check.detail)
             case .targetVolumeReadOnly:

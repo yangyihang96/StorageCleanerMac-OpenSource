@@ -3,6 +3,7 @@ import SwiftUI
 /// Non-data decoration for the privacy landing state. Interactive filters and
 /// records remain separate SwiftUI controls owned by BrowserPrivacyStore.
 struct PrivacyConceptArtwork: View {
+    @Environment(\.colorScheme) private var colorScheme
     let tint: Color
     @Environment(\.moduleTheme) private var theme
 
@@ -11,7 +12,7 @@ struct PrivacyConceptArtwork: View {
             let diameter = min(proxy.size.width * 0.90, proxy.size.height * 0.75)
             VStack(spacing: 24) {
                 ZStack {
-                    if theme.isImmersive, let image = GoldenLandingAsset.browserPrivacy.image {
+                    if theme.isImmersive, let image = GoldenLandingAsset.browserPrivacy.image(for: colorScheme) {
                         GoldenLandingArtwork(image: image)
                     } else {
                         ForEach([CGFloat(0.60), 0.76, 0.90, 1], id: \.self) { scale in
@@ -65,41 +66,162 @@ struct PrivacyConceptArtwork: View {
 }
 
 struct HealthCheckScopeCards: View {
+    @AppSurfaces private var surfaces
     @Environment(\.windowLayoutMetrics) private var layout
-    private let checks: [(String, String, Color, [String])] = [
-        (L10n.text("磁盘", "Disk"), "internaldrive.fill", .cyan,
-         ["SMART", L10n.text("介质寿命", "Media lifespan"), L10n.text("可用容量", "Free space")]),
-        (L10n.text("电池", "Battery"), "battery.75", .yellow,
-         [L10n.text("最大容量", "Maximum capacity"), L10n.text("循环次数", "Cycle count"), L10n.text("电池状况", "Condition")]),
-        (L10n.text("系统状态", "System"), "waveform.path.ecg.rectangle", .blue,
-         [L10n.text("崩溃与卡顿", "Crashes & hangs"), "FileVault", L10n.text("备份状态", "Backup status")])
-    ]
+    @Environment(\.featureCardPresentation) private var cardPresentation
+    let internalBatteryAvailability: InternalBatteryAvailability
+
+    enum CheckKind: String, Hashable {
+        case disk, battery, system
+    }
+
+    struct Check: Identifiable {
+        let id: CheckKind
+        let title: String
+        let systemImage: String
+        let tint: Color
+        let details: [String]
+    }
+
+    // Scope is driven by the latest native capability, never by chip names or
+    // a previously saved health scan. Unknown has no claimed battery metrics.
+    var checks: [Check] {
+        var result = [Check(id: .disk, title: L10n.text("磁盘", "Disk"),
+                            systemImage: "internaldrive.fill", tint: AppIconPalette.scope(.protection, index: 0, night: MonitorPalette.cyan),
+                            details: ["SMART", L10n.text("介质寿命", "Media lifespan"),
+                                      L10n.text("可用容量", "Free space")])]
+        if internalBatteryAvailability != .absent {
+            let isConfirmed = internalBatteryAvailability == .present
+            result.append(Check(
+                id: .battery, title: L10n.text("电池", "Battery"),
+                systemImage: isConfirmed ? "battery.75" : "questionmark.circle", tint: AppIconPalette.scope(.protection, index: 1, night: MonitorPalette.yellow),
+                details: isConfirmed
+                    ? [L10n.text("最大容量", "Maximum capacity"), L10n.text("循环次数", "Cycle count"),
+                       L10n.text("电池状况", "Condition")]
+                    : [L10n.text("内置电池待确认", "Internal battery not confirmed")]
+            ))
+        }
+        result.append(Check(id: .system, title: L10n.text("系统状态", "System"),
+                            systemImage: "waveform.path.ecg.rectangle", tint: AppIconPalette.scope(.protection, index: 2, night: MonitorPalette.blue),
+                            details: [L10n.text("崩溃与卡顿", "Crashes & hangs"), "FileVault",
+                                      L10n.text("备份状态", "Backup status")]))
+        return result
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ForEach(checks.indices, id: \.self) { index in
-                let check = checks[index]
+        if cardPresentation == .legacy {
+            fullCards
+        } else {
+            FeatureOptionList {
+                ForEach(checks) { check in
+                    FeatureOptionCard(padding: 0) {
+                        HStack(spacing: 8) {
+                            Text(check.title).font(FeaturePageTokens.optionTitleFont)
+                                .foregroundStyle(surfaces.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            if check.id == .battery && internalBatteryAvailability == .unknown {
+                                Text(L10n.text("内置电池待确认", "Internal battery not confirmed"))
+                                    .font(AppDesignTokens.TypeScale.caption).foregroundStyle(surfaces.textSecondary)
+                                    .lineLimit(1)
+#if DEBUG
+                                    .layoutProbe("health.scope.availability.battery")
+#endif
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(maxWidth: .infinity, minHeight: FeaturePageTokens.optionRowMinimumHeight)
+                    }
+                    .help(check.details.joined(separator: " · "))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityValue(check.details.joined(separator: " · "))
+                }
+            }
+        }
+    }
+
+    private var fullCards: some View {
+        CardLayout {
+            ForEach(checks) { check in
+                FeatureOptionCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    Image(systemName: check.1)
-                        .symbolRenderingMode(.hierarchical)
-                        .font(.system(size: layout.isShort ? 32 : 46, weight: .regular))
-                        .foregroundStyle(check.2)
-                        .frame(maxWidth: .infinity, minHeight: layout.isShort ? 46 : 70)
-                    Text(check.0)
-                        .font(AppTypography.cardTitle)
+                    Text(check.title)
+                        .font(AppDesignTokens.TypeScale.bodyEmphasis)
+                        .foregroundStyle(surfaces.textPrimary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity)
-                    ForEach(check.3, id: \.self) { label in
-                        Text("· " + label)
-                            .font(AppTypography.secondaryText)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+#if DEBUG
+                        .layoutProbe("health.scope.title.\(check.id.rawValue)")
+#endif
+                    if check.id == .battery && internalBatteryAvailability == .unknown {
+                        Text(L10n.text("内置电池待确认", "Internal battery not confirmed"))
+                            .font(AppDesignTokens.TypeScale.secondary).foregroundStyle(surfaces.textSecondary)
+                            .lineLimit(1)
+#if DEBUG
+                            .layoutProbe("health.scope.availability.battery")
+#endif
                     }
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, minHeight: layout.isShort ? 174 : 216, alignment: .top)
-                .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(AppAppearanceColors.ink.opacity(0.12)))
+                .frame(maxWidth: .infinity, minHeight: 56,
+                       maxHeight: .infinity, alignment: .top)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("health.scope.card.\(check.id.rawValue)")
+#if DEBUG
+                .layoutProbe("health.scope.card.\(check.id.rawValue)")
+#endif
             }
+        }
+#if DEBUG
+        .layoutProbe("health.scope")
+#endif
+    }
+
+    /// Use the actual card proposal, which is narrower than the page viewport.
+    /// Limit columns to the real item count so an absent battery leaves no slot.
+    private struct CardLayout: Layout {
+        private let minimumCardWidth: CGFloat = 128
+        private let spacing: CGFloat = 10
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            guard !subviews.isEmpty else { return .zero }
+            let naturalWidth = minimumCardWidth * CGFloat(subviews.count)
+                + spacing * CGFloat(subviews.count - 1)
+            let width = proposal.width.flatMap { $0.isFinite ? max(1, $0) : nil } ?? naturalWidth
+            let rows = rowMetrics(width: width, subviews: subviews)
+            return CGSize(width: width,
+                          height: rows.heights.reduce(0, +) + spacing * CGFloat(rows.heights.count - 1))
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            guard !subviews.isEmpty else { return }
+            let rows = rowMetrics(width: bounds.width, subviews: subviews)
+            var y = bounds.minY
+            for (row, height) in rows.heights.enumerated() {
+                let first = row * rows.columns
+                for index in first..<min(first + rows.columns, subviews.count) {
+                    subviews[index].place(
+                        at: CGPoint(x: bounds.minX + CGFloat(index - first) * (rows.cardWidth + spacing), y: y),
+                        anchor: .topLeading,
+                        proposal: ProposedViewSize(width: rows.cardWidth, height: height)
+                    )
+                }
+                y += height + spacing
+            }
+        }
+
+        private func rowMetrics(width: CGFloat, subviews: Subviews) -> (columns: Int, cardWidth: CGFloat, heights: [CGFloat]) {
+            let columns = min(subviews.count, max(1, Int((width + spacing) / (minimumCardWidth + spacing))))
+            let cardWidth = max(0, (width - spacing * CGFloat(columns - 1)) / CGFloat(columns))
+            var heights = [CGFloat]()
+            for first in stride(from: 0, to: subviews.count, by: columns) {
+                let height = (first..<min(first + columns, subviews.count)).map {
+                    subviews[$0].sizeThatFits(ProposedViewSize(width: cardWidth, height: nil)).height
+                }.max() ?? 0
+                heights.append(height)
+            }
+            return (columns, cardWidth, heights)
         }
     }
 }

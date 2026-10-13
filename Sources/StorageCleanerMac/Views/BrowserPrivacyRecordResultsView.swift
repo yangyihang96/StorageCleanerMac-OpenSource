@@ -20,7 +20,8 @@ enum BrowserPrivacyManualWorkflow {
             BrowserPrivacyManualGuidanceGroup(
                 browser: records[0].browser,
                 recordCount: records.count,
-                domains: normalizedDomains(records.map(\.domain))
+                domains: normalizedDomains(records.map(\.domain)),
+                pages: BrowserPrivacyDisplayItem.aggregate(records)
             )
         }.sorted {
             $0.browser.displayName.localizedCaseInsensitiveCompare($1.browser.displayName)
@@ -37,8 +38,8 @@ enum BrowserPrivacyManualWorkflow {
 
     static func historyInstruction(for browser: BrowserPrivacyBrowser) -> String {
         historyRoute(for: browser)?.instruction ?? L10n.text(
-            "仅启动 \(browser.displayName)。请从该浏览器的“历史记录”菜单打开完整历史列表，再按已复制的域名逐项核对。",
-            "Only \(browser.displayName) will be launched. Open its full History list from the browser menu, then review the copied domains one by one."
+            "仅启动 \(browser.displayName)。请从该浏览器的“历史记录”菜单打开完整历史列表，再按上面列出的页面逐项核对。",
+            "Only \(browser.displayName) will be launched. Open its full History list from the browser menu, then review the pages listed above one by one."
         )
     }
 
@@ -53,10 +54,162 @@ enum BrowserPrivacyManualWorkflow {
     }
 }
 
+/// Writes browsing data the user chose to copy. The content is marked
+/// concealed and transient (nspasteboard.org), so clipboard managers that
+/// honour the markers neither show nor keep it in their history.
+enum BrowserPrivacyClipboard {
+    static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+    static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+
+    @discardableResult
+    static func write(_ text: String, to pasteboard: NSPasteboard) -> Bool {
+        pasteboard.clearContents()
+        pasteboard.declareTypes([.string, concealedType, transientType], owner: nil)
+        return pasteboard.setString(text, forType: .string)
+            && pasteboard.setData(Data(), forType: concealedType)
+            && pasteboard.setData(Data(), forType: transientType)
+    }
+}
+
+/// The text of the deletion confirmations. Every page is listed under what
+/// will actually happen to it: deleted, deleted only if its running browser
+/// quits, or handled in the browser.
+enum BrowserPrivacyConfirmationText {
+    /// Direct deletion with no selected browser running.
+    static func deletionMessage(
+        records: [BrowserPrivacyRecord],
+        includesIncompletelyReadProfiles: Bool,
+        disclosure: BrowserPrivacyDisclosurePolicy? = nil
+    ) -> String {
+        let disclosure = disclosure ?? .protecting(records)
+        let direct = records.filter { $0.locator != nil }
+        let manual = records.filter { $0.locator == nil }
+        var sections = [L10n.text(
+            "将删除 \(visits(direct))（\(browsers(direct))）：\n\(pageLines(direct, disclosure: disclosure))",
+            "This deletes \(visits(direct)) in \(browsers(direct)):\n\(pageLines(direct, disclosure: disclosure))"
+        )]
+        sections += commonSections(
+            manual: manual,
+            includesIncompletelyReadProfiles: includesIncompletelyReadProfiles,
+            disclosure: disclosure
+        )
+        return sections.joined(separator: "\n\n")
+    }
+
+    /// Direct deletion while some selected browsers are running. The user
+    /// either quits them or skips them, so their pages are listed apart.
+    static func preflightMessage(
+        records: [BrowserPrivacyRecord],
+        runningBrowserIDs: Set<String>,
+        includesIncompletelyReadProfiles: Bool,
+        disclosure: BrowserPrivacyDisclosurePolicy? = nil
+    ) -> String {
+        let disclosure = disclosure ?? .protecting(records)
+        let direct = records.filter { $0.locator != nil }
+        let running = direct.filter { runningBrowserIDs.contains($0.browser.id) }
+        let others = direct.filter { !runningBrowserIDs.contains($0.browser.id) }
+        var sections = [L10n.text(
+            "直接清理前浏览器必须正常退出，这样才能重新核对数据库和所选访问记录。不会强制结束浏览器进程。",
+            "Browsers must quit normally before direct cleanup so the database and the selected visits can be checked again. The app never force-quits a browser."
+        )]
+        if !running.isEmpty {
+            sections.append(L10n.text(
+                "正在运行的 \(browsers(running)) 里的 \(visits(running))：选择“正常退出并继续”会删除，选择“跳过运行中的浏览器”则跳过、不处理：\n\(pageLines(running, disclosure: disclosure))",
+                "\(visits(running)) in the running \(browsers(running)): Quit Normally and Continue deletes them; Skip Running Browsers leaves them untouched:\n\(pageLines(running, disclosure: disclosure))"
+            ))
+        }
+        if !others.isEmpty {
+            sections.append(L10n.text(
+                "其他浏览器（\(browsers(others))）里的 \(visits(others))，两种选择都会删除：\n\(pageLines(others, disclosure: disclosure))",
+                "\(visits(others)) in other browsers (\(browsers(others))) are deleted either way:\n\(pageLines(others, disclosure: disclosure))"
+            ))
+        }
+        sections += commonSections(
+            manual: records.filter { $0.locator == nil },
+            includesIncompletelyReadProfiles: includesIncompletelyReadProfiles,
+            disclosure: disclosure
+        )
+        return sections.joined(separator: "\n\n")
+    }
+
+    /// D93: the six fixed confirmation fields for the selected visits.
+    static func facts(
+        records: [BrowserPrivacyRecord],
+        runningBrowserIDs: Set<String>,
+        fullDiskAccessBrowsers: [String]
+    ) -> OperationConfirmationFacts {
+        let direct = records.filter { $0.locator != nil }
+        return .browserHistory(
+            directRecordCount: direct.count,
+            manualRecordCount: records.count - direct.count,
+            browsers: Array(Set(records.map { $0.browser.displayName })).sorted(),
+            runningBrowsers: OperationQuitNotice.runningBrowserNames(selected: records, runningBrowserIDs: runningBrowserIDs).sorted(),
+            fullDiskAccessBrowsers: fullDiskAccessBrowsers
+        )
+    }
+
+    /// Only in-browser steps; nothing is written.
+    static func manualMessage(records: [BrowserPrivacyRecord], disclosure: BrowserPrivacyDisclosurePolicy? = nil) -> String {
+        let disclosure = disclosure ?? .protecting(records)
+        return L10n.text(
+            "将为 \(visits(records))（\(browsers(records))）生成浏览器内的处理步骤：\n\(pageLines(records, disclosure: disclosure))\n\n本应用不会修改这些浏览器的数据库。",
+            "This prepares in-browser steps for \(visits(records)) in \(browsers(records)):\n\(pageLines(records, disclosure: disclosure))\n\nThis app will not modify these browsers' databases."
+        )
+    }
+
+    private static func commonSections(
+        manual: [BrowserPrivacyRecord],
+        includesIncompletelyReadProfiles: Bool,
+        disclosure: BrowserPrivacyDisclosurePolicy
+    ) -> [String] {
+        var sections: [String] = []
+        if !manual.isEmpty {
+            sections.append(L10n.text(
+                "另有 \(visits(manual))只能在浏览器内处理，稍后会给出步骤：\n\(pageLines(manual, disclosure: disclosure))",
+                "\(visits(manual)) more can only be handled in the browser; the steps follow afterwards:\n\(pageLines(manual, disclosure: disclosure))"
+            ))
+        }
+        if includesIncompletelyReadProfiles {
+            sections.append(L10n.text(
+                "部分配置文件这次没有读取全部记录（超过单个配置文件的读取上限）。只会删除已读取到的访问；同一页面更早的访问不会被删除。",
+                "Some profiles were not read completely this time (they exceed the per-profile read limit). Only the visits that were read are deleted; earlier visits of the same pages stay."
+            ))
+        }
+        sections.append(L10n.text(
+            "删除前会先备份浏览器的历史数据库，删除后重新读取确认；数据库结构不受支持的配置文件不会被修改。\(BrowserPrivacyRecoveryText.retentionNotice)书签、密码、Cookie、自动填充和未选的访问记录不受影响。",
+            "The browser's history database is backed up first and read again afterwards; profiles with an unsupported database schema are not modified. \(BrowserPrivacyRecoveryText.retentionNotice) Bookmarks, passwords, cookies, autofill and unselected visits are not affected."
+        ))
+        return sections
+    }
+
+    private static func visits(_ records: [BrowserPrivacyRecord]) -> String {
+        BrowserPrivacyCountText.visits(records.count)
+    }
+
+    private static func browsers(_ records: [BrowserPrivacyRecord]) -> String {
+        Array(Set(records.map { $0.browser.displayName })).sorted()
+            .joined(separator: L10n.text("、", ", "))
+    }
+
+    private static func pageLines(_ records: [BrowserPrivacyRecord], disclosure: BrowserPrivacyDisclosurePolicy) -> String {
+        BrowserPrivacyPageListText.lines(for: BrowserPrivacyDisplayItem.aggregate(records), disclosure: disclosure)
+            .joined(separator: "\n")
+    }
+}
+
+struct BrowserPrivacyProfileOption: Identifiable, Equatable, Sendable {
+    /// The profile identifier the filter stores.
+    let id: String
+    /// "Browser · profile name" as shown in the filter menu.
+    let title: String
+}
+
 struct BrowserPrivacyManualGuidanceGroup: Identifiable, Equatable {
     let browser: BrowserPrivacyBrowser
     let recordCount: Int
     let domains: [String]
+    /// The selected pages, newest first, so they can be found in the browser.
+    let pages: [BrowserPrivacyDisplayItem]
 
     var id: String { browser.id }
 }
@@ -67,10 +220,15 @@ struct BrowserPrivacyRecordResultsView: View {
     private struct BulkSelectionRequest {
         let title: String
         let recordIDs: Set<UUID>
+        var removingIDs: Set<UUID> = []
     }
 
     @ObservedObject var store: BrowserPrivacyStore
+    /// D91: opens the cookie/other-data page from the skeleton's status bar.
+    var onShowDataTypes: (() -> Void)? = nil
     @Environment(\.moduleTheme) private var theme
+    /// Reads the recovery folder only when "Recent Deletions" is opened.
+    @StateObject private var recoveryStore = BrowserPrivacyRecoveryStore()
 
     @State private var isShowingProcessingConfirmation = false
     @State private var isShowingReviewSelectionConfirmation = false
@@ -80,12 +238,29 @@ struct BrowserPrivacyRecordResultsView: View {
     @State private var searchQuery = ""
     @State private var showsPermissionDetails = false
     @State private var showsCoverageDetails = false
+    @State private var showsRecentDeletions = false
+    /// Built when a confirmation is requested, so the selected pages are not
+    /// re-aggregated on every redraw.
+    @State private var processingConfirmationMessage = ""
+    @State private var runningBrowserConfirmationMessage = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            resultSurface
-            Divider()
-            compactSelectionHeader
+        FeatureLightfieldPage(module: .privacy, phase: .result, title: ReviewFilter.privacy.title,
+            status: selectionSummaryDetail,
+            safety: L10n.text("只删除所选浏览记录 · 保留书签和密码", "Delete selected history only · Keep bookmarks and passwords"),
+            actionTitle: lightfieldActionTitle,
+            actionEnabled: !store.isFiltering && !store.selectedRecordIDs.isEmpty && !store.isProcessing
+                && !store.isRunningBrowserPreflight && store.state != .scanning,
+            showsArtwork: false,
+            statusActionTitle: BrowserPrivacyWorkspaceView.dataTypesTitle,
+            statusActionEnabled: !store.isProcessing && store.state != .scanning,
+            statusAction: onShowDataTypes, action: beginProcessingConfirmation) {
+            BrowserPrivacyLightfieldResults(store: store, searchQuery: $searchQuery,
+                notices: { lightfieldNotices }, utilities: { lightfieldUtilities },
+                showsRecords: !store.isProcessing && store.processingReport == nil,
+                pageRow: { AnyView(lightfieldPageRow($0)) },
+                selectAll: { if !store.isFiltering { isShowingReviewSelectionConfirmation = true } },
+                requestSelection: requestGroupSelection)
         }
         .confirmationDialog(
             processingConfirmationTitle,
@@ -111,7 +286,10 @@ struct BrowserPrivacyRecordResultsView: View {
             titleVisibility: .visible
         ) {
             Button(L10n.text("选择需确认记录", "Select Review Records")) {
-                store.setFilteredSelection(true, confirmingReview: true)
+                guard !store.isFiltering else { return }
+                store.setSelection(true,
+                    recordIDs: BrowserPrivacyLightfieldPresentation.deletableIDs(store.filteredRecords),
+                    confirmingReview: true)
             }
             Button(L10n.text("取消", "Cancel"), role: .cancel) {}
         } message: {
@@ -129,10 +307,11 @@ struct BrowserPrivacyRecordResultsView: View {
             titleVisibility: .visible
         ) {
             Button(L10n.text(
-                "加入 \(pendingBulkSelection?.recordIDs.count ?? 0) 项到已选",
-                "Add \(pendingBulkSelection?.recordIDs.count ?? 0) Items to Selection"
+                "加入 \(pendingSelectionSummary) 到已选",
+                "Add \(pendingSelectionSummary) to Selection"
             )) {
                 if let request = pendingBulkSelection {
+                    store.setSelection(false, recordIDs: request.removingIDs)
                     store.setSelection(
                         true,
                         recordIDs: request.recordIDs,
@@ -146,8 +325,8 @@ struct BrowserPrivacyRecordResultsView: View {
             }
         } message: {
             Text(L10n.text(
-                "只会把匹配记录加入当前选择，不会立即删除。点击“清理所选”后仍需确认，并继续执行浏览器运行预检、恢复备份和删除后回读验证。",
-                "Matching records are only added to the current selection and are not deleted immediately. Clean Selected still requires confirmation, browser-running preflight, recovery backup, and post-delete read-back verification."
+                "只加入选择，不立即删除；清理前确认、复核并备份，删除后回读验证",
+                "Adds to selection only; confirm, check and back up before deletion, then verify by read-back"
             ))
         }
         .confirmationDialog(
@@ -165,125 +344,92 @@ struct BrowserPrivacyRecordResultsView: View {
             }
             Button(L10n.text("取消", "Cancel"), role: .cancel) {}
         } message: {
-            Text(L10n.text(
-                "直接清理前浏览器必须正常退出，以便重新检查数据库身份、WAL、Schema 和所选 Visit。不会强制结束浏览器进程。",
-                "Browsers must quit normally before direct cleanup so database identity, WAL, schema, and selected visits can be checked again. The app never force-quits a browser."
-            ))
+            Text(runningBrowserConfirmationMessage)
         }
         .accessibilityElement(children: .contain)
         .onAppear {
             searchQuery = store.filters.query
         }
         .task(id: searchQuery) {
-            do {
-                try await Task.sleep(for: .milliseconds(200))
-                store.filters.query = searchQuery
-            } catch {
-                // A newer keystroke superseded this debounce task.
-            }
+            store.filters.query = searchQuery
         }
     }
 
-    private var compactSelectionHeader: some View {
-        HStack(alignment: .center, spacing: AppDesignTokens.Spacing.section) {
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.micro) {
-                Text(selectionSummaryDetail)
-                    .font(AppDesignTokens.Typography.compactLabelEmphasis.monospacedDigit())
-                if !store.selectedRecordIDs.isEmpty {
-                    Text(selectedCapacityTitle)
-                        .font(AppDesignTokens.Typography.metadata.monospacedDigit())
-                        .foregroundStyle(AppDesignTokens.Palette.secondaryText)
+    private var lightfieldActionTitle: String {
+        if store.isProcessing { return L10n.text("正在处理", "Processing") }
+        if !store.selectedRecordIDs.isEmpty && !store.selectedRecordsContainVerifiedDeletionCandidate {
+            return L10n.text("在浏览器内处理 · \(store.selectedRecordIDs.count) 条", "Handle in browser · \(store.selectedRecordIDs.count) records")
+        }
+        return L10n.text("删除所选记录 · \(store.selectedVerifiedDeletionCandidateCount) 条", "Delete selected records · \(store.selectedVerifiedDeletionCandidateCount) records")
+    }
+
+    @ViewBuilder private var lightfieldNotices: some View {
+        if store.isRefreshingCachedResults || (store.error != nil && store.hasCachedResults) { refreshStatus }
+        if requiresFullDiskAccess { permissionBanner }
+        if !store.isProcessing, store.processingReport == nil, let notice = runningBrowserSelectionNotice {
+            Label(notice, systemImage: "app.badge")
+                .font(AppDesignTokens.Typography.metadata)
+                .foregroundStyle(AppDesignTokens.Palette.warning)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if store.isProcessing {
+            BrowserPrivacyProcessingProgress()
+        } else if let report = store.processingReport {
+            BrowserPrivacyProcessingReportView(report: report, selectedRecords: store.manualGuidanceRecords,
+                reverificationStatus: store.reverificationStatus, onRescan: store.startScan,
+                removeBackup: { await recoveryStore.remove(backupID: $0) }, disclosure: store.disclosurePolicy,
+                presentationRecords: store.reportPresentationRecords,
+                revealSensitive: { store.revealSensitiveSites(in: store.reportPresentationRecords) })
+        } else if !store.isFiltering && store.filteredRecords.isEmpty {
+            BrowserPrivacyRecordsEmptyState(scanState: store.state, hasFilters: hasActiveFilters,
+                hasRecords: !store.records.isEmpty, requiresFullDiskAccess: requiresFullDiskAccess)
+        }
+    }
+
+    private var lightfieldUtilities: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 20) { utilityButtons }
+            VStack(alignment: .leading, spacing: 12) { utilityButtons }
+        }
+        .font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(lightfieldScheme).fg2)
+    }
+    @Environment(\.colorScheme) private var lightfieldScheme
+
+    @ViewBuilder private var utilityButtons: some View {
+        Button(L10n.text("重新扫描", "Scan Again"), action: store.startScan)
+            .buttonStyle(FeatureLightfieldRowButtonStyle()).disabled(store.isProcessing || store.state == .scanning)
+        Button(L10n.text("读取状态", "Read Status")) { showsCoverageDetails.toggle() }
+            .buttonStyle(FeatureLightfieldRowButtonStyle())
+            .popover(isPresented: $showsCoverageDetails) { coverageDetails }
+        Button(L10n.text("最近的删除", "Recent Deletions")) { showsRecentDeletions.toggle() }
+            .buttonStyle(FeatureLightfieldRowButtonStyle())
+            .popover(isPresented: $showsRecentDeletions) {
+                BrowserPrivacyRecentDeletionsView(recoveryStore: recoveryStore,
+                    isBusy: store.state == .scanning || store.isProcessing,
+                    onRescan: { showsRecentDeletions = false; store.startScan() })
+            }
+        Button(L10n.text("批量选择", "Bulk Select")) { showsBulkSelection.toggle() }
+            .buttonStyle(FeatureLightfieldRowButtonStyle()).disabled(store.isFiltering || store.isProcessing || store.state == .scanning)
+            .popover(isPresented: $showsBulkSelection) {
+                if let snapshot = store.resultPresentation {
+                    BrowserPrivacyBulkSelectionView(presentation: snapshot.bulk,
+                        isDisabled: store.isFiltering || store.state == .scanning || store.isProcessing, onSelect: requestBulkSelection)
                 }
-                Text(L10n.text(
-                    "删除前仍会检查浏览器运行状态并再次确认。",
-                    "Browser state is checked and confirmation is required before deletion."
-                ))
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
             }
-
-            Spacer(minLength: AppDesignTokens.Spacing.medium)
-
-            Button {
-                beginProcessingConfirmation()
-            } label: {
-                Label(
-                    store.isProcessing
-                        ? L10n.text("正在处理", "Processing")
-                        : primaryActionTitle,
-                    systemImage: store.isProcessing
-                        ? "arrow.triangle.2.circlepath"
-                        : (store.selectedRecordsContainVerifiedDeletionCandidate
-                            ? "trash"
-                            : "hand.raised")
-                )
-                .frame(minWidth: 132)
-            }
-            .appButtonChrome(.primary)
-            .controlSize(.large)
-            .disabled(
-                store.selectedRecordIDs.isEmpty
-                    || store.isProcessing
-                    || store.isRunningBrowserPreflight
-                    || store.state == .scanning
-            )
-            .help(L10n.text(
-                "精确 Schema 项会先创建恢复备份再清理；其余项在浏览器内处理",
-                "Exact-schema items are backed up before cleanup; remaining items are handled in the browser"
-            ))
-        }
-        .padding(.horizontal, AppDesignTokens.Spacing.compact)
-        .frame(minHeight: 76)
-        .accessibilityElement(children: .contain)
+        sortMenu
+        advancedFiltersMenu
     }
 
-    private var resultSurface: some View {
-        VStack(spacing: 0) {
-            resultToolbar
-            dateAndGroupingToolbar
-
-            Divider()
-                .overlay(AppDesignTokens.Palette.separator.opacity(0.55))
-
-            if store.isRefreshingCachedResults || (store.error != nil && store.hasCachedResults) {
-                refreshStatus
-                    .padding(.horizontal, AppDesignTokens.Spacing.medium)
-                    .padding(.top, AppDesignTokens.Spacing.small)
-            }
-
-            if requiresFullDiskAccess {
-                permissionBanner
-                    .padding(.horizontal, AppDesignTokens.Spacing.medium)
-                    .padding(.top, AppDesignTokens.Spacing.small)
-            }
-
-            if store.isProcessing {
-                BrowserPrivacyProcessingProgress()
-                    .padding(AppDesignTokens.Spacing.medium)
-            } else if let report = store.processingReport {
-                ScrollView {
-                    BrowserPrivacyProcessingReportView(
-                        report: report,
-                        selectedRecords: store.manualGuidanceRecords,
-                        reverificationStatus: store.reverificationStatus,
-                        onRescan: store.startScan
-                    )
-                    .padding(AppDesignTokens.Spacing.medium)
-                }
-            } else {
-                resultGroupHeader
-                Divider()
-                    .overlay(AppDesignTokens.Palette.separator.opacity(0.45))
-                compactRecordContent
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var dateAndGroupingToolbar: some View {
-        BrowserPrivacyDateControls(store: store)
-            .padding(.horizontal, AppDesignTokens.Spacing.medium)
-            .padding(.bottom, AppDesignTokens.Spacing.small)
+    private func lightfieldPageRow(_ item: BrowserPrivacyDisplayItem) -> some View {
+        let expanded = store.expandedItemIDs.contains(item.id)
+        return BrowserPrivacyLightfieldPageRow(item: item, selectedIDs: store.selectedRecordIDs,
+            expanded: expanded, disabled: store.isFiltering || store.isProcessing || store.state == .scanning,
+            select: {
+                guard !store.isFiltering else { return }
+                store.setSelected(store.selectionState(for: item) != .checked, displayItem: item)
+            },
+            disclose: { store.setExpanded(!expanded, itemID: item.id) },
+            visit: { if !store.isFiltering { store.toggleSelection($0) } }, disclosure: store.disclosurePolicy)
     }
 
     private func applyDateRange(days: Int) {
@@ -301,118 +447,21 @@ struct BrowserPrivacyRecordResultsView: View {
         .sorted { $0.domain < $1.domain }
     }
 
-    private var resultToolbar: some View {
-        HStack(spacing: AppDesignTokens.Spacing.small) {
-            compactSearchField
-
-            Spacer(minLength: AppDesignTokens.Spacing.small)
-
-            Button {
-                showsBulkSelection.toggle()
-            } label: {
-                Label(L10n.text("批量选择", "Bulk Select"), systemImage: "checklist.checked")
-            }
-            .appButtonChrome(.toolbar)
-            .disabled(store.records.isEmpty || store.state == .scanning || store.isProcessing)
-            .help(L10n.text("按日期或网站批量选择", "Select in bulk by date or website"))
-            .popover(isPresented: $showsBulkSelection, arrowEdge: .bottom) {
-                BrowserPrivacyBulkSelectionView(
-                    records: store.records,
-                    isDisabled: store.state == .scanning || store.isProcessing,
-                    onSelect: requestBulkSelection
-                )
-            }
-
-            sortMenu
-            advancedFiltersMenu
-
-            if !store.coverage.isEmpty {
-                Button {
-                    showsCoverageDetails.toggle()
-                } label: {
-                    Image(systemName: "checklist")
-                }
-                .appButtonChrome(.icon)
-                .controlSize(.small)
-                .accessibilityLabel(L10n.text("扫描覆盖范围", "Scan Coverage"))
-                .help(coverageSummary)
-                .popover(isPresented: $showsCoverageDetails, arrowEdge: .bottom) {
-                    coverageDetails
-                }
-            }
-
-            Button {
-                if store.state == .scanning {
-                    store.cancel()
-                } else {
-                    store.startScan()
-                }
-            } label: {
-                Image(systemName: store.state == .scanning ? "xmark" : "arrow.clockwise")
-            }
-            .appButtonChrome(.icon)
-            .controlSize(.small)
-            .accessibilityLabel(store.state == .scanning
-                ? L10n.text("取消扫描", "Cancel Scan")
-                : L10n.text("重新扫描", "Scan Again"))
-            .help(store.state == .scanning
-                ? L10n.text("取消当前只读扫描", "Cancel the current read-only scan")
-                : L10n.text("重新扫描浏览器隐私记录", "Scan browser privacy records again"))
-        }
-        .padding(.horizontal, AppDesignTokens.Spacing.medium)
-        .padding(.vertical, AppDesignTokens.Spacing.small)
-    }
-
-    private var compactSearchField: some View {
-        HStack(spacing: AppDesignTokens.Spacing.small) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                .accessibilityHidden(true)
-            TextField(
-                L10n.text("搜索浏览器、标题、域名或类别", "Search browser, title, domain, or category"),
-                text: $searchQuery
-            )
-            .textFieldStyle(.plain)
-            if !searchQuery.isEmpty {
-                Button {
-                    searchQuery = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                }
-                .appButtonChrome(.icon)
-                .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                .accessibilityLabel(L10n.text("清除搜索", "Clear Search"))
-            }
-        }
-        .padding(.horizontal, AppDesignTokens.Spacing.small)
-        .frame(maxWidth: 360, minHeight: 30)
-        .background(
-            AppDesignTokens.Palette.secondaryBackground.opacity(0.72),
-            in: RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl, style: .continuous)
-                .stroke(AppDesignTokens.Palette.separator.opacity(0.55), lineWidth: 1)
-        }
-        .accessibilityLabel(L10n.text("搜索浏览器隐私结果", "Search browser privacy results"))
-    }
-
     private var sortMenu: some View {
         Menu {
             Picker(L10n.text("排序", "Sort"), selection: $store.resultSort) {
-                Text(L10n.text("容量优先", "Largest First"))
-                    .tag(BrowserPrivacyResultSort.largestFirst)
-                Text(L10n.text("最近访问", "Newest First"))
-                    .tag(BrowserPrivacyResultSort.newestFirst)
-                Text(L10n.text("按浏览器", "By Browser"))
-                    .tag(BrowserPrivacyResultSort.browser)
+                ForEach(BrowserPrivacyResultSort.allCases, id: \.self) { sort in
+                    Text(sort.title).tag(sort)
+                }
             }
         } label: {
-            Image(systemName: "arrow.up.arrow.down")
+            Text(L10n.text("排序", "Sort"))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
         .accessibilityLabel(L10n.text("结果排序", "Sort Results"))
+        .accessibilityValue(store.resultSort.title)
+        .help(L10n.text("页面排序：\(store.resultSort.title)", "Page order: \(store.resultSort.title)"))
     }
 
     private var advancedFiltersMenu: some View {
@@ -424,11 +473,11 @@ struct BrowserPrivacyRecordResultsView: View {
                 }
             }
 
-            if profileIDs.count > 1 {
+            if profileOptions.count > 1 {
                 Picker(L10n.text("配置文件", "Profile"), selection: filterBinding(\.profileID)) {
                     Text(L10n.text("所有配置文件", "All Profiles")).tag(Optional<String>.none)
-                    ForEach(profileIDs, id: \.self) { profileID in
-                        Text(profileID).tag(profileID as String?)
+                    ForEach(profileOptions) { option in
+                        Text(option.title).tag(option.id as String?)
                     }
                 }
             }
@@ -436,7 +485,7 @@ struct BrowserPrivacyRecordResultsView: View {
             Picker(L10n.text("类别", "Category"), selection: filterBinding(\.category)) {
                 Text(L10n.text("所有类别", "All Categories")).tag(Optional<BrowserPrivacyCategory>.none)
                 ForEach(BrowserPrivacyCategory.allCases, id: \.self) { category in
-                    Text(category.browserPrivacyTitle).tag(category as BrowserPrivacyCategory?)
+                    Text(category.title).tag(category as BrowserPrivacyCategory?)
                 }
             }
 
@@ -457,7 +506,7 @@ struct BrowserPrivacyRecordResultsView: View {
             }
             .disabled(!hasAdvancedFilters)
         } label: {
-            Image(systemName: hasAdvancedFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+            Text(L10n.text("筛选", "Filters"))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -556,127 +605,12 @@ struct BrowserPrivacyRecordResultsView: View {
         .accessibilityElement(children: .contain)
     }
 
-    private var resultGroupHeader: some View {
-        HStack(spacing: AppDesignTokens.Spacing.small) {
-            Button {
-                if store.filteredSelectionState == .checked {
-                    store.setFilteredSelection(false)
-                } else {
-                    isShowingReviewSelectionConfirmation = true
-                }
-            } label: {
-                Image(systemName: groupSelectionSystemImage)
-                    .font(.system(size: 15, weight: .semibold))
-            }
-            .appButtonChrome(.toolbar)
-            .foregroundStyle(AppDesignTokens.Palette.accent)
-            .disabled(store.filteredRecords.isEmpty || store.state == .scanning || store.isProcessing)
-            .accessibilityLabel(L10n.text("选择当前结果", "Select Current Results"))
-            .accessibilityValue(groupSelectionAccessibilityValue)
-
-            Text(L10n.text("浏览记录", "Browsing History"))
-                .font(AppTypography.metadata)
-                .foregroundStyle(theme.primaryText)
-
-            Spacer(minLength: AppDesignTokens.Spacing.small)
-
-            Text(L10n.text(
-                "\(store.filteredRecords.count) 项 · 已选 \(selectedFilteredCount)",
-                "\(store.filteredRecords.count) items · \(selectedFilteredCount) selected"
-            ))
-            .font(AppTypography.caption.monospacedDigit())
-            .foregroundStyle(theme.secondaryText)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.horizontal, AppDesignTokens.Spacing.medium)
-        .padding(.vertical, AppDesignTokens.Spacing.small)
-    }
-
-    @ViewBuilder
-    private var compactRecordContent: some View {
-        if store.filteredRecords.isEmpty {
-            BrowserPrivacyRecordsEmptyState(
-                scanState: store.state,
-                hasFilters: hasActiveFilters,
-                hasRecords: !store.records.isEmpty,
-                requiresFullDiskAccess: requiresFullDiskAccess
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    if store.groupsByWebsite {
-                        ForEach(Self.websiteGroups(store.filteredDisplayItems), id: \.domain) { group in
-                            HStack {
-                                Text(group.domain.isEmpty ? L10n.text("无网站信息", "No website") : group.domain)
-                                Spacer()
-                                Text(L10n.text("\(group.items.count) 组记录", "\(group.items.count) record groups"))
-                            }
-                            .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                            .padding(AppDesignTokens.Spacing.small)
-                            .background(theme.accent.opacity(0.08))
-                            ForEach(group.items) { item in recordRow(item) }
-                        }
-                    } else {
-                        ForEach(store.filteredDisplayItems) { item in recordRow(item) }
-                    }
-                }
-            }
-            .accessibilityLabel(L10n.text("浏览器隐私记录列表", "Browser privacy record list"))
-        }
-    }
-
-    @ViewBuilder
-    private func recordRow(_ item: BrowserPrivacyDisplayItem) -> some View {
-        BrowserPrivacyDisplayItemRow(
-            item: item,
-            selectionState: store.selectionState(for: item),
-            isDisabled: store.state == .scanning || store.isProcessing,
-            isBrowserRunning: store.runningBrowserIDs.contains(item.browser.id),
-            toggleSelection: {
-                store.setSelected(
-                    store.selectionState(for: item) != .checked,
-                    displayItem: item
-                )
-            }
-        )
-        Divider()
-            .padding(.leading, 42)
-            .overlay(AppDesignTokens.Palette.separator.opacity(0.38))
-    }
-
-    private var selectedCapacityTitle: String {
-        if store.selectedRecordIDs.isEmpty { return "0 B" }
-        if store.selectedUnknownSizeCount > 0 {
-            return L10n.text("大小不可用", "Size unavailable")
-        }
-        return BrowserPrivacyByteFormatter.string(store.selectedKnownSizeBytes)
-    }
-
-    private var selectedFilteredCount: Int {
-        store.selectedRecordIDs.intersection(Set(store.filteredRecords.map(\.id))).count
-    }
-
     private var selectionSummaryDetail: String {
         if store.selectedRecordIDs.isEmpty {
-            return L10n.text("未选择项目", "No items selected")
+            return L10n.text("未选择访问记录", "No visits selected")
         }
-        if store.selectedUnknownSizeCount > 0 {
-            return L10n.text(
-                "已选择 \(store.selectedRecordIDs.count) 项 · 历史行没有可信的独立容量",
-                "\(store.selectedRecordIDs.count) selected · history rows have no reliable individual size"
-            )
-        }
-        return L10n.text(
-            "已选择 \(store.selectedRecordIDs.count) 项",
-            "\(store.selectedRecordIDs.count) selected"
-        )
-    }
-
-    private var primaryActionTitle: String {
-        store.selectedRecordsContainVerifiedDeletionCandidate
-            ? L10n.text("清理所选", "Clean Selected")
-            : L10n.text("在浏览器内处理", "Handle in Browser")
+        let visits = store.disclosurePolicy.summary(store.selectedRecords)
+        return L10n.text("已选择 \(visits)", "\(visits) selected")
     }
 
     private var processingConfirmationTitle: String {
@@ -685,41 +619,32 @@ struct BrowserPrivacyRecordResultsView: View {
             : L10n.text("准备在浏览器内处理", "Prepare In-Browser Handling")
     }
 
-    private var processingConfirmationMessage: String {
-        if store.selectedRecordsContainVerifiedDeletionCandidate {
-            return L10n.text(
-                "将处理 \(store.selectedRecordIDs.count) 条 Visit（\(selectedBrowserSummary)）。受支持项目会先创建 SQLite 在线恢复备份，再按真实 Visit 主键执行事务和回读验证；不支持的 Schema 不会写入。书签、密码、Cookie、自动填充和未选 Visit 不在计划中。",
-                "This processes \(store.selectedRecordIDs.count) visits in \(selectedBrowserSummary). Supported items receive an online SQLite recovery backup before an exact Visit-key transaction and read-back verification; unsupported schemas are not written. Bookmarks, passwords, cookies, autofill, and unselected visits are outside the plan."
-            )
-        }
-        return L10n.text(
-            "将为 \(store.selectedRecordIDs.count) 条记录（\(selectedBrowserSummary)）生成浏览器内处理流程。本应用不会把不支持的数据库 Schema 假装成可直接清理。",
-            "This prepares an in-browser workflow for \(store.selectedRecordIDs.count) records in \(selectedBrowserSummary). Unsupported database schemas are never presented as direct cleanup."
-        )
-    }
-
     private func beginProcessingConfirmation() {
+        guard !store.isFiltering else { return }
+        let records = store.selectedRecords
+        let incomplete = store.selectionIncludesIncompletelyReadProfiles
+        // D93: the same six fields as every other confirmation, as text.
+        let facts = BrowserPrivacyConfirmationText.facts(
+            records: records,
+            runningBrowserIDs: store.selectedRunningBrowserIDs,
+            fullDiskAccessBrowsers: fullDiskAccessBrowserNames
+        ).plainText + "\n\n"
+        processingConfirmationMessage = facts + (store.selectedRecordsContainVerifiedDeletionCandidate
+            ? BrowserPrivacyConfirmationText.deletionMessage(
+                records: records,
+                includesIncompletelyReadProfiles: incomplete, disclosure: store.disclosurePolicy
+            )
+            : BrowserPrivacyConfirmationText.manualMessage(records: records, disclosure: store.disclosurePolicy))
+        runningBrowserConfirmationMessage = facts + BrowserPrivacyConfirmationText.preflightMessage(
+            records: records,
+            runningBrowserIDs: store.selectedRunningBrowserIDs,
+            includesIncompletelyReadProfiles: incomplete, disclosure: store.disclosurePolicy
+        )
         if store.selectedRecordsContainVerifiedDeletionCandidate,
            !store.selectedRunningBrowserIDs.isEmpty {
             isShowingRunningBrowserPreflight = true
         } else {
             isShowingProcessingConfirmation = true
-        }
-    }
-
-    private var groupSelectionSystemImage: String {
-        switch store.filteredSelectionState {
-        case .unchecked: "square"
-        case .mixed: "minus.square.fill"
-        case .checked: "checkmark.square.fill"
-        }
-    }
-
-    private var groupSelectionAccessibilityValue: String {
-        switch store.filteredSelectionState {
-        case .unchecked: L10n.text("未选择", "Not selected")
-        case .mixed: L10n.text("部分选择", "Mixed")
-        case .checked: L10n.text("已全选", "All selected")
         }
     }
 
@@ -742,8 +667,8 @@ struct BrowserPrivacyRecordResultsView: View {
                 systemImage: "arrow.clockwise",
                 title: L10n.text("正在刷新，继续显示上次结果", "Refreshing While Keeping Previous Results"),
                 detail: L10n.text(
-                    "新快照完成前不会清空当前记录或选择；处理操作暂时不可用。",
-                    "Current records and selection stay visible until the new snapshot completes; processing is temporarily unavailable."
+                    "刷新期间保留记录与选择，暂不能处理",
+                    "Records and selection stay visible; processing is unavailable during refresh"
                 ),
                 tint: AppDesignTokens.Palette.information,
                 isLoading: true
@@ -754,10 +679,7 @@ struct BrowserPrivacyRecordResultsView: View {
                 title: error == .cancelled
                     ? L10n.text("刷新已取消", "Refresh Cancelled")
                     : L10n.text("刷新失败，仍显示上次结果", "Refresh Failed; Previous Results Remain"),
-                detail: L10n.text(
-                    "当前列表来自上一次已完成、部分完成或权限受限的本机只读扫描。可再次刷新。",
-                    "The current list is from the last completed, partial, or permission-limited local read-only scan. You can refresh again."
-                ),
+                detail: "",
                 tint: error == .cancelled
                     ? AppDesignTokens.Palette.secondaryText
                     : AppDesignTokens.Palette.warning,
@@ -767,7 +689,7 @@ struct BrowserPrivacyRecordResultsView: View {
     }
 
     private var browsers: [BrowserPrivacyBrowser] {
-        Self.uniqueBrowsers(from: store.records)
+        (store.resultPresentation?.browsers ?? []).sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
     nonisolated static func uniqueBrowsers(from records: [BrowserPrivacyRecord]) -> [BrowserPrivacyBrowser] {
@@ -780,19 +702,28 @@ struct BrowserPrivacyRecordResultsView: View {
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
-    private var selectedBrowserSummary: String {
-        let names = Array(Set(store.selectedRecords.map { $0.browser.displayName })).sorted()
-        return names.isEmpty
-            ? L10n.text("0 个浏览器", "0 browsers")
-            : names.joined(separator: L10n.text("、", ", "))
+    private var profileOptions: [BrowserPrivacyProfileOption] {
+        guard let snapshot = store.resultPresentation else { return [] }
+        if let browserID = store.filters.browserID { return snapshot.profilesByBrowser[browserID] ?? [] }
+        return snapshot.allProfiles
     }
 
-    private var profileIDs: [String] {
-        let records = store.filters.browserID.map { browserID in
-            store.records.filter { $0.browser.id == browserID }
-        } ?? store.records
-        return Array(Set(records.map(\.profileID))).sorted {
-            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+    /// Profiles are listed by the name the browser shows, prefixed with the
+    /// browser so two "Default" profiles stay distinguishable.
+    nonisolated static func profileOptions(
+        from records: [BrowserPrivacyRecord],
+        browserID: String?
+    ) -> [BrowserPrivacyProfileOption] {
+        var options: [String: BrowserPrivacyProfileOption] = [:]
+        for record in records where browserID == nil || record.browser.id == browserID {
+            guard options[record.profileID] == nil else { continue }
+            options[record.profileID] = BrowserPrivacyProfileOption(
+                id: record.profileID,
+                title: "\(record.browser.displayName) · \(record.resolvedProfileDisplayName)"
+            )
+        }
+        return options.values.sorted {
+            $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
         }
     }
 
@@ -812,6 +743,19 @@ struct BrowserPrivacyRecordResultsView: View {
 
     private var requiresFullDiskAccess: Bool {
         store.coverage.contains { $0.requiresFullDiskAccess }
+    }
+
+    private var fullDiskAccessBrowserNames: [String] {
+        var seen = Set<String>()
+        return store.coverage.filter(\.requiresFullDiskAccess).map(\.browser.displayName)
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// D93: said when the records are checked, not only when cleanup starts.
+    /// Only records deleted directly need their browser to quit (P2-5).
+    private var runningBrowserSelectionNotice: String? {
+        OperationQuitNotice.text(runningBrowsers: OperationQuitNotice.runningBrowserNames(
+            selected: store.selectedRecords, runningBrowserIDs: store.selectedRunningBrowserIDs))
     }
 
     private var coverageSummary: String {
@@ -841,13 +785,29 @@ struct BrowserPrivacyRecordResultsView: View {
     }
 
     private func requestBulkSelection(_ scope: BrowserPrivacyBulkSelectionScope) {
-        let recordIDs = scope.matchingRecordIDs(in: store.records)
+        guard !store.isFiltering else { return }
+        let recordIDs = scope.matchingRecordIDs(in: store.records, disclosure: store.disclosurePolicy)
         guard !recordIDs.isEmpty else { return }
         showsBulkSelection = false
         pendingBulkSelection = BulkSelectionRequest(
             title: scope.title,
             recordIDs: recordIDs
         )
+    }
+
+    private var pendingSelectionSummary: String {
+        store.disclosurePolicy.summary(store.records(for: pendingBulkSelection?.recordIDs ?? []))
+    }
+
+    private func requestGroupSelection(_ adding: Set<UUID>, _ removing: Set<UUID>, _ title: String) {
+        guard !store.isFiltering else { return }
+        // Keep the existing review confirmation for bulk additions. A pure
+        // deselection is immediate; inversion is applied only after approval.
+        if adding.isEmpty {
+            store.setSelection(false, recordIDs: removing)
+        } else {
+            pendingBulkSelection = BulkSelectionRequest(title: title, recordIDs: adding, removingIDs: removing)
+        }
     }
 
     private func filterBinding<Value>(
@@ -901,9 +861,11 @@ private struct BrowserPrivacyRefreshStatus: View {
                 Text(title)
                     .font(AppTypography.metadata)
                     .foregroundStyle(tint)
-                Text(detail)
-                    .font(AppTypography.caption)
-                    .foregroundStyle(.secondary)
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(AppDesignTokens.Spacing.small)
@@ -983,103 +945,6 @@ private struct BrowserPrivacyCoverageRow: View {
     }
 }
 
-private struct BrowserPrivacyDisplayItemRow: View {
-    @Environment(\.moduleTheme) private var theme
-
-    let item: BrowserPrivacyDisplayItem
-    let selectionState: BrowserPrivacySelectionState
-    let isDisabled: Bool
-    let isBrowserRunning: Bool
-    let toggleSelection: () -> Void
-
-    @State private var isHovering = false
-
-    var body: some View {
-        Button(action: toggleSelection) {
-            HStack(spacing: AppDesignTokens.Spacing.small) {
-                Image(systemName: selectionImage)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(selectionState == .unchecked
-                        ? theme.secondaryText
-                        : AppDesignTokens.Palette.accent)
-
-                BrowserPrivacyRecordIdentityView(item: item)
-                    .layoutPriority(1)
-
-                Spacer(minLength: AppDesignTokens.Spacing.small)
-
-                badge(item.risk.browserPrivacyTitle, tint: item.risk.browserPrivacyTint)
-                badge(
-                    item.selectionEligibility.browserPrivacyTitle,
-                    tint: item.selectionEligibility == .selectableWithConfirmation
-                        ? AppDesignTokens.Palette.accent
-                        : theme.secondaryText
-                )
-                if isBrowserRunning {
-                    badge(L10n.text("运行中", "Running"), tint: AppDesignTokens.Palette.warning)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .appButtonChrome(.toolbar)
-        .disabled(isDisabled || !item.selectionEligibility.canSelect)
-        .padding(.horizontal, AppDesignTokens.Spacing.medium)
-        .frame(minHeight: 72)
-        .background(
-            selectionState != .unchecked
-                ? AppDesignTokens.Palette.selection.opacity(0.12)
-                : (isHovering ? theme.primaryText.opacity(0.035) : .clear)
-        )
-        .onHover { isHovering = $0 }
-        .accessibilityLabel(recordAccessibilityLabel)
-        .accessibilityValue(selectionAccessibilityValue)
-        .accessibilityHint(L10n.text(
-            "切换此聚合项目中的全部访问记录",
-            "Toggles every underlying visit in this aggregate item"
-        ))
-    }
-
-    private var selectionImage: String {
-        switch selectionState {
-        case .unchecked: "square"
-        case .mixed: "minus.square.fill"
-        case .checked: "checkmark.square.fill"
-        }
-    }
-
-    private var selectionAccessibilityValue: String {
-        switch selectionState {
-        case .unchecked: L10n.text("未选择", "Not selected")
-        case .mixed: L10n.text("部分选择", "Partially selected")
-        case .checked: L10n.text("已选择", "Selected")
-        }
-    }
-
-    private var recordAccessibilityLabel: String {
-        guard let record = item.records.first else {
-            return L10n.text(
-                "\(item.browser.displayName)，\(item.profileDisplayName)，\(item.visitCount) 次访问",
-                "\(item.browser.displayName), \(item.profileDisplayName), \(item.visitCount) visits"
-            )
-        }
-        let presentation = BrowserPrivacySafeRecordPresentation(record: record)
-        return L10n.text(
-            "\(presentation.accessibilityLabel)，\(item.visitCount) 次访问",
-            "\(presentation.accessibilityLabel), \(item.visitCount) visits"
-        )
-    }
-
-    private func badge(_ title: String, tint: Color) -> some View {
-        Text(title)
-            .font(AppTypography.caption.weight(.semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(tint.opacity(0.11), in: Capsule())
-            .fixedSize(horizontal: true, vertical: false)
-    }
-}
-
 private struct BrowserPrivacyProcessingProgress: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppDesignTokens.Spacing.medium) {
@@ -1089,8 +954,8 @@ private struct BrowserPrivacyProcessingProgress: View {
                 Text(L10n.text("正在安全处理浏览记录", "Safely Processing Browser History"))
                     .font(AppTypography.sectionTitle)
                 Text(L10n.text(
-                    "正在复核浏览器运行状态、路径与数据库身份，并执行事务删除和只读复读。完成前不会从列表移除任何记录。",
-                    "Checking browser state, trusted paths, and database identity before transactional deletion and read-only verification. No record leaves the list before verification."
+                    "复核删除并回读，核验前保留记录，请勿打开浏览器",
+                    "Check, delete and verify; records stay until verified; keep browsers closed"
                 ))
                 .font(AppTypography.secondary)
                 .foregroundStyle(.secondary)
@@ -1107,13 +972,24 @@ private struct BrowserPrivacyProcessingProgress: View {
     }
 }
 
-private struct BrowserPrivacyProcessingReportView: View {
+struct BrowserPrivacyProcessingReportView: View {
     let report: BrowserPrivacyProcessingReport
     let selectedRecords: [BrowserPrivacyRecord]
     let reverificationStatus: BrowserPrivacyReverificationStatus?
     let onRescan: () -> Void
+    /// Deletes the app's own backup; returns whether it is gone.
+    let removeBackup: (UUID) async -> Bool
+    var disclosure: BrowserPrivacyDisclosurePolicy = .init()
+    /// All processed records protect receipt text after verified removals.
+    /// Manual steps continue to use only the original browser-only subset.
+    var presentationRecords: [BrowserPrivacyRecord]? = nil
+    var revealSensitive: () -> Void = {}
+    private var receiptRecords: [BrowserPrivacyRecord] { presentationRecords ?? selectedRecords }
 
     @State private var manualActionFeedback: String?
+    @State private var pendingBackupRemoval: UUID?
+    @State private var removedBackupIDs = Set<UUID>()
+    @State private var failedBackupRemovals = Set<UUID>()
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
@@ -1132,8 +1008,30 @@ private struct BrowserPrivacyProcessingReportView: View {
                 .font(AppTypography.secondary)
                 .foregroundStyle(.secondary)
 
+            // D93: completed / skipped / failed / needs verification per profile;
+            // deleting history frees no disk space.
+            OperationCompletionTallyView(tally: OperationCompletionTally(browser: report), showsEntryDetails: false)
+
+            if receiptRecords.contains(where: disclosure.isConcealed) {
+                Text(disclosure.summary(receiptRecords)).font(AppTypography.caption)
+                Button(L10n.text("展开敏感网站", "Reveal Sensitive Websites"), action: revealSensitive)
+                    .appButtonChrome(.secondary)
+            }
+
             if let reverificationStatus {
                 BrowserPrivacyReverificationStatusView(status: reverificationStatus)
+            }
+
+            if report.entries.contains(where: {
+                $0.recoveryBackupID.map { !removedBackupIDs.contains($0) } ?? false
+            }) {
+                Text(L10n.text(
+                        "\(BrowserPrivacyRecoveryText.retentionNotice)需要撤销时，在工具栏的“最近的删除”里恢复。",
+                        "\(BrowserPrivacyRecoveryText.retentionNotice) To undo, restore it from Recent Deletions in the toolbar."
+                    ))
+                .font(AppTypography.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             if hasManualGuidance {
@@ -1146,18 +1044,20 @@ private struct BrowserPrivacyProcessingReportView: View {
                         .foregroundStyle(entry.outcome.browserPrivacyTint)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.micro) {
-                        Text("\(entry.browser.displayName) · \(entry.profileID)")
+                        Text("\(entry.browser.displayName) · \(entry.resolvedProfileDisplayName)")
                             .font(AppTypography.metadata)
-                        Text(L10n.text(
-                            "\(entry.recordCount) 条记录 · \(entry.outcome.browserPrivacyTitle)",
-                            "\(entry.recordCount) records · \(entry.outcome.browserPrivacyTitle)"
-                        ))
+                        Text(BrowserPrivacyReportDisclosurePresentation.count(entry, records: receiptRecords, disclosure: disclosure)
+                            + " · " + entry.outcome.browserPrivacyTitle)
                         .font(AppTypography.caption)
                         .foregroundStyle(entry.outcome.browserPrivacyTint)
-                        if !entry.detail.isEmpty {
-                            Text(entry.detail)
+                        let detail = BrowserPrivacyReportDisclosurePresentation.detail(entry, records: receiptRecords, disclosure: disclosure)
+                        if !detail.isEmpty {
+                            Text(detail)
                                 .font(AppTypography.caption)
                                 .foregroundStyle(.secondary)
+                        }
+                        if let backupID = entry.recoveryBackupID {
+                            backupControl(backupID)
                         }
                     }
                     Spacer(minLength: 0)
@@ -1183,79 +1083,73 @@ private struct BrowserPrivacyProcessingReportView: View {
                     number: "1",
                     title: L10n.text("按浏览器复制所选域名", "Copy Selected Domains by Browser"),
                     detail: L10n.text(
-                        "页面只显示遮罩值。真实域名只保留在本次内存会话中，并且只有点击对应浏览器的复制按钮后才写入剪贴板。",
-                        "This page shows masked values only. Real domains remain in this in-memory session and are written to the clipboard only after you click Copy for that browser."
+                        "所选页面仅在本次内存会话保留；点击复制才写入剪贴板",
+                        "Selected pages stay in this memory session; copying writes to the clipboard only on click"
                     )
                 )
 
-                if guidanceGroups.allSatisfy({ $0.domains.isEmpty }) {
-                    Text(L10n.text("所选记录没有可显示的域名。", "The selected records have no displayable domains."))
-                        .font(AppTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 34)
-                } else {
-                    ForEach(guidanceGroups) { group in
-                        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                            HStack {
-                                Label(group.browser.displayName, systemImage: "safari")
-                                    .font(AppTypography.metadata)
-                                Spacer(minLength: AppDesignTokens.Spacing.small)
-                                Text(L10n.text(
-                                    "\(group.recordCount) 条记录",
-                                    "\(group.recordCount) records"
-                                ))
-                                .font(AppTypography.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            }
-
-                            Text(maskedDomainSummary(for: group))
-                                .font(AppTypography.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Text(BrowserPrivacyManualWorkflow.historyInstruction(for: group.browser))
-                                .font(AppTypography.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            HStack(spacing: AppDesignTokens.Spacing.small) {
-                                Button {
-                                    copyDomains(for: group)
-                                } label: {
-                                    Label(
-                                        L10n.text(
-                                            "复制 \(group.domains.count) 个域名",
-                                            "Copy \(group.domains.count) Domains"
-                                        ),
-                                        systemImage: "doc.on.doc"
-                                    )
-                                }
-                                .appButtonChrome(.secondary)
-                                .disabled(group.domains.isEmpty)
-
-                                Button {
-                                    openHistory(for: group.browser)
-                                } label: {
-                                    Label(
-                                        BrowserPrivacyManualWorkflow.historyRoute(for: group.browser) == nil
-                                            ? L10n.text("启动 \(group.browser.displayName)", "Launch \(group.browser.displayName)")
-                                            : L10n.text("打开 \(group.browser.displayName) 历史记录", "Open \(group.browser.displayName) History"),
-                                        systemImage: "clock.arrow.circlepath"
-                                    )
-                                }
-                                .appButtonChrome(.secondary)
-                            }
+                ForEach(guidanceGroups) { group in
+                    VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+                        HStack {
+                            Text(group.browser.displayName)
+                                .font(AppTypography.metadata)
+                            Spacer(minLength: AppDesignTokens.Spacing.small)
+                            Text(BrowserPrivacyCountText.pagesAndVisits(
+                                pages: group.pages.count,
+                                visits: group.recordCount
+                            ))
+                            .font(AppTypography.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
                         }
-                        .padding(AppDesignTokens.Spacing.small)
-                        .background(
-                            AppDesignTokens.Palette.secondaryBackground.opacity(0.66),
-                            in: RoundedRectangle(
-                                cornerRadius: AppDesignTokens.Radius.glassControl,
-                                style: .continuous
-                            )
-                        )
-                        .accessibilityElement(children: .contain)
+
+                        Text(BrowserPrivacyPageListText.siteSummary(group.domains))
+                            .font(AppTypography.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        // Titles and addresses are not selectable; only the
+                        // site names above are.
+                        Text(BrowserPrivacyPageListText.lines(for: group.pages, disclosure: disclosure).joined(separator: "\n"))
+                            .font(AppTypography.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text(BrowserPrivacyManualWorkflow.historyInstruction(for: group.browser))
+                            .font(AppTypography.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: AppDesignTokens.Spacing.small) {
+                            Button {
+                                copyDomains(for: group)
+                            } label: {
+                                Text(L10n.text(
+                                        "复制 \(group.domains.count) 个域名",
+                                        "Copy \(group.domains.count) Domains"
+                                    ))
+                            }
+                            .appButtonChrome(.secondary)
+                            .disabled(group.domains.isEmpty)
+
+                            Button {
+                                openHistory(for: group.browser)
+                            } label: {
+                                Text(BrowserPrivacyManualWorkflow.historyRoute(for: group.browser) == nil
+                                        ? L10n.text("启动 \(group.browser.displayName)", "Launch \(group.browser.displayName)")
+                                        : L10n.text("打开 \(group.browser.displayName) 历史记录", "Open \(group.browser.displayName) History"))
+                            }
+                            .appButtonChrome(.secondary)
+                        }
                     }
+                    .padding(AppDesignTokens.Spacing.small)
+                    .background(
+                        AppDesignTokens.Palette.secondaryBackground.opacity(0.66),
+                        in: RoundedRectangle(
+                            cornerRadius: AppDesignTokens.Radius.glassControl,
+                            style: .continuous
+                        )
+                    )
+                    .accessibilityElement(children: .contain)
                 }
             }
 
@@ -1289,14 +1183,14 @@ private struct BrowserPrivacyProcessingReportView: View {
                     )
                 )
                 Button(action: onRescan) {
-                    Label(L10n.text("已处理，重新扫描", "Done in Browser, Scan Again"), systemImage: "arrow.clockwise")
+                    Text(L10n.text("已处理，重新扫描", "Done in Browser, Scan Again"))
                 }
                 .appButtonChrome(.primary)
                 .padding(.leading, 34)
             }
 
             if let manualActionFeedback {
-                Label(manualActionFeedback, systemImage: "info.circle")
+                Text(manualActionFeedback)
                     .font(AppTypography.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1306,6 +1200,67 @@ private struct BrowserPrivacyProcessingReportView: View {
             cornerRadius: AppDesignTokens.Radius.panel,
             style: .continuous
         ))
+    }
+
+    /// "Delete this backup", asking first. The backup is the app's own copy
+    /// of the history, so it is deleted directly, not moved to the Trash.
+    @ViewBuilder
+    private func backupControl(_ backupID: UUID) -> some View {
+        if removedBackupIDs.contains(backupID) {
+            Text(L10n.text("备份已删除", "Backup Deleted"))
+                .font(AppTypography.caption)
+                .foregroundStyle(.secondary)
+        } else if pendingBackupRemoval == backupID {
+            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+                Label(
+                    BrowserPrivacyRecoveryText.removalWarning(createdAt: nil),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(AppTypography.caption)
+                .foregroundStyle(AppDesignTokens.Palette.warning)
+                .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: AppDesignTokens.Spacing.small) {
+                    Button(L10n.text("取消", "Cancel")) {
+                        pendingBackupRemoval = nil
+                    }
+                    .appButtonChrome(.secondary)
+                    Button(L10n.text("删除这份备份", "Delete This Backup")) {
+                        pendingBackupRemoval = nil
+                        Task {
+                            if await removeBackup(backupID) {
+                                removedBackupIDs.insert(backupID)
+                                failedBackupRemovals.remove(backupID)
+                            } else {
+                                failedBackupRemovals.insert(backupID)
+                            }
+                        }
+                    }
+                    .appButtonChrome(.destructive)
+                }
+            }
+            .padding(AppDesignTokens.Spacing.small)
+            .background(
+                AppDesignTokens.Palette.warning.opacity(0.10),
+                in: RoundedRectangle(cornerRadius: AppDesignTokens.Radius.glassControl, style: .continuous)
+            )
+        } else {
+            HStack(spacing: AppDesignTokens.Spacing.small) {
+                Button {
+                    pendingBackupRemoval = backupID
+                } label: {
+                    Text(L10n.text("删除这份备份…", "Delete This Backup…"))
+                }
+                .appButtonChrome(.secondary)
+                if failedBackupRemovals.contains(backupID) {
+                    Text(L10n.text(
+                        "没能删除备份，可在“最近的删除”里再试。",
+                        "The backup could not be deleted; try again in Recent Deletions."
+                    ))
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppDesignTokens.Palette.warning)
+                }
+            }
+        }
     }
 
     private func manualStep(number: String, title: String, detail: String) -> some View {
@@ -1334,9 +1289,7 @@ private struct BrowserPrivacyProcessingReportView: View {
             )
             return
         }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        manualActionFeedback = pasteboard.setString(text, forType: .string)
+        manualActionFeedback = BrowserPrivacyClipboard.write(text, to: NSPasteboard.general)
             ? L10n.text(
                 "已复制 \(group.browser.displayName) 的 \(group.domains.count) 个域名。",
                 "Copied \(group.domains.count) domains for \(group.browser.displayName)."
@@ -1397,18 +1350,7 @@ private struct BrowserPrivacyProcessingReportView: View {
     }
 
     private var guidanceGroups: [BrowserPrivacyManualGuidanceGroup] {
-        BrowserPrivacyManualWorkflow.groups(from: selectedRecords)
-    }
-
-    private func maskedDomainSummary(for group: BrowserPrivacyManualGuidanceGroup) -> String {
-        let masked = group.domains.map(BrowserPrivacySafeRecordPresentation.maskedDomain)
-        guard !masked.isEmpty else {
-            return L10n.text("没有可复制的域名", "No domains available to copy")
-        }
-        return L10n.text(
-            "遮罩域名：\(masked.joined(separator: "、"))",
-            "Masked domains: \(masked.joined(separator: ", "))"
-        )
+        BrowserPrivacyManualWorkflow.groups(from: disclosure.visibleRecords(selectedRecords))
     }
 
     private var isManualGuidanceOnly: Bool {
@@ -1420,13 +1362,13 @@ private struct BrowserPrivacyProcessingReportView: View {
     private var reportSummary: String {
         if isManualGuidanceOnly {
             return L10n.text(
-                "所选 \(report.selectedRecordCount) 条记录仅支持浏览器内手动处理。请按以下四步操作；本应用未修改浏览器数据库，也未自动删除任何记录。",
-                "The \(report.selectedRecordCount) selected records support in-browser manual handling only. Follow the four steps below; this app did not change a browser database or delete any record automatically."
+                "所选 \(report.selectedRecordCount) 次访问只能在浏览器内手动处理。请按以下四步操作；本应用未修改浏览器数据库，也未自动删除任何记录。",
+                "The \(BrowserPrivacyCountText.visits(report.selectedRecordCount)) selected can only be handled manually in the browser. Follow the four steps below; this app did not change a browser database or delete any record automatically."
             )
         }
         return L10n.text(
-            "请求 \(report.selectedRecordCount) 条 · 已删除并复读确认 \(report.verifiedDeletedRecordCount) 条 · 结果不确定 \(report.indeterminateRecordCount) 条 · 失败 \(report.failedRecordCount) 条 · 手动/不支持 \(report.manualRecordCount) 条。只有复读确认不存在的记录已从列表移除。",
-            "Requested \(report.selectedRecordCount) · deleted and read-back verified \(report.verifiedDeletedRecordCount) · indeterminate \(report.indeterminateRecordCount) · failed \(report.failedRecordCount) · manual/unsupported \(report.manualRecordCount). Only records confirmed absent by read-back were removed from the list."
+            "共 \(report.selectedRecordCount) 次访问 · 已删除并重新读取确认 \(report.verifiedDeletedRecordCount) 次 · 结果未确认 \(report.indeterminateRecordCount) 次 · 失败 \(report.failedRecordCount) 次 · 需在浏览器内处理 \(report.manualRecordCount) 次。只有重新读取确认已不存在的记录才从列表移除。",
+            "\(BrowserPrivacyCountText.visits(report.selectedRecordCount)) requested · \(report.verifiedDeletedRecordCount) deleted and confirmed by a fresh read · \(report.indeterminateRecordCount) unconfirmed · \(report.failedRecordCount) failed · \(report.manualRecordCount) to handle in the browser. Only records confirmed absent by the fresh read left the list."
         )
     }
 
@@ -1601,17 +1543,15 @@ private struct BrowserPrivacyRecordsEmptyState: View {
                 ProgressView()
                     .controlSize(.small)
             }
-            Image(systemName: kind == .scanning ? "lock.doc" : "magnifyingglass")
-                .font(.title2)
-                .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                .accessibilityHidden(true)
             Text(title)
                 .font(AppTypography.emptyStateTitle)
-            Text(detail)
-                .font(AppTypography.emptyStateDetail)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 430)
+            if !detail.isEmpty {
+                Text(detail)
+                    .font(AppTypography.emptyStateDetail)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 430)
+            }
         }
         .padding(AppDesignTokens.Spacing.section)
         .frame(maxWidth: .infinity)
@@ -1640,10 +1580,7 @@ private struct BrowserPrivacyRecordsEmptyState: View {
                 "The scan does not open websites, upload records, or sync browser data."
             )
         case .filtered:
-            return L10n.text(
-                "调整来源、浏览器、时间、关键词或类别筛选后重试。",
-                "Adjust source, browser, date, keyword, or category filters and try again."
-            )
+            return ""
         case .permissionRequired:
             return L10n.text(
                 "查看上方权限提示，并使用“打开系统设置”检查完全磁盘访问权限。当前结果不代表这些浏览器没有历史记录。",
@@ -1659,21 +1596,6 @@ private struct BrowserPrivacyRecordsEmptyState: View {
                 "本次已完成的只读扫描没有返回可显示记录。可重新扫描或检查浏览器本地配置文件。",
                 "The completed read-only scan returned no displayable records. You can rescan or review local browser profiles."
             )
-        }
-    }
-}
-
-private enum BrowserPrivacyByteFormatter {
-    static func string(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
-}
-
-private extension BrowserPrivacyRecordSource {
-    var browserPrivacyTitle: String {
-        switch self {
-        case .history:
-            L10n.text("浏览记录", "History")
         }
     }
 }
@@ -1703,37 +1625,6 @@ private extension BrowserPrivacySelectionEligibility {
         case .selectableWithConfirmation: L10n.text("确认后处理", "Confirm First")
         case .browserActionOnly: L10n.text("浏览器内处理", "In Browser")
         case .forbidden: L10n.text("禁止处理", "Forbidden")
-        }
-    }
-}
-
-private extension BrowserPrivacyCategory {
-    var browserPrivacyTitle: String {
-        switch self {
-        case .adult: L10n.text("成人内容", "Adult")
-        case .finance: L10n.text("金融与账户", "Finance & Accounts")
-        case .social: L10n.text("社交", "Social")
-        case .shopping: L10n.text("购物", "Shopping")
-        case .entertainment: L10n.text("娱乐", "Entertainment")
-        case .search: L10n.text("搜索", "Search")
-        case .productivity: L10n.text("效率", "Productivity")
-        case .news: L10n.text("新闻", "News")
-        case .other: L10n.text("其他", "Other")
-        case .unknown: L10n.text("未知", "Unknown")
-        }
-    }
-
-    var browserPrivacyTint: Color {
-        switch self {
-        case .adult: AppDesignTokens.Palette.sensitive
-        case .finance: AppDesignTokens.Palette.warning
-        case .social: AppDesignTokens.Palette.diagnostic
-        case .shopping: AppDesignTokens.Palette.storage
-        case .entertainment: AppDesignTokens.Palette.secondary
-        case .search: AppDesignTokens.Palette.information
-        case .productivity: AppDesignTokens.Palette.success
-        case .news: AppDesignTokens.Palette.tertiary
-        case .other, .unknown: AppDesignTokens.Palette.secondaryText
         }
     }
 }

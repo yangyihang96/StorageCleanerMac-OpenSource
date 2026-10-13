@@ -69,9 +69,13 @@ final class ModuleThemeTests: XCTestCase {
             colorKey(ModuleThemeCatalog.theme(for: $0).startColor(for: .light))
         }
         XCTAssertEqual(Set(accents).count, brandedGroups.count)
-        XCTAssertEqual(Set(lightStarts).count, 2)
+        XCTAssertEqual(Set(lightStarts).count, 1, "R2 shares the neutral daylight canvas across routes")
         XCTAssertFalse(ModuleTheme.neutral.isImmersive)
-        XCTAssertEqual(colorKey(ModuleThemeCatalog.theme(for: .settings).accent), colorKey(.accentColor))
+        XCTAssertEqual(
+            colorKey(ModuleThemeCatalog.theme(for: .settings).accent),
+            colorKey(AppAppearanceColors.controlAccent),
+            "Settings uses the same control accent as the rest of the app"
+        )
     }
 
     private func colorKey(

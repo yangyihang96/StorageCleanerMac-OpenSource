@@ -222,9 +222,9 @@ final class FanControlProtocolSafetyTests: XCTestCase {
                 appliedTargetRPMByFan: [:]
             ),
         ] {
-            let suite = "FanControlProtocolSafetyTests.\(UUID().uuidString)"
-            let defaults = UserDefaults(suiteName: suite)!
-            defer { defaults.removePersistentDomain(forName: suite) }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = TestPreferenceDomain.open(suiteName: suite)!
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             var operations: [FanControlHelperRequest.Operation] = []
             let coordinator = FanControlCoordinator(
                 defaults: defaults,
@@ -237,7 +237,7 @@ final class FanControlProtocolSafetyTests: XCTestCase {
                 serviceStatusProvider: { .enabled }
             )
 
-            await coordinator.refreshConnection()
+            await coordinator.connectHelper()
             await coordinator.selectMode(.manual)
 
             XCTAssertFalse(coordinator.hasTrustedHelper)
@@ -268,13 +268,14 @@ final class FanControlProtocolSafetyTests: XCTestCase {
                 posixPermissions: 0o775
             ),
         ] {
-            let suite = "FanControlProtocolSafetyTests.\(UUID().uuidString)"
-            let defaults = UserDefaults(suiteName: suite)!
-            defer { defaults.removePersistentDomain(forName: suite) }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = TestPreferenceDomain.open(suiteName: suite)!
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             var events: [String] = []
             let coordinator = FanControlCoordinator(
                 defaults: defaults,
                 helperStatusOverride: .needsMigration,
+                requestSender: TestOperationFactory(for: self).fanRequestSender(),
                 legacyArtifactsPresentProvider: { true },
                 legacyArtifactsCurrentProvider: { false },
                 legacyArtifactsSafeForRemovalProvider: { metadata.isTrusted },

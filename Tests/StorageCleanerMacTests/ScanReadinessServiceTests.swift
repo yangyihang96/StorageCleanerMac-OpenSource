@@ -2,6 +2,13 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class ScanReadinessServiceTests: XCTestCase {
+    func testNoLocationsAndDenialOnlyHistoryCannotClaimMeasuredCoverage() {
+        XCTAssertNil(ScanReadinessSummary(items: []).checkedLocationsReadablePercent)
+        let history = ScanReadinessService.summary(fromScanDeniedPaths: [])
+        XCTAssertNil(history.checkedLocationsReadablePercent)
+        XCTAssertEqual(history.readableCount, 0)
+    }
+
     func testSummaryMarksReadableLocationsReady() {
         let locations = [
             ScanReadinessLocation(title: "Downloads", path: "~/Downloads", systemImage: "arrow.down.circle.fill"),
@@ -24,7 +31,7 @@ final class ScanReadinessServiceTests: XCTestCase {
         XCTAssertEqual(summary.level, .ready)
         XCTAssertEqual(summary.readableCount, 2)
         XCTAssertEqual(summary.blockedCount, 0)
-        XCTAssertEqual(summary.estimatedCoveragePercent, 100)
+        XCTAssertEqual(summary.checkedLocationsReadablePercent, 100)
         XCTAssertTrue(didRestoreSavedAccess)
     }
 
@@ -47,7 +54,7 @@ final class ScanReadinessServiceTests: XCTestCase {
         XCTAssertEqual(summary.readableCount, 1)
         XCTAssertEqual(summary.blockedCount, 1)
         XCTAssertEqual(summary.highImpactBlockedCount, 1)
-        XCTAssertEqual(summary.estimatedCoveragePercent, 85)
+        XCTAssertEqual(summary.checkedLocationsReadablePercent, 50)
         XCTAssertEqual(summary.blockedItems.map(\.location.title), ["Downloads"])
     }
 
@@ -70,7 +77,7 @@ final class ScanReadinessServiceTests: XCTestCase {
         XCTAssertEqual(summary.readableCount, 1)
         XCTAssertEqual(summary.missingCount, 1)
         XCTAssertEqual(summary.blockedCount, 0)
-        XCTAssertEqual(summary.estimatedCoveragePercent, 100)
+        XCTAssertEqual(summary.checkedLocationsReadablePercent, 100)
     }
 
     func testDefaultReadinessLocationsAvoidMediaLibraryAndTrashRoots() {
@@ -98,12 +105,12 @@ final class ScanReadinessServiceTests: XCTestCase {
         )
 
         XCTAssertEqual(summary.level, .needsPermission)
-        XCTAssertEqual(summary.readableCount, 2)
+        XCTAssertEqual(summary.readableCount, 0)
         XCTAssertEqual(summary.blockedCount, 1)
         XCTAssertEqual(summary.blockedItems.map(\.location.title), ["Documents"])
     }
 
-    func testSummaryFromCleanScanTreatsPlannedLocationsAsCurrentlyVerified() {
+    func testSummaryFromCleanScanDoesNotTreatAbsenceOfErrorsAsReadability() {
         let locations = [
             ScanReadinessLocation(title: "Downloads", path: "/Users/tester/Downloads", systemImage: "arrow.down.circle.fill"),
             ScanReadinessLocation(title: "Documents", path: "/Users/tester/Documents", systemImage: "doc.text.fill")
@@ -112,13 +119,14 @@ final class ScanReadinessServiceTests: XCTestCase {
         let summary = ScanReadinessService.summary(fromScanDeniedPaths: [], locations: locations)
 
         XCTAssertEqual(summary.level, .ready)
-        XCTAssertEqual(summary.readableCount, 2)
+        XCTAssertEqual(summary.readableCount, 0)
         XCTAssertEqual(summary.blockedCount, 0)
     }
 
     func testDisplayTextSeparatesCurrentCheckFromLastScanAccessGaps() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let unchecked = ScanReadinessService.displayText(
             summary: nil,
@@ -153,8 +161,9 @@ final class ScanReadinessServiceTests: XCTestCase {
     }
 
     func testFullDiskAccessVerifiedAvoidsDuplicateFolderAuthorization() {
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
-        defer { UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey) }
+        let languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        defer { languagePreferences.restore() }
 
         let summary = ScanReadinessService.summary(
             locations: [
@@ -171,7 +180,7 @@ final class ScanReadinessServiceTests: XCTestCase {
         XCTAssertTrue(summary.isFullDiskAccessVerified)
         XCTAssertEqual(summary.blockedCount, 1)
         XCTAssertEqual(summary.folderAuthorizationRequiredCount, 0)
-        XCTAssertEqual(summary.estimatedCoveragePercent, 97)
+        XCTAssertEqual(summary.checkedLocationsReadablePercent, 0)
 
         let displayText = ScanReadinessService.displayText(
             summary: summary,
@@ -198,9 +207,9 @@ final class ScanReadinessServiceTests: XCTestCase {
     }
 
     func testFolderAccessGrantPromptShowsOnlyBeforeSavedAccessOrSkip() throws {
-        let suiteName = "FolderAccessGrantPromptTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suiteName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
+        defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
 
         FolderAccessGrantService.reset(defaults: defaults)
         XCTAssertTrue(FolderAccessGrantService.shouldShowInitialPrompt(defaults: defaults))

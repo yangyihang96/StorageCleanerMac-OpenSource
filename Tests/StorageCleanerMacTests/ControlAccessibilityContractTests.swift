@@ -92,7 +92,11 @@ final class ControlAccessibilityContractTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/ItemListView.swift"
         )
 
+        // D64 keeps explicit state symbols hidden from the spoken label.
+        XCTAssertTrue(metadata.contains("if let renderedSystemImage {"))
         XCTAssertTrue(metadata.contains(".accessibilityHidden(true)"))
+        XCTAssertTrue(metadata.contains(".accessibilityValue(status.accessibilityDescription)"))
+        XCTAssertTrue(metadata.contains("Text(text)"))
         XCTAssertTrue(metadata.contains(".accessibilityElement(children: .ignore)"))
         XCTAssertTrue(metadata.contains(".accessibilityLabel(text)"))
         XCTAssertTrue(content.contains(".onChange(of: message, initial: true)"))
@@ -143,7 +147,22 @@ final class ControlAccessibilityContractTests: XCTestCase {
         )
 
         XCTAssertTrue(iconStyle.contains("static let iconHitRegion: CGFloat = 32"))
-        XCTAssertTrue(iconStyle.contains("case .toolbar, .inline, .sidebar: 16"))
+        for role in [AppIconRole.toolbar, .inline, .sidebar] {
+            XCTAssertEqual(role.glyphSize, 16,
+                "Adding another role to the same switch branch must not change existing glyph sizes")
+        }
+        XCTAssertEqual(AppControlSizes.iconHitRegion, 32)
+        XCTAssertEqual(AppIconRole.toolbar.frameSize, AppControlSizes.iconHitRegion)
+        XCTAssertEqual(AppIconRole.panelNavigation.frameSize, AppControlSizes.iconHitRegion)
+        let symbolIcon = try XCTUnwrap(
+            iconStyle.components(separatedBy: "struct AppSymbolIcon: View").last?
+                .components(separatedBy: "struct AppSymbolGlyph: View").first
+        )
+        XCTAssertTrue(symbolIcon.contains("AppSymbolGlyph("))
+        XCTAssertTrue(symbolIcon.contains("size: role.glyphSize"))
+        XCTAssertTrue(symbolIcon.contains(".frame(width: role.frameSize, height: role.frameSize)"))
+        XCTAssertTrue(symbolIcon.contains(".contentShape(Rectangle())"))
+        XCTAssertTrue(symbolIcon.contains(".accessibilityHidden(isDecorative)"))
         XCTAssertTrue(iconStyle.contains("case .panelNavigation, .panelHeader, .panelMode: 18"))
         XCTAssertTrue(iconStyle.contains("case .toolbar, .panelNavigation:"))
         XCTAssertTrue(iconStyle.contains("AppControlSizes.iconHitRegion"))
@@ -170,20 +189,17 @@ final class ControlAccessibilityContractTests: XCTestCase {
     }
 
     func testCompactPanelMotionAndTabGroupUseSharedContracts() throws {
-        let source = try projectSource(
-            "Sources/StorageCleanerMac/Views/MenuBarStatusView.swift"
-        )
-        let panelChrome = try projectSource(
-            "Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"
-        )
-
-        XCTAssertTrue(source.contains(
-            "AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion)"
-        ))
-        XCTAssertFalse(source.contains(".snappy(duration: 0.30)"))
-        XCTAssertTrue(panelChrome.contains(
-            ".accessibilityLabel(L10n.text(\"小窗分区\", \"Panel Section\"))"
-        ))
+        // D64 retires the simple tab strip; the live module controls still
+        // have one spoken navigation label and respect reduced motion.
+        let components = try D64MenuBarSource.source("MenuBarAdvanced/GeekPanelComponents.swift")
+        let control = try r2SourceDeclaration("struct GeekOverviewModuleButton<", in: components)
+        XCTAssertTrue(control.contains(".accessibilityLabel(accessibilityLabel ?? destination.title)"))
+        XCTAssertTrue(control.contains(".environment(\\.geekCombinedCardIsSelected, isSelected)"))
+        XCTAssertTrue(control.contains(".accessibilityHint(L10n.text(\"打开二级监控详情\", \"Open secondary monitoring details\"))"))
+        let panel = try D64MenuBarSource.source("MenuBarAdvancedStatusView.swift")
+        XCTAssertTrue(panel.contains("@Environment(\\.accessibilityReduceMotion) var reduceMotion"))
+        XCTAssertTrue(panel.contains("reduceMotion: reduceMotion"))
+        XCTAssertFalse(panel.contains(".snappy(duration: 0.30)"))
     }
 
     func testAppArtworkDefaultsToDecorativeButAllowsCallersToOptIn() throws {
@@ -212,11 +228,11 @@ final class ControlAccessibilityContractTests: XCTestCase {
         )
 
         XCTAssertTrue(dashboard.contains("@FocusState private var isSearchFocused: Bool"))
-        XCTAssertTrue(dashboard.contains("focus: $isSearchFocused"))
+        XCTAssertTrue(dashboard.contains(".focused($isSearchFocused)"))
         XCTAssertTrue(dashboard.contains(".onKeyPress(.return)"))
         XCTAssertTrue(dashboard.contains(".onKeyPress(.space)"))
         XCTAssertTrue(dashboard.contains(".accessibilityLabel(L10n.text(\"搜索启动项\", \"Search startup items\"))"))
-        XCTAssertTrue(dashboard.contains(".accessibilityLabel(L10n.text(\"允许以后启动\", \"Allow future launches\"))"))
+        XCTAssertTrue(dashboard.contains(".accessibilityLabel(L10n.text(\"允许以后启动 · \\(item.displayName)\", \"Allow future launches · \\(item.displayName)\"))"))
         XCTAssertTrue(dashboard.contains(".accessibilityValue(item.displayStatus)"))
         XCTAssertTrue(app.contains("@FocusedValue(\\.startupItemsKeyboardActions)"))
         XCTAssertTrue(app.contains("startupItemsKeyboardActions?.focusSearch()"))

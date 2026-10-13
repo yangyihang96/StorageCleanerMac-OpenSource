@@ -141,12 +141,19 @@ protocol BatteryPowerModeCommandRunning: Sendable {
 }
 
 struct PrivilegedBatteryPowerModeCommandRunner: BatteryPowerModeCommandRunning {
+    private let fanControlProvider: @MainActor @Sendable () -> FanControlCoordinator
+
+    init(fanControlProvider: @escaping @MainActor @Sendable () -> FanControlCoordinator = { FanControlCoordinator.shared }) {
+        self.fanControlProvider = fanControlProvider
+    }
+
     func apply(_ command: BatteryPowerModeWriteCommand) async throws -> BatteryPowerModes? {
         guard command.isWhitelisted else {
             throw BatteryPowerModeCommandFailure.unavailable
         }
         try Task.checkCancellation()
-        let verifiedModes = try await FanControlCoordinator.shared.applyPowerMode(command)
+        let coordinator = await fanControlProvider()
+        let verifiedModes = try await coordinator.applyPowerMode(command)
         try Task.checkCancellation()
         return verifiedModes
     }

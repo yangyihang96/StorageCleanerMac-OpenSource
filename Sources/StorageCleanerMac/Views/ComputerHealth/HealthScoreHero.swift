@@ -1,6 +1,17 @@
 import SwiftUI
 
 enum HealthDashboardText {
+    static var scoreScopeNote: String {
+        L10n.text(
+            "计分：磁盘、容量、稳定性、电池；备份、加密、当前电量与环境不计分，平均分不会掩盖单项异常。",
+            "Scored: disk, capacity, stability and battery; backup, encryption, current charge and environment are excluded. The average does not mask an individual risk."
+        )
+    }
+
+    static var assessmentTitle: String {
+        L10n.text("健康评估", "Health Assessment")
+    }
+
     static var dataInsufficient: String {
         L10n.text("数据不足", "Data Insufficient")
     }
@@ -117,15 +128,6 @@ enum HealthDashboardVisuals {
         }
     }
 
-    static func factorSymbol(_ factor: HealthFactor) -> String {
-        switch factor {
-        case .diskReliability: "internaldrive.fill"
-        case .capacity: "chart.line.downtrend.xyaxis"
-        case .stability: "waveform.path.ecg"
-        case .backup: "clock.arrow.circlepath"
-        case .battery: "battery.75"
-        }
-    }
 }
 
 struct HealthScoreHero: View {
@@ -203,10 +205,8 @@ struct HealthScoreHero: View {
 
             DisclosureGroup(L10n.text("评分说明", "Score details")) {
                 Text(statusDetail)
-                Text(L10n.text(
-                    "磁盘、容量、稳定性、电池参与计分；备份与即时状态独立呈现。",
-                    "Disk, capacity, stability, and battery affect the score; backup and live status remain separate."
-                ))
+                Text(HealthDashboardText.scoreScopeNote)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .font(AppDesignTokens.Typography.secondary)
             .foregroundStyle(.secondary)
@@ -236,7 +236,6 @@ struct HealthScoreHero: View {
     private var refreshButton: some View {
         AppButton(
             title: isRefreshing ? L10n.text("检查中", "Checking") : refreshTitle,
-            systemImage: isRefreshing ? "hourglass" : "arrow.clockwise",
             kind: .primary,
             controlSize: .regular,
             isLoading: isRefreshing,
@@ -248,41 +247,32 @@ struct HealthScoreHero: View {
     @ViewBuilder
     private var evidenceMetadata: some View {
         if let confidence = evaluation?.confidence {
-            Label(
-                L10n.text(
+            Text(L10n.text(
                     "评估可信度 \(confidence.value)% · \(confidenceLevelText(confidence.level))",
                     "Assessment confidence \(confidence.value)% · \(confidenceLevelText(confidence.level))"
-                ),
-                systemImage: "checkmark.shield"
-            )
+                ))
         }
         if let evaluation {
-            Label(
-                L10n.text(
+            Text(L10n.text(
                     "核心证据 \(percent(evaluation.coverage))",
                     "Core evidence \(percent(evaluation.coverage))"
-                ),
-                systemImage: "checkmark.seal"
-            )
+                ))
         }
         if let checkedAt {
-            Label(
-                checkedAt.formatted(date: .abbreviated, time: .shortened),
-                systemImage: "clock"
-            )
+            Text(checkedAt.formatted(date: .abbreviated, time: .shortened))
             .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
         }
     }
 
     private var scoreSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(L10n.text("实测健康分", "Measured Health Score"), systemImage: "heart.text.square.fill")
+            Text(HealthDashboardText.assessmentTitle)
                 .font(AppDesignTokens.Typography.secondary)
                 .foregroundStyle(statusColor)
 
             if let score = evaluation?.score, score.isFinite {
                 GeekCombinedRing(
-                    title: L10n.text("实测", "MEASURED"),
+                    title: L10n.text("评估", "ASSESSMENT"),
                     value: "\(Int(score.rounded()))",
                     detail: "/ 100",
                     progress: min(1, max(0, score / 100)),
@@ -303,7 +293,7 @@ struct HealthScoreHero: View {
         }
         .frame(width: layout.density == .compact ? 166 : 186, alignment: .leading)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(L10n.text("系统健康分", "System health score"))
+        .accessibilityLabel(HealthDashboardText.assessmentTitle)
         .accessibilityValue(scoreAccessibilityValue)
     }
 
@@ -352,8 +342,8 @@ struct HealthScoreHero: View {
             )
         case .attention:
             return L10n.text(
-                "至少一项实测指标需要关注；平均分不会掩盖单项异常。",
-                "At least one measured indicator needs attention; the average never hides an unhealthy component."
+                "至少一项实测指标需要关注。",
+                "At least one measured indicator needs attention."
             )
         case .actionRequired:
             return L10n.text(

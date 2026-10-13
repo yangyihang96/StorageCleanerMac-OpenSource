@@ -82,6 +82,19 @@ final class MacBenchmarkStore: ObservableObject {
     @Published private(set) var suiteStep: MacBenchmarkSuiteStep?
     @Published private(set) var suiteOutcome: MacBenchmarkSuiteOutcome?
     @Published private(set) var v7State: BenchmarkV7State = .idle
+    @Published private(set) var v7ProgressTimeline: MSeriesStageProgress?
+    @Published private(set) var v11RunConfiguration: MSeriesV11RunConfiguration?
+    @Published private(set) var v11SaveState: MSeriesV11SaveState?
+    private var v7StartedAtNanoseconds: UInt64?
+
+    var v7ElapsedSeconds: TimeInterval? {
+        guard let start = v7StartedAtNanoseconds else { return nil }
+        let now = DispatchTime.now().uptimeNanoseconds
+        return Double(now >= start ? now - start : 0) / 1e9
+    }
+    var v7ProgressFraction: Double? {
+        v7ProgressTimeline?.fraction(nowNanoseconds: DispatchTime.now().uptimeNanoseconds) ?? v7State.progress
+    }
     @Published private(set) var v7LatestResult: BenchmarkV7Result?
     @Published private(set) var v7History: [BenchmarkV7Result] = []
     @Published private(set) var v7Preflight: BenchmarkV7PreflightReport?
@@ -107,6 +120,8 @@ final class MacBenchmarkStore: ObservableObject {
         (any MacAcceleratorBenchmarkHistoryPersisting)?
     private let sustainedService: (any MacSustainedBenchmarkServicing)?
     private let v7Coordinator: BenchmarkV7Coordinator
+    private let v11TelemetryBridge: MSeriesV11TelemetryBridge?
+    private let v11PersistabilityCheck: @Sendable (BenchmarkV7Result) -> Bool
     private let v7HistoryRepository: any BenchmarkV7HistoryPersisting
     private let v7PromotionRevocations: BenchmarkV7PromotionRevocationStore
     private let v7PersistenceTimeout: Duration
@@ -136,6 +151,8 @@ final class MacBenchmarkStore: ObservableObject {
             (any MacAcceleratorBenchmarkHistoryPersisting)? = nil,
         sustainedService: (any MacSustainedBenchmarkServicing)? = nil,
         v7Coordinator: BenchmarkV7Coordinator? = nil,
+        v11TelemetryBridge: MSeriesV11TelemetryBridge? = nil,
+        v11PersistabilityCheck: @escaping @Sendable (BenchmarkV7Result) -> Bool = { $0.isPersistable },
         v7HistoryRepository: (any BenchmarkV7HistoryPersisting)? = nil,
         v7PromotionRevocationDefaults: UserDefaults = .standard,
         v7PersistenceTimeout: Duration = BenchmarkV7TimeoutPolicy.standard.persistence,
@@ -154,6 +171,8 @@ final class MacBenchmarkStore: ObservableObject {
         self.sustainedService = sustainedService
         self.v7Coordinator = v7Coordinator
             ?? BenchmarkV7Coordinator(coreService: service)
+        self.v11TelemetryBridge = v11TelemetryBridge
+        self.v11PersistabilityCheck = v11PersistabilityCheck
         self.v7HistoryRepository = v7HistoryRepository
             ?? BenchmarkV7HistoryRepository()
         v7PromotionRevocations = BenchmarkV7PromotionRevocationStore(
@@ -273,6 +292,18 @@ final class MacBenchmarkStore: ObservableObject {
         acceleratorHistory = acceleratorStored
         v7History = confirmedV7Stored
         v7HistoryStatus = v7Status
+        // A failed immediate readback can recover later. Only a successful
+        // load of the exact current sealed result confirms the local save;
+        // other records and unconfirmed loads cannot clear its failure state.
+        if v7Status == .loaded,
+           let saveState = v11SaveState, saveState.state == .failed,
+           saveState.recordID != nil, saveState.rawPayloadSHA256?.isEmpty == false,
+           let current = v7LatestResult, saveState.matches(current),
+           let saved = confirmedV7Stored.first(where: {
+               saveState.matches($0) && $0.failure == current.failure
+           }) {
+            v11SaveState = MSeriesV11SaveState(result: saved, state: .saved)
+        }
         if v7LatestResult == nil {
             v7LatestResult = confirmedV7Stored.first
         }
@@ -326,7 +357,8 @@ final class MacBenchmarkStore: ObservableObject {
         plan: BenchmarkV7Plan,
         categories: [BenchmarkV7Category]? = nil,
         targetDirectory: URL = DiskBenchmarkKernel.defaultRootDirectory,
-        forcePreflightContinuation: Bool = false
+        forcePreflightContinuation: Bool = false,
+        v11Accelerators: [MSeriesV11AcceleratorUnit] = []
     ) {
         guard operation == nil,
               acceleratorOperation == nil,
@@ -343,7 +375,23 @@ final class MacBenchmarkStore: ObservableObject {
         v7HistoryLoadGeneration = nil
         v7CancellationRequestedAt = nil
         v7Preflight = nil
+        v11SaveState = nil
         v7State = .phase(.preflighting, sessionID: sessionID)
+        v11RunConfiguration = ["mseries-core-v11", "mseries-pressure-v11"].contains(plan.planVersion)
+            ? .init(sessionID: sessionID, mode: plan.planVersion == "mseries-pressure-v11" ? "pressure10m" : "standard", accelerators: v11Accelerators)
+            : nil
+        let now = DispatchTime.now().uptimeNanoseconds
+        v7StartedAtNanoseconds = now
+        let budgets: [MSeriesStageBudget]? = plan.planVersion == MSeriesProtocol.plan ? MSeriesStageBudget.coreV10 :
+            plan.planVersion == "mseries-core-v11" ? MSeriesStageBudget.standardV11 :
+            plan.planVersion == "mseries-pressure-v11" ? MSeriesStageBudget.pressure10m : nil
+        var frozenBudgets = budgets
+        if !v11Accelerators.isEmpty, frozenBudgets != nil {
+            let seconds = v11Accelerators.reduce(0) { $0 + $1.collectionDeadlineSeconds }
+            let insertionIndex = (frozenBudgets?.count ?? 1) - 1
+            frozenBudgets?.insert(.init(id: "accelerators", plannedSeconds: seconds, weight: seconds), at: insertionIndex)
+        }
+        v7ProgressTimeline = frozenBudgets.flatMap { try? MSeriesStageProgress(budgets: $0, nowNanoseconds: now) }
 
         let task = Task<Void, Never> { [weak self] in
             let result = await coordinator.run(
@@ -351,7 +399,8 @@ final class MacBenchmarkStore: ObservableObject {
                 plan: plan,
                 categories: categories,
                 targetDirectory: targetDirectory,
-                forcePreflightContinuation: forcePreflightContinuation
+                forcePreflightContinuation: forcePreflightContinuation,
+                v11Accelerators: v11Accelerators
             ) { [weak self] state in
                 await self?.acceptV7State(state, generation: generation)
             }
@@ -370,6 +419,17 @@ final class MacBenchmarkStore: ObservableObject {
             targetDirectory: MSeriesProtocol.temporaryRoot
         )
     }
+
+    /// B4 can select this explicit v11 entrance without changing legacy plan semantics.
+    func startV11Benchmark(mode: String = "standard", accelerators: [MSeriesV11AcceleratorUnit] = []) {
+        guard ["standard", "pressure10m"].contains(mode) else { return }
+        startV7(plan: MSeriesV11Protocol.plan(mode: mode), targetDirectory: MSeriesProtocol.temporaryRoot, v11Accelerators: accelerators)
+    }
+
+    func setV11TelemetryVisible(_ visible: Bool) { v11TelemetryBridge?.setVisible(visible) }
+    /// Presentation reads the existing session bridge; no additional sampler.
+    var v11LiveTelemetry: [MSeriesV11Telemetry] { v11TelemetryBridge?.readings.map(\.telemetry) ?? [] }
+    var v11LiveObservation: MSeriesV11LiveObservation? { v11TelemetryBridge?.liveObservation }
 
     /// Runs the non-destructive v7 environment check without allocating a
     /// benchmark session or starting a workload. The next explicit start
@@ -392,6 +452,8 @@ final class MacBenchmarkStore: ObservableObject {
         let coordinator = v7Coordinator
         v7Preflight = nil
         isV7Preflighting = true
+        v7StartedAtNanoseconds = DispatchTime.now().uptimeNanoseconds
+        v7ProgressTimeline = nil
         let task = Task<Void, Never> { [weak self] in
             let outcome = await coordinator.preflightOutcome(
                 plan: plan,
@@ -412,6 +474,7 @@ final class MacBenchmarkStore: ObservableObject {
         if v7CancellationRequestedAt == nil {
             v7CancellationRequestedAt = Date()
         }
+        v7ProgressTimeline?.stop(nowNanoseconds: DispatchTime.now().uptimeNanoseconds)
         v7State = .phase(
             .cancelling,
             sessionID: v7State.sessionID ?? v7Operation.generation
@@ -651,6 +714,28 @@ final class MacBenchmarkStore: ObservableObject {
             || next.phase == .cancelling
             || next.phase == .cancelled else { return }
         v7State = next
+        v11RunConfiguration?.accept(next)
+        updateV7Stage(next)
+    }
+
+    private func updateV7Stage(_ state: BenchmarkV7State) {
+        guard let timeline = v7ProgressTimeline else { return }
+        let stage: String
+        if state.phase == .persisting { stage = "saving" }
+        else if state.phase == .preflighting { stage = "preflight" }
+        else if let id = state.workloadID {
+            if id.hasPrefix("cpu.threadCurve.") || id.hasPrefix("cpu.sustained.short.") { stage = "legacyExtensions" }
+            else if id.hasPrefix("power.cpu.") { stage = "cpuEfficiency" }
+            else if id == "power.gpu.peak" { stage = "gpuPeak" }
+            else if id == "sustained.cpu.allCores" { stage = "cpuSustained" }
+            else if id == "sustained.gpu" { stage = "gpuSustained" }
+            else if id == "pressure.cpu.allCores" { stage = "cpuPressure" }
+            else if id == "pressure.gpu" { stage = "gpuPressure" }
+            else if id == "accelerators" { stage = "accelerators" }
+            else { stage = "core" }
+        } else { return }
+        guard let index = timeline.frozenBudgets.firstIndex(where: { $0.id == stage }), index >= timeline.activeIndex else { return }
+        try? v7ProgressTimeline?.advance(to: stage, nowNanoseconds: DispatchTime.now().uptimeNanoseconds)
     }
 
     private func finishV7Preflight(
@@ -679,14 +764,35 @@ final class MacBenchmarkStore: ObservableObject {
         _ result: BenchmarkV7Result,
         generation: UUID
     ) async {
+        // BOARD N22: a cancelled run ends in its own, cancelled task. Saving
+        // its record and reloading the history there came back "cancelled"
+        // at once (BenchmarkTimedOperation), so the record was saved late
+        // and the list was not reloaded until the next launch. Its record is
+        // saved and listed outside that cancellation.
+        if Task.isCancelled {
+            await Task { await self.finishV7Result(result, generation: generation) }.value
+        } else {
+            await finishV7Result(result, generation: generation)
+        }
+    }
+
+    private func finishV7Result(
+        _ result: BenchmarkV7Result,
+        generation: UUID
+    ) async {
         guard v7Operation?.generation == generation else { return }
         let wasCancelled = isV7CancellationRequested(generation: generation)
         var terminalResult = wasCancelled
-            ? cancelledV7Result(from: result)
+            ? await cancelledV7Result(from: result)
             : result
+        if terminalResult.mSeriesV11 != nil {
+            await finishV11Result(terminalResult, generation: generation)
+            return
+        }
         v7Preflight = terminalResult.preflight
         if !wasCancelled, terminalResult.failure == nil {
             v7State = .phase(.persisting, sessionID: terminalResult.session.id)
+            updateV7Stage(v7State)
         }
         var saveFailed = false
         var shouldReloadHistory = true
@@ -793,7 +899,7 @@ final class MacBenchmarkStore: ObservableObject {
                     generation: generation
                 )
             case let .cancelled(lateOperation):
-                terminalResult = cancelledV7Result(from: terminalResult)
+                terminalResult = await cancelledV7Result(from: terminalResult)
                 shouldReloadHistory = false
                 handOffV7Persistence(
                     lateOperation,
@@ -868,6 +974,7 @@ final class MacBenchmarkStore: ObservableObject {
             v7State = .failed(.persistenceFailed, sessionID: terminalResult.session.id)
         } else {
             v7State = .phase(.completed, sessionID: terminalResult.session.id)
+            try? v7ProgressTimeline?.didSave()
         }
     }
 
@@ -877,7 +984,17 @@ final class MacBenchmarkStore: ObservableObject {
             || v7Operation?.task.isCancelled == true
     }
 
-    private func cancelledV7Result(from result: BenchmarkV7Result) -> BenchmarkV7Result {
+    private func cancelledV7Result(from result: BenchmarkV7Result) async -> BenchmarkV7Result {
+        var v11 = result.mSeriesV11
+        if var envelope = v11 {
+            envelope.state = "cancelled"
+            envelope.failure = "cancelled"
+            envelope.cancellationRequestedAt = v7CancellationRequestedAt ?? envelope.cancellationRequestedAt
+            let cancelledEnvelope = envelope
+            v11 = await MSeriesV11BackgroundValidation.run {
+                (try? MSeriesV11RawPayload.seal(core: result.mSeries, envelope: cancelledEnvelope)) ?? cancelledEnvelope
+            }
+        }
         let workloadExecutions = result.workloadExecutions.map { records in
             guard let cancellationDate = v7CancellationRequestedAt else { return records }
             return records.compactMap { record in
@@ -897,6 +1014,7 @@ final class MacBenchmarkStore: ObservableObject {
         }
         return BenchmarkV7Result(
             mSeries: result.mSeries,
+            mSeriesV11: v11,
             session: result.session,
             preflight: result.preflight,
             environment: result.environment,
@@ -927,6 +1045,7 @@ final class MacBenchmarkStore: ObservableObject {
     ) -> BenchmarkV7Result {
         BenchmarkV7Result(
             mSeries: result.mSeries,
+            mSeriesV11: result.mSeriesV11,
             session: result.session,
             preflight: result.preflight,
             environment: result.environment,
@@ -1370,5 +1489,55 @@ final class MacBenchmarkStore: ObservableObject {
         sustainedOperation?.task.cancel()
         v7Operation?.task.cancel()
         v7PreflightOperation?.task.cancel()
+    }
+}
+
+extension MacBenchmarkStore {
+    /// v11 has one short atomic commit. Await it instead of abandoning a timed
+    /// writer or performing the legacy provisional-write/promotion pair.
+    private func finishV11Result(_ result: BenchmarkV7Result, generation: UUID) async {
+        v7Preflight = result.preflight
+        v11RunConfiguration?.acceptPendingResult(result)
+        v7State = .phase(.persisting, sessionID: result.session.id)
+        updateV7Stage(v7State)
+        var terminal = result
+        var saveFailed = false
+        do {
+            let validate = v11PersistabilityCheck
+            guard await MSeriesV11BackgroundValidation.run({ validate(result) }) else { throw MSeriesV11RunError.metadataBudget }
+            try await v7HistoryRepository.save(result)
+            let records = await v7HistoryRepository.load()
+            let status = await v7HistoryRepository.loadStatus()
+            guard v7Operation?.generation == generation else { return }
+            v7History = confirmedV7History(records)
+            v7HistoryStatus = status
+            guard let saved = records.first(where: {
+                $0.recordID == result.recordID && $0.session.id == result.session.id
+                    && $0.mSeriesV11?.rawPayloadSHA256 == result.mSeriesV11?.rawPayloadSHA256
+                    && $0.failure == result.failure
+            }) else { throw MSeriesV11RunError.metadataBudget }
+            terminal = saved
+        } catch {
+            // Keep the original outer stop reason and sealed measurement.
+            // A failed local commit is not a new measurement failure.
+            saveFailed = true
+        }
+        let snapshot = terminal
+        let complete = await MSeriesV11BackgroundValidation.run { snapshot.isComplete }
+        guard v7Operation?.generation == generation else { return }
+        v11SaveState = .init(result: terminal, state: saveFailed ? .failed : .saved)
+        v7LatestResult = terminal
+        v7Operation = nil
+        if saveFailed {
+            v7State = .failed(.persistenceFailed, sessionID: terminal.session.id)
+        } else if let failure = terminal.failure {
+            v7State = failure == .cancelled ? .phase(.cancelled, sessionID: terminal.session.id) : .failed(failure, sessionID: terminal.session.id)
+        } else if complete {
+            try? v7ProgressTimeline?.didSave()
+            v7State = .phase(.completed, sessionID: terminal.session.id)
+        } else {
+            v7ProgressTimeline?.stop(nowNanoseconds: DispatchTime.now().uptimeNanoseconds)
+            v7State = .failed(.validationFailed("partial-v11-result"), sessionID: terminal.session.id)
+        }
     }
 }

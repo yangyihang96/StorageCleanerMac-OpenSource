@@ -195,9 +195,9 @@ enum AppUpdateService {
         return AppUpdateOneClickPlan(
             appStoreApps: applications(plan.appStoreApplicationIDs),
             automaticApps: applications(
-                plan.automaticApplicationIDs + plan.requiresQuitApplicationIDs
+                plan.automaticApplicationIDs + plan.requiresQuitApplicationIDs + plan.requiresAuthorizationApplicationIDs
             ),
-            authorizationApps: applications(plan.requiresAuthorizationApplicationIDs),
+            authorizationApps: [],
             sparkleApps: manual.filter {
                 $0.updateProvider == .sparkle || $0.updateProvider == .vendorUpdater
             },

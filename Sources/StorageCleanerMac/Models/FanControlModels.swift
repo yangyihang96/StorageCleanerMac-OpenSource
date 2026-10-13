@@ -21,7 +21,7 @@ enum GeekFanControlMode: String, CaseIterable, Codable, Identifiable, Sendable {
         case .manual:
             L10n.text("手动转速", "Manual RPM")
         case .maximum:
-            L10n.text("狂暴模式 · 最大转速", "Maximum Cooling · Maximum RPM")
+            L10n.text("最大转速", "Maximum RPM")
         }
     }
 }
@@ -769,7 +769,7 @@ enum FanControlPlanner {
 }
 
 enum FanControlHelperProtocolContract {
-    static let currentVersion = 2
+    static let currentVersion = HardwareControlProtocol.currentVersion
 }
 
 enum FanControlHelperErrorCode: String, Codable, Equatable, Sendable {
@@ -780,6 +780,7 @@ enum FanControlHelperErrorCode: String, Codable, Equatable, Sendable {
     case smcReadFailed
     case smcWriteFailed
     case fanVerificationFailed
+    case fanCrashRecoveryFailed
     case fanLeaseExpired
     case partialFanWriteFailure
     case invalidCurvePointCount
@@ -797,6 +798,12 @@ enum FanControlHelperErrorCode: String, Codable, Equatable, Sendable {
     case curveVerificationFailed
     case curveLeaseExpired
     case thermalProtectionActivated
+    case macMiniModeStateUnavailable
+    case macMiniModePersistenceFailed
+    case macMiniModeCommandFailed
+    case macMiniModeVerificationFailed
+    case macMiniModeSleepFailed
+    case macMiniModeConflict
 }
 
 struct FanControlPowerConfiguration: Codable, Equatable, Sendable {
@@ -825,7 +832,7 @@ struct FanControlPowerConfiguration: Codable, Equatable, Sendable {
 }
 
 struct FanControlHelperRequest: Codable, Sendable {
-    enum Operation: String, Codable, Equatable, Sendable {
+    enum Operation: String, Codable, Equatable, Hashable, Sendable {
         case ping
         case readPowerConfiguration
         case apply
@@ -837,6 +844,9 @@ struct FanControlHelperRequest: Codable, Sendable {
         case updateFanCurve
         case getFanCurveRuntimeState
         case deactivateFanCurve
+        case readMacMiniMode
+        case setMacMiniMode
+        case samplePowerMetrics
     }
 
     let protocolVersion: Int
@@ -850,6 +860,7 @@ struct FanControlHelperRequest: Codable, Sendable {
     let powerModeValue: Int?
     let curveProfile: FanCurveProfile?
     let curveLeaseID: UUID?
+    let macMiniMode: MacMiniMode?
 
     init(
         protocolVersion: Int = FanControlHelperProtocolContract.currentVersion,
@@ -862,7 +873,8 @@ struct FanControlHelperRequest: Codable, Sendable {
         powerModeSetting: String?,
         powerModeValue: Int?,
         curveProfile: FanCurveProfile? = nil,
-        curveLeaseID: UUID? = nil
+        curveLeaseID: UUID? = nil,
+        macMiniMode: MacMiniMode? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.operation = operation
@@ -875,6 +887,74 @@ struct FanControlHelperRequest: Codable, Sendable {
         self.powerModeValue = powerModeValue
         self.curveProfile = curveProfile
         self.curveLeaseID = curveLeaseID
+        self.macMiniMode = macMiniMode
+    }
+
+    static let samplePowerMetrics = macMiniModeRequest(operation: .samplePowerMetrics, mode: nil)
+
+    func encodedForTransport() throws -> Data {
+        if operation == .samplePowerMetrics {
+            return try JSONEncoder().encode(PowermetricsSamplingRequest(protocolVersion: protocolVersion))
+        }
+        return try JSONEncoder().encode(self)
+    }
+
+    static let disableMacMiniModeForVersion3 = Self(
+        protocolVersion: 3, operation: .setMacMiniMode, targetRPMByFan: [:], automaticFanIDs: [],
+        allowsRPMDecrease: false, watchdogSeconds: 0, powerModeSource: nil, powerModeSetting: nil,
+        powerModeValue: nil, macMiniMode: .off
+    )
+    static let restoreAutomaticForVersion3 = Self(
+        protocolVersion: 3, operation: .restoreAutomatic, targetRPMByFan: [:], automaticFanIDs: [],
+        allowsRPMDecrease: false, watchdogSeconds: 0, powerModeSource: nil, powerModeSetting: nil, powerModeValue: nil
+    )
+    var isVersion3RemovalOnly: Bool {
+        protocolVersion == 3
+            && ((operation == .setMacMiniMode && macMiniMode == .off)
+                || (operation == .restoreAutomatic && macMiniMode == nil))
+            && targetRPMByFan.isEmpty && automaticFanIDs.isEmpty && !allowsRPMDecrease && watchdogSeconds == 0
+            && powerModeSource == nil && powerModeSetting == nil && powerModeValue == nil
+            && curveProfile == nil && curveLeaseID == nil
+    }
+
+    static let readMacMiniMode = macMiniModeRequest(operation: .readMacMiniMode, mode: nil)
+
+    static func setMacMiniMode(_ mode: MacMiniMode) -> Self {
+        macMiniModeRequest(operation: .setMacMiniMode, mode: mode)
+    }
+
+    private static func macMiniModeRequest(operation: Operation, mode: MacMiniMode?) -> Self {
+        Self(
+            operation: operation, targetRPMByFan: [:], automaticFanIDs: [],
+            allowsRPMDecrease: false, watchdogSeconds: 0,
+            powerModeSource: nil, powerModeSetting: nil, powerModeValue: nil,
+            macMiniMode: mode
+        )
+    }
+
+    /// Only used to retire an authenticated v2 helper, which has no Mac mini mode.
+    /// No version-2 write/control operation is otherwise accepted by the new app.
+    static let restoreAutomaticForVersion2 = Self(
+        protocolVersion: 2, operation: .restoreAutomatic,
+        targetRPMByFan: [:], automaticFanIDs: [], allowsRPMDecrease: false,
+        watchdogSeconds: 0, powerModeSource: nil, powerModeSetting: nil, powerModeValue: nil
+    )
+
+    /// These operations cannot enable sleep suppression or reach a fan executor.
+    var isMacMiniSleepRecoveryRequest: Bool {
+        FanControlStartupSafety.permitsSleepRecovery(operation: operation.rawValue, mode: macMiniMode,
+            hasEmptyPayload: targetRPMByFan.isEmpty && automaticFanIDs.isEmpty
+                && !allowsRPMDecrease && watchdogSeconds == 0
+                && powerModeSource == nil && powerModeSetting == nil && powerModeValue == nil
+                && curveProfile == nil && curveLeaseID == nil)
+    }
+
+    var isVersion2RestoreOnly: Bool {
+        protocolVersion == 2 && operation == .restoreAutomatic
+            && targetRPMByFan.isEmpty && automaticFanIDs.isEmpty
+            && !allowsRPMDecrease && watchdogSeconds == 0
+            && powerModeSource == nil && powerModeSetting == nil && powerModeValue == nil
+            && curveProfile == nil && curveLeaseID == nil && macMiniMode == nil
     }
 
     static let ping = FanControlHelperRequest(
@@ -1047,6 +1127,19 @@ struct FanControlHelperRequest: Codable, Sendable {
 }
 
 struct FanControlHelperReply: Codable, Equatable, Sendable {
+    /// Structured replies contain at most 16 clusters/fans, fixed status codes
+    /// and short helper-owned messages (no raw subprocess output). Even a full
+    /// DTO is under 8 KiB; 64 KiB leaves 8x headroom and is below the helper's
+    /// existing 512 KiB combined subprocess-output ceiling.
+    static let maximumEncodedReplyBytes = 64 * 1_024
+
+    static func decodeFromTransport(_ data: Data) throws -> Self {
+        guard data.count <= maximumEncodedReplyBytes else {
+            throw FanControlHelperProtocolError.replyTooLarge
+        }
+        return try JSONDecoder().decode(Self.self, from: data)
+    }
+
     let protocolVersion: Int?
     let operation: FanControlHelperRequest.Operation?
     let success: Bool
@@ -1055,6 +1148,8 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
     let powerConfiguration: FanControlPowerConfiguration?
     let curveRuntimeState: FanCurveRuntimeState?
     let errorCode: FanControlHelperErrorCode?
+    let macMiniModeStatus: MacMiniModeStatus?
+    let powerSampleResult: PowermetricsResult?
 
     init(
         protocolVersion: Int? = FanControlHelperProtocolContract.currentVersion,
@@ -1064,7 +1159,9 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
         appliedTargetRPMByFan: [Int: Int],
         powerConfiguration: FanControlPowerConfiguration? = nil,
         curveRuntimeState: FanCurveRuntimeState? = nil,
-        errorCode: FanControlHelperErrorCode? = nil
+        errorCode: FanControlHelperErrorCode? = nil,
+        macMiniModeStatus: MacMiniModeStatus? = nil,
+        powerSampleResult: PowermetricsResult? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.operation = operation
@@ -1074,13 +1171,24 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
         self.powerConfiguration = powerConfiguration
         self.curveRuntimeState = curveRuntimeState
         self.errorCode = errorCode
+        self.macMiniModeStatus = macMiniModeStatus
+        self.powerSampleResult = powerSampleResult
+    }
+
+    func replacingMessage(_ message: String) -> Self {
+        Self(protocolVersion: protocolVersion, operation: operation, success: success, message: message,
+             appliedTargetRPMByFan: appliedTargetRPMByFan, powerConfiguration: powerConfiguration,
+             curveRuntimeState: curveRuntimeState, errorCode: errorCode, macMiniModeStatus: macMiniModeStatus, powerSampleResult: powerSampleResult)
     }
 
     func validated(for request: FanControlHelperRequest) throws -> Self {
         guard let protocolVersion else {
             throw FanControlHelperProtocolError.missingProtocolVersion
         }
-        guard protocolVersion == FanControlHelperProtocolContract.currentVersion else {
+        guard HardwareControlProtocol.accepts(protocolVersion)
+                && HardwareControlProtocol.accepts(request.protocolVersion)
+                || (protocolVersion == 2 && request.isVersion2RestoreOnly)
+                || (protocolVersion == 3 && request.isVersion3RemovalOnly) else {
             throw FanControlHelperProtocolError.unsupportedProtocolVersion(protocolVersion)
         }
         guard let operation else {
@@ -1105,15 +1213,39 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
            curveRuntimeState == nil {
             throw FanControlHelperProtocolError.missingCurveRuntimeState
         }
+        if success, [.readMacMiniMode, .setMacMiniMode].contains(request.operation),
+           macMiniModeStatus == nil {
+            throw FanControlHelperProtocolError.missingMacMiniModeStatus
+        }
+        if success, request.operation == .setMacMiniMode,
+           macMiniModeStatus?.mode != request.macMiniMode {
+            throw FanControlHelperProtocolError.macMiniModeMismatch
+        }
+        if request.operation == .samplePowerMetrics,
+           (!appliedTargetRPMByFan.isEmpty || powerConfiguration != nil || curveRuntimeState != nil || macMiniModeStatus != nil || errorCode != nil) {
+            throw FanControlHelperProtocolError.invalidPowerSample
+        }
+        if success, request.operation == .samplePowerMetrics {
+            guard case .sample(let sample)? = powerSampleResult, sample.isValid else {
+                throw FanControlHelperProtocolError.invalidPowerSample
+            }
+        }
+        if !success, case .sample? = powerSampleResult {
+            throw FanControlHelperProtocolError.invalidPowerSample
+        }
         return self
     }
 }
 
 enum FanControlHelperProtocolError: Error, Equatable, LocalizedError, Sendable {
+    case replyTooLarge
     case missingProtocolVersion
     case unsupportedProtocolVersion(Int)
     case missingResponseOperation
     case missingCurveRuntimeState
+    case missingMacMiniModeStatus
+    case macMiniModeMismatch
+    case invalidPowerSample
     case operationMismatch(
         expected: FanControlHelperRequest.Operation,
         received: FanControlHelperRequest.Operation
@@ -1121,6 +1253,8 @@ enum FanControlHelperProtocolError: Error, Equatable, LocalizedError, Sendable {
 
     var errorDescription: String? {
         switch self {
+        case .replyTooLarge:
+            L10n.text("系统助手回复超出安全大小限制。", "The helper reply exceeds the safe size limit.")
         case .missingProtocolVersion:
             L10n.text(
                 "检测到旧版系统控制辅助程序协议；未发送风扇转速，系统控制保持关闭。",
@@ -1141,6 +1275,12 @@ enum FanControlHelperProtocolError: Error, Equatable, LocalizedError, Sendable {
                 "系统控制辅助程序未返回温控曲线运行状态；已停止自定义控制。",
                 "The helper did not return fan-curve runtime state; custom control was stopped."
             )
+        case .missingMacMiniModeStatus:
+            L10n.text("系统助手未返回合盖睡眠状态，尚未确认设置。", "The helper did not return lid-sleep state; the setting is unconfirmed.")
+        case .invalidPowerSample:
+            L10n.text("系统助手未返回有效功率采样。", "The helper did not return a valid power sample.")
+        case .macMiniModeMismatch:
+            L10n.text("系统助手回报的模式与请求不一致，尚未确认设置。", "The helper returned a different mode; the setting is unconfirmed.")
         case .operationMismatch(let expected, let received):
             L10n.text(
                 "系统控制辅助程序回报类型不匹配（请求 \(expected.rawValue)，收到 \(received.rawValue)）；未发送风扇转速。",

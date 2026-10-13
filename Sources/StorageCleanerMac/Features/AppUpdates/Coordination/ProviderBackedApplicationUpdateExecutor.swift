@@ -1,5 +1,20 @@
 import Foundation
 
+/// Uses the executor's injected fresh signature/metadata reader for the same
+/// artifact baseline and readback. Production defaults still perform strict
+/// Security validation; tests cannot accidentally fall through to host code.
+private struct ExecutorArtifactRechecker: InstalledApplicationRechecking {
+    let reader: ApplicationMetadataReader
+    let runningState: @Sendable () async -> ApplicationRunningStateSnapshot
+    func snapshot(at url: URL) async throws -> InstalledApplicationRecheckSnapshot? {
+        guard let application = await reader.read(applicationURL: url, runningState: await runningState()) else { return nil }
+        let valid = application.sourceEvidence.contains("valid-code-signature")
+        return .init(application: application, signature: .init(isValid: valid,
+            codeSigningIdentifier: application.codeSigningIdentifier, teamIdentifier: application.signingTeamIdentifier,
+            designatedRequirement: nil, certificateCommonNames: [], status: valid ? 0 : -1))
+    }
+}
+
 enum ProviderBackedUpdateExecutorError: LocalizedError, Sendable, Equatable {
     case providerMismatch
     case applicationNoLongerEligible
@@ -86,7 +101,7 @@ struct ApplicationUpdateDiskSpacePolicy: Hashable, Sendable {
 
 /// Executes only providers admitted by `ApplicationUpdatePlanBuilder`, then
 /// independently reconciles the on-disk identity and version before success.
-final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting, @unchecked Sendable {
+final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateBatchExecuting, @unchecked Sendable {
     private struct ActiveUpdate {
         let application: InstalledApplication
         let provider: any ApplicationUpdateProvider
@@ -101,6 +116,12 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
     private let availableDiskCapacity: @Sendable (URL) throws -> Int64?
     private let replacementTransactionURL: URL
     private let replacementIdentityVerifier: OfficialApplicationReplacement.IdentityVerifier
+    private let runtime: ApplicationUpdateBatchRuntime
+    private let processSafety: AppUpdateInstallationProcessSafety
+    private let batchAuthorization: any AppUpdateBatchAuthorizing
+    private let brewBatchInstaller: HomebrewBatchInstaller
+    private var authorizationFailure: String?
+    private var batchSessionID: UUID?
     private let activeLock = NSLock()
     private var activeUpdates = [String: ActiveUpdate]()
 
@@ -110,6 +131,10 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
     }
 
     init(
+        runtime: ApplicationUpdateBatchRuntime = .system,
+        processSafety: AppUpdateInstallationProcessSafety = .init(),
+        batchAuthorization: any AppUpdateBatchAuthorizing = AppUpdateBatchAuthorization.shared,
+        brewBatchInstaller: HomebrewBatchInstaller? = nil,
         providerRegistry: ApplicationUpdateProviderRegistry = ApplicationUpdateProviderRegistry(),
         metadataReader: ApplicationMetadataReader = ApplicationMetadataReader(),
         homebrewScanner: HomebrewInventoryScanner = HomebrewInventoryScanner(),
@@ -131,6 +156,10 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
         replacementTransactionURL: URL = OfficialApplicationReplacementTransactionLocation.defaultURL,
         replacementIdentityVerifier: @escaping OfficialApplicationReplacement.IdentityVerifier = OfficialApplicationReplacement.defaultIdentityVerifier
     ) {
+        self.runtime = runtime
+        self.processSafety = processSafety
+        self.batchAuthorization = batchAuthorization
+        self.brewBatchInstaller = brewBatchInstaller ?? HomebrewBatchInstaller(rechecker: ExecutorArtifactRechecker(reader: metadataReader, runningState: runningStateProvider), runtime: runtime, processSafety: processSafety)
         self.providerRegistry = providerRegistry
         self.metadataReader = metadataReader
         self.homebrewScanner = homebrewScanner
@@ -142,7 +171,164 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
         self.replacementIdentityVerifier = replacementIdentityVerifier
     }
 
-    func execute(
+    func beginBatch(applications: [InstalledApplication], sessionID: UUID) async {
+        let needsPreparation = activeLock.withLock {
+            guard batchSessionID != sessionID else { return false }
+            batchSessionID = sessionID; authorizationFailure = nil
+            return true
+        }
+        guard needsPreparation else { return }
+        do {
+            // Same lease as uninstall/restore: lifecycle refresh cannot boot out
+            // their worker while an operation or cleanup quarantine is active.
+            try await heavyWorkCoordinator.withLease(owner: .appUpdates) { _ in
+                try await self.batchAuthorization.prepare(applications: applications, sessionID: sessionID)
+            }
+        }
+        catch { activeLock.withLock { authorizationFailure = error.localizedDescription } }
+    }
+
+    func prepareRecoveryEvidence(application: InstalledApplication, task: ApplicationUpdateTask,
+        relatedApplications: [InstalledApplication]) async throws -> ApplicationUpdateRecoveryEvidence? {
+        if task.providerIdentifier == .homebrew {
+            return try await brewBatchInstaller.recoveryEvidence(for: application, relatedApplications: relatedApplications)
+        }
+        return .init(applicationPath: application.path, homebrewMetadata: nil,
+            artifacts: [.init(path: application.path, originalIdentity: task.originalIdentity, originalVersion: task.originalVersion,
+                wasRunning: await runtime.isRunning(application.bundleURL) || application.isRunning)])
+    }
+
+    func endBatch(sessionID: UUID) async {
+        guard activeLock.withLock({ batchSessionID == sessionID }) else { return }
+        await batchAuthorization.finish()
+        activeLock.withLock { batchSessionID = nil; authorizationFailure = nil }
+    }
+
+    func executeHomebrewBatch(applications: [InstalledApplication], tasks: [ApplicationUpdateTask],
+        progress: @Sendable @escaping (ApplicationUpdateProgressEvent) async -> Void) async -> [ApplicationUpdateInstallResult] {
+        var eligible = [InstalledApplication]()
+        var rejected = [ApplicationUpdateInstallResult]()
+        for app in applications {
+            if app.requiresAdministratorAuthorization || app.homebrewMetadata?.needsAdministrator == true,
+                let failure = activeLock.withLock({ authorizationFailure }) {
+                rejected.append(.init(applicationID: app.id, state: .skipped, observedVersion: nil, detail: failure))
+                continue
+            }
+            guard let task = tasks.first(where: { $0.applicationID == app.id }), task.originalIdentity == app.identity,
+                  task.originalVersion == app.installedVersion, task.targetVersion == app.availableVersion,
+                  app.canJoinAutomaticUpdateBatch else {
+                rejected.append(.init(applicationID: app.id, state: .failed, observedVersion: nil, detail: ProviderBackedUpdateExecutorError.applicationNoLongerEligible.localizedDescription))
+                continue
+            }
+            do { try verifyAvailableDiskSpace(for: app); eligible.append(app) }
+            catch { rejected.append(.init(applicationID: app.id, state: .failed, observedVersion: nil, detail: error.localizedDescription)) }
+        }
+        var selected = eligible
+        var installer = brewBatchInstaller
+        do {
+            installer.frozenExecutable = try await batchAuthorization.homebrewExecutable()
+            installer.revokeAuthorization = { try await self.batchAuthorization.revokeHomebrewAuthorization() }
+        } catch {
+            return rejected + selected.map { .init(applicationID: $0.id, state: .failed, observedVersion: nil, detail: error.localizedDescription) }
+        }
+        if selected.contains(where: { $0.requiresAdministratorAuthorization || $0.homebrewMetadata?.needsAdministrator == true }) {
+            do { installer.administratorEnvironment = try await batchAuthorization.homebrewEnvironment() }
+            catch {
+                let needsApproval: (InstalledApplication) -> Bool = { $0.requiresAdministratorAuthorization || $0.homebrewMetadata?.needsAdministrator == true }
+                rejected += selected.filter(needsApproval).map { .init(applicationID: $0.id, state: .skipped, observedVersion: nil, detail: error.localizedDescription) }
+                selected.removeAll(where: needsApproval)
+            }
+        }
+        let preparedInstaller = installer
+        let selectedApplications = selected
+        let evidenceByID = Dictionary(uniqueKeysWithValues: tasks.compactMap { task in task.recoveryEvidence.map { (task.applicationID, $0) } })
+        do {
+            let results = try await heavyWorkCoordinator.withLease(owner: .appUpdates) { _ in
+                await preparedInstaller.install(applications: selectedApplications, recoveryEvidenceByID: evidenceByID, progress: progress)
+            }
+            return rejected + results
+        } catch {
+            return rejected + selected.map { .init(applicationID: $0.id, state: .failed, observedVersion: nil, detail: error.localizedDescription) }
+        }
+    }
+
+    func execute(application: InstalledApplication, task: ApplicationUpdateTask,
+        progress: @Sendable @escaping (ApplicationUpdateProgressEvent) async -> Void) async throws -> ApplicationUpdateInstallResult {
+        if application.requiresAdministratorAuthorization, let failure = activeLock.withLock({ authorizationFailure }) {
+            return .init(applicationID: application.id, state: .skipped, observedVersion: nil, detail: failure)
+        }
+        var eligibility = application
+        eligibility.isRunning = false; eligibility.requiresApplicationQuit = false; eligibility.requiresAdministratorAuthorization = false
+        guard ApplicationUpdatePlanBuilder.isEligibleForAutomaticUpdate(eligibility) else { throw ProviderBackedUpdateExecutorError.applicationNoLongerEligible }
+        var evidence: ApplicationUpdateRecoveryEvidence?
+        if let frozen = task.recoveryEvidence { evidence = frozen }
+        else { evidence = try await prepareRecoveryEvidence(application: application, task: task, relatedApplications: [application]) }
+        let stopped = try await runtime.stop(application)
+        guard stopped.stopped else {
+            return .init(applicationID: application.id, state: .skipped, observedVersion: nil, detail: L10n.text("应用未退出", "Application did not quit"))
+        }
+        var ready = application
+        ready.isRunning = false
+        ready.requiresApplicationQuit = false
+        ready.requiresAdministratorAuthorization = false
+        let result: ApplicationUpdateInstallResult
+        do { result = try await executeStopped(application: ready, task: task, progress: progress) }
+        catch let commandError as AppUpdateCommandError where commandError.isNormalExit {
+            var completion = commandError.completionEvidence ?? .stopped
+            evidence?.commandCompletion = completion
+            do {
+                var observed = try await observedVersion(for: ready, baselineVersion: task.originalVersion,
+                    targetVersion: task.targetVersion, expectedIdentity: task.originalIdentity)
+                if completion.knownProcessesAlive {
+                    let stopped = try await processSafety.waitForKnownProcesses(&completion)
+                    evidence?.commandCompletion = completion
+                    guard stopped else {
+                        return .init(applicationID: application.id, state: .completed, observedVersion: observed,
+                            detail: L10n.text("安装程序仍在收尾，稍后再打开。仍保持隔离，可用“核验并恢复”。", "The installer is still finishing; open the app later. Quarantine remains; use Verify and Recover."),
+                            recoveryEvidence: evidence, installationIsolated: true)
+                    }
+                    completion.knownProcessesAlive = false
+                    evidence?.commandCompletion = completion
+                    observed = try await observedVersion(for: ready, baselineVersion: task.originalVersion,
+                        targetVersion: task.targetVersion, expectedIdentity: task.originalIdentity)
+                }
+                let (reopened, reopeningDetail) = await ApplicationUpdateRecoveryEvidence.reopening(evidence, using: runtime)
+                return .init(applicationID: application.id, state: .completed, observedVersion: observed,
+                    detail: L10n.text("主命令正常退出，已核验新版本", "Normal command exit; new version verified") + reopeningDetail, recoveryEvidence: reopened)
+            } catch {
+                evidence?.commandCompletion = completion
+                return .init(applicationID: application.id, state: completion.permitsRetry && error is ProviderBackedUpdateExecutorError ? .failed : .needsReconciliation, observedVersion: nil,
+                    detail: commandError.localizedDescription + "\n" + AppUpdateErrorRedaction.text(error.localizedDescription),
+                    recoveryEvidence: evidence)
+            }
+        }
+        catch let commandError as AppUpdateCommandError where commandError.isUnconfirmedStop {
+            evidence?.commandCompletion = commandError.completionEvidence
+            return .init(applicationID: application.id, state: .needsReconciliation, observedVersion: nil, detail: AppUpdateCommandError.needsReconciliation.localizedDescription, recoveryEvidence: evidence)
+        }
+        catch let AppUpdateCommandError.recoveryRequired(paths) {
+            return .init(applicationID: application.id, state: .needsReconciliation, observedVersion: nil, detail: AppUpdateCommandError.recoveryRequired(paths).localizedDescription, recoveryEvidence: evidence)
+        }
+        catch let OfficialApplicationUpdateInstallerError.rollbackFailed(paths) {
+            return .init(applicationID: application.id, state: .needsReconciliation, observedVersion: nil, detail: AppUpdateCommandError.recoveryRequired(paths).localizedDescription, recoveryEvidence: evidence)
+        }
+        catch let error as AppUpdateAuthorizationError {
+            return .init(applicationID: application.id, state: .skipped, observedVersion: nil, detail: error.localizedDescription)
+        }
+        catch AppUpdateCommandError.cancelled {
+            return .init(applicationID: application.id, state: .cancelled, observedVersion: nil, detail: AppUpdateCommandError.cancelled.localizedDescription, confirmedStopped: true)
+        }
+        if result.state == .completed, let evidence {
+            let (reopened, detail) = await evidence.reopening(using: runtime)
+            var completed = result; completed.recoveryEvidence = reopened
+            return .init(applicationID: result.applicationID, state: result.state, observedVersion: result.observedVersion,
+                detail: result.detail + detail, recoveryEvidence: completed.recoveryEvidence)
+        }
+        var recorded = result; recorded.recoveryEvidence = evidence
+        return recorded
+    }
+
+    private func executeStopped(
         application: InstalledApplication,
         task: ApplicationUpdateTask,
         progress: @Sendable @escaping (ApplicationUpdateProgressEvent) async -> Void
@@ -232,12 +418,14 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
                         || providerResult.state == .completed else {
                     return providerResult
                 }
-                let observed = try await self.observedVersion(
-                    for: currentApplication,
-                    baselineVersion: task.originalVersion,
-                    targetVersion: task.targetVersion,
-                    expectedIdentity: task.originalIdentity
-                )
+                let observed: ApplicationVersion
+                do {
+                    observed = try await self.observedVersion(for: currentApplication, baselineVersion: task.originalVersion,
+                        targetVersion: task.targetVersion, expectedIdentity: task.originalIdentity)
+                } catch ProviderBackedUpdateExecutorError.versionDidNotChange where currentApplication.updateProvider == .vendorUpdater && task.targetVersion == nil {
+                    return .init(applicationID: application.id, state: .skipped, observedVersion: nil,
+                        detail: L10n.text("厂商更新器未发现更高版本", "The vendor updater did not find a newer version"))
+                }
                 return ApplicationUpdateInstallResult(
                     applicationID: application.id,
                     state: .completed,
@@ -341,6 +529,7 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
     }
 
     func cancel(applicationID: String) async {
+        await batchAuthorization.finish()
         let active = activeLock.withLock { activeUpdates[applicationID] }
         guard let active else { return }
         await active.provider.cancelUpdate(for: active.application)
@@ -443,8 +632,26 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
         task: ApplicationUpdateTask,
         application: InstalledApplication?
     ) async throws -> ApplicationUpdateInstallResult {
+        try await reconcile(task: task, application: application, transactionRecoveryConfirmed: false)
+    }
+
+    private func reconcile(task: ApplicationUpdateTask, application: InstalledApplication?,
+        transactionRecoveryConfirmed: Bool) async throws -> ApplicationUpdateInstallResult {
+        var task = task
+        let status = inspectProcesses(&task)
+        guard status == .stopped else { return pendingRecovery(task, detail: status.detail) }
+        if task.providerIdentifier == .homebrew {
+            var result = try await brewBatchInstaller.reconcile(application: application, task: task, reopenWhenVerified: false)
+            guard result.state == .completed else { return result }
+            let afterRead = inspectProcesses(&task)
+            guard afterRead == .stopped else { return pendingRecovery(task, detail: afterRead.detail) }
+            result.recoveryEvidence?.commandCompletion = task.recoveryEvidence?.commandCompletion
+            let (reopened, detail) = await ApplicationUpdateRecoveryEvidence.reopening(result.recoveryEvidence, using: runtime)
+            return .init(applicationID: result.applicationID, state: .completed, observedVersion: result.observedVersion,
+                detail: result.detail + detail, recoveryEvidence: reopened)
+        }
         var application = application
-        if task.providerIdentifier == .officialWebsite {
+        if [.officialWebsite, .sparkle].contains(task.providerIdentifier) {
             guard let targetVersion = task.targetVersion,
                   !targetVersion.preferred.isEmpty else {
                 throw ProviderBackedUpdateExecutorError.applicationNoLongerEligible
@@ -459,6 +666,12 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
                     throw ProviderBackedUpdateExecutorError.applicationMissing
                 }
                 if pending != nil {
+                    // Automatic queue restoration/status refresh must not move
+                    // bundles or remove recovery material. Only the UI's
+                    // confirmed Verify and Recover action enters this branch.
+                    guard transactionRecoveryConfirmed else {
+                        return pendingRecovery(task, detail: L10n.text("先前更新留下应用替换事务，请点击“核验并恢复”并确认后处理。", "An earlier update left an application replacement transaction. Choose Verify and Recover, then confirm to proceed."))
+                    }
                     _ = try OfficialApplicationReplacement.reconcilePending(
                         transactionURL: replacementTransactionURL,
                         expectedDestinationURL: application?.bundleURL,
@@ -492,7 +705,18 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
                 )
             }
         }
+        // A legacy intent may carry process identities only (empty path).
+        if application == nil, let evidence = task.recoveryEvidence, !evidence.applicationPath.isEmpty {
+            let running = await runningStateProvider()
+            if var disk = await metadataReader.read(applicationURL: URL(fileURLWithPath: evidence.applicationPath), runningState: running) {
+                disk.updateProvider = task.providerIdentifier; application = disk
+            }
+        }
         guard let application else { throw ProviderBackedUpdateExecutorError.applicationMissing }
+        if let evidence = task.recoveryEvidence, !evidence.applicationPath.isEmpty,
+            ApplicationPathNormalizer.comparisonKey(for: application.bundleURL) != ApplicationPathNormalizer.comparisonKey(for: URL(fileURLWithPath: evidence.applicationPath)) {
+            throw ProviderBackedUpdateExecutorError.applicationIdentityChanged
+        }
         guard application.updateProvider == task.providerIdentifier else {
             throw ProviderBackedUpdateExecutorError.providerMismatch
         }
@@ -505,12 +729,65 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
             targetVersion: task.targetVersion,
             expectedIdentity: task.originalIdentity
         )
+        let afterRead = inspectProcesses(&task)
+        guard afterRead == .stopped else { return pendingRecovery(task, detail: afterRead.detail) }
+        let (reopened, detail) = await ApplicationUpdateRecoveryEvidence.reopening(task.recoveryEvidence, using: runtime)
         return ApplicationUpdateInstallResult(
             applicationID: application.id,
             state: .completed,
             observedVersion: observed,
-            detail: L10n.text("已重新读取磁盘版本。", "The on-disk version was read again.")
+            detail: L10n.text("已重新读取磁盘版本。", "The on-disk version was read again.") + detail,
+            recoveryEvidence: reopened
         )
+    }
+
+    /// Called by the user-confirmed recovery action, never by automatic refresh.
+    func verifyAndRelease(task: ApplicationUpdateTask, application: InstalledApplication?) async throws -> ApplicationUpdateInstallResult {
+        var task = task
+        let status = inspectProcesses(&task)
+        guard status == .stopped else { return pendingRecovery(task, detail: status.detail) }
+        do {
+            let result = try await reconcile(task: task, application: application, transactionRecoveryConfirmed: true)
+            task.recoveryEvidence = result.recoveryEvidence ?? task.recoveryEvidence
+            if result.state == .completed { return result }
+            let afterRead = inspectProcesses(&task)
+            guard afterRead == .stopped else { return pendingRecovery(task, detail: afterRead.detail) }
+            return .init(applicationID: task.applicationID, state: .failed, observedVersion: nil,
+                detail: L10n.text("已确认安装进程结束，但无法证实达到原计划目标；已解除隔离，可重新授权更新。", "Installation processes have stopped, but the frozen target could not be verified. Quarantine released; authorize an update again.") + "\n" + result.detail,
+                confirmedStopped: true, recoveryEvidence: result.recoveryEvidence ?? task.recoveryEvidence)
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                return pendingRecovery(task, detail: L10n.text("核验已取消，继续隔离", "Verification cancelled; quarantine remains"))
+            }
+            if case ProviderBackedUpdateExecutorError.replacementRecoveryFailed = error {
+                return pendingRecovery(task, detail: AppUpdateErrorRedaction.text(error.localizedDescription))
+            }
+            let afterRead = inspectProcesses(&task)
+            guard afterRead == .stopped else { return pendingRecovery(task, detail: afterRead.detail) }
+            return .init(applicationID: task.applicationID, state: .failed, observedVersion: nil,
+                detail: L10n.text("已确认安装进程结束；未升版或旧记录无法证明原计划，已解除隔离，可重新授权更新。", "Installation processes have stopped. No upgrade or insufficient legacy evidence; quarantine released. Authorize an update again.") + "\n" + AppUpdateErrorRedaction.text(error.localizedDescription),
+                confirmedStopped: true, recoveryEvidence: task.recoveryEvidence)
+        }
+    }
+
+    private func inspectProcesses(_ task: inout ApplicationUpdateTask) -> AppUpdateInstallationProcessStatus {
+        var completion = task.recoveryEvidence?.commandCompletion ?? .stopped
+        let prefixes = [task.recoveryEvidence?.homebrewMetadata?.prefixPath].compactMap { $0 }
+        let status = processSafety.releaseStatus(&completion, homebrewPrefixes: prefixes)
+        // A legacy intent has no package/path baseline. Preserve that absence
+        // (and provider-wide quarantine), but retain newly observed installer
+        // descendants so the next session cannot forget a reparented child.
+        if task.recoveryEvidence == nil, !completion.processes.isEmpty {
+            task.recoveryEvidence = .init(applicationPath: "", homebrewMetadata: nil, artifacts: [],
+                commandCompletion: completion)
+        }
+        task.recoveryEvidence?.commandCompletion = completion
+        return status
+    }
+
+    private func pendingRecovery(_ task: ApplicationUpdateTask, detail: String) -> ApplicationUpdateInstallResult {
+        .init(applicationID: task.applicationID, state: .needsReconciliation, observedVersion: nil,
+            detail: detail, recoveryEvidence: task.recoveryEvidence)
     }
 
     private func preflight(
@@ -580,30 +857,14 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
                 return try Self.validatedObservedVersion(observed, targetVersion: targetVersion)
             }
 
-            let candidateURLs = metadata.appBundlePaths.map {
-                URL(fileURLWithPath: $0, isDirectory: true)
-            } + [application.bundleURL]
-            var lastError: ProviderBackedUpdateExecutorError = .applicationMissing
-            var seen = Set<String>()
-            for url in candidateURLs where seen.insert(url.standardizedFileURL.path).inserted {
-                do {
-                    let observed = try await readVerifiedApplication(
-                        at: url,
-                        baselineVersion: baselineVersion,
-                        expectedIdentity: expectedIdentity
-                    )
-                    return try Self.validatedObservedVersion(
-                        observed.installedVersion,
-                        targetVersion: targetVersion
-                    )
-                } catch let error as ProviderBackedUpdateExecutorError {
-                    if error == .applicationIdentityChanged
-                        || (error == .versionDidNotChange && lastError == .applicationMissing) {
-                        lastError = error
-                    }
-                }
-            }
-            throw lastError
+            // A newer duplicate artifact is not proof that the selected target
+            // was updated. Reconcile the exact path that passed preflight.
+            let observed = try await readVerifiedApplication(
+                at: application.bundleURL,
+                baselineVersion: baselineVersion,
+                expectedIdentity: expectedIdentity
+            )
+            return try Self.validatedObservedVersion(observed.installedVersion, targetVersion: targetVersion)
         }
 
         let observed = try await readVerifiedApplication(
@@ -611,10 +872,13 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
             baselineVersion: baselineVersion,
             expectedIdentity: expectedIdentity
         )
-        return try Self.validatedObservedVersion(
-            observed.installedVersion,
-            targetVersion: targetVersion
-        )
+        if application.updateProvider == .vendorUpdater && targetVersion == nil {
+            guard SparkleAutomaticUpdateAdapter.isNewer(observed.installedVersion, than: baselineVersion) else {
+                throw ProviderBackedUpdateExecutorError.versionDidNotChange
+            }
+            return observed.installedVersion
+        }
+        return try Self.validatedObservedVersion(observed.installedVersion, targetVersion: targetVersion)
     }
 
     private static func validatedObservedVersion(
@@ -624,7 +888,7 @@ final class ProviderBackedApplicationUpdateExecutor: ApplicationUpdateExecuting,
         guard let targetVersion, !targetVersion.preferred.isEmpty else {
             throw ProviderBackedUpdateExecutorError.applicationNoLongerEligible
         }
-        guard observed >= targetVersion else {
+        guard observed.reaches(targetVersion) else {
             throw ProviderBackedUpdateExecutorError.targetVersionNotReached(
                 expected: targetVersion,
                 observed: observed

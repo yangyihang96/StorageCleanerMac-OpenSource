@@ -39,12 +39,19 @@ enum BatteryPowerModeAdjustmentState: Equatable, Sendable {
 }
 
 struct DefaultComputerHealthProbe: ComputerHealthProbing {
+    private let eventRepository: any ComputerHealthEventPersisting
+
+    init(eventRepository: any ComputerHealthEventPersisting = ComputerHealthEventRepository.shared) {
+        self.eventRepository = eventRepository
+    }
+
     private enum Component: Sendable {
         case disk(DiskHealthSnapshot)
         case capacity(CapacityTrendSnapshot)
         case backup(TimeMachineSnapshot)
         case stability(StabilitySummary)
         case battery(BatteryHealthEvidence)
+        case security(SystemProtectionSnapshot)
     }
 
     func probe() async throws -> ComputerHealthSnapshot {
@@ -55,6 +62,7 @@ struct DefaultComputerHealthProbe: ComputerHealthProbing {
         var backup: TimeMachineSnapshot?
         var stability: StabilitySummary?
         var batteryEvidence: BatteryHealthEvidence?
+        var security: SystemProtectionSnapshot?
 
         try await withThrowingTaskGroup(of: Component.self) { group in
             group.addTask(priority: .utility) {
@@ -72,6 +80,9 @@ struct DefaultComputerHealthProbe: ComputerHealthProbing {
             group.addTask(priority: .utility) {
                 .battery(try await BatteryHealthRuntime.shared.evidence())
             }
+            group.addTask(priority: .utility) {
+                .security(await SystemProtectionAudit.check())
+            }
 
             for try await component in group {
                 if Task.isCancelled {
@@ -83,22 +94,45 @@ struct DefaultComputerHealthProbe: ComputerHealthProbing {
                 case let .backup(value): backup = value
                 case let .stability(value): stability = value
                 case let .battery(value): batteryEvidence = value
+                case let .security(value): security = value
                 }
             }
         }
 
         try Task.checkCancellation()
-        guard let disk, let capacity, let backup, let stability, let batteryEvidence else {
+        guard let disk, let capacity, let backup, let stability, let batteryEvidence, let security else {
             throw ComputerHealthRefreshError.readFailed
         }
-        return ComputerHealthSnapshot(
+        let snapshot = ComputerHealthSnapshot(
             generatedAt: Date(),
             disk: disk,
             capacity: capacity,
             backup: backup,
             stability: stability,
-            batteryEvidence: batteryEvidence
+            batteryEvidence: batteryEvidence,
+            security: security
         )
+        let changes: [ComputerHealthChangeEvent]
+        let changeLogReadFailed: Bool
+        var changeLogWasReset = false
+        do {
+            let recording = try await eventRepository.recordChanges(snapshot)
+            changes = recording.events
+            changeLogWasReset = recording.recoveredUnrecognizedJournal
+            changeLogReadFailed = false
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Local journal failure does not invalidate the read-only health
+            // evidence or lower the file/health score. Surface it explicitly.
+            changes = []
+            changeLogReadFailed = true
+        }
+        try Task.checkCancellation()
+        return ComputerHealthSnapshot(generatedAt: snapshot.generatedAt, disk: disk, capacity: capacity,
+            backup: backup, stability: stability, batteryEvidence: batteryEvidence,
+            security: security, recentChanges: changes, changeLogReadFailed: changeLogReadFailed,
+            changeLogWasReset: changeLogWasReset)
     }
 
     private static func capacityTrendSnapshot() -> CapacityTrendSnapshot {
@@ -209,12 +243,14 @@ final class ComputerHealthStore: ObservableObject {
 
     convenience init(
         freshnessTTL: TimeInterval = 600,
-        now: @escaping @MainActor () -> Date = { Date() }
+        now: @escaping @MainActor () -> Date = { Date() },
+        batteryPowerModeController: (any BatteryPowerModeControlling)? = nil
     ) {
         self.init(
             probe: DefaultComputerHealthProbe(),
             freshnessTTL: freshnessTTL,
             now: now,
+            batteryPowerModeController: batteryPowerModeController,
             historyRepository: ComputerHealthHistoryRepository(),
             capacityHistoryRepository: CapacityHistoryRepository(),
             thermalReadinessProvider: Self.liveThermalReadiness
@@ -477,6 +513,20 @@ final class ComputerHealthStore: ObservableObject {
         )
         menuBarSummary = menuBarSummary?.retainingDiskHealth(from: fallback) ?? fallback
     }
+
+#if DEBUG
+    /// Screenshot/test presentation only: shows a fixed evaluation on the real
+    /// results page. No probe, history save, capacity record or battery read.
+    func installDebugPresentationFixture(snapshot: ComputerHealthSnapshot, evaluation: ComputerHealthEvaluation) {
+        refreshOperation?.task.cancel()
+        refreshOperation = nil
+        isRefreshing = false
+        error = nil
+        self.snapshot = snapshot
+        self.evaluation = evaluation
+        lastRefreshAt = snapshot.generatedAt
+    }
+#endif
 
     private func finish(
         _ result: Result<PreparedHealthRefresh, ComputerHealthRefreshError>,

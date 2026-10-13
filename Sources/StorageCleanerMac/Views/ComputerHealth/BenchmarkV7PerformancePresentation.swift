@@ -227,13 +227,17 @@ struct BenchmarkV7RunProgressView: View {
         case completed
     }
 
+    @Environment(\.featureCardPresentation) private var cardPresentation
     let state: BenchmarkV7State
     let isPreflighting: Bool
     let accent: Color
     let canCancel: Bool
     let onCancel: () -> Void
-    var telemetryPoints: [MenuBarTelemetryPoint] = []
 
+    /// Review P2-3: the live monitor is no longer stacked below the progress
+    /// at a fixed 330 pt. The dashboard places it where the landing page has
+    /// it (`BenchmarkLandingLayout`), so it keeps its place and size when a
+    /// test starts.
     var body: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
             RuntimeInlineStatus(
@@ -260,16 +264,41 @@ struct BenchmarkV7RunProgressView: View {
                 }
             }
             if let progressValue { ProgressView(value: progressValue).tint(accent) }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 58), spacing: 8),
-                                     count: Stage.allCases.count), spacing: 10) {
-                ForEach(Stage.allCases) { stage in stageView(stage) }
-            }
+            stageGrid
             Text(stageCaption)
                 .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
-            BenchmarkSystemMonitor(telemetryPoints: telemetryPoints, accent: accent)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// The template keeps all six stages in one row. Legacy dashboards keep
+    /// their approved wrapping layout; full labels remain in help and AX.
+    var stageGrid: some View {
+        Group {
+            if cardPresentation == .running {
+                HStack(alignment: .top, spacing: 6) {
+                    ForEach(Stage.allCases) { stage in stageView(stage) }
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    stageGrid(columns: Array(repeating: GridItem(.flexible(minimum: 58), spacing: 8),
+                                             count: Stage.allCases.count))
+                        .frame(minWidth: CGFloat(Stage.allCases.count) * 58
+                            + CGFloat(Stage.allCases.count - 1) * 8)
+                    stageGrid(columns: [GridItem(.adaptive(minimum: 58), spacing: 8)])
+                }
+            }
+        }
+#if DEBUG
+        .layoutProbe("benchmark.stages")
+#endif
+    }
+
+    private func stageGrid(columns: [GridItem]) -> some View {
+        LazyVGrid(columns: columns, spacing: 10) {
+            ForEach(Stage.allCases) { stage in stageView(stage) }
+        }
     }
 
     private func stageView(_ stage: Stage) -> some View {
@@ -281,13 +310,18 @@ struct BenchmarkV7RunProgressView: View {
             Text(stage.title)
                 .font(AppDesignTokens.Typography.metadata)
                 .foregroundStyle(status == .waiting ? .secondary : .primary)
+                .lineLimit(cardPresentation == .running ? 1 : nil)
+                .help(stage.title)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
+#if DEBUG
+        .layoutProbe("benchmark.stage.\(stage.rawValue)")
+#endif
     }
 
-    private var phaseTitle: String {
+    var phaseTitle: String {
         if isPreflighting { return L10n.text("正在检查环境", "Checking environment") }
         return switch state.phase {
         case .preflighting: L10n.text("正在检查环境", "Checking environment")
@@ -303,7 +337,7 @@ struct BenchmarkV7RunProgressView: View {
         }
     }
 
-    private var currentTaskTitle: String {
+    var currentTaskTitle: String {
         if isPreflighting || state.phase == .preflighting {
             return L10n.text("检查电源、温度、内存与存储环境", "Checking power, temperature, memory, and storage")
         }
@@ -316,12 +350,10 @@ struct BenchmarkV7RunProgressView: View {
         default: break
         }
 
-        if let id = state.workloadID, id.hasPrefix("cpu.threadCurve.") {
-            let workers = id.split(separator: ".").last.map(String.init) ?? "—"
-            return L10n.text("扩展：CPU 线程曲线（\(workers) 线程）", "Extension: CPU thread curve (\(workers) workers)")
-        }
-        if state.workloadID?.hasPrefix("cpu.sustained.short.") == true {
-            return L10n.text("扩展：短持续表现观察", "Extension: short sustained observation")
+        if let id = state.workloadID,
+           MSeriesRunItemTitles.titles[id] != nil || id.hasPrefix("cpu.threadCurve.")
+                || id.hasPrefix("cpu.sustained.short.") {
+            return MSeriesRunItemTitles.chineseTitle(for: id)
         }
 
         switch state.workloadID {
@@ -337,8 +369,8 @@ struct BenchmarkV7RunProgressView: View {
         case "sustained.cpu-then-gpu", "sustained": return L10n.text("CPU 与 GPU 持续负载", "Sustained CPU and GPU load")
         case "sustained.cooling-down": return L10n.text("负载结束与温度恢复", "Load completion and thermal recovery")
         default:
-            return state.category.map { L10n.text("正在测试 \(categoryTitle($0))", "Testing \(categoryTitle($0))") }
-                ?? L10n.text("准备首个测试项目", "Preparing the first test")
+            if let id = state.workloadID { return MSeriesRunItemTitles.chineseTitle(for: id) }
+            return L10n.text("准备首个测试项目", "Preparing the first test")
         }
     }
 
@@ -415,65 +447,241 @@ private func categorySymbol(_ category: BenchmarkV7Category) -> String {
     }
 }
 
-/// Shared by the initial and running pages; all plotted values retain their
-/// provider timestamps through the existing telemetry chart.
+/// UI plan U1 029 (gap list 029): the temperature dial and the load chart are
+/// separate. The dial is a complete circle next to the CPU and GPU gauges; the
+/// load chart has its own full-width area below it. Both share the height the
+/// page can show above its status bar, so neither is cut off. All plotted
+/// values keep their provider timestamps through the existing chart.
+struct BenchmarkMonitorLayout: Equatable {
+    static let headerHeight: CGFloat = 18
+    static let sectionSpacing: CGFloat = 8
+    static let chartCaptionHeight: CGFloat = 14
+    static let chartCaptionSpacing: CGFloat = 4
+    /// Header, the two gaps between the three rows and the chart caption.
+    static let fixedChromeHeight: CGFloat = headerHeight + 2 * sectionSpacing
+        + chartCaptionHeight + chartCaptionSpacing
+    static let maximumDiameter: CGFloat = 240
+    static let dialGaugeSpacing: CGFloat = 16
+    static let maximumGaugeSize: CGFloat = 64
+    static let gaugeSpacing: CGFloat = 8
+    static let minimumChartHeight: CGFloat = 80
+    static let maximumChartHeight: CGFloat = 120
+    /// The chart's share of the height left for the dial and the chart.
+    static let chartShare: CGFloat = 0.38
+
+    /// The landing page's segmented page picker plus a little slack.
+    static let pagePickerAllowance: CGFloat = 28
+    static let landingMinimumHeight: CGFloat = 250
+    static let landingMaximumHeight: CGFloat = 430
+    /// The monitor height when no page height is given. The performance page
+    /// itself, idle or running, always passes `landingHeight` (review P2-3).
+    static let defaultHeight: CGFloat = 330
+
+    let diameter: CGFloat
+    let gaugeSize: CGFloat
+    let chartHeight: CGFloat
+
+    /// `width` and `height` are the monitor's content size, inside its padding.
+    init(width: CGFloat, height: CGFloat) {
+        let width = width.isFinite ? max(0, width) : 0
+        let height = height.isFinite ? max(0, height) : 0
+        guard width > 0, height > 0 else {
+            diameter = 0
+            gaugeSize = 0
+            chartHeight = 0
+            return
+        }
+        let flexible = max(0, height - Self.fixedChromeHeight)
+        chartHeight = min(Self.maximumChartHeight,
+                          max(min(Self.minimumChartHeight, flexible), flexible * Self.chartShare))
+        let byHeight = flexible - chartHeight
+        let byWidth = width - Self.dialGaugeSpacing - Self.maximumGaugeSize
+        diameter = max(0, min(Self.maximumDiameter, byHeight, byWidth))
+        gaugeSize = max(0, min(Self.maximumGaugeSize, (diameter - Self.gaugeSpacing) / 2))
+    }
+
+    /// The landing monitor's height: what the scroll area shows below the page
+    /// picker, so the dial is complete above the status bar (default window
+    /// and 900 x 640), within fixed limits.
+    static func landingHeight(scrollViewportHeight: CGFloat) -> CGFloat {
+        guard scrollViewportHeight.isFinite else { return landingMinimumHeight }
+        return min(landingMaximumHeight,
+                   max(landingMinimumHeight, visibleHeight(scrollViewportHeight: scrollViewportHeight)))
+    }
+
+    /// The height the scroll area shows below the page picker, before the
+    /// landing limits are applied.
+    static func visibleHeight(scrollViewportHeight: CGFloat) -> CGFloat {
+        guard scrollViewportHeight.isFinite else { return 0 }
+        return scrollViewportHeight - AppDesignTokens.Layout.pagePadding - pagePickerAllowance
+            - AppDesignTokens.Layout.pageSpacing - AppDesignTokens.Spacing.small
+    }
+}
+
+/// U1 029 and review P2-3/P2-4: how the performance page arranges its first
+/// screen, idle or running. The test card — or, while a test runs, its
+/// progress — sits beside the monitor while both fit, so the monitor has the
+/// same place and size in both states. Narrower pages stack the monitor below
+/// it; there, and where the page is too short to show the monitor, the status
+/// bar keeps a compact chip-temperature reading instead.
+struct BenchmarkLandingLayout: Equatable {
+    static let cardMinimumWidth: CGFloat = 290
+    static let cardIdealWidth: CGFloat = 300
+    static let cardMaximumWidth: CGFloat = 440
+    static let monitorMinimumWidth: CGFloat = 280
+    static let monitorIdealWidth: CGFloat = 300
+    /// Both ideal widths and the gap between them: where the earlier
+    /// ViewThatFits switched to the stacked arrangement.
+    static let sideBySideMinimumContentWidth: CGFloat = cardIdealWidth
+        + AppDesignTokens.Spacing.large + monitorIdealWidth
+
+    let placesMonitorBeside: Bool
+    let monitorHeight: CGFloat
+    let showsCompactTemperature: Bool
+
+    /// `scrollViewportSize` is the size of the page's scroll area (above the
+    /// status bar); the page content is inset by the page padding.
+    init(scrollViewportSize size: CGSize) {
+        let width = size.width.isFinite ? max(0, size.width) : 0
+        let height = size.height.isFinite ? max(0, size.height) : 0
+        placesMonitorBeside = width - 2 * AppDesignTokens.Layout.pagePadding
+            >= Self.sideBySideMinimumContentWidth
+        monitorHeight = BenchmarkMonitorLayout.landingHeight(scrollViewportHeight: height)
+        let monitorFitsFirstScreen = BenchmarkMonitorLayout.visibleHeight(scrollViewportHeight: height)
+            >= BenchmarkMonitorLayout.landingMinimumHeight
+        showsCompactTemperature = width > 0 && height > 0
+            && (!placesMonitorBeside || !monitorFitsFirstScreen)
+    }
+}
+
+/// Review P2-4: the chip temperature in one line for the status bar, shown
+/// when the dial is not on the first screen. It reads the same latest sample
+/// as the dial.
+struct BenchmarkCompactTemperature: View {
+    let telemetryPoints: [MenuBarTelemetryPoint]
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: AppSymbols.Panel.temperature)
+                .foregroundStyle(accent)
+                .accessibilityHidden(true)
+            Text(L10n.text("芯片温度", "Chip temperature"))
+                .foregroundStyle(.secondary)
+            Text(BenchmarkSystemMonitor.temperatureText(
+                BenchmarkSystemMonitor.latestChipTemperature(in: telemetryPoints)
+            ))
+            .monospacedDigit()
+            .foregroundStyle(.primary)
+        }
+        .font(AppDesignTokens.Typography.metadata)
+        .lineLimit(1)
+        .fixedSize()
+        .accessibilityElement(children: .combine)
+#if DEBUG
+        .layoutProbe("benchmark.compactTemperature")
+#endif
+    }
+}
+
 struct BenchmarkSystemMonitor: View {
     let telemetryPoints: [MenuBarTelemetryPoint]
     let accent: Color
-    var chartHeight: CGFloat = 128
+    /// The monitor's total height, padding included.
+    var availableHeight: CGFloat = BenchmarkMonitorLayout.defaultHeight
+
+    private var outerHeight: CGFloat {
+        availableHeight.isFinite
+            ? max(availableHeight, 2 * AppDesignTokens.Spacing.small)
+            : BenchmarkMonitorLayout.defaultHeight
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: AppDesignTokens.Spacing.small) {
-                Label(
-                    monitorTitle,
-                    systemImage: "waveform.path.ecg"
-                )
+        GeometryReader { proxy in
+            let metrics = BenchmarkMonitorLayout(width: proxy.size.width, height: proxy.size.height)
+            VStack(alignment: .leading, spacing: BenchmarkMonitorLayout.sectionSpacing) {
+                header
+                    .frame(height: BenchmarkMonitorLayout.headerHeight)
+
+                // The dial and gauges are centred so a wide monitor does not
+                // leave one large empty block on the right (D45).
+                HStack(alignment: .center, spacing: BenchmarkMonitorLayout.dialGaugeSpacing) {
+                    Spacer(minLength: 0)
+                    temperatureDial(diameter: metrics.diameter)
+                        .allowsHitTesting(false)
+#if DEBUG
+                        .layoutProbe("benchmark.monitor.dial")
+#endif
+                    VStack(alignment: .center, spacing: BenchmarkMonitorLayout.gaugeSpacing) {
+                        liveGauge(title: "CPU", value: telemetryPoints.last?.cpuTotal, tint: accent,
+                                  size: metrics.gaugeSize)
+                        liveGauge(title: "GPU", value: telemetryPoints.last?.gpu, tint: AppDesignTokens.Palette.caution,
+                                  size: metrics.gaugeSize)
+                    }
+                    .frame(width: BenchmarkMonitorLayout.maximumGaugeSize)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: metrics.diameter)
+
+                loadChart(height: metrics.chartHeight)
+#if DEBUG
+                    .layoutProbe("benchmark.monitor.chart")
+#endif
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+        }
+        .padding(AppDesignTokens.Spacing.small)
+        .frame(height: outerHeight)
+        .background(accent.opacity(0.018), in: RoundedRectangle(
+            cornerRadius: AppDesignTokens.Radius.glassControl,
+            style: .continuous
+        ))
+#if DEBUG
+        .layoutProbe("benchmark.monitor")
+#endif
+    }
+
+    private var header: some View {
+        HStack(spacing: AppDesignTokens.Spacing.small) {
+            Label(monitorTitle, systemImage: "waveform.path.ecg")
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .foregroundStyle(accent)
-
-                Spacer(minLength: AppDesignTokens.Spacing.small)
-
-                if let temperature = latestChipTemperature {
-                    Text("\(temperature.formatted(.number.precision(.fractionLength(0))))°C")
-                        .monospacedDigit()
-                } else {
-                    Text(L10n.text("温度不可用", "Temperature unavailable"))
-                }
-            }
-            .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
-
-            HStack(spacing: 24) {
-                liveGauge(title: "CPU", value: telemetryPoints.last?.cpuTotal, tint: accent)
-                liveGauge(title: "GPU", value: telemetryPoints.last?.gpu, tint: AppDesignTokens.Palette.caution)
-                Spacer(minLength: 0)
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(L10n.text("当前负载", "Current Load"))
-                        .font(AppDesignTokens.Typography.secondary)
-                    Text(L10n.text("最近 2 分钟 · 0–100%", "Last 2 minutes · 0–100%"))
-                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
-                }
-            }
-
+                .lineLimit(1)
+            Spacer(minLength: AppDesignTokens.Spacing.small)
             if let point = telemetryPoints.last {
-                HStack {
+                HStack(spacing: 4) {
                     Text(L10n.text("最近采样", "Last sample"))
                     Text(point.date, format: .dateTime.hour().minute().second())
                         .monospacedDigit()
                 }
-                .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .lineLimit(1)
             } else {
                 Text(L10n.text("等待首次采样", "Waiting for the first sample"))
-                    .font(AppDesignTokens.Typography.metadata)
+                    .lineLimit(1)
+            }
+        }
+        .font(AppDesignTokens.Typography.metadata)
+        .foregroundStyle(.secondary)
+    }
+
+    /// The live load curves in their own area below the dial: a caption with
+    /// the legend, then the percent axis and the chart.
+    private func loadChart(height: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: BenchmarkMonitorLayout.chartCaptionSpacing) {
+            HStack(spacing: AppDesignTokens.Spacing.small) {
+                Text(L10n.text("当前负载", "Current Load"))
+                    .foregroundStyle(.primary)
+                legendDot("CPU", tint: accent)
+                legendDot("GPU", tint: AppDesignTokens.Palette.caution)
+                Spacer(minLength: AppDesignTokens.Spacing.small)
+                Text(L10n.text("最近 2 分钟 · 0–100%", "Last 2 minutes · 0–100%"))
                     .foregroundStyle(.secondary)
             }
+            .font(AppDesignTokens.Typography.metadata)
+            .lineLimit(1)
+            .frame(height: BenchmarkMonitorLayout.chartCaptionHeight)
 
-            ZStack {
-                temperatureDial
-                    .allowsHitTesting(false)
-                HStack(spacing: 2) {
+            HStack(spacing: 2) {
                 VStack(alignment: .trailing, spacing: 0) {
                     Text("100%")
                     Spacer(minLength: 0)
@@ -516,65 +724,72 @@ struct BenchmarkSystemMonitor: View {
                     showsTooltip: true
                 )
             }
-                .frame(maxWidth: max(180, chartHeight - 20))
-                .padding(.vertical, 60)
-            }
-            .frame(height: max(280, chartHeight + 70))
+            .frame(height: height)
         }
-        .padding(AppDesignTokens.Spacing.small)
-        .background(accent.opacity(0.018), in: RoundedRectangle(
-            cornerRadius: AppDesignTokens.Radius.glassControl,
-            style: .continuous
-        ))
     }
 
-    private var temperatureDial: some View {
-        GeometryReader { proxy in
-            let diameter = min(proxy.size.width, proxy.size.height) - 10
-            ZStack {
-                Circle().stroke(accent.opacity(0.12), lineWidth: 1)
-                Circle().inset(by: 16).stroke(accent.opacity(0.08), lineWidth: 1)
-                Circle().inset(by: 34).stroke(accent.opacity(0.06), lineWidth: 1)
-                ForEach(0..<61, id: \.self) { tick in
-                    Rectangle()
-                        .fill(tick >= 48 ? Color.orange.opacity(0.65) : accent.opacity(0.40))
-                        .frame(width: 1, height: tick % 10 == 0 ? 8 : 4)
-                        .offset(y: -diameter / 2 + 5)
-                        .rotationEffect(.degrees(-135 + Double(tick) * 4.5))
-                }
-                Circle().trim(from: 0, to: 0.75)
-                    .stroke(accent.opacity(0.16), style: StrokeStyle(lineWidth: 3))
+    private func legendDot(_ title: String, tint: Color) -> some View {
+        HStack(spacing: 3) {
+            Circle().fill(tint).frame(width: 6, height: 6)
+            Text(title)
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// A complete temperature dial: ticks, a 270° track and the reading. The
+    /// load curves are no longer drawn inside it (U1 029).
+    private func temperatureDial(diameter: CGFloat) -> some View {
+        ZStack {
+            Circle().stroke(accent.opacity(0.12), lineWidth: 1)
+            Circle().inset(by: diameter * 0.08).stroke(accent.opacity(0.08), lineWidth: 1)
+            ForEach(0..<61, id: \.self) { tick in
+                Rectangle()
+                    .fill(tick >= 48 ? Color.orange.opacity(0.65) : accent.opacity(0.40))
+                    .frame(width: 1, height: tick % 10 == 0 ? 8 : 4)
+                    .offset(y: -diameter / 2 + 5)
+                    .rotationEffect(.degrees(-135 + Double(tick) * 4.5))
+            }
+            Circle().trim(from: 0, to: 0.75)
+                .stroke(accent.opacity(0.16), style: StrokeStyle(lineWidth: 3))
+                .rotationEffect(.degrees(135))
+                .padding(12)
+            if let temperature = latestChipTemperature, temperature.isFinite {
+                Circle().trim(from: 0, to: min(1, max(0, temperature / 100)) * 0.75)
+                    .stroke(AngularGradient(colors: [accent, .purple, .orange], center: .center,
+                                            startAngle: .degrees(135), endAngle: .degrees(405)),
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round))
                     .rotationEffect(.degrees(135))
-                if let temperature = latestChipTemperature, temperature.isFinite {
-                    Circle().trim(from: 0, to: min(1, max(0, temperature / 100)) * 0.75)
-                        .stroke(AngularGradient(colors: [accent, .purple, .orange], center: .center,
-                                                startAngle: .degrees(135), endAngle: .degrees(405)),
-                                style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                        .rotationEffect(.degrees(135))
-                }
-                VStack {
-                    Text(L10n.text("芯片温度 · 0–100°C", "Chip temperature · 0–100°C"))
-                    Spacer()
-                    Text(latestChipTemperature.map { "\($0.formatted(.number.precision(.fractionLength(0))))°C" } ?? "—")
-                        .font(.system(size: 19, weight: .medium)).monospacedDigit()
-                }
-                .font(.system(size: 10)).foregroundStyle(.secondary)
-                .padding(.vertical, 22)
+                    .padding(12)
             }
-            .frame(width: diameter, height: diameter)
-            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            VStack(spacing: 2) {
+                Text(L10n.text("芯片温度", "Chip temperature"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(Self.temperatureText(latestChipTemperature))
+                    .font(.system(size: max(16, diameter * 0.13), weight: .medium))
+                    .monospacedDigit()
+                    .accessibilityLabel(L10n.text("芯片温度", "Chip temperature"))
+                    .accessibilityValue(Self.temperatureText(latestChipTemperature))
+                Text("0–100°C")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+            .frame(width: diameter * 0.7)
         }
+        .frame(width: diameter, height: diameter)
     }
 
-    private func liveGauge(title: String, value: Double?, tint: Color) -> some View {
+    private func liveGauge(title: String, value: Double?, tint: Color, size: CGFloat) -> some View {
         let valid = value.flatMap { $0.isFinite && (0...100).contains($0) ? $0 : nil }
         return GeekCombinedRing(
             title: title,
             value: Self.loadText(valid),
             progress: valid.map { $0 / 100 },
             tint: tint,
-            size: 72,
-            fixedValueFontSize: 15,
+            size: size,
+            fixedValueFontSize: size >= 60 ? 14 : 12,
             strokeWidth: 5
         )
     }
@@ -593,8 +808,19 @@ struct BenchmarkSystemMonitor: View {
         return GeekChartUnit.percent.formatted(value)
     }
 
+    static func temperatureText(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "—" }
+        return "\(value.formatted(.number.precision(.fractionLength(0))))°C"
+    }
+
     private var latestChipTemperature: Double? {
-        guard let point = telemetryPoints.last else { return nil }
-        return MenuBarTelemetryChannel.chipTemperature.value(in: point)
+        Self.latestChipTemperature(in: telemetryPoints)
+    }
+
+    static func latestChipTemperature(in points: [MenuBarTelemetryPoint]) -> Double? {
+        guard let point = points.last else { return nil }
+        guard let value = MenuBarTelemetryChannel.chipTemperature.value(in: point),
+              value.isFinite else { return nil }
+        return value
     }
 }

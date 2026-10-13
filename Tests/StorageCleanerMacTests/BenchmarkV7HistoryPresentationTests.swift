@@ -161,9 +161,9 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
             categoryScore: 8_000,
             completedAt: Date(timeIntervalSinceReferenceDate: 200)
         )
-        let defaultsName = "BenchmarkV7RevokedDelete.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let defaultsName = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: defaultsName))
+        defer { TestPreferenceDomain.cleanup(suiteName: defaultsName) }
         defaults.set(
             [try XCTUnwrap(revoked.recordID).uuidString],
             forKey: "benchmark.v7.unconfirmedPromotionRecordIDs"
@@ -228,7 +228,7 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
 
     private func makeStore(
         history: any BenchmarkV7HistoryPersisting,
-        revocationDefaults: UserDefaults = .standard
+        revocationDefaults: UserDefaults? = nil
     ) throws -> MacBenchmarkStore {
         let catalog = try MacBenchmarkBaselineCatalog(
             activeBaselineVersion: "fixture",
@@ -240,7 +240,8 @@ final class BenchmarkV7HistoryPresentationTests: XCTestCase {
             lifecycleCleaner: NoopPresentationLifecycleCleaner(),
             historyRepository: EmptyPresentationV6History(),
             v7HistoryRepository: history,
-            v7PromotionRevocationDefaults: revocationDefaults
+            // Review P1-2: never the real standard domain (D48).
+            v7PromotionRevocationDefaults: revocationDefaults ?? TestPreferenceDomain.make(for: self)
         )
     }
 

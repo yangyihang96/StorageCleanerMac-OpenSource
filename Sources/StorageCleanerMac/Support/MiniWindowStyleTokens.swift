@@ -15,25 +15,74 @@ enum MiniWindowStyleTokens {
     // 8-point content inset and 2-point chart inset: 120 × 3-point slots.
     static let historyWidth: CGFloat = 380
     static let compactHistoryWidth: CGFloat = 380
+    // History inspectors share one plot viewport. Extra vertical space stays
+    // above the plot, so its baseline and any legend remain near the shell's
+    // lower edge across CPU, memory, disk, network, sensor and power pages.
+    static let historyHeight: CGFloat = 216
+    // One history plot block: the chart plus its axis row (start / gap legend
+    // / scale / now) directly below it. The block keeps the 154-point height
+    // the plot had before the axis row existed, so every history shell keeps
+    // its height, including the pages with rows below the chart.
+    static let historyPlotHeight: CGFloat = 154
+    static let historyAxisRowHeight: CGFloat = 14
+    static let historyChartHeight = historyPlotHeight - historyAxisRowHeight
+    static let historyContentHeight = historyHeight - 2 * contentInset
     static let anchorGap: CGFloat = 0
     static let cascadeGap: CGFloat = 0
 
     static let outerCornerRadius: CGFloat = 12
+    static let outerCornerExtent = continuousCornerExtent(radius: outerCornerRadius)
+
+    /// Read the platform shape's curve extent instead of treating a continuous
+    /// corner as a quarter circle or hard-coding a private Bezier coefficient.
+    static func continuousCornerExtent(radius: CGFloat) -> CGFloat {
+        guard radius.isFinite, radius > 0 else { return 0 }
+        let side = radius * 4
+        var extent = radius
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        shape.path(in: CGRect(x: 0, y: 0, width: side, height: side)).forEach { element in
+            let endpoint: CGPoint
+            switch element {
+            case let .curve(to: point, control1: _, control2: _): endpoint = point
+            case let .quadCurve(to: point, control: _): endpoint = point
+            default: return
+            }
+            if abs(endpoint.x) < 0.001 || abs(endpoint.x - side) < 0.001 {
+                extent = max(extent, min(endpoint.y, side - endpoint.y))
+            }
+            if abs(endpoint.y) < 0.001 || abs(endpoint.y - side) < 0.001 {
+                extent = max(extent, min(endpoint.x, side - endpoint.x))
+            }
+        }
+        return extent
+    }
     static let cardCornerRadius: CGFloat = 10
     static let controlCornerRadius: CGFloat = 6
     // iStat-like density: one equal inset on all four shell edges, with a
     // smaller repeated gap between sibling cards.
     static let contentInset: CGFloat = 8
-    static let cardSpacing: CGFloat = 5
+    static let cardSpacing: CGFloat = 6
     static let cardHorizontalInset: CGFloat = 8
     static let cardVerticalInset: CGFloat = 6
     static let rowSpacing: CGFloat = 4
     static let inlineSpacing: CGFloat = 6
+    // Gap between side-by-side value columns inside a card.
+    static let columnSpacing: CGFloat = 8
+    // SF Symbols retain their own aspect ratio inside equal, centered slots.
+    // Keep label and process geometry shared across modules and previews.
+    static let moduleIconGlyphSize: CGFloat = 12
+    static let moduleIconSlotSize: CGFloat = 16
+    static let moduleIconSpacing: CGFloat = 6
+    static let processIconSize: CGFloat = 16
+    static let disclosureGlyphSize: CGFloat = 9
+    static let disclosureIconSlotSize: CGFloat = 12
+    static let statusGlyphSize: CGFloat = 11
+    static let statusIconSlotSize: CGFloat = 14
     static let dataRowHeight: CGFloat = 16
     static let controlRowHeight: CGFloat = 24
-    static let lightShellShadowOpacity: Double = 0.24
+    static let lightShellShadowOpacity: Double = 0.08
     static let darkShellShadowOpacity: Double = 0.44
-    static let lightShellShadowRadius: CGFloat = 14
+    static let lightShellShadowRadius: CGFloat = 10
     static let darkShellShadowRadius: CGFloat = 16
     static let shellShadowYOffset: CGFloat = 4
 
@@ -41,9 +90,17 @@ enum MiniWindowStyleTokens {
     static let barSpacing: CGFloat = 1
     static let barPitch = barWidth + barSpacing
     static let panelBackgroundTintOpacity: Double = 0.18
-    static let lightMaterialNeutralTintOpacity: Double = 0.18
-    static let darkShellTopColor = Color(red: 0.035, green: 0.060, blue: 0.085)
-    static let darkShellBottomColor = Color(red: 0.010, green: 0.020, blue: 0.032)
+    static let lightMaterialNeutralTintOpacity: Double = 0.94
+    // Daylight preserves the former graphite panel. Night uses a neutral black
+    // surface; attached levels share the same fill at their seams.
+    static let graphiteShellColor = MonitorPalette.graphiteShell
+    static let darkShellColor = MonitorPalette.blackShell
+    static let darkShellTopColor = darkShellColor
+    static let darkShellBottomColor = darkShellColor
+
+    static func shellColor(for visualMode: MiniWindowVisualMode) -> Color {
+        visualMode == .graphite ? graphiteShellColor : darkShellColor
+    }
 
     static let detailRevealDelay = HoverIntentPolicy.menuBar.initialOpenDelay
     static let historyRevealDelay = HoverIntentPolicy.menuBar.switchDelay
@@ -165,7 +222,9 @@ struct MiniWindowBorderEdges: Equatable {
             spans.contains { $0.upperBound >= 1 - tolerance }
         }
         func addCorner(_ x: CGFloat, _ y: CGFloat, radius: CGFloat) {
-            let extent = max(radius, 0) + thickness
+            let extent = (radius == MiniWindowStyleTokens.outerCornerRadius
+                ? MiniWindowStyleTokens.outerCornerExtent
+                : MiniWindowStyleTokens.continuousCornerExtent(radius: radius)) + thickness
             path.addRect(
                 CGRect(
                     x: x,
@@ -211,6 +270,8 @@ struct MetricPanelShell<Content: View>: View {
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.displayScale) private var displayScale
     @Environment(\.panelBackgroundTint) private var panelBackgroundTint
+    @Environment(\.panelChromePalette) private var panelChromePalette
+    @Environment(\.miniWindowVisualMode) private var visualMode
 
     let cornerRadii: RectangleCornerRadii
     let borderEdges: MiniWindowBorderEdges
@@ -238,18 +299,11 @@ struct MetricPanelShell<Content: View>: View {
         let shape = UnevenRoundedRectangle(cornerRadii: cornerRadii, style: .continuous)
         content
             .background {
-                if colorScheme == .dark {
+                if let panelChromePalette {
+                    shape.fill(panelChromePalette.shell)
+                } else if colorScheme == .dark {
                     shape
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    MiniWindowStyleTokens.darkShellTopColor,
-                                    MiniWindowStyleTokens.darkShellBottomColor,
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+                        .fill(MiniWindowStyleTokens.shellColor(for: visualMode))
                         .overlay {
                             if let panelBackgroundTint {
                                 shape.fill(panelBackgroundTint)
@@ -264,7 +318,7 @@ struct MetricPanelShell<Content: View>: View {
                             ZStack {
                                 if colorScheme == .light {
                                     shape.fill(
-                                        Color.white.opacity(
+                                        AppAppearanceColors.secondarySurface.opacity(
                                             MiniWindowStyleTokens.lightMaterialNeutralTintOpacity
                                         )
                                     )
@@ -300,7 +354,8 @@ struct MetricPanelShell<Content: View>: View {
     }
 
     private var opaqueSurface: Color {
-        Color(nsColor: .windowBackgroundColor)
+        if let panelChromePalette { return panelChromePalette.shell }
+        return colorScheme == .light ? AppAppearanceColors.secondarySurface : MiniWindowStyleTokens.shellColor(for: visualMode)
     }
 
     private var shellShadowOpacity: Double {
@@ -316,24 +371,39 @@ struct MetricPanelShell<Content: View>: View {
     }
 
     private var borderColor: Color {
-        colorSchemeContrast == .increased
+        if let panelChromePalette {
+            return colorSchemeContrast == .increased ? panelChromePalette.text : panelChromePalette.border
+        }
+        return colorSchemeContrast == .increased
             ? AppDesignTokens.Palette.primaryText.opacity(0.8)
             : colorScheme == .dark
-                ? Color.white.opacity(0.10)
-                : Color.black.opacity(0.14)
+                ? (visualMode == .black ? MonitorPalette.blackBorder : MonitorPalette.graphiteBorder)
+                : AppAppearanceColors.border
+    }
+}
+
+private struct MiniWindowPageProvidesInsetKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var miniWindowPageProvidesInset: Bool {
+        get { self[MiniWindowPageProvidesInsetKey.self] }
+        set { self[MiniWindowPageProvidesInsetKey.self] = newValue }
     }
 }
 
 private struct MiniWindowTooltipChrome: ViewModifier {
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.panelChromePalette) private var panelChromePalette
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
         content
-            .background(shape.fill(AppAppearanceColors.tooltip))
+            .background(shape.fill(panelChromePalette?.card ?? AppAppearanceColors.tooltip))
             .overlay {
                 shape
-                    .strokeBorder(AppAppearanceColors.ink.opacity(0.16), lineWidth: MiniWindowPixel.onePhysicalPixel(displayScale: displayScale))
+                    .strokeBorder(panelChromePalette?.border ?? AppAppearanceColors.ink.opacity(0.16), lineWidth: MiniWindowPixel.onePhysicalPixel(displayScale: displayScale))
                     .allowsHitTesting(false)
             }
             .shadow(color: .black.opacity(0.24), radius: 5, y: 2)

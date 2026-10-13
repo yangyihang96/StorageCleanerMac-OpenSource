@@ -8,6 +8,12 @@ enum PanelChartSampling {
         L10n.text("正在采样…", "Sampling…")
     }
 
+    static func placeholderText(sampledAt: Date?, isPaused: Bool, now: Date = Date()) -> String {
+        if isPaused { return L10n.text("已暂停", "Paused") }
+        guard let sampledAt else { return statusText }
+        return L10n.text("趋势数据不足 · ", "Insufficient trend data · ") + PanelTimestampFormat.age(sampledAt, now: now)
+    }
+
     static func hasRenderableTrend(_ values: [Double?]) -> Bool {
         var contiguousCount = 0
         for value in values {
@@ -77,11 +83,19 @@ enum PanelChartSampling {
 
 }
 
+private struct PanelStoredSampleDateKey: EnvironmentKey {
+    static let defaultValue: Date? = nil
+}
+
 private struct PanelAutomaticRefreshPausedKey: EnvironmentKey {
     static let defaultValue = false
 }
 
 extension EnvironmentValues {
+    var panelStoredSampleDate: Date? {
+        get { self[PanelStoredSampleDateKey.self] }
+        set { self[PanelStoredSampleDateKey.self] = newValue }
+    }
     var panelAutomaticRefreshPaused: Bool {
         get { self[PanelAutomaticRefreshPausedKey.self] }
         set { self[PanelAutomaticRefreshPausedKey.self] = newValue }
@@ -90,12 +104,25 @@ extension EnvironmentValues {
 
 struct PanelChartSamplingPlaceholder: View {
     @Environment(\.panelAutomaticRefreshPaused) private var isPaused
+    @Environment(\.panelStoredSampleDate) private var sampledAt
 
     var body: some View {
-        Text(isPaused ? L10n.text("已暂停", "Paused") : PanelChartSampling.statusText)
+        Text(PanelChartSampling.placeholderText(sampledAt: sampledAt, isPaused: isPaused))
             .font(AdvancedPanelTypography.caption)
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .accessibilityHidden(true)
+            .menuBarTraceProbe { PanelChartPlaceholderProbe() }
+    }
+}
+
+/// Audit only: `chart.placeholder.<region>`, a chart showed its sampling
+/// placeholder instead of data.
+private struct PanelChartPlaceholderProbe: View {
+    @Environment(\.menuBarTraceRegion) private var region
+
+    var body: some View {
+        MenuBarPresentationProbe(key: "chart.placeholder.\(region)")
+            .frame(width: 1, height: 1)
     }
 }

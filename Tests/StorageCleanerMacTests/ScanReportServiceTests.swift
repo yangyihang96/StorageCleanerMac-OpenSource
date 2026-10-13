@@ -2,13 +2,17 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class ScanReportServiceTests: XCTestCase {
+    private var languagePreferences: TestVolatilePreferences!
+
     override func setUp() {
         super.setUp()
-        UserDefaults.standard.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
+        languagePreferences = TestVolatilePreferences()
+        languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)
     }
 
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: L10n.languageDefaultsKey)
+        languagePreferences.restore()
+        languagePreferences = nil
         super.tearDown()
     }
 
@@ -29,8 +33,8 @@ final class ScanReportServiceTests: XCTestCase {
         XCTAssertTrue(markdown.contains("可信度扣分"))
         XCTAssertTrue(markdown.contains("结果时效"))
         XCTAssertTrue(markdown.contains("2 小时内"))
-        XCTAssertTrue(markdown.contains("权限覆盖率"))
-        XCTAssertTrue(markdown.contains("85%"))
+        XCTAssertTrue(markdown.contains("全盘权限覆盖率（未测量）"))
+        XCTAssertTrue(markdown.contains("| 全盘权限覆盖率（未测量） | — |"))
         XCTAssertTrue(markdown.contains("扫描完成状态"))
         XCTAssertTrue(markdown.contains("完整完成"))
         XCTAssertTrue(markdown.contains("评分项"))
@@ -110,7 +114,7 @@ final class ScanReportServiceTests: XCTestCase {
 
         XCTAssertTrue(markdown.contains("达到扫描预算或安全数量上限，部分位置未完成"))
         XCTAssertTrue(markdown.contains("扫描未完成"))
-        XCTAssertTrue(markdown.contains("权限覆盖率 | 100%"))
+        XCTAssertTrue(markdown.contains("全盘权限覆盖率（未测量） | —"))
         XCTAssertTrue(markdown.contains("扫描完成状态 | 部分完成"))
         XCTAssertFalse(markdown.contains("| 扫描完整度 | 100%"))
         XCTAssertTrue(markdown.contains("95/100"))
@@ -184,7 +188,7 @@ final class ScanReportServiceTests: XCTestCase {
         sizeBytes: Int64,
         sourceID: String = ""
     ) -> StorageItem {
-        let path = "~/Library/Caches/\(title)"
+        let path = "/Users/fixture/Library/Caches/\(title)"
         return StorageItem(
             id: PathSafety.normalizedPath(path),
             title: title,

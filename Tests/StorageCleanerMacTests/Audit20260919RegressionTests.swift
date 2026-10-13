@@ -38,9 +38,9 @@ final class Audit20260919RegressionTests: XCTestCase {
 
     func testOwnedStagingDirectoryCleansPartiallyCreatedCopy() throws {
         let fm = FileManager.default
-        let parent = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let parent = TestFileSystem.uniqueOperationRoot("staging-tests")
+        TestFileSystem.registerCleanup(of: parent, for: self)
         try fm.createDirectory(at: parent, withIntermediateDirectories: false)
-        defer { try? fm.removeItem(at: parent) }
         let unrelated = parent.appendingPathComponent("keep.txt")
         try Data("keep".utf8).write(to: unrelated)
         let staging = try MigrationStagingDirectory(parentURL: parent)

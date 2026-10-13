@@ -1,3 +1,4 @@
+import FanControlShared
 import Foundation
 import XCTest
 @testable import StorageCleanerMac
@@ -38,7 +39,11 @@ final class FanControlPackagingTests: XCTestCase {
             "helper.execute(requestData) { @Sendable replyData in"
         ))
         XCTAssertTrue(helper.contains("clientMatchesHelper(auditToken:"))
-        XCTAssertTrue(helper.contains("clientIdentity.identifier == mainApplicationIdentifier"))
+        let signingPolicy = try source("Sources/FanControlShared/HelperUpgradeSafety.swift")
+        XCTAssertTrue(helper.contains("clientIdentifier: clientIdentity.identifier, expectedIdentifier: mainApplicationIdentifier"))
+        XCTAssertTrue(helper.contains("HelperClientSigningPolicy.permits("))
+        XCTAssertTrue(signingPolicy.contains("clientIdentifier == expectedIdentifier"))
+        XCTAssertTrue(signingPolicy.contains("!helperCertificates.isEmpty && helperCertificates == clientCertificates"))
         XCTAssertTrue(helper.contains("watchdogDeadline"))
         XCTAssertTrue(helper.contains("restoreAllFans()"))
         XCTAssertTrue(helper.contains("exit(EXIT_SUCCESS)"))
@@ -173,7 +178,7 @@ final class FanControlPackagingTests: XCTestCase {
         ))
         XCTAssertLessThan(marker.lowerBound, firstTargetWrite.lowerBound)
         XCTAssertTrue(helper.contains(
-            "guard recoverPreviousControlIfNeeded() else"
+            "startupSafety.start(recoverFans:"
         ))
         XCTAssertTrue(helper.contains(
             "return restoreAllFans()"
@@ -181,9 +186,23 @@ final class FanControlPackagingTests: XCTestCase {
         XCTAssertTrue(helper.contains(
             "clearCrashRecoveryMarker()"
         ))
-        XCTAssertTrue(helper.contains(
-            "exit(EXIT_FAILURE)"
-        ))
+        // Third-round user decision: fault-only reporting, followed by a clean
+        // idle exit, replaces a nonzero startup exit/KeepAlive restart loop.
+        // Lock the safety consequence with behavior, not an exit substring.
+        let startup = FanControlStartupSafety()
+        var events: [String] = []
+        XCTAssertEqual(startup.start(recoverFans: {
+            events.append("recover")
+            return false
+        }, prepareMacMiniForTermination: {
+            events.append("mac-mini-termination")
+        }), .recoveryFailed)
+        XCTAssertFalse(startup.startNormalWork { events.append("normal-start") })
+        let accepted = startup.dispatch(execute: { events.append("fan-write"); return true }, reject: { _ in false })
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(events, ["recover", "mac-mini-termination"])
+        XCTAssertFalse(startup.requiresResidentHelper(macMiniRequested: true))
+        XCTAssertTrue(helper.contains("startupSafety.dispatch(execute:"))
     }
 
     func testFanCurveRunsInHelperAndKeepsEveryFailClosedBoundary() throws {

@@ -1,10 +1,22 @@
 import Foundation
 
+/// History points that may carry D80 bucket statistics.
+protocol MenuBarBucketStatisticsCarrier {
+    var date: Date { get }
+    var bucketStatistics: MenuBarHistoryStatistics? { get }
+}
+
+extension MenuBarTelemetryPoint: MenuBarBucketStatisticsCarrier {}
+extension NativeDiskIOPoint: MenuBarBucketStatisticsCarrier {}
+extension MenuBarPowerHistoryPoint: MenuBarBucketStatisticsCarrier {}
+
 struct MetricHistorySnapshot: Codable, Equatable, Sendable {
     static let currentVersion = 1
     static let empty = MetricHistorySnapshot()
 
     var version: Int
+    var checkpointSequence: UInt64 = 0
+    var checkpointWrittenAt: Date? = nil
     var telemetry: [MenuBarTelemetryPoint]
     var memoryTelemetry: [MenuBarTelemetryPoint]
     var diskIO: [NativeDiskIOPoint]
@@ -26,6 +38,8 @@ struct MetricHistorySnapshot: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case version
+        case checkpointSequence
+        case checkpointWrittenAt
         case telemetry
         case memoryTelemetry
         case diskIO
@@ -35,6 +49,8 @@ struct MetricHistorySnapshot: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decode(Int.self, forKey: .version)
+        checkpointSequence = try container.decodeIfPresent(UInt64.self, forKey: .checkpointSequence) ?? 0
+        checkpointWrittenAt = try container.decodeIfPresent(Date.self, forKey: .checkpointWrittenAt)
         telemetry = try container.decodeIfPresent(
             BoundedMonitoringArray<MenuBarTelemetryPoint>.self,
             forKey: .telemetry
@@ -61,6 +77,8 @@ struct MetricHistorySnapshot: Codable, Equatable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(version, forKey: .version)
+        if checkpointSequence > 0 { try container.encode(checkpointSequence, forKey: .checkpointSequence) }
+        try container.encodeIfPresent(checkpointWrittenAt, forKey: .checkpointWrittenAt)
         try container.encode(telemetry, forKey: .telemetry)
         try container.encode(memoryTelemetry, forKey: .memoryTelemetry)
         try container.encode(diskIO, forKey: .diskIO)
@@ -84,22 +102,34 @@ actor MetricHistoryStore {
     static let futureTolerance: TimeInterval = 5 * 60
 
     static var defaultURL: URL? {
-        MenuBarPowerHistoryStore.defaultURL?
-            .deletingLastPathComponent()
+        AppDataDirectories.applicationSupportRoot
+            .appendingPathComponent("Monitoring", isDirectory: true)
             .appendingPathComponent("MetricHistory-v1.json")
     }
 
     static func live() -> MetricHistoryStore? {
-        defaultURL.map {
-            MetricHistoryStore(
-                url: $0,
-                legacyPowerURL: MenuBarPowerHistoryStore.defaultURL
-            )
-        }
+        defaultURL.map { live(url: $0, usesIntegrationRoot: AppDataDirectories.isUsingIntegrationRoot) }
+    }
+
+    /// An isolated QA root starts from its own data only: importing the
+    /// installed app's legacy history would make a fresh root non-empty.
+    static func live(url: URL, usesIntegrationRoot: Bool) -> MetricHistoryStore {
+        guard !usesIntegrationRoot else { return MetricHistoryStore(url: url) }
+        return MetricHistoryStore(url: url, legacyPowerURL: MenuBarPowerHistoryStore.legacyURL,
+            legacyMetricURL: MenuBarPowerHistoryStore.legacyURL?.deletingLastPathComponent()
+                .appendingPathComponent("MetricHistory-v1.json"))
     }
 
     private let url: URL
-    private let legacyPowerURL: URL?
+    nonisolated let legacyPowerURL: URL?
+    nonisolated let legacyMetricURL: URL?
+    private var pending = MetricHistorySnapshot.empty
+    private var journalSequence: UInt64 = 0
+    private let beforeJournalWrite: @Sendable () throws -> Void
+    private var persistenceIssueHandler: (@Sendable (String?) -> Void)?
+    private(set) var persistenceIssue: String? {
+        didSet { if oldValue != persistenceIssue { persistenceIssueHandler?(persistenceIssue) } }
+    }
     private let maximumFileSize: Int
     private var cached = MetricHistorySnapshot.empty
     private var isLoaded = false
@@ -111,21 +141,22 @@ actor MetricHistoryStore {
     private(set) var saveSchedule = MonitoringSaveSchedule()
     private(set) var loadFailure: String?
     private var lastPersistenceError: (any Error)?
-    private let write: @Sendable (Data, URL) throws -> Void
+    private let write: (@Sendable (Data, URL) throws -> Void)?
 
     init(
         url: URL,
         legacyPowerURL: URL? = nil,
         maximumFileSize: Int = MetricHistoryStore.maximumFileSize,
-        write: @escaping @Sendable (Data, URL) throws -> Void = { data, url in
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: url, options: .atomic)
-        }
+        write: (@Sendable (Data, URL) throws -> Void)? = nil,
+        legacyMetricURL: URL? = nil,
+        beforeJournalWrite: @escaping @Sendable () throws -> Void = {}
     ) {
         self.url = url
         self.legacyPowerURL = legacyPowerURL
+        self.legacyMetricURL = legacyMetricURL
         self.maximumFileSize = max(1, min(maximumFileSize, Self.maximumFileSize))
         self.write = write
+        self.beforeJournalWrite = beforeJournalWrite
     }
 
     func load(now: Date = Date()) -> MetricHistorySnapshot {
@@ -133,21 +164,52 @@ actor MetricHistoryStore {
         isLoaded = true
 
         do {
-            if let data = try BoundedMonitoringFile.read(url, maximumBytes: maximumFileSize) {
+            let journal = MetricHistoryJournal(url: url, maximumSnapshotBytes: maximumFileSize)
+            var loaded = try journal.load()
+            if let decoded = loaded.snapshot {
+                guard decoded.version == MetricHistorySnapshot.currentVersion,
+                      (decoded.telemetry + decoded.memoryTelemetry).allSatisfy({
+                          ($0.temperatureReadings?.count ?? 0) <= 64 && ($0.fanReadings?.count ?? 0) <= 64
+                      }) else { throw MonitoringFileError.invalidStructure }
+            }
+            if let issue = loaded.issue {
+                // A torn tail used to stop saving on every later launch. Keep the
+                // original log byte for byte, then continue from the valid prefix.
+                do {
+                    // Saving works again, so no persistence issue is reported; the
+                    // preserved copy beside the journal keeps the evidence.
+                    if let recovered = try journal.preserveDamagedTailAndCheckpoint(now: now) {
+                        loaded = recovered.loaded
+                    }
+                } catch {
+                    // The original could not be preserved: leave it untouched and stop saving.
+                    journalSequence = loaded.sequence
+                    if let decoded = loaded.snapshot { cached = Self.sanitized(decoded, now: now) }
+                    loadFailure = issue
+                    persistenceIssue = issue
+                    return cached
+                }
+            }
+            journalSequence = loaded.sequence
+            if let decoded = loaded.snapshot {
+                cached = Self.sanitized(decoded, now: now)
+                return cached
+            }
+            if let legacyMetricURL, legacyMetricURL.standardizedFileURL != url.standardizedFileURL,
+               let data = try BoundedMonitoringFile.read(legacyMetricURL, maximumBytes: maximumFileSize) {
                 let decoded = try JSONDecoder().decode(MetricHistorySnapshot.self, from: data)
                 guard decoded.version == MetricHistorySnapshot.currentVersion,
                       (decoded.telemetry + decoded.memoryTelemetry).allSatisfy({
                           ($0.temperatureReadings?.count ?? 0) <= 64 && ($0.fanReadings?.count ?? 0) <= 64
-                      }) else {
-                    throw MonitoringFileError.invalidStructure
-                }
+                      }) else { throw MonitoringFileError.invalidStructure }
                 cached = Self.sanitized(decoded, now: now)
+                pending = cached
+                markDirtyAndPersistIfNeeded(now: now)
                 return cached
             }
         } catch {
-            // Preserve the original byte-for-byte. New observations stay in the
-            // bounded live buffer; never replace an unreadable file with empty data.
             loadFailure = String(describing: error)
+            persistenceIssue = loadFailure
             return cached
         }
 
@@ -155,6 +217,7 @@ actor MetricHistoryStore {
         let legacyPower = MenuBarPowerHistoryStore.load(from: legacyPowerURL, now: now)
         guard !legacyPower.isEmpty else { return cached }
         cached.power = legacyPower
+        pending.power = legacyPower
         markDirtyAndPersistIfNeeded(now: now)
         return cached
     }
@@ -163,6 +226,7 @@ actor MetricHistoryStore {
         _ = load(now: now)
         guard Self.isValid(point, now: now) else { return }
         Self.appendOrdered(point, to: &cached.telemetry, date: \.date)
+        Self.appendOrdered(point, to: &pending.telemetry, date: \.date)
         markDirtyAndPersistIfNeeded(now: now)
     }
 
@@ -173,6 +237,7 @@ actor MetricHistoryStore {
         _ = load(now: now)
         guard Self.isValid(point, now: now) else { return }
         Self.appendOrdered(point, to: &cached.memoryTelemetry, date: \.date)
+        Self.appendOrdered(point, to: &pending.memoryTelemetry, date: \.date)
         markDirtyAndPersistIfNeeded(now: now)
     }
 
@@ -180,6 +245,7 @@ actor MetricHistoryStore {
         _ = load(now: now)
         guard Self.isValid(point, now: now) else { return }
         Self.appendOrdered(point, to: &cached.diskIO, date: \.date)
+        Self.appendOrdered(point, to: &pending.diskIO, date: \.date)
         markDirtyAndPersistIfNeeded(now: now)
     }
 
@@ -187,6 +253,7 @@ actor MetricHistoryStore {
         _ = load(now: now)
         guard Self.isValid(point, now: now) else { return }
         Self.appendOrdered(point, to: &cached.power, date: \.date)
+        Self.appendOrdered(point, to: &pending.power, date: \.date)
         markDirtyAndPersistIfNeeded(now: now)
     }
 
@@ -225,15 +292,27 @@ actor MetricHistoryStore {
         let limit = maximumFileSize
         let destination = url
         let write = self.write
+        let delta = pending
+        pending = .empty
+        let expectedSequence = journalSequence
+        let beforeWrite = beforeJournalWrite
         let worker = Task.detached(priority: .utility) {
-            var document = Self.persistable(snapshot, longRangeBucket: 5 * 60)
-            var data = try JSONEncoder().encode(document)
-            if data.count > limit {
-                document = Self.persistable(snapshot, longRangeBucket: 30 * 60)
-                data = try JSONEncoder().encode(document)
+            // The compatibility writer remains injectable for legacy snapshot clients.
+            // The production path appends only delta and encodes a full document at checkpoints.
+            if let write {
+                var document = Self.persistable(snapshot, longRangeBucket: 5 * 60)
+                var data = try JSONEncoder().encode(document)
+                if data.count > limit {
+                    document = Self.persistable(snapshot, longRangeBucket: 30 * 60)
+                    data = try JSONEncoder().encode(document)
+                }
+                guard data.count <= limit else { throw MetricHistoryStoreError.fileTooLarge }
+                try write(data, destination)
+                return MetricHistoryJournal.Saved(sequence: expectedSequence, issue: nil)
             }
-            guard data.count <= limit else { throw MetricHistoryStoreError.fileTooLarge }
-            try write(data, destination)
+            return try MetricHistoryJournal(url: destination, maximumSnapshotBytes: limit, beforeWrite: beforeWrite)
+                .persist(snapshot: snapshot,
+                         delta: delta, expectedSequence: expectedSequence, now: now)
         }
         let task = Task {
             let result = await worker.result
@@ -241,12 +320,18 @@ actor MetricHistoryStore {
             // immediately replaying a backlog of historical save deadlines.
             let completedAt = max(now, latestMutationAt)
             switch result {
-            case .success:
+            case let .success(saved):
+                journalSequence = saved.sequence
+                persistenceIssue = saved.issue
                 persistedRevision = savedRevision
                 isDirty = revision != savedRevision
                 saveSchedule.succeeded(at: completedAt)
                 lastPersistenceError = nil
             case .failure(let error):
+                var restoredPending = delta
+                Self.merge(pending, into: &restoredPending)
+                pending = restoredPending
+                persistenceIssue = String(describing: error)
                 saveSchedule.failed(at: completedAt)
                 lastPersistenceError = error
             }
@@ -258,28 +343,62 @@ actor MetricHistoryStore {
 
     var isSaveInFlight: Bool { saveTask != nil }
 
+    func setPersistenceIssueHandler(_ handler: @escaping @Sendable (String?) -> Void) {
+        persistenceIssueHandler = handler
+        handler(persistenceIssue)
+    }
+
+    nonisolated static func merge(_ delta: MetricHistorySnapshot, into snapshot: inout MetricHistorySnapshot) {
+        for point in delta.telemetry { appendOrdered(point, to: &snapshot.telemetry, date: \.date) }
+        for point in delta.memoryTelemetry { appendOrdered(point, to: &snapshot.memoryTelemetry, date: \.date) }
+        for point in delta.diskIO { appendOrdered(point, to: &snapshot.diskIO, date: \.date) }
+        for point in delta.power { appendOrdered(point, to: &snapshot.power, date: \.date) }
+    }
+
     private static func sanitized(
         _ snapshot: MetricHistorySnapshot,
         now: Date
     ) -> MetricHistorySnapshot {
-        MetricHistorySnapshot(
-            telemetry: retained(snapshot.telemetry, now: now, date: \.date) {
+        let gaps = MenuBarSamplingGaps.shared.intervals(at: now)
+        return MetricHistorySnapshot(
+            telemetry: withBucketStatistics(retained(snapshot.telemetry, now: now, date: \.date) {
                 isValid($0, now: now)
-            },
-            memoryTelemetry: retained(
+            }, gaps: gaps),
+            memoryTelemetry: withBucketStatistics(retained(
                 snapshot.memoryTelemetry,
                 now: now,
                 date: \.date
             ) {
                 isValid($0, now: now)
-            },
-            diskIO: retained(snapshot.diskIO, now: now, date: \.date) {
+            }, gaps: gaps),
+            diskIO: withBucketStatistics(retained(snapshot.diskIO, now: now, date: \.date) {
                 isValid($0, now: now)
-            },
-            power: retained(snapshot.power, now: now, date: \.date) {
+            }, gaps: gaps),
+            power: withBucketStatistics(retained(snapshot.power, now: now, date: \.date) {
                 isValid($0, now: now)
-            }
+            }, gaps: gaps)
         )
+    }
+
+    /// D80 upgrade (P1-4): legacy points older than the raw window get their
+    /// bucket statistics here, on this actor, from one gap snapshot. The
+    /// main-actor `restoreHistory` then only receives prepared points, so the
+    /// first launch after an upgrade does not compute 28 days of statistics on
+    /// the main thread. Points that already carry statistics are untouched.
+    nonisolated static func withBucketStatistics<T: MenuBarBucketStatisticsCarrier>(
+        _ points: [T], gaps: [DateInterval]
+    ) -> [T] {
+        // The same cutoff the restore/compaction applies (its newest point), so
+        // the result is exactly what the main actor would otherwise compute.
+        guard let end = points.lazy.map(\.date).max() else { return points }
+        let cutoff = end.addingTimeInterval(-MenuBarHistoryRetention.highResolutionDuration)
+        guard points.contains(where: { $0.date < cutoff && $0.bucketStatistics == nil }) else { return points }
+        var result = points
+        for index in result.indices where result[index].date < cutoff && result[index].bucketStatistics == nil {
+            result[index] = MenuBarHistoryRetention.preparedForBucket(points[index],
+                previous: index > 0 ? points[index - 1] : nil, gaps: gaps)
+        }
+        return result
     }
 
     private static func retained<T>(
@@ -324,6 +443,10 @@ actor MetricHistoryStore {
         }
     }
 
+    nonisolated static func checkpointSnapshot(_ snapshot: MetricHistorySnapshot, longRangeBucket: TimeInterval) -> MetricHistorySnapshot {
+        persistable(snapshot, longRangeBucket: longRangeBucket)
+    }
+
     private static func persistable(
         _ snapshot: MetricHistorySnapshot,
         longRangeBucket: TimeInterval
@@ -353,7 +476,7 @@ actor MetricHistoryStore {
     }
 
     /// Keep raw recent samples, minute samples for the current day, and the
-    /// newest real sample in each deterministic long-range bucket after that.
+    /// observed means/peaks/last values and coverage in each older bucket.
     private static func multiresolution<T>(
         _ points: [T],
         date: KeyPath<T, Date>,
@@ -368,8 +491,13 @@ actor MetricHistoryStore {
         var lastBucketDuration: TimeInterval?
         var lastBucketIndex: Int64?
 
-        for point in points {
-            let pointDate = point[keyPath: date]
+        var previous: T?
+        let gaps = MenuBarSamplingGaps.shared.intervals(at: end)
+        for rawPoint in points {
+            let pointDate = rawPoint[keyPath: date]
+            let point = pointDate < highResolutionCutoff
+                ? MenuBarHistoryRetention.preparedForBucket(rawPoint, previous: previous, gaps: gaps) : rawPoint
+            previous = rawPoint
             if pointDate >= highResolutionCutoff {
                 lastBucketDuration = nil
                 lastBucketIndex = nil
@@ -383,8 +511,11 @@ actor MetricHistoryStore {
                 pointDate.timeIntervalSinceReferenceDate / bucketDuration
             ))
             if bucketDuration == lastBucketDuration,
-               bucket == lastBucketIndex {
-                result[result.count - 1] = point
+               bucket == lastBucketIndex,
+               MenuBarHistoryRetention.canShareBucket(result[result.count - 1], point) {
+                result[result.count - 1] = MenuBarHistoryRetention.bucketRepresentative(
+                    point, replacing: result[result.count - 1], gaps: gaps
+                )
             } else {
                 result.append(point)
             }
@@ -415,7 +546,7 @@ actor MetricHistoryStore {
                 readings.count <= SystemTemperatureZone.allCases.count
                     && Set(readings.map(\.zone)).count == readings.count
                     && readings.allSatisfy {
-                        $0.celsius.isFinite && (5...130).contains($0.celsius)
+                        $0.celsius.isFinite && (0...130).contains($0.celsius)
                     }
             } ?? true
             && point.fanReadings?.allSatisfy {
@@ -455,6 +586,11 @@ enum MenuBarPowerHistoryStore {
     private static let maximumArchivedPointCount = 360
 
     static var defaultURL: URL? {
+        AppDataDirectories.applicationSupportRoot.appendingPathComponent("Monitoring", isDirectory: true)
+            .appendingPathComponent("MenuBarPowerHistory.json")
+    }
+
+    static var legacyURL: URL? {
         guard let applicationSupport = try? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,

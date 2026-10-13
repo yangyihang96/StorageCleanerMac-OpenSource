@@ -120,6 +120,8 @@ struct DuplicateFileCandidateGroup: Identifiable, Hashable, Sendable {
 enum DuplicateFileScanScope: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
     case userFiles
     case wholeComputer
+    /// N17: only the folders and volumes the user added; no default folder.
+    case selectedLocations
 
     var id: String { rawValue }
 
@@ -127,6 +129,7 @@ enum DuplicateFileScanScope: String, CaseIterable, Codable, Hashable, Identifiab
         switch self {
         case .userFiles: L10n.text("用户文件", "User Files")
         case .wholeComputer: L10n.text("用户数据区", "User Data Areas")
+        case .selectedLocations: L10n.text("仅所选位置", "Selected Only")
         }
     }
 
@@ -137,13 +140,18 @@ enum DuplicateFileScanScope: String, CaseIterable, Codable, Hashable, Identifiab
         switch self {
         case .userFiles:
             return L10n.text(
-                "只扫描常用用户文件夹和你明确选择的位置；只处理有权限读取的常规文件。隐藏文件、未选择的卷及其余位置不在本次范围。",
-                "Scans common user folders and locations you explicitly select; only readable regular files are considered. Hidden files, unselected volumes, and other locations are out of scope."
+                "先扫描你明确选择的位置（单独计数和时间上限），再扫描下载、桌面、文稿、影片、音乐、图片；只处理有权限读取的常规文件。隐藏文件、未选择的卷及其余位置不在本次范围。",
+                "Scans the locations you explicitly select first, with their own file and time limits, then Downloads, Desktop, Documents, Movies, Music, and Pictures; only readable regular files are considered. Hidden files, unselected volumes, and other locations are out of scope."
             )
         case .wholeComputer:
             return L10n.text(
-                "扫描可读用户数据区，并自动纳入已挂载的本地可浏览数据卷；也可额外选择外接卷。只处理有权限读取的常规文件。自动发现会排除网络卷、不可浏览卷和只读系统容器；隐藏文件、系统保护目录、应用包、缓存挂载、伪文件系统和 Time Machine 会跳过。",
-                "Scans readable user data areas and automatically includes mounted local browsable data volumes; only readable regular files are considered. Automatic discovery excludes network volumes, non-browsable volumes, and read-only system containers; hidden files, system-protected folders, app bundles, cache mounts, pseudo-filesystems, and Time Machine locations are skipped."
+                "先扫描你选择的位置（单独计数和时间上限），再扫描可读用户数据区，并自动纳入已挂载的本地可浏览数据卷；也可额外选择外接卷。只处理有权限读取的常规文件。自动发现会排除网络卷、不可浏览卷和只读系统容器；隐藏文件、系统保护目录、应用包、缓存挂载、伪文件系统和 Time Machine 会跳过。",
+                "Scans the locations you select first, with their own file and time limits, then readable user data areas, and automatically includes mounted local browsable data volumes; only readable regular files are considered. Automatic discovery excludes network volumes, non-browsable volumes, and read-only system containers; hidden files, system-protected folders, app bundles, cache mounts, pseudo-filesystems, and Time Machine locations are skipped."
+            )
+        case .selectedLocations:
+            return L10n.text(
+                "只扫描你添加的文件夹和外接卷；下载、桌面、文稿、影片、音乐、图片等默认位置不在本次范围。只处理有权限读取的常规文件，隐藏文件跳过。",
+                "Scans only the folders and volumes you added; Downloads, Desktop, Documents, Movies, Music, Pictures and other default folders are out of scope. Only readable regular files are considered; hidden files are skipped."
             )
         }
     }
@@ -206,6 +214,8 @@ enum DuplicateFileScanSkipReason: String, Codable, Hashable, Sendable {
     case fileLimit
     case directoryLimit
     case cancelled
+    /// Content is only in the cloud; comparing it would download it.
+    case cloudPlaceholder
 }
 
 struct DuplicateFileScanSkippedPath: Codable, Hashable, Sendable {
@@ -226,6 +236,10 @@ struct DuplicateFileScanRootCoverage: Codable, Hashable, Sendable {
     let scannedFiles: Int
     let scannedBytes: Int64
     let skippedPaths: [DuplicateFileScanSkippedPath]
+    /// Files left uncompared because their content is only in the cloud.
+    /// skippedPaths keeps a bounded set of examples; these are the totals.
+    var cloudOnlyFiles: Int? = nil
+    var cloudOnlyBytes: Int64? = nil
 }
 
 struct DuplicateFileScanCoverage: Codable, Hashable, Sendable {
@@ -234,6 +248,22 @@ struct DuplicateFileScanCoverage: Codable, Hashable, Sendable {
     let reachedFileLimit: Bool
     let reachedDirectoryLimit: Bool
     let reachedResultLimit: Bool
+    // Optional for reports encoded before N6; absence means no reported I/O stall.
+    var contentReadUnresponsive: Bool? = nil
+
+    var cloudOnlyFileCount: Int { roots.reduce(0) { $0 + ($1.cloudOnlyFiles ?? 0) } }
+    var cloudOnlyByteCount: Int64 { roots.reduce(0) { $0 + ($1.cloudOnlyBytes ?? 0) } }
+
+    /// Shown with every result, including "nothing found": an empty result
+    /// must not read as "everything was compared".
+    var cloudOnlySummary: String? {
+        guard cloudOnlyFileCount > 0 else { return nil }
+        let size = ByteFormat.string(cloudOnlyByteCount)
+        return L10n.text(
+            "\(cloudOnlyFileCount) 个文件（\(size)）仅在云端，未下载、未比对；在访达中下载后重新扫描即可比对。",
+            "\(cloudOnlyFileCount) files (\(size)) are only in the cloud and were not downloaded or compared. Download them in Finder and scan again to include them."
+        )
+    }
 }
 
 struct DuplicateFileScanReport: Hashable, Sendable {

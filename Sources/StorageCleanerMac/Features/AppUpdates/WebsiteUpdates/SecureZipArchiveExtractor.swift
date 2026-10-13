@@ -1,5 +1,21 @@
 import Foundation
+import CryptoKit
+import Darwin
+import FileOperationShared
 import zlib
+
+struct AuthenticatedExtractedApplications: Sendable {
+    let root: URL
+    let digests: [String: String]
+    func digest(for candidate: URL) throws -> String {
+        let prefix = root.standardizedFileURL.path + "/"
+        guard candidate.standardizedFileURL.path.hasPrefix(prefix),
+              let digest = digests[String(candidate.standardizedFileURL.path.dropFirst(prefix.count))] else {
+            throw SecureZipArchiveError.extractionFailed
+        }
+        return digest
+    }
+}
 
 enum SecureZipArchiveError: Error, Equatable, LocalizedError, Sendable {
     case invalidArchive
@@ -111,45 +127,74 @@ struct SecureZipArchiveExtractor: Sendable {
     }
 
     func extract(archiveURL: URL, to destinationURL: URL) async throws {
-        let entries = try manifest(at: archiveURL)
-        guard !FileManager.default.fileExists(atPath: destinationURL.path) else {
-            throw SecureZipArchiveError.destinationAlreadyExists
-        }
-        try FileManager.default.createDirectory(
-            at: destinationURL,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
+        try await extract(bytes: AuthenticatedUpdateArchive.snapshot(archiveURL).bytes, to: destinationURL)
+    }
 
-        let cancellation = SecureZipExtractionCancellation()
-        let result = try await withTaskCancellationHandler {
-            try await Task.detached(priority: .utility) {
-                try Shell.run(
-                    "/usr/bin/ditto",
-                    ["-x", "-k", archiveURL.path, destinationURL.path],
-                    timeout: 30 * 60,
-                    outputByteLimit: 1_048_576,
-                    cancellationCheck: { cancellation.isCancelled }
-                )
-            }.value
-        } onCancel: {
-            cancellation.cancel()
+    @discardableResult
+    func extract(bytes: Data, to destinationURL: URL) async throws -> AuthenticatedExtractedApplications {
+        let entries = try manifest(bytes: bytes)
+        var records = [String: AuthenticatedApplicationDigest.Record]()
+        guard !FileManager.default.fileExists(atPath: destinationURL.path) else { throw SecureZipArchiveError.destinationAlreadyExists }
+        try FileManager.default.createDirectory(at: destinationURL, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            // In-process extraction binds the central/local headers, CRC and
+            // inflated bytes. No ditto path reopen or subprocess is involved.
+            for entry in entries.sorted(by: { $0.relativePath.count < $1.relativePath.count }) {
+                try Task.checkCancellation()
+                let url = destinationURL.appendingPathComponent(entry.relativePath)
+                let components = entry.relativePath.split(separator: "/").map(String.init)
+                for count in 1..<components.count {
+                    let relative = components.prefix(count).joined(separator: "/")
+                    if records[relative] == nil { records[relative] = .init(path: relative, type: .typeDirectory, mode: 0o755) }
+                }
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+                guard url.deletingLastPathComponent().resolvingSymlinksInPath().path.hasPrefix(destinationURL.resolvingSymlinksInPath().path + "/") || url.deletingLastPathComponent().resolvingSymlinksInPath() == destinationURL.resolvingSymlinksInPath() else { throw SecureZipArchiveError.extractionFailed }
+                switch entry.kind {
+                case .directory:
+                    records[entry.relativePath] = .init(path: entry.relativePath, type: .typeDirectory, mode: UInt16(entry.permissions))
+                    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                    try FileManager.default.setAttributes([.posixPermissions: entry.permissions], ofItemAtPath: url.path)
+                case .file:
+                    let compressed = try readExactly(bytes, offset: entry.dataOffset, count: Int(entry.compressedSize))
+                    let data = try decodedEntryData(compressed, method: entry.compressionMethod, expectedSize: Int(entry.uncompressedSize))
+                    guard checksum(of: data) == entry.crc32 else { throw SecureZipArchiveError.checksumMismatch(entry.relativePath) }
+                    records[entry.relativePath] = .init(path: entry.relativePath, type: .typeRegular, mode: UInt16(entry.permissions), contentDigest: Data(SHA256.hash(data: data)), size: UInt64(data.count))
+                    try data.write(to: url, options: [.withoutOverwriting])
+                    try FileManager.default.setAttributes([.posixPermissions: entry.permissions], ofItemAtPath: url.path)
+                case .symbolicLink:
+                    guard let target = entry.symbolicLinkTarget else { throw SecureZipArchiveError.invalidArchive }
+                    records[entry.relativePath] = .init(path: entry.relativePath, type: .typeSymbolicLink, mode: UInt16(entry.permissions), link: target)
+                    try FileManager.default.createSymbolicLink(atPath: url.path, withDestinationPath: target)
+                    guard lchmod(url.path, mode_t(entry.permissions)) == 0 else { throw SecureZipArchiveError.extractionFailed }
+                }
+            }
+            try validateExtractedTree(entries, root: destinationURL)
+            let roots = records.keys.filter { $0.hasSuffix(".app") }
+            var digests = [String: String]()
+            for bundle in roots {
+                let prefix = bundle + "/"
+                let children = records.values.filter { $0.path.hasPrefix(prefix) }.map {
+                    AuthenticatedApplicationDigest.Record(path: String($0.path.dropFirst(prefix.count)), type: $0.type, mode: $0.mode, contentDigest: $0.contentDigest, size: $0.size, link: $0.link)
+                }
+                let digest = AuthenticatedApplicationDigest.compute(records: children)
+                try AuthenticatedApplicationDigest.authenticateCopy(destinationURL.appendingPathComponent(bundle), expectedSHA256: digest)
+                digests[bundle] = digest
+            }
+            return .init(root: destinationURL, digests: digests)
+        } catch {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw error
         }
-        guard result.terminationStatus == 0 else {
-            throw SecureZipArchiveError.extractionFailed
-        }
-        try validateExtractedTree(entries, root: destinationURL)
     }
 
     func manifest(at archiveURL: URL) throws -> [SecureZipArchiveEntry] {
-        let values = try archiveURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true, let rawFileSize = values.fileSize, rawFileSize > 0 else {
-            throw SecureZipArchiveError.invalidArchive
-        }
-        let fileSize = Int64(rawFileSize)
-        let handle = try FileHandle(forReadingFrom: archiveURL)
-        defer { try? handle.close() }
+        try manifest(bytes: AuthenticatedUpdateArchive.snapshot(archiveURL).bytes)
+    }
 
+    func manifest(bytes: Data) throws -> [SecureZipArchiveEntry] {
+        let fileSize = Int64(bytes.count)
+        guard fileSize > 0 else { throw SecureZipArchiveError.invalidArchive }
+        let handle = bytes
         let tailSize = min(
             fileSize,
             Int64(Self.maximumCommentLength + 22)
@@ -357,7 +402,7 @@ struct SecureZipArchiveExtractor: Sendable {
     }
 
     private func localEntryMetadata(
-        handle: FileHandle,
+        handle: Data,
         rawName: Data,
         path: String,
         expectedFlags: UInt16,
@@ -556,17 +601,9 @@ struct SecureZipArchiveExtractor: Sendable {
         }
     }
 
-    private func readExactly(
-        _ handle: FileHandle,
-        offset: Int64,
-        count: Int
-    ) throws -> Data {
-        guard offset >= 0, count >= 0 else { throw SecureZipArchiveError.invalidArchive }
-        try handle.seek(toOffset: UInt64(offset))
-        guard let data = try handle.read(upToCount: count), data.count == count else {
-            throw SecureZipArchiveError.invalidArchive
-        }
-        return data
+    private func readExactly(_ bytes: Data, offset: Int64, count: Int) throws -> Data {
+        guard offset >= 0, count >= 0, offset <= bytes.count, count <= bytes.count - Int(offset) else { throw SecureZipArchiveError.invalidArchive }
+        return bytes.subdata(in: Int(offset)..<(Int(offset) + count))
     }
 
     private func normalizedPathKey(_ path: String) -> String {

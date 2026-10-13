@@ -25,9 +25,18 @@ final class CompetitiveParityContractTests: XCTestCase {
 
         XCTAssertFalse(themeSource.contains("检查系统垃圾、隐私风险与性能状态"))
         XCTAssertFalse(progressSource.contains("Checking cleanup, privacy, and performance status"))
-        XCTAssertTrue(themeSource.contains("检查可清理垃圾与需要人工判断的文件"))
-        XCTAssertTrue(progressSource.contains("subtitle: module.pageSubtitle"))
-        XCTAssertTrue(themeSource.contains("Check cleanup candidates and files that need review"))
+        // D64 removes the page subtitle; the offered scan ranges now describe
+        // and implement the actual coverage, without a privacy/benchmark claim.
+        let scopes = try String(contentsOf: projectRoot.appendingPathComponent(
+            "Sources/StorageCleanerMac/Models/SmartScanScope.swift"), encoding: .utf8)
+        let operation = try String(contentsOf: projectRoot.appendingPathComponent(
+            "Sources/StorageCleanerMac/Services/SmartScanReadOperation.swift"), encoding: .utf8)
+        XCTAssertTrue(scopes.contains("Cleanup Candidates"))
+        XCTAssertTrue(scopes.contains("Files to Review"))
+        XCTAssertTrue(scopes.contains("Health Status"))
+        XCTAssertFalse(progressSource.contains("module.pageSubtitle"))
+        XCTAssertFalse(operation.contains("BrowserPrivacy"))
+        XCTAssertFalse(operation.contains("Benchmark"))
     }
 
     func testStorageMapUsesOneReusableIndexAndKeepsFinderAsExplicitAction() throws {
@@ -56,10 +65,17 @@ final class CompetitiveParityContractTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(largeFilesSource.contains("LargeFileStorageMap("))
-        XCTAssertTrue(largeFilesSource.contains("case visualMap"))
-        XCTAssertTrue(largeFilesSource.contains("case columnBrowser"))
-        XCTAssertTrue(largeFilesSource.contains(".pickerStyle(.segmented)"))
+        // D70 replaces the rectangular map/column switch with the approved
+        // directory/type/top-eight views; the completed index stays the source.
+        let analysisSource = try String(contentsOf: projectRoot.appendingPathComponent(
+            "Sources/StorageCleanerMac/Views/FilesLightfield/FileAnalysisLightfieldView.swift"), encoding: .utf8)
+        XCTAssertTrue(largeFilesSource.contains("FileAnalysisLightfieldView("))
+        XCTAssertTrue(analysisSource.contains("LightfieldTextSegments("))
+        XCTAssertTrue(analysisSource.contains("LightfieldBubbleChart("))
+        XCTAssertTrue(analysisSource.contains("LightfieldDonutChart("))
+        XCTAssertTrue(analysisSource.contains("workspace.showStorageMapSnapshot"))
+        XCTAssertTrue(analysisSource.contains("workspace.openStorageMapDirectory"))
+        XCTAssertTrue(analysisSource.contains("activateFileViewerSelecting"))
         XCTAssertFalse(largeFilesSource.contains("private var summaryPanel"))
         XCTAssertFalse(largeFilesSource.contains("private struct LargeFileCategoryBar"))
         XCTAssertTrue(mapSource.contains("StorageMapColumn("))

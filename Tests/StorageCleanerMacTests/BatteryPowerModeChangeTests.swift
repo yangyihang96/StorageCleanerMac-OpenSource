@@ -92,6 +92,7 @@ final class BatteryPowerModeChangeTests: XCTestCase {
             setting: .powerMode
         ))
         let coordinator = FanControlCoordinator(
+            defaults: TestPreferenceDomain.make(for: self),
             helperStatusOverride: .enabled,
             isHelperReachable: true,
             requestSender: { request in

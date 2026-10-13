@@ -31,43 +31,16 @@ struct LargeFilesView: View {
     @State private var pendingMigration: ExternalMigrationItem?
     @State private var pendingOriginalRemoval: PendingOriginalRemoval?
     @State private var migratingItemID: String?
+    @State private var migrationTask: Task<Void, Never>?
     @State private var migrationActivity: (title: String, detail: String)?
-    @State private var completedMigrations: [String: ExternalMigrationCompletion] = [:]
     @State private var migrationNotice: ExternalMigrationNotice?
     @State private var isRefreshingVolumes = false
-    @AppStorage("storage-analysis.display-mode")
-    private var analysisSurfaceRawValue = StorageAnalysisDisplayMode.visualMap.rawValue
-
-    private var analysisSurface: StorageAnalysisDisplayMode {
-        StorageAnalysisDisplayMode(rawValue: analysisSurfaceRawValue) ?? .visualMap
-    }
-
-    private var analysisSurfaceSelection: Binding<StorageAnalysisDisplayMode> {
-        Binding(
-            get: { analysisSurface },
-            set: { analysisSurfaceRawValue = $0.rawValue }
-        )
-    }
-
     private var rawItems: [StorageItem] {
         workspace.items
     }
 
-    private var visibleItems: [StorageItem] {
-        rawItems
-            .filter { ExternalMigrationItem.largeFile($0) != nil }
-            .sorted {
-                if $0.sizeBytes != $1.sizeBytes { return $0.sizeBytes > $1.sizeBytes }
-                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
-            }
-    }
-
     private var selectedVolume: ExternalStorageVolume? {
         externalVolumes.first { $0.id == workspace.migrationDestinationVolumeID }
-    }
-
-    private var migratableFiles: [ExternalMigrationItem] {
-        rawItems.compactMap(ExternalMigrationItem.largeFile)
     }
 
     private var migratableApplications: [ExternalMigrationItem] {
@@ -86,6 +59,12 @@ struct LargeFilesView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task {
+#if DEBUG
+            guard !FeaturePresentationDemo.isEnabled else { return }
+#endif
+            // N18 review: an original put back from Operation History while
+            // another page was open no longer shows as moved.
+            workspace.refreshMigrationCompletions()
             if mode == .migration {
                 if prepareMigrationPresentationFixtureIfRequested() { return }
                 await refreshExternalVolumes()
@@ -128,396 +107,51 @@ struct LargeFilesView: View {
 
     @ViewBuilder
     private var analysisWorkspace: some View {
-        if !workspace.hasStorageAnalysis {
-            ScrollView {
-                AppEmptyState(
-                    title: L10n.text("尚未建立磁盘空间索引", "Disk Space Has Not Been Indexed"),
-                    detail: L10n.text("重新分析后可按层级浏览每个文件夹", "Analyze again to browse every folder by level"),
-                    systemImage: "internaldrive"
-                )
-                    .padding(AppDesignTokens.Layout.pagePadding)
-                    .appMotionEntrance(delay: 0.075)
-            }
-        } else {
-            VStack(spacing: 0) {
-                analysisToolbar
-                    .fixedSize(horizontal: false, vertical: true)
-                    .layoutPriority(2)
-                Divider()
-
-                switch analysisSurface {
-                case .visualMap, .columnBrowser:
-                    LargeFileStorageMap(
-                        workspace: workspace,
-                        displayMode: analysisSurface
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-                    .layoutPriority(1)
-                    .clipped()
-                    .transition(AppMotionTokens.listTransition(reduceMotion: reduceMotion))
-                }
-            }
-            .animation(
-                AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-                value: analysisSurface
-            )
-        }
-    }
-
-    private var analysisToolbar: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: AppDesignTokens.Spacing.large) {
-                analysisResultIdentity
-                    .layoutPriority(1)
-                Spacer(minLength: AppDesignTokens.Spacing.large)
-                analysisToolbarControls
-            }
-
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-                analysisResultIdentity
-                analysisToolbarControls
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .padding(.horizontal, AppDesignTokens.Spacing.medium)
-        .padding(.vertical, AppDesignTokens.Spacing.small)
-    }
-
-    private var analysisToolbarControls: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: AppDesignTokens.Spacing.small) {
-                analysisScopeMenu
-                analysisSurfacePicker
-            }
-
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                analysisScopeMenu
-                analysisSurfacePicker
-            }
-        }
-    }
-
-    private var analysisResultIdentity: some View {
-        ViewThatFits(in: .horizontal) {
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.tight) {
-                analysisScopeIdentity
-                if let analysis = workspace.storageAnalysis {
-                    Text("\(capacitySummary(analysis)) · \(indexedSummary(analysis))")
-                        .font(AppDesignTokens.Typography.metadata)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.tight) {
-                analysisScopeIdentity
-                if let analysis = workspace.storageAnalysis {
-                    Text(capacitySummary(analysis))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                    Text(indexedSummary(analysis))
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
-                }
-            }
-        }
-        .font(AppDesignTokens.Typography.compactLabel)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var analysisScopeIdentity: some View {
-        Label {
-            Text(workspace.storageAnalysis?.target.title ?? L10n.text("磁盘空间", "Disk Space"))
-                .font(AppDesignTokens.Typography.inlineTitle)
-                .fixedSize(horizontal: false, vertical: true)
-        } icon: {
-            Image(systemName: workspace.storageAnalysis?.target.systemImage ?? "internaldrive.fill")
-                .foregroundStyle(AppDesignTokens.Palette.storage)
-        }
-    }
-
-    private func capacitySummary(_ analysis: StorageMapAnalysisResult) -> String {
-        L10n.text(
-            "可用 \(ByteFormat.storageString(analysis.volumeAvailableBytes)) / 共 \(ByteFormat.storageString(analysis.volumeTotalBytes))",
-            "\(ByteFormat.storageString(analysis.volumeAvailableBytes)) available / \(ByteFormat.storageString(analysis.volumeTotalBytes)) total"
-        )
-    }
-
-    private func indexedSummary(_ analysis: StorageMapAnalysisResult) -> String {
-        L10n.text(
-            "已索引 \(analysis.inspectedItemCount) 项",
-            "\(analysis.inspectedItemCount) items indexed"
-        )
-    }
-
-    private var analysisSurfacePicker: some View {
-        Picker(L10n.text("显示方式", "View"), selection: analysisSurfaceSelection) {
-            ForEach(StorageAnalysisDisplayMode.allCases) { surface in
-                Text(surface.title).tag(surface)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 228)
-        .accessibilityLabel(L10n.text("显示方式", "View"))
-    }
-
-    private var analysisScopeMenu: some View {
-        Menu {
-            ForEach(workspace.storageMapTargets) { target in
-                Button {
-                    workspace.selectedStorageMapTargetID = target.id
-                    workspace.startStorageAnalysis()
-                } label: {
-                    Label(target.title, systemImage: target.systemImage)
-                }
-            }
-        } label: {
-            Label(L10n.text("更换范围", "Change Scope"), systemImage: "externaldrive.badge.plus")
-        }
-        .appButtonChrome(.secondary)
-        .disabled(!workspace.canStartStorageAnalysis)
-        .help(L10n.text("选择另一个磁盘或个人目录并重新分析", "Analyze another disk or the home folder"))
+        FileAnalysisLightfieldView(workspace: workspace)
     }
 
     private var migrationWorkspace: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.large) {
-                externalMigrationPanel
-                    .appMotionEntrance(delay: 0.055)
-
-                if rawItems.isEmpty || visibleItems.isEmpty {
-                    if workspace.migrationKind == .file {
-                        emptyPanel(density: .workspace)
-                            .appMotionEntrance(delay: 0.075)
-                    }
-                } else if workspace.migrationKind == .file {
-                    Label(
-                        L10n.text("可搬移文件", "Files Ready to Move"),
-                        systemImage: "doc.on.doc"
-                    )
-                    .font(AppDesignTokens.Typography.cardTitle)
-                    .foregroundStyle(AppDesignTokens.Palette.storage)
-                    .accessibilityAddTraits(.isHeader)
-
-                    resultRows
-                }
-            }
-            .padding(AppDesignTokens.Layout.pagePadding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        FileMigrationLightfieldView(entries: migrationEntries, volumes: externalVolumes,
+            destinationID: $workspace.migrationDestinationVolumeID,
+            sourceRoot: workspace.migrationSourcePath ?? FileManager.default.homeDirectoryForCurrentUser.path,
+            completions: workspace.migrationCompletions, busyID: migratingItemID,
+            refreshing: isRefreshingVolumes, notice: migrationNotice?.message,
+            activity: migrationActivity.map { $0.title + " · " + $0.detail },
+            onRefresh: { Task { await refreshExternalVolumes() } },
+            onRescan: { if workspace.migrationKind == .application { store.refreshInstalledApps() } else { workspace.startScan() } },
+            onCancel: { migrationTask?.cancel() }, onCopy: { pendingMigration = $0 },
+            onOriginal: { item, completion in
+                pendingOriginalRemoval = PendingOriginalRemoval(item: item,
+                    destinationURL: completion.destinationURL, volume: completion.volume,
+                    contentVerification: completion.contentVerification)
+            }, onReveal: { item in
+                if let completion = workspace.migrationCompletions[item.id], completion.isMovedAway {
+                    ExternalDriveMigrationService.reveal(completion.destinationURL)
+                } else { store.reveal(item.sourceURL.path) }
+            }, canTrash: { item in
+                rawItems.first { ExternalMigrationItem.largeFile($0)?.id == item.id }.map { store.canRequestTrash($0) } ?? false
+            }, onTrash: { item in
+                if let source = rawItems.first(where: { ExternalMigrationItem.largeFile($0)?.id == item.id }) { store.requestTrash(source) }
+            },
+            listingNote: workspace.migrationKind == .file ? workspace.listingSummary?.note : nil,
+            lowerBoundIDs: lowerBoundMigrationIDs)
     }
 
-    private var resultRows: some View {
-        LazyVStack(spacing: 8) {
-            ForEach(visibleItems) { item in
-                let migrationItem = mode == .migration && selectedVolume != nil
-                    ? ExternalMigrationItem.largeFile(item)
-                    : nil
-                LargeFileRow(
-                    item: item,
-                    store: store,
-                    migrationItem: migrationItem,
-                    isMigrating: migratingItemID == migrationItem?.id,
-                    isMigrationDisabled: migratingItemID != nil,
-                    completedMigration: migrationItem.flatMap {
-                        completedMigrations[$0.id]
-                    },
-                    onMigrate: { pendingMigration = $0 },
-                    onHandleOriginal: { item, completion in
-                        pendingOriginalRemoval = PendingOriginalRemoval(
-                            item: item,
-                            destinationURL: completion.destinationURL,
-                            volume: completion.volume
-                        )
-                    }
-                )
-                .transition(AppMotionTokens.listTransition(reduceMotion: reduceMotion))
-            }
-        }
-        .animation(
-            AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-            value: workspace.selectedFilter
-        )
-        .animation(
-            AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-            value: workspace.sortMode
-        )
-        .animation(
-            AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-            value: rawItems.map(\.id)
-        )
-        .appMotionEntrance(delay: 0.10)
+    /// D84：测量超时、大小只是本轮量到的下限的行。
+    private var lowerBoundMigrationIDs: Set<String> {
+        guard let paths = workspace.listingSummary?.lowerBoundPaths, !paths.isEmpty else { return [] }
+        return Set(rawItems.compactMap { item in
+            paths.contains(PathSafety.normalizedPath(item.path)) ? ExternalMigrationItem.largeFile(item)?.id : nil
+        })
     }
 
-    private var externalMigrationPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Label(L10n.text("外接硬盘迁移助手", "External Drive Migration"), systemImage: "externaldrive.badge.plus")
-                    .font(AppDesignTokens.Typography.cardTitle)
-                Spacer()
-                Button {
-                    Task { await refreshExternalVolumes() }
-                } label: {
-                    if isRefreshingVolumes {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Label(L10n.text("刷新硬盘", "Refresh Drives"), systemImage: "arrow.clockwise")
-                    }
-                }
-                .appButtonChrome(.secondary)
-                .disabled(isRefreshingVolumes || migratingItemID != nil)
-            }
-
-            if externalVolumes.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(
-                        L10n.text("未连接可写的物理外接硬盘", "No Writable Physical External Drive"),
-                        systemImage: "externaldrive.badge.questionmark"
-                    )
-                    .font(AppDesignTokens.Typography.inlineTitle)
-                    Text(
-                        L10n.text(
-                            "连接外接硬盘后点“刷新硬盘”。只读镜像、网络卷和虚拟磁盘不会作为迁移目标。",
-                            "Connect an external drive, then choose Refresh Drives. Read-only images, network volumes, and virtual disks are excluded."
-                        )
-                    )
-                    .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
-                }
-            } else if let selectedVolume {
-                Picker(
-                    L10n.text("目标硬盘", "Destination Drive"),
-                    selection: $workspace.migrationDestinationVolumeID
-                ) {
-                    ForEach(externalVolumes) { volume in
-                        Text("\(volume.name) · \(ByteFormat.string(volume.availableBytes))")
-                            .tag(volume.id)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                HStack(spacing: 8) {
-                    MetadataPill(
-                        text: L10n.text("可用 \(ByteFormat.string(selectedVolume.availableBytes))", "\(ByteFormat.string(selectedVolume.availableBytes)) available"),
-                        systemImage: "externaldrive.fill",
-                        tint: AppDesignTokens.Palette.storage
-                    )
-                    MetadataPill(
-                        text: selectedVolume.fileSystem,
-                        systemImage: "internaldrive",
-                        tint: selectedVolume.supportsApplications
-                            ? AppDesignTokens.Palette.success
-                            : AppDesignTokens.Palette.warning
-                    )
-                    MetadataPill(
-                        text: L10n.text("可迁移文件 \(migratableFiles.count)", "\(migratableFiles.count) files eligible"),
-                        systemImage: "doc.fill",
-                        tint: AppDesignTokens.Palette.information
-                    )
-                }
-
-                Text(
-                    L10n.text(
-                        "先复制并验证；确认副本可用后，再单独决定是否把原件移到废纸篓。",
-                        "Copy and verify first. After confirming the copy, separately decide whether to move the original to Trash."
-                    )
-                )
-                .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-                if workspace.migrationKind == .application {
-                    Divider()
-                    applicationMigrationSuggestions(for: selectedVolume)
-                }
-            }
-
-            if let migrationActivity {
-                RuntimeInlineStatus(title: migrationActivity.title, detail: migrationActivity.detail)
-            }
-            if let migrationNotice {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: migrationNotice.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(migrationNotice.isError ? AppDesignTokens.Palette.warning : AppDesignTokens.Palette.success)
-                    Text(migrationNotice.message)
-                        .font(AppDesignTokens.Typography.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 8)
-                    if let destinationURL = migrationNotice.destinationURL {
-                        Button(L10n.text("在访达中显示", "Show in Finder")) {
-                            ExternalDriveMigrationService.reveal(destinationURL)
-                        }
-                        .appButtonChrome(.secondary)
-                    }
-                }
+    private var migrationEntries: [LightfieldMigrationEntry] {
+        if workspace.migrationKind == .application {
+            return migratableApplications.map { item in
+                LightfieldMigrationEntry(item: item, modifiedAt: store.installedApps.first { $0.path == item.sourceURL.path }?.modifiedAt)
             }
         }
-        .padding(AppDesignTokens.Spacing.large)
-        .fullBleedSection()
-    }
-
-    @ViewBuilder
-    private func applicationMigrationSuggestions(for volume: ExternalStorageVolume) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(L10n.text("大型 App 建议", "Large App Suggestions"), systemImage: "app.badge")
-                .font(AppDesignTokens.Typography.cardTitle)
-
-            if !volume.supportsApplications {
-                Text(
-                    L10n.text(
-                        "此硬盘适合普通文件；搬移 App 请使用 APFS。",
-                        "This drive suits regular files; use APFS to move apps."
-                    )
-                )
-                .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
-            } else if store.isLoadingInstalledApps {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(L10n.text("正在读取大型第三方 App…", "Reading large third-party apps…"))
-                        .foregroundStyle(.secondary)
-                }
-            } else if migratableApplications.isEmpty {
-                Text(
-                    L10n.text(
-                        "没有发现超过 1 GB、未运行且可安全建议迁移的第三方 App。",
-                        "No third-party app over 1 GB is currently eligible for a safe migration suggestion."
-                    )
-                )
-                .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
-            } else {
-                ForEach(migratableApplications) { item in
-                    ExternalAppMigrationRow(
-                        item: item,
-                        isMigrating: migratingItemID == item.id,
-                        completedMigration: completedMigrations[item.id],
-                        isDisabled: migratingItemID != nil,
-                        onMigrate: { pendingMigration = item },
-                        onHandleOriginal: { completion in
-                            pendingOriginalRemoval = PendingOriginalRemoval(
-                                item: item,
-                                destinationURL: completion.destinationURL,
-                                volume: completion.volume
-                            )
-                        }
-                    )
-                }
-                Text(
-                    L10n.text(
-                        "仅迁移 App 本体；账户、项目、缓存与 Application Support 数据仍保留在内置磁盘。部分 App 的自动更新可能要求重新选择安装位置。",
-                        "Only the app bundle is migrated. Accounts, projects, caches, and Application Support data stay on the internal disk. Some updaters may require the install location to be selected again."
-                    )
-                )
-                .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        return LightfieldMigrationPresentation.fileEntries(rawItems)
     }
 
     private func migrationConfirmationText(for item: ExternalMigrationItem) -> String {
@@ -546,11 +180,11 @@ struct LargeFilesView: View {
         case .copy:
             pendingMigration = fixture.item
         case .original:
-            completedMigrations[fixture.item.id] = ExternalMigrationCompletion(
+            workspace.recordMigrationCompletion(ExternalMigrationCompletion(
                 destinationURL: fixture.destinationURL,
                 volume: fixture.volume,
                 didMoveSourceToTrash: false
-            )
+            ), for: fixture.item.id)
             pendingOriginalRemoval = PendingOriginalRemoval(
                 item: fixture.item,
                 destinationURL: fixture.destinationURL,
@@ -593,44 +227,56 @@ struct LargeFilesView: View {
             "\(item.title) → \(selectedVolume.name)"
         )
 
-        Task {
+        migrationTask = Task {
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
+                let worker = Task.detached(priority: .userInitiated) {
                     try ExternalDriveMigrationService.migrate(item, to: selectedVolume)
-                }.value
-                completedMigrations[item.id] = ExternalMigrationCompletion(
+                }
+                let result = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                workspace.recordMigrationCompletion(ExternalMigrationCompletion(
                     destinationURL: result.destinationURL,
                     volume: selectedVolume,
-                    didMoveSourceToTrash: result.didMoveSourceToTrash
-                )
+                    didMoveSourceToTrash: result.didMoveSourceToTrash,
+                    contentVerification: result.contentVerification,
+                    information: result.information
+                ), for: item.id)
                 migrationNotice = ExternalMigrationNotice(
-                    message: L10n.text(
+                    message: result.noticeMessage(fallback: L10n.text(
                         "副本已复制并验证，原件仍保留。确认外接硬盘中的副本可正常使用后，再决定是否处理原件。",
                         "The copy was verified and the original remains. Confirm the external copy works before deciding whether to handle the original."
-                    ),
-                    isError: false,
+                    )),
+                    isError: result.publicationWarning != nil,
                     destinationURL: result.destinationURL
                 )
-                if item.kind != .application {
+                if item.kind != .application, result.publicationWarning == nil {
                     pendingOriginalRemoval = PendingOriginalRemoval(
                         item: item,
                         destinationURL: result.destinationURL,
-                        volume: selectedVolume
+                        volume: selectedVolume,
+                        contentVerification: result.contentVerification
                     )
                 }
                 if item.kind == .application {
                     store.refreshInstalledApps(priority: .utility)
                 }
-                await refreshExternalVolumes()
+                if !Task.isCancelled { await refreshExternalVolumes() }
+            } catch is CancellationError {
+                migrationNotice = ExternalMigrationNotice(
+                    message: L10n.text("已取消等待，原件保留；未完成的副本不会发布，临时文件将在复制返回后清理。", "Waiting was cancelled. The original was kept. The unfinished copy will not be published; temporary files will be cleaned up when copying returns."),
+                    isError: false, destinationURL: nil
+                )
             } catch {
                 migrationNotice = ExternalMigrationNotice(
-                    message: error.localizedDescription,
+                    message: FileContentReadError.userMessage(for: error),
                     isError: true,
                     destinationURL: nil
                 )
             }
             migratingItemID = nil
             migrationActivity = nil
+            migrationTask = nil
         }
     }
 
@@ -644,75 +290,89 @@ struct LargeFilesView: View {
             pending.item.title
         )
 
-        Task {
+        migrationTask = Task {
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
+                let worker = Task.detached(priority: .userInitiated) {
                     try ExternalDriveMigrationService.moveOriginalToTrash(
                         pending.item,
                         verifiedCopyAt: pending.destinationURL,
-                        on: pending.volume
+                        on: pending.volume,
+                        contentVerification: pending.contentVerification
                     )
-                }.value
-                completedMigrations[pending.item.id] = ExternalMigrationCompletion(
+                }
+                let result = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                workspace.recordMigrationCompletion(ExternalMigrationCompletion(
                     destinationURL: result.destinationURL,
                     volume: pending.volume,
-                    didMoveSourceToTrash: result.didMoveSourceToTrash
-                )
+                    didMoveSourceToTrash: result.didMoveSourceToTrash,
+                    originalPath: pending.item.sourceURL.path,
+                    originalIdentity: result.originalIdentity,
+                    information: result.information
+                ), for: pending.item.id)
+                // N18: the move has a receipt in Operation History.
                 migrationNotice = ExternalMigrationNotice(
-                    message: L10n.text(
-                        "已再次验证副本；原件已移到废纸篓。清空废纸篓后才会释放空间。",
-                        "The copy was verified again and the original moved to Trash. Empty Trash to reclaim space."
-                    ),
-                    isError: false,
+                    message: result.noticeMessage(fallback: result.canRestoreFromHistory
+                        ? L10n.text(
+                            "已再次验证副本；原件已移到废纸篓，可在“操作记录”中恢复到原处。清空废纸篓后才会释放空间。",
+                            "The copy was verified again and the original moved to Trash. Operation History can put it back. Empty Trash to reclaim space."
+                        )
+                        : L10n.text(
+                            "已再次验证副本；原件已不在原处，但操作记录需要核实。请在“操作记录”中刷新后查看。",
+                            "The copy was verified again and the original is no longer in place, but its record needs checking. Refresh Operation History to review it."
+                        )),
+                    isError: !result.canRestoreFromHistory,
                     destinationURL: result.destinationURL
                 )
                 if pending.item.kind == .application {
                     store.refreshInstalledApps(priority: .utility)
                 }
-                await refreshExternalVolumes()
+                if !Task.isCancelled { await refreshExternalVolumes() }
+            } catch is CancellationError {
+                migrationNotice = ExternalMigrationNotice(
+                    message: L10n.text("已取消处理原件，原件和已验证的副本均保留。", "Handling the original was cancelled. Both the original and the verified copy were kept."),
+                    isError: false, destinationURL: nil
+                )
             } catch {
                 migrationNotice = ExternalMigrationNotice(
-                    message: error.localizedDescription,
+                    message: FileContentReadError.userMessage(for: error),
                     isError: true,
                     destinationURL: pending.destinationURL
                 )
             }
             migratingItemID = nil
             migrationActivity = nil
+            migrationTask = nil
         }
     }
 
-    private func emptyPanel(density: AppEmptyStateDensity) -> some View {
-        AppEmptyState(
-            title: emptyStateTitle,
-            detail: emptyStateDetail,
-            systemImage: mode == .migration ? "externaldrive.badge.questionmark" : rawItems.isEmpty ? "checkmark.circle" : "magnifyingglass",
-            density: density
-        )
-    }
 
-    private var emptyStateTitle: String {
-        if mode == .migration {
-            return L10n.text("尚无可安全搬移的文件", "No Files Ready to Move Safely")
-        }
-        return rawItems.isEmpty
-            ? L10n.text("未发现大型文件", "No Large Files Found")
-            : L10n.text("没有符合当前条件的大型文件", "No Large Files Match These Filters")
-    }
+}
 
-    private var emptyStateDetail: String {
-        if mode == .migration {
-            return rawItems.isEmpty
-                ? L10n.text("先扫描大型文件，再选择外接硬盘复制并验证；原件处理需要另行确认", "Scan large files first, then choose an external drive to copy and verify them; handling originals needs a separate confirmation")
-                : L10n.text("当前扫描结果中没有位于用户目录、可安全搬移的普通文件", "The current scan has no regular user files eligible for safe migration")
-        }
-        return rawItems.isEmpty
-            ? L10n.text("重新扫描后会在这里列出可审查项目", "Rescan to list files worth reviewing")
-            : L10n.text("换筛选或重新扫描", "Change filter or rescan")
+/// D70 single-column choices; the feature Store retains real scope identities.
+struct StorageAnalysisScopePicker: View {
+    let targets: [StorageMapScanTarget]
+    @Binding var selectedID: String
+    let isDisabled: Bool
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(targets.enumerated()), id: \.element.id) { index, target in
+                LightfieldOptionRow(title: target.title, icon: FileLightfieldPresentation.scopeIcon(target.kind), module: .largeFiles,
+                    selection: Binding(get: { selectedID == target.id }, set: { if $0 { selectedID = target.id } }),
+                    metadata: target.path, probeID: "fileAnalysis.scope.\(index)")
+                    .disabled(isDisabled).help(target.path)
+            }
+        }.lightfieldComponentProbe("fileAnalysis.scopes")
+            .accessibilityElement(children: .contain).accessibilityLabel(L10n.text("分析范围", "Analysis Scope"))
     }
 }
 
 struct LargeFilesScanLandingView: View {
+#if DEBUG
+    @Environment(\.featurePresentationIsFixture) private var isPresentationFixture
+#endif
+    @Environment(\.windowLayoutMetrics) private var layout
     @ObservedObject var store: ScanStore
     @ObservedObject var workspace: LargeFilesStore
     var mode: LargeFilesViewMode = .analysis
@@ -769,36 +429,22 @@ struct LargeFilesScanLandingView: View {
         if isLoading {
             runtimePage
         } else {
-        FileToolLandingPage(
-            title: route.sidebarTitle,
-            subtitle: route.pageSubtitle,
-            systemImage: route.systemImage,
-            configurationTitle: mode == .migration
-                ? L10n.text("搬移来源", "Migration Source")
-                : L10n.text("分析范围", "Analysis Scope"),
-            actionTitle: scanActionTitle,
-            actionDetail: scanActionDetail,
-            actionSystemImage: hasResult ? "arrow.clockwise" : "doc.text.magnifyingglass",
-            status: status,
-            isLoading: isLoading,
-            isActionDisabled: !canStart,
-            trustText: trustText,
-            action: startSelectedScan
-        ) {
-            VStack(spacing: AppDesignTokens.Spacing.medium) {
-                if mode == .analysis {
-                    storageTargetPicker
-                    analysisCategoryLegend
-                } else {
-                    migrationConfiguration
-                }
-
+        FeatureLightfieldPage(module: route, phase: .landing, title: route.sidebarTitle,
+            status: status.title, safety: trustText, actionTitle: scanActionTitle,
+            actionEnabled: canStart, action: startSelectedScan) {
+            FeatureLightfieldOptions(title: mode == .migration ? L10n.text("读取范围", "Read Scope") : L10n.text("分析范围", "Analysis Scope")) {
+                if mode == .analysis { storageTargetPicker }
+                else { migrationConfiguration }
             }
         }
         }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .featureFlowTransition(value: isLoading)
         .task {
+#if DEBUG
+            guard !FeaturePresentationDemo.isEnabled, !isPresentationFixture else { return }
+#endif
             if mode == .migration {
                 await refreshExternalVolumes()
             }
@@ -867,150 +513,154 @@ struct LargeFilesScanLandingView: View {
     }
 
     private var storageTargetPicker: some View {
-        VStack(spacing: AppDesignTokens.Spacing.small) {
-            ForEach(workspace.storageMapTargets) { target in
-                let isSelected = workspace.selectedStorageMapTargetID == target.id
-                Button {
-                    workspace.selectedStorageMapTargetID = target.id
-                } label: {
-                    HStack(spacing: AppDesignTokens.Spacing.medium) {
-                        Image(systemName: target.systemImage)
-                            .font(.title2)
-                            .foregroundStyle(AppDesignTokens.Palette.storage)
-                            .frame(width: 30)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.tight) {
-                            Text(target.title)
-                                .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                            Text(target.path)
-                                .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .truncationMode(.middle)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(isSelected ? AppDesignTokens.Palette.storage : AppDesignTokens.Palette.secondaryText)
-                            .accessibilityHidden(true)
-                    }
-                    .padding(8)
-                    .contentShape(Rectangle())
-                    .appSelectableRowSurface(isSelected: isSelected, isFocused: false)
-                }
-                .buttonStyle(ResponsivePlainButtonStyle())
-                .accessibilityAddTraits(isSelected ? .isSelected : [])
-                .accessibilityLabel("\(target.title) · \(target.path)")
-                .accessibilityHint(L10n.text("选择分析范围后，点击分析磁盘空间开始", "Choose a scope, then select Analyze Disk Space to begin"))
-                .help(target.path)
-                .disabled(isLoading)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(L10n.text("分析范围", "Analysis Scope"))
+        StorageAnalysisScopePicker(
+            targets: presentationStorageMapTargets,
+            selectedID: presentationStorageMapSelection,
+            isDisabled: isLoading
+        )
     }
 
-    private var analysisCategoryLegend: some View {
-        HStack(spacing: 8) {
-            category(L10n.text("文档", "Documents"), "doc.fill", .cyan)
-            category(L10n.text("媒体", "Media"), "photo.fill", .pink)
-            category(L10n.text("归档", "Archives"), "archivebox.fill", .orange)
-            category(L10n.text("其他", "Other"), "puzzlepiece.fill", .green)
-        }
+    private var presentationStorageMapSelection: Binding<String> {
+        Binding(get: {
+#if DEBUG
+            if isPresentationFixture { return presentationStorageMapTargets[0].id }
+#endif
+            return workspace.selectedStorageMapTargetID
+        }, set: { value in
+#if DEBUG
+            guard !isPresentationFixture else { return }
+#endif
+            workspace.selectedStorageMapTargetID = value
+        })
     }
 
-    private func category(_ title: String, _ symbol: String, _ color: Color) -> some View {
-        VStack(spacing: 7) {
-            Image(systemName: symbol).font(.system(size: 24, weight: .regular)).foregroundStyle(color)
-            Text(title).font(AppDesignTokens.Typography.metadata)
+    private var presentationStorageMapTargets: [StorageMapScanTarget] {
+#if DEBUG
+        if isPresentationFixture {
+            return [StorageMapScanTarget(path: "/Fixture/Disk", title: L10n.text("演示磁盘", "Fixture Disk"), kind: .internalVolume),
+                    StorageMapScanTarget(path: "/Fixture/Home", title: L10n.text("演示个人目录", "Fixture Home"), kind: .homeDirectory)]
         }
-        .frame(maxWidth: .infinity, minHeight: 63)
-        .background(AppAppearanceColors.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(AppAppearanceColors.ink.opacity(0.14)))
+#endif
+        return workspace.storageMapTargets
     }
 
     private var migrationConfiguration: some View {
-        VStack(spacing: AppDesignTokens.Spacing.small) {
-            migrationSourceMenu
-            migrationDestinationMenu
-
-            Picker(L10n.text("类型", "Type"), selection: $workspace.migrationKind) {
-                Label(L10n.text("文件", "Files"), systemImage: "folder")
-                    .tag(ExternalMigrationItem.Kind.file)
-                Label(L10n.text("应用", "Apps"), systemImage: "app")
-                    .tag(ExternalMigrationItem.Kind.application)
-            }
-            .pickerStyle(.segmented)
-
-            Toggle(isOn: .constant(true)) {
-                Label(
-                    L10n.text("搬移前生成计划并再次确认", "Create a plan and confirm before moving"),
-                    systemImage: "checkmark.shield.fill"
-                )
-                .font(AppDesignTokens.Typography.compactLabel.weight(.semibold))
-                .foregroundStyle(AppDesignTokens.Palette.success)
-            }
-            .toggleStyle(.switch)
-            .disabled(true)
+        VStack(alignment: .leading, spacing: 0) {
+            LightfieldOptionRow(title: L10n.text("可搬移大文件", "Movable Large Files"), icon: .migrationDocuments, module: .migration,
+                selection: Binding(get: { workspace.migrationKind == .file }, set: { if $0 { workspace.migrationKind = .file } }))
+            LightfieldOptionRow(title: L10n.text("可搬移应用", "Movable Apps"), icon: .migrationApplication, module: .migration,
+                selection: Binding(get: { workspace.migrationKind == .application }, set: { if $0 { workspace.migrationKind = .application } }))
+            if workspace.migrationKind == .file { largeFileThresholdControl }
+            migrationSourceControl
+            migrationDestinationControl
         }
-        .frame(maxWidth: .infinity)
     }
 
-    private var migrationSourceMenu: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Menu {
-                Button(L10n.text("用户可访问的文件夹", "User-accessible folders")) {
-                    workspace.selectMigrationSource(nil)
-                }
-                Divider()
-                Button(L10n.text("选择文件夹…", "Choose Folder…")) { chooseMigrationSource() }
-            } label: {
-                Label(L10n.text("来源", "Source"), systemImage: "folder.fill")
-            }
-            .menuStyle(.borderlessButton)
-            Text(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
-                .font(AppDesignTokens.Typography.compactLabel)
-                .lineLimit(2).truncationMode(.middle)
-                .help(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
+    /// D85：大文件门槛三档；默认 200 MiB，单位按二进制写明。
+    private var largeFileThresholdControl: some View {
+        HStack(spacing: 8) {
+            LightfieldOptionIconView(icon: .migrationVerification)
+            Text(L10n.text("大文件门槛", "Large File Threshold")).font(.system(size: 13)).lineLimit(1)
+            LightfieldTextSegments(titles: LargeFileThreshold.allCases.map(\.title),
+                selection: Binding(get: { LargeFileThreshold.allCases.firstIndex(of: workspace.largeFileThreshold) ?? 1 },
+                    set: { index in
+                        guard LargeFileThreshold.allCases.indices.contains(index) else { return }
+                        workspace.largeFileThreshold = LargeFileThreshold.allCases[index]
+                    }),
+                module: .migration, spacing: 18)
+                .disabled(isLoading)
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-        .padding(8)
-        .background(AppAppearanceColors.ink.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
+        .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+        .help(workspace.largeFileThreshold.detail + "\n" + LargeFileThreshold.unitHelp)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.text("大文件门槛", "Large File Threshold"))
+        .lightfieldComponentProbe("migration.threshold")
     }
 
-    private var migrationDestinationMenu: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Menu {
-                if externalVolumes.isEmpty {
-                    Text(L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
-                } else {
-                    ForEach(externalVolumes) { volume in
-                        Button("\(volume.name) · \(ByteFormat.string(volume.availableBytes))") {
-                            workspace.migrationDestinationVolumeID = volume.id
-                        }
+    private var migrationSourceControl: some View {
+        Menu {
+            Button(L10n.text("用户可访问的文件夹", "User-accessible folders")) {
+                workspace.selectMigrationSource(nil)
+            }
+            Divider()
+            Button(L10n.text("选择文件夹…", "Choose Folder…")) { chooseMigrationSource() }
+        } label: {
+            HStack(spacing: 8) {
+                LightfieldOptionIconView(icon: .migrationSourceFolder)
+                Text(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
+                    .font(.system(size: 13))
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
+            .contentShape(Rectangle())
+            .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+        }
+        .menuStyle(.borderlessButton)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(L10n.text("来源", "Source"))
+        .accessibilityValue(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
+        .help(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
+    }
+
+    private var migrationDestinationControl: some View {
+        Menu {
+            if presentationExternalVolumes.isEmpty {
+                Text(L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
+            } else {
+                ForEach(presentationExternalVolumes) { volume in
+                    Button("\(volume.name) · \(ByteFormat.string(volume.availableBytes))") {
+                        workspace.migrationDestinationVolumeID = volume.id
                     }
                 }
-                Divider()
-                Button(L10n.text("刷新外接设备", "Refresh External Drives")) {
-                    Task { await refreshExternalVolumes() }
-                }
-            } label: {
-                Label(L10n.text("目标位置", "Destination"), systemImage: "externaldrive.fill")
             }
-            .menuStyle(.borderlessButton)
-            .disabled(isRefreshingVolumes)
-            Text(selectedVolume?.url.path ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
-                .font(AppDesignTokens.Typography.compactLabel)
-                .lineLimit(2).truncationMode(.middle)
-                .help(selectedVolume?.url.path ?? L10n.text("请连接外接硬盘", "Connect an external drive"))
+            Divider()
+            Button(L10n.text("刷新外接设备", "Refresh External Drives")) {
+                Task { await refreshExternalVolumes() }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                LightfieldOptionIconView(icon: .migrationDestinationDrive)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(selectedVolume?.name ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
+                        .font(.system(size: 16)).lineLimit(1).truncationMode(.middle)
+                    if let volume = selectedVolume {
+                        LightfieldDataBar(progress: volume.totalBytes > 0 ? Double(volume.availableBytes) / Double(volume.totalBytes) : nil,
+                            module: .migration, style: .share, accessibilityLabel: L10n.text("目标盘可用比例", "Destination Free Share"))
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                Text(selectedVolume.map { ByteFormat.storageString($0.availableBytes) } ?? "—")
+                    .font(.system(size: 13)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok
+            }
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
+            .contentShape(Rectangle())
+            .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
         }
-        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-        .padding(8)
-        .background(AppAppearanceColors.ink.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+        .menuStyle(.borderlessButton)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .disabled(isRefreshingVolumes)
+        .accessibilityLabel(L10n.text("目标位置", "Destination"))
+        .accessibilityValue(selectedVolume?.url.path ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
+        .help(selectedVolume?.url.path ?? L10n.text("请连接外接硬盘", "Connect an external drive"))
     }
 
     private var selectedVolume: ExternalStorageVolume? {
-        externalVolumes.first { $0.id == workspace.migrationDestinationVolumeID }
+#if DEBUG
+        if isPresentationFixture { return presentationExternalVolumes.first }
+#endif
+        return presentationExternalVolumes.first { $0.id == workspace.migrationDestinationVolumeID }
+    }
+
+    private var presentationExternalVolumes: [ExternalStorageVolume] {
+#if DEBUG
+        if isPresentationFixture { return [FeatureLightfieldFileResultFixture.volume] }
+#endif
+        return externalVolumes
     }
 
     private func chooseMigrationSource() {
@@ -1046,27 +696,21 @@ struct LargeFilesScanLandingView: View {
         let phase = mode == .migration ? workspace.phase : workspace.storageAnalysisPhase
         let state: RuntimeWorkflowState = phase == .paused ? .paused : phase == .cancelling ? .stopping : .running
         let readingApplications = mode == .migration && workspace.migrationKind == .application
-        return FeatureRuntimePage(
-            module: route,
-            title: readingApplications
-                ? L10n.text("正在读取可搬移应用", "Reading Movable Applications")
-                : mode == .migration
-                    ? L10n.text("正在扫描可搬移文件", "Scanning Movable Files")
-                    : L10n.text("正在分析磁盘空间", "Analyzing Disk Space"),
+        return LargeFilesRunningPage(module: route,
+            title: readingApplications ? L10n.text("正在读取可搬移应用", "Reading Movable Applications")
+                : mode == .migration ? L10n.text("正在扫描可搬移文件", "Scanning Movable Files")
+                : L10n.text("正在分析磁盘空间", "Analyzing Disk Space"),
             state: state,
             fraction: mode == .migration && !readingApplications ? workspace.progress.flatMap {
                 $0.progressKind == .determinate ? Double($0.fractionCompleted) : nil
             } : nil,
             metrics: runtimeMetrics,
             currentItem: mode == .migration ? workspace.progress?.currentPath : workspace.storageAnalysisProgress?.currentPath,
-            trustText: trustText
-        ) {
-            EmptyView()
-        } actions: {
-            if !readingApplications {
-                cancelScanButton.disabled(state == .stopping)
-            }
-        }
+            trustText: trustText, canCancel: !readingApplications && state != .stopping,
+            onCancel: readingApplications ? nil : {
+                if mode == .migration { workspace.cancelScan() }
+                else { workspace.cancelStorageAnalysis() }
+            })
     }
 
     private var runtimeMetrics: [RuntimeWorkflowMetric] {
@@ -1110,227 +754,17 @@ struct LargeFilesScanLandingView: View {
     }
 }
 
-private struct LargeFileRow: View {
-    let item: StorageItem
-    @ObservedObject var store: ScanStore
-    let migrationItem: ExternalMigrationItem?
-    let isMigrating: Bool
-    let isMigrationDisabled: Bool
-    let completedMigration: ExternalMigrationCompletion?
-    let onMigrate: (ExternalMigrationItem) -> Void
-    let onHandleOriginal: (ExternalMigrationItem, ExternalMigrationCompletion) -> Void
-
-    private var kind: LargeFileKind {
-        LargeFileKind.classify(item)
-    }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: kind.systemImage)
-                .symbolRenderingMode(.hierarchical)
-                .font(.title2)
-                .foregroundStyle(kind.tint)
-                .frame(width: 44)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(item.title)
-                        .font(AppDesignTokens.Typography.cardTitle)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if item.status == .movedToTrash {
-                        Label(L10n.text("已移到废纸篓", "Moved to Trash"), systemImage: "trash.fill")
-                            .font(AppTypography.body)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer(minLength: 8)
-
-                    Text(ByteFormat.string(item.sizeBytes))
-                        .font(AppDesignTokens.Typography.metadata.monospacedDigit())
-                        .foregroundStyle(kind.tint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        Label(kind.title, systemImage: kind.systemImage)
-                            .foregroundStyle(kind.tint)
-
-                        Divider()
-                            .frame(height: 12)
-
-                        Label(LargeFilePresenter.sourceTitle(for: item), systemImage: "folder.fill")
-                            .foregroundStyle(.secondary)
-
-                        Divider()
-                            .frame(height: 12)
-
-                        Label(item.tier.title, systemImage: item.tier.systemImage)
-                            .foregroundStyle(item.tier.color)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(kind.title, systemImage: kind.systemImage)
-                            .foregroundStyle(kind.tint)
-                        Label(LargeFilePresenter.sourceTitle(for: item), systemImage: "folder.fill")
-                            .foregroundStyle(.secondary)
-                        Label(item.tier.title, systemImage: item.tier.systemImage)
-                            .foregroundStyle(item.tier.color)
-                    }
-                }
-                .font(AppTypography.body)
-
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        Text(kind.shortDescription)
-                            .foregroundStyle(.secondary)
-                        Text(item.path)
-                            .foregroundStyle(.tertiary)
-                    }
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(kind.shortDescription)
-                            .foregroundStyle(.secondary)
-                        Text(item.path)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .font(AppDesignTokens.Typography.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            .layoutPriority(1)
-
-            HStack(spacing: 7) {
-                Button {
-                    store.reveal(item.openPath.isEmpty ? item.path : item.openPath)
-                } label: {
-                    Label(L10n.text("在访达中显示", "Show in Finder"), systemImage: "folder")
-                }
-                .appButtonChrome(.secondary)
-
-                if let completedMigration {
-                    Button {
-                        ExternalDriveMigrationService.reveal(completedMigration.destinationURL)
-                    } label: {
-                        Label(
-                            completedMigration.didMoveSourceToTrash
-                                ? L10n.text("已迁移", "Migrated")
-                                : L10n.text("已复制", "Copied"),
-                            systemImage: "checkmark.circle"
-                        )
-                    }
-                    .appButtonChrome(.secondary)
-                    if !completedMigration.didMoveSourceToTrash, let migrationItem {
-                        Button {
-                            onHandleOriginal(migrationItem, completedMigration)
-                        } label: {
-                            Label(L10n.text("处理原件", "Handle Original"), systemImage: "trash")
-                        }
-                        .appButtonChrome(.secondary)
-                        .disabled(isMigrationDisabled)
-                    }
-                } else if let migrationItem {
-                    Button {
-                        onMigrate(migrationItem)
-                    } label: {
-                        if isMigrating {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Label(L10n.text("复制到外接硬盘", "Copy to External Drive"), systemImage: "externaldrive.badge.plus")
-                        }
-                    }
-                    .appButtonChrome(.secondary)
-                    .disabled(isMigrationDisabled)
-                }
-
-                if item.canMoveToTrash, completedMigration == nil {
-                    Button(role: .destructive) {
-                        store.requestTrash(item)
-                    } label: {
-                        Label(L10n.text("移到废纸篓", "Move to Trash"), systemImage: "trash")
-                    }
-                    .appButtonChrome(.secondary)
-                    .disabled(!store.canRequestTrash(item) || isMigrationDisabled)
-                }
-            }
-            .controlSize(.regular)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .glassPanel(cornerRadius: AppDesignTokens.Radius.settingsPanel, tint: kind.tint, elevated: false, prominence: .quiet)
-    }
-}
-
-private struct ExternalAppMigrationRow: View {
-    let item: ExternalMigrationItem
-    let isMigrating: Bool
-    let completedMigration: ExternalMigrationCompletion?
-    let isDisabled: Bool
-    let onMigrate: () -> Void
-    let onHandleOriginal: (ExternalMigrationCompletion) -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            CachedAppIconView(path: item.sourceURL.path, size: 28) {
-                Image(systemName: "app.fill")
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(AppDesignTokens.Palette.information)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.title)
-                    .font(AppDesignTokens.Typography.inlineTitle)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(ByteFormat.string(item.sizeBytes))
-                    .font(AppDesignTokens.Typography.secondary.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if let completedMigration {
-                Button(L10n.text("在访达中显示", "Show in Finder")) {
-                    ExternalDriveMigrationService.reveal(completedMigration.destinationURL)
-                }
-                .appButtonChrome(.secondary)
-                Text(L10n.text("原 App 已保留", "Original app kept"))
-                    .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
-            } else {
-                Button {
-                    onMigrate()
-                } label: {
-                    if isMigrating {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Label(L10n.text("复制 App 本体", "Copy App Bundle"), systemImage: "externaldrive.badge.plus")
-                    }
-                }
-                .appButtonChrome(.secondary)
-                .disabled(isDisabled)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
 private struct ExternalMigrationNotice: Equatable {
     let message: String
     let isError: Bool
     let destinationURL: URL?
 }
 
-private struct ExternalMigrationCompletion: Equatable {
-    let destinationURL: URL
-    let volume: ExternalStorageVolume
-    let didMoveSourceToTrash: Bool
-}
-
 private struct PendingOriginalRemoval: Equatable, Sendable {
     let item: ExternalMigrationItem
     let destinationURL: URL
     let volume: ExternalStorageVolume
+    var contentVerification: MigrationContentVerification? = nil
 }
 
 #if DEBUG || STORAGE_CLEANER_BETA
@@ -1387,37 +821,21 @@ enum DebugExternalMigrationPresentationFixture {
 }
 #endif
 
-private extension LargeFileKind {
-    var tint: Color {
-        switch self {
-        case .folder: AppDesignTokens.Palette.storage
-        case .video: AppDesignTokens.Palette.destructive
-        case .installer: AppDesignTokens.Palette.warning
-        case .archive: AppDesignTokens.Palette.caution
-        case .document: AppDesignTokens.Palette.information
-        case .image: AppDesignTokens.Palette.sensitive
-        case .audio: AppDesignTokens.Palette.diagnostic
-        case .mailAttachment: AppDesignTokens.Palette.tertiary
-        case .developer: AppDesignTokens.Palette.secondary
-        case .other: .secondary
-        }
-    }
-}
-
-private extension LargeFileFilter {
-    var tint: Color {
-        switch self {
-        case .all: AppDesignTokens.Palette.storage
-        case .folder: LargeFileKind.folder.tint
-        case .video: LargeFileKind.video.tint
-        case .installer: LargeFileKind.installer.tint
-        case .archive: LargeFileKind.archive.tint
-        case .document: LargeFileKind.document.tint
-        case .image: LargeFileKind.image.tint
-        case .audio: LargeFileKind.audio.tint
-        case .mailAttachment: LargeFileKind.mailAttachment.tint
-        case .developer: LargeFileKind.developer.tint
-        case .other: LargeFileKind.other.tint
-        }
+/// The scan/analysis presentation used by the workspace and inert captures.
+struct LargeFilesRunningPage: View {
+    let module: ReviewFilter
+    let title: String
+    var state: RuntimeWorkflowState = .running
+    var fraction: Double? = nil
+    var metrics: [RuntimeWorkflowMetric] = []
+    var currentItem: String? = nil
+    let trustText: String
+    let canCancel: Bool
+    let onCancel: (() -> Void)?
+    var body: some View {
+        FeatureRuntimePage(module: module, title: title, state: state,
+            fraction: fraction, metrics: metrics, currentItem: currentItem, trustText: trustText,
+            canCancel: canCancel, cancelTitle: L10n.text("取消扫描", "Cancel Scan"), onCancel: onCancel
+        ) { EmptyView() } actions: { EmptyView() }
     }
 }

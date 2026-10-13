@@ -14,7 +14,7 @@ enum GeekChartUnit {
         case .temperature:
             return String(format: compact ? "%.0f°C" : "%.1f°C", value)
         case .fanRPM:
-            return "\(Int(value.rounded()))" + (compact ? "" : " rpm")
+            return SystemFanSpeedFormat.number(Int(value.rounded())) + (compact ? "" : " rpm")
         case .bytes:
             return ByteFormat.string(Int64(max(0, value).rounded()))
         case .bytesPerSecond:
@@ -51,9 +51,18 @@ enum ChartDomainPolicy: Equatable, Sendable {
     }
 }
 
+private struct MiniWindowPreviewDateKey: EnvironmentKey { static let defaultValue: Date? = nil }
+extension EnvironmentValues {
+    var miniWindowPreviewDate: Date? {
+        get { self[MiniWindowPreviewDateKey.self] }
+        set { self[MiniWindowPreviewDateKey.self] = newValue }
+    }
+}
+
 struct GeekLiveChartTimeline<Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.panelChartClock) private var sharedClock
+    @Environment(\.miniWindowPreviewDate) private var previewDate
 
     let duration: TimeInterval
     private let content: (Date) -> Content
@@ -68,7 +77,9 @@ struct GeekLiveChartTimeline<Content: View>: View {
 
     @ViewBuilder
     var body: some View {
-        if let sharedClock {
+        if let previewDate {
+            content(previewDate)
+        } else if let sharedClock {
             SharedPanelChartClockContent(clock: sharedClock, content: content)
         } else {
             TimelineView(
@@ -772,6 +783,229 @@ struct GeekBarTimelineLabels: View {
     }
 }
 
+/// Axis line under a tertiary history chart: where the window starts, that it
+/// ends now, the vertical scale and what the quiet gap blocks mean. The plot
+/// keeps its built-in timeline and value labels off, so its viewport, hover
+/// tooltips and prepared frames are unchanged; this row is static text that
+/// depends only on the selected duration and adds no per-frame chart work.
+/// Place it with `geekHistoryAxis(_:)`, directly under the chart.
+struct GeekHistoryAxisFooter: View {
+    static let height = MiniWindowStyleTokens.historyAxisRowHeight
+
+    /// The window the plot above draws.
+    let duration: TimeInterval
+    /// Visible vertical range such as "0–100%"; nil for an automatic scale.
+    var valueRange: String?
+    /// Bar charts draw unrecorded periods as gap blocks; line charts leave a
+    /// break instead and do not need the legend.
+    var showsGapLegend = true
+    /// The history still draws the previous window while the selected one is
+    /// prepared (`MenuBarDisplayedHistory.isUpdating`, passed by the
+    /// history's owner). The plot block also sets it while the chart shows
+    /// the previous window's frame.
+    var isUpdating = false
+
+    var body: some View {
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+            Text(Self.startLabel(for: duration))
+            Spacer(minLength: MiniWindowStyleTokens.rowSpacing)
+            if showsGapLegend, !isUpdating {
+                HStack(spacing: 3) {
+                    GeekChartGapSwatch()
+                    Text(L10n.text("未记录", "Unrecorded"))
+                }
+                .help(Self.gapHelp)
+                Text("·")
+                    .foregroundStyle(.tertiary)
+            }
+            Text(Self.centerLabel(valueRange: valueRange, isUpdating: isUpdating))
+                .help(isUpdating ? Self.updatingHelp : "")
+            Spacer(minLength: MiniWindowStyleTokens.rowSpacing)
+            Text(L10n.text("现在", "Now"))
+        }
+        .font(AdvancedPanelTypography.chartLabel)
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
+        .lineLimit(1)
+        // Tertiary plots use a 2-point horizontal inset; the end labels sit
+        // on the plot's first and last columns.
+        .padding(.horizontal, 2)
+        .frame(height: Self.height)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(L10n.text("图表坐标", "Chart axes"))
+        .accessibilityValue(accessibilitySummary)
+    }
+
+    static func startLabel(for duration: TimeInterval) -> String {
+        "−" + (GeekChartRange(rawValue: Int(duration.rounded()))?.title ?? fallbackTitle(duration))
+    }
+
+    /// "0–100%", "0–100°C", "0–4,000 rpm"; nil for byte scales, which grow
+    /// with the visible peak.
+    static func rangeText(_ range: ClosedRange<Double>, unit: GeekChartUnit) -> String? {
+        switch unit {
+        case .percent, .temperature:
+            return "\(Int(range.lowerBound.rounded()))–\(unit.formatted(range.upperBound, compact: true))"
+        case .fanRPM:
+            return "\(Int(range.lowerBound.rounded()))–\(unit.formatted(range.upperBound))"
+        case .bytes, .bytesPerSecond:
+            return nil
+        }
+    }
+
+    static func scaleLabel(_ valueRange: String?) -> String {
+        valueRange.map { L10n.text("纵轴 \($0)", "Scale \($0)") }
+            ?? L10n.text("纵轴自动", "Auto scale")
+    }
+
+    /// The plot still shows the previous window while the newly selected one
+    /// is prepared: the window it draws is not the selected one.
+    /// Text between the start and "now" labels.
+    static func centerLabel(valueRange: String?, isUpdating: Bool) -> String {
+        isUpdating ? L10n.text("更新中…", "Updating…") : scaleLabel(valueRange)
+    }
+
+    static var updatingHelp: String {
+        L10n.text(
+            "图表仍是上一个时间范围的数据，正在更新为所选时间范围。",
+            "The chart still shows the previous time range and is updating to the selected one."
+        )
+    }
+
+    static var gapHelp: String {
+        L10n.text(
+            "浅灰色块：这段时间没有采样记录（应用未运行、电脑休眠或暂停采样），不代表数值为 0。",
+            "Light gray blocks: no samples were recorded (app not running, sleep or paused sampling); they do not mean zero."
+        )
+    }
+
+    private var accessibilitySummary: String {
+        Self.accessibilitySummary(duration: duration, valueRange: valueRange, showsGapLegend: showsGapLegend,
+                                  isUpdating: isUpdating)
+    }
+
+    /// The row is one accessibility element, so the gap legend's meaning is
+    /// part of its value rather than only a hover tooltip.
+    static func accessibilitySummary(
+        duration: TimeInterval, valueRange: String?, showsGapLegend: Bool, isUpdating: Bool = false
+    ) -> String {
+        let axes = L10n.text(
+            "横轴从\(startLabel(for: duration))到现在；\(scaleLabel(valueRange))",
+            "From \(startLabel(for: duration)) to now; \(scaleLabel(valueRange))"
+        )
+        let updating = isUpdating
+            ? L10n.text("；图表仍是上一个时间范围，正在更新为所选时间范围",
+                        "; the chart still shows the previous time range and is updating to the selected one")
+            : ""
+        guard showsGapLegend else { return axes + updating }
+        return axes + L10n.text(
+            "；浅灰色块表示未记录，没有采样，不代表数值为 0",
+            "; light gray blocks are unrecorded periods with no samples, not zero"
+        ) + updating
+    }
+
+    private static func fallbackTitle(_ duration: TimeInterval) -> String {
+        if duration >= 86_400 {
+            let days = Int((duration / 86_400).rounded())
+            return L10n.text("\(days) 天", "\(days) Days")
+        }
+        if duration >= 3_600 {
+            let hours = Int((duration / 3_600).rounded())
+            return L10n.text("\(hours) 小时", "\(hours) Hours")
+        }
+        let minutes = max(1, Int((duration / 60).rounded()))
+        return L10n.text("\(minutes) 分钟", "\(minutes) Minutes")
+    }
+}
+
+extension View {
+    /// One history plot block: this chart (or its placeholder) framed to
+    /// `historyChartHeight`, with the axis row directly below and no gap, so
+    /// the block is `historyPlotHeight` tall on every page whatever the page's
+    /// own row spacing.
+    func geekHistoryAxis(_ footer: GeekHistoryAxisFooter) -> some View {
+        GeekHistoryPlotBlock(chart: self, footer: footer)
+    }
+}
+
+/// The plot block of a history: chart and axis row. `footer.duration` is the
+/// window the chart draws. Right after another range was selected that can
+/// still be the previous window (`footer.isUpdating`, from the history's
+/// slice), or the chart can still show the previous window's prepared frame
+/// while the selected one is built (`GeekHistoryPreviousFrameKey`). Either
+/// way the block dims the plot and the axis row says "更新中…" instead of the
+/// scale, until the selected window is on screen. Nothing is inferred from
+/// the environment's selected range.
+struct GeekHistoryPlotBlock<Chart: View>: View {
+    static var updatingOpacity: Double { 0.45 }
+
+    let chart: Chart
+    var footer: GeekHistoryAxisFooter
+    @State private var isShowingPreviousFrame = false
+
+    static func showsUpdating(historyIsUpdating: Bool, isShowingPreviousFrame: Bool) -> Bool {
+        historyIsUpdating || isShowingPreviousFrame
+    }
+
+    var body: some View {
+        let isUpdating = Self.showsUpdating(
+            historyIsUpdating: footer.isUpdating,
+            isShowingPreviousFrame: isShowingPreviousFrame
+        )
+        VStack(spacing: 0) {
+            chart
+                .frame(height: MiniWindowStyleTokens.historyChartHeight)
+                .onPreferenceChange(GeekHistoryPreviousFrameKey.self) { showsPrevious in
+                    isShowingPreviousFrame = showsPrevious
+                }
+                .opacity(isUpdating ? GeekHistoryPlotBlock.updatingOpacity : 1)
+                .menuBarTraceChartIsStale(isUpdating)
+            updatedFooter(isUpdating)
+        }
+        .menuBarPresentationProbe("range.dimmed", revision: UInt64(footer.duration.isFinite ? max(0, footer.duration) : 0), when: isUpdating)
+        // The state belongs to this block only.
+        .transformPreference(GeekHistoryPreviousFrameKey.self) { $0 = false }
+        .transaction { $0.animation = nil }
+    }
+
+    private func updatedFooter(_ isUpdating: Bool) -> GeekHistoryAxisFooter {
+        var footer = footer
+        footer.isUpdating = isUpdating
+        return footer
+    }
+}
+
+/// A prepared chart is showing the previous window's frame
+/// (`MenuBarPreparedChartModel.isShowingPreviousValue`); read by the history
+/// plot block that contains it.
+struct GeekHistoryPreviousFrameKey: PreferenceKey {
+    static let defaultValue = false
+
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
+
+/// Legend swatch for an unrecorded period: the same square block and fill
+/// the plot draws, plus a hairline so it stays visible at legend size.
+struct GeekChartGapSwatch: View {
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        Rectangle()
+            .fill(GeekChartDrawing.gapFill)
+            .overlay {
+                Rectangle().strokeBorder(
+                    Color.secondary.opacity(0.45),
+                    lineWidth: MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
+                )
+            }
+            .frame(width: 9, height: 7)
+            .accessibilityHidden(true)
+    }
+}
+
 enum GeekBarChartScale {
     static func throughputUpperBound(for values: [Double]) -> Double {
         // Callers pass the actual displayed averages, not unaggregated polls.
@@ -783,6 +1017,7 @@ enum GeekBarChartScale {
 }
 
 struct GeekNetworkHistorySnapshot: Sendable {
+    let points: [MenuBarTelemetryPoint]
     let dates: [Date]
     let uploadSamples: [MenuBarChartSample]
     let downloadSamples: [MenuBarChartSample]
@@ -796,6 +1031,7 @@ struct GeekNetworkHistorySnapshot: Sendable {
     }
 
     init(points: [MenuBarTelemetryPoint]) {
+        self.points = points
         var dates: [Date] = []
         var uploadSamples: [MenuBarChartSample] = []
         var downloadSamples: [MenuBarChartSample] = []
@@ -804,8 +1040,8 @@ struct GeekNetworkHistorySnapshot: Sendable {
         downloadSamples.reserveCapacity(points.count)
 
         for point in points {
-            let upload = point.upBytesPerSecond.map(Double.init)
-            let download = point.downBytesPerSecond.map(Double.init)
+            let upload = MenuBarTelemetryChannel.upload.mean(in: point)
+            let download = MenuBarTelemetryChannel.download.mean(in: point)
             dates.append(point.date)
             uploadSamples.append(MenuBarChartSample(date: point.date, value: upload))
             downloadSamples.append(MenuBarChartSample(date: point.date, value: download))
@@ -814,10 +1050,10 @@ struct GeekNetworkHistorySnapshot: Sendable {
         self.dates = dates
         self.uploadSamples = uploadSamples
         self.downloadSamples = downloadSamples
-        uploadHasRenderableData = PanelChartSampling.hasRenderableTrend(uploadSamples)
-        downloadHasRenderableData = PanelChartSampling.hasRenderableTrend(downloadSamples)
-        uploadStatistics = GeekSeriesStatistics(values: uploadSamples.compactMap(\.value))
-        downloadStatistics = GeekSeriesStatistics(values: downloadSamples.compactMap(\.value))
+        uploadHasRenderableData = PanelChartSampling.hasRenderableTrend(uploadSamples) || GeekCompressedHistoryProjection.hasTrend(points, channel: .upload)
+        downloadHasRenderableData = PanelChartSampling.hasRenderableTrend(downloadSamples) || GeekCompressedHistoryProjection.hasTrend(points, channel: .download)
+        uploadStatistics = GeekCompressedHistoryProjection.telemetryStatistics(points, channel: .upload)
+        downloadStatistics = GeekCompressedHistoryProjection.telemetryStatistics(points, channel: .download)
     }
 }
 
@@ -849,7 +1085,7 @@ struct GeekPreparedNetworkFrame: Sendable {
             duration: duration,
             referenceDate: referenceDate
         )
-        let snapshots = GeekChartWindow.displayBuckets(
+        var snapshots = GeekChartWindow.displayBuckets(
             for: history.dates,
             in: plotRect,
             range: range,
@@ -859,14 +1095,29 @@ struct GeekPreparedNetworkFrame: Sendable {
             isMissing: { history.uploadSamples[$0].value == nil && history.downloadSamples[$0].value == nil },
             holdLatestWhileFresh: true
         )
+        let compressed = history.points.contains { $0.bucketStatistics != nil }
+        if compressed {
+            let gaps = MenuBarSamplingGaps.shared.intervals(at: referenceDate)
+            let points = history.points
+            snapshots = GeekCompressedHistoryProjection.buckets(snapshots, dates: history.dates,
+                records: points.indices.map { index in
+                    let previous = index > 0 ? points[index - 1] : nil
+                    return points[index].statistic(for: .download, previous: previous, gaps: gaps)
+                        ?? points[index].statistic(for: .upload, previous: previous, gaps: gaps)
+                })
+        }
         let rawUploads = snapshots.map { bucket in
             bucket.mean { history.uploadSamples[$0].value }
         }
         let rawDownloads = snapshots.map { bucket in
             bucket.mean { history.downloadSamples[$0].value }
         }
-        let uploads = TimeBucketAggregator.nearestFilled(rawUploads)
-        let downloads = TimeBucketAggregator.nearestFilled(rawDownloads)
+        let uploads = compressed
+            ? rawUploads.enumerated().map { TimeBucketValue(value: $0.element, isEstimated: false, sourceIndex: $0.offset) }
+            : TimeBucketAggregator.nearestFilled(rawUploads)
+        let downloads = compressed
+            ? rawDownloads.enumerated().map { TimeBucketValue(value: $0.element, isEstimated: false, sourceIndex: $0.offset) }
+            : TimeBucketAggregator.nearestFilled(rawDownloads)
         let buckets = snapshots.indices.map { index in
             let bucket = snapshots[index]
             return GeekPreparedNetworkBucket(
@@ -919,6 +1170,10 @@ struct GeekMirroredBarMark: Sendable {
 }
 
 enum GeekChartDrawing {
+    /// Fill of an unrecorded period. The axis footer's legend uses the same
+    /// pigment, so the quiet block and its "未记录" swatch always match.
+    static let gapFill = Color.secondary.opacity(0.045)
+
     static func bar(in context: GraphicsContext, rect: CGRect, color: Color,
                     estimated: Bool, displayScale: CGFloat) {
         // Estimated coverage shares the normal appearance; provenance stays in the tooltip.
@@ -933,9 +1188,9 @@ enum GeekChartDrawing {
         for right in ordered.map({ $0 - metrics.width / 2 }) + [plot.maxX] {
             if right - left > metrics.pitch * 2 {
                 let rect = CGRect(x: left, y: plot.minY, width: right - left, height: plot.height)
-                context.fill(Path(rect), with: .color(.secondary.opacity(0.045)))
-                // Keep the true time gap quiet. Its meaning is available in
-                // the chart help rather than repeated over every metric plot.
+                context.fill(Path(rect), with: .color(gapFill))
+                // Keep the true time gap quiet inside the plot. Tertiary
+                // histories name it once in GeekHistoryAxisFooter's legend.
             }
             left = right + metrics.width + metrics.spacing
         }
@@ -950,17 +1205,18 @@ private struct GeekMirroredBarSeries: View {
     let maximum: Double
     let color: Color
     let upward: Bool
+    var singleDirection = false
 
     var body: some View {
         let metrics = GeekChartWindow.barMetrics(displayScale: displayScale)
-        let halfHeight = max(1, plotRect.height / 2 - 3)
+        let halfHeight = max(1, singleDirection ? plotRect.height - 4 : plotRect.height / 2 - 3)
         let safeMaximum = max(Double.ulpOfOne, maximum)
 
         Canvas { context, _ in
             context.clip(to: Path(plotRect))
             let hairline = MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
             let baselineY = MiniWindowPixel.strokeCenter(
-                plotRect.midY,
+                singleDirection ? (upward ? plotRect.maxY - 2 : plotRect.minY + 2) : plotRect.midY,
                 lineWidth: hairline,
                 displayScale: displayScale
             )
@@ -1023,35 +1279,61 @@ struct GeekCPUHistoryFrame: Sendable {
         duration: TimeInterval,
         referenceDate: Date,
         samplingInterval: TimeInterval,
-        displayScale: CGFloat
+        displayScale: CGFloat,
+        preparedAveragedBuckets: [GeekChartBucketSnapshot]? = nil
     ) -> Self {
         guard duration.isFinite, duration > 0, duration <= MenuBarHistoryRetention.duration,
               plotRect.width.isFinite, plotRect.width > 0,
               plotRect.minX.isFinite else {
             return Self(marks: [], bucketDuration: 1)
         }
-        if GeekHistoryAveraging.interval(for: duration) != nil {
-            let range = GeekChartWindow.barRange(for: points.map(\.date), duration: duration,
-                referenceDate: referenceDate)
-            let buckets = GeekChartWindow.displayBuckets(for: points.map(\.date), in: plotRect,
-                range: range, referenceDate: referenceDate, displayScale: displayScale,
-                isMissing: { !isComplete(points[$0]) })
+        let hasCompressedHistory = points.contains { $0.bucketStatistics != nil }
+        if GeekHistoryAveraging.interval(for: duration) != nil || hasCompressedHistory {
+            var buckets: [GeekChartBucketSnapshot]
+            if let preparedAveragedBuckets {
+                buckets = preparedAveragedBuckets
+            } else {
+                let dates = points.map(\.date)
+                let range = GeekChartWindow.barRange(for: dates, duration: duration,
+                    referenceDate: referenceDate)
+                buckets = GeekChartWindow.displayBuckets(for: dates, in: plotRect,
+                    range: range, referenceDate: referenceDate, displayScale: displayScale,
+                    isMissing: { !isComplete(points[$0]) })
+            }
+            if hasCompressedHistory {
+                let gaps = MenuBarSamplingGaps.shared.intervals(at: referenceDate)
+                buckets = GeekCompressedHistoryProjection.buckets(buckets, dates: points.map(\.date),
+                    records: points.indices.map { index in isComplete(points[index])
+                        ? points[index].statistic(for: .cpuTotal, previous: index > 0 ? points[index - 1] : nil, gaps: gaps) : nil })
+            }
             let width = GeekChartWindow.barMetrics(displayScale: displayScale).width
             let marks = buckets.compactMap { bucket -> Mark? in
                 guard let latestIndex = bucket.indices.last,
-                      let peakIndex = bucket.indices.max(by: { points[$0].cpuTotal! < points[$1].cpuTotal! })
+                      let peakIndex = bucket.indices.max(by: {
+                          if hasCompressedHistory {
+                              return MenuBarTelemetryChannel.cpuTotal.peak(in: points[$0])!
+                                  < MenuBarTelemetryChannel.cpuTotal.peak(in: points[$1])!
+                          }
+                          return points[$0].cpuTotal! < points[$1].cpuTotal!
+                      })
                 else { return nil }
                 let mean = MenuBarTelemetryPoint(date: bucket.end,
-                    cpuTotal: bucket.mean { points[$0].cpuTotal },
-                    cpuUser: bucket.mean { points[$0].cpuUser },
-                    cpuSystem: bucket.mean { points[$0].cpuSystem },
+                    cpuTotal: bucket.mean { hasCompressedHistory
+                        ? MenuBarTelemetryChannel.cpuTotal.mean(in: points[$0]) : points[$0].cpuTotal },
+                    cpuUser: bucket.mean { hasCompressedHistory
+                        ? MenuBarTelemetryChannel.cpuUser.mean(in: points[$0]) : points[$0].cpuUser },
+                    cpuSystem: bucket.mean { hasCompressedHistory
+                        ? MenuBarTelemetryChannel.cpuSystem.mean(in: points[$0]) : points[$0].cpuSystem },
                     gpu: nil, memory: nil, chipTemperature: nil, fanRPM: nil,
                     downBytesPerSecond: nil, upBytesPerSecond: nil)
                 return Mark(bucket: bucket,
                     rect: CGRect(x: MiniWindowPixel.aligned(bucket.x - width / 2, displayScale: displayScale),
                                  y: plotRect.minY, width: width, height: plotRect.height),
-                    latest: points[latestIndex], mean: mean, peak: points[peakIndex],
-                    peakTotal: points[peakIndex].cpuTotal!, isEstimated: false)
+                    latest: points[latestIndex], mean: mean,
+                    peak: hasCompressedHistory ? points[peakIndex].cpuPeakSample : points[peakIndex],
+                    peakTotal: hasCompressedHistory
+                        ? MenuBarTelemetryChannel.cpuTotal.peak(in: points[peakIndex])! : points[peakIndex].cpuTotal!,
+                    isEstimated: false)
             }
             return Self(marks: marks, bucketDuration: buckets.first.map { $0.end.timeIntervalSince($0.start) } ?? 1)
         }
@@ -1150,11 +1432,15 @@ struct GeekCPUHistoryFrame: Sendable {
         marks.first { x >= $0.rect.minX && x <= $0.rect.maxX }
     }
 
-    private static func isComplete(_ point: MenuBarTelemetryPoint) -> Bool {
-        [point.cpuTotal, point.cpuUser, point.cpuSystem].allSatisfy {
-            guard let value = $0 else { return false }
-            return value.isFinite && (0...100).contains(value)
-        }
+    static func isComplete(_ point: MenuBarTelemetryPoint) -> Bool {
+        // Raw histories retain the direct-field path used by the preparation
+        // budget. Only compressed points need a lookup of bucket statistics.
+        let compressed = point.bucketStatistics != nil
+        guard let total = compressed ? MenuBarTelemetryChannel.cpuTotal.mean(in: point) : point.cpuTotal,
+              let user = compressed ? MenuBarTelemetryChannel.cpuUser.mean(in: point) : point.cpuUser,
+              let system = compressed ? MenuBarTelemetryChannel.cpuSystem.mean(in: point) : point.cpuSystem else { return false }
+        return total.isFinite && user.isFinite && system.isFinite
+            && (0...100).contains(total) && (0...100).contains(user) && (0...100).contains(system)
     }
 }
 
@@ -1170,6 +1456,10 @@ private struct GeekStackedBarSeries: View {
     let referenceDate: Date
     var cpuFrame: GeekCPUHistoryFrame?
     var prepared: GeekPreparedLineFrame?
+    /// A single-series chart may color each bucket's bar on its own (the
+    /// memory-pressure history: every sample's level). Nil keeps the series
+    /// color for that bucket.
+    var bucketColor: ((Int) -> Color?)? = nil
 
     var body: some View {
         let buckets = prepared?.buckets ?? []
@@ -1179,15 +1469,17 @@ private struct GeekStackedBarSeries: View {
         Canvas { context, _ in
             context.clip(to: Path(plotRect))
 
-            let observations: [(values: [Double?], x: CGFloat, width: CGFloat, estimated: Bool)]
+            let observations: [(values: [Double?], x: CGFloat, width: CGFloat, estimated: Bool, color: Color?)]
             if let cpuFrame {
                 observations = cpuFrame.marks.map { mark in
-                    (series.map { $0.channel.value(in: mark.mean) }, mark.rect.minX, mark.rect.width, mark.isEstimated)
+                    (series.map { $0.channel.value(in: mark.mean) }, mark.rect.minX, mark.rect.width, mark.isEstimated, nil)
                 }
             } else {
-                observations = zip(buckets, bucketValues).compactMap { bucket, values in
+                observations = zip(buckets, bucketValues).enumerated().compactMap { index, pair in
+                    let (bucket, values) = pair
                     guard values.contains(where: { $0 != nil }) else { return nil }
-                    return (values, bucket.x - metrics.width / 2, metrics.width, bucket.isEstimated)
+                    return (values, bucket.x - metrics.width / 2, metrics.width, bucket.isEstimated,
+                            values.count == 1 ? bucketColor?(index) : nil)
                 }
             }
             GeekChartDrawing.gaps(in: context, plot: plotRect,
@@ -1213,7 +1505,7 @@ private struct GeekStackedBarSeries: View {
                         in: plotRect, range: valueRange,
                         displayScale: displayScale
                     )
-                    GeekChartDrawing.bar(in: context, rect: rect, color: colors[index],
+                    GeekChartDrawing.bar(in: context, rect: rect, color: observation.color ?? colors[index],
                         estimated: observation.estimated, displayScale: displayScale)
                 }
             }
@@ -1221,7 +1513,7 @@ private struct GeekStackedBarSeries: View {
     }
 }
 
-struct GeekSeriesStatistics: Sendable {
+struct GeekSeriesStatistics: Sendable, Equatable {
     let current: Double
     let minimum: Double
     let average: Double
@@ -1258,14 +1550,40 @@ struct GeekPrecisionLineChart: View {
     var showsTimelineLabels = true
     var showsTooltip = false
     var horizontalInset: CGFloat = 6
+    /// Compact CPU cards use their full plot height directly under the header;
+    /// other charts retain the existing breathing room above the plot.
+    var verticalInset: CGFloat = 4
     var domainPolicy: ChartDomainPolicy?
     var showsValueLabels = false
     var lineWidth: CGFloat = 1.35
     var fillOpacity: Double = 0
     var cpuSamplingInterval: TimeInterval = 1
     var showsSamplingDetails = true
+    /// Memory-pressure bars take the color of each sample's own level
+    /// instead of one series color.
+    var pressureLevelColor: ((MemoryPressureLevel?) -> Color)? = nil
 
     @State private var hoverLocation: CGPoint?
+
+    /// The prepared frame's identity. The series ids are part of it: a
+    /// caller that rewrites the points before drawing them (a fan history
+    /// draws one fan's speed in the fan channel) names the data with its
+    /// series, so frames of different data never share a cache entry.
+    static func preparationConfiguration(
+        series: [MenuBarTelemetrySeries], plotRect: CGRect, duration: TimeInterval, displayScale: CGFloat,
+        style: GeekPrecisionChartStyle, valueRange: ClosedRange<Double>, samplingInterval: TimeInterval
+    ) -> String {
+        "\(preparationShape(series: series, plotRect: plotRect, displayScale: displayScale, style: style)):\(duration):\(valueRange):\(samplingInterval)"
+    }
+
+    /// The part of the identity that is not the time window: a frame of
+    /// another window of the same data may stand in while the new one is
+    /// prepared; a frame of other data may not.
+    static func preparationShape(
+        series: [MenuBarTelemetrySeries], plotRect: CGRect, displayScale: CGFloat, style: GeekPrecisionChartStyle
+    ) -> String {
+        "\(series.map { "\($0.id)=\($0.channel.rawValue)" }):\(plotRect):\(displayScale):\(style)"
+    }
 
     var body: some View {
         let channels = series.map(\.channel)
@@ -1300,15 +1618,23 @@ struct GeekPrecisionLineChart: View {
                         GeometryReader { proxy in
                             let plotRect = CGRect(
                                 x: horizontalInset + (showsValueLabels ? 56 : 0),
-                                y: 4,
+                                y: verticalInset,
                                 width: max(1, proxy.size.width - horizontalInset * 2 - (showsValueLabels ? 56 : 0)),
-                                height: max(1, proxy.size.height - (showsTimelineLabels ? 20 : 4))
+                                height: max(1, proxy.size.height - (showsTimelineLabels ? 20 : verticalInset))
                             )
                             let visibleValueRange = resolvedValueRange
                             let channels = visibleSeries.map(\.channel)
                             MenuBarChartPreparation(kind: "line-frame", first: points.first?.date, last: points.last?.date,
                                 count: points.count,
-                                configuration: "\(channels.map(\.rawValue)):\(plotRect):\(duration):\(displayScale):\(style):\(visibleValueRange):\(cpuSamplingInterval)",
+                                configuration: Self.preparationConfiguration(
+                                    series: visibleSeries, plotRect: plotRect, duration: duration,
+                                    displayScale: displayScale, style: style, valueRange: visibleValueRange,
+                                    samplingInterval: cpuSamplingInterval
+                                ),
+                                shape: Self.preparationShape(
+                                    series: visibleSeries, plotRect: plotRect, displayScale: displayScale, style: style
+                                ),
+                                window: duration,
                                 clockRevision: floor(referenceDate.timeIntervalSince1970),
                                 cost: max(512, points.count * 512),
                                 build: { [points, duration, cpuSamplingInterval, displayScale, style] in
@@ -1340,7 +1666,10 @@ struct GeekPrecisionLineChart: View {
                                         duration: duration,
                                         referenceDate: referenceDate,
                                         cpuFrame: cpuFrame,
-                                        prepared: prepared
+                                        prepared: prepared,
+                                        bucketColor: pressureLevelColor.map { color in
+                                            { prepared.pressureLevels.indices.contains($0) ? color(prepared.pressureLevels[$0]) : nil }
+                                        }
                                     )
                                 } else {
                                     ForEach(visibleSeries, id: \.id) { item in
@@ -1390,14 +1719,18 @@ struct GeekPrecisionLineChart: View {
                                         preparedBuckets: prepared.buckets,
                                         preparedPoints: prepared.sourcePoints,
                                         preparedValues: prepared.hoverValues,
-                                        preparedEstimated: prepared.hoverEstimated
+                                        preparedEstimated: prepared.hoverEstimated,
+                                        preparedPressureLevels: prepared.pressureLevels
                                     )
                                 }
                             }
+                            .menuBarPresentationProbe("hover", revision: MenuBarPresentationProbe.revision(hoverLocation), when: showsTooltip)
+                            .menuBarScriptHover("hover.line", enabled: showsTooltip) { hoverLocation = $0 }
                             .onContinuousHover { phase in
                                 guard showsTooltip else { return }
                                 switch phase {
                                 case let .active(location):
+                                    MenuBarPresentationTrace.beginInput("hover", label: "hover.line")
                                     hoverLocation = location
                                 case .ended:
                                     hoverLocation = nil
@@ -1595,7 +1928,8 @@ struct GeekPrecisionLineChart: View {
         preparedBuckets: [GeekChartBucketSnapshot],
         preparedPoints: [MenuBarTelemetryPoint],
         preparedValues: [[Double?]],
-        preparedEstimated: [[Bool]]
+        preparedEstimated: [[Bool]],
+        preparedPressureLevels: [MemoryPressureLevel?] = []
     ) -> some View {
         if let cpuFrame {
             cpuHoverOverlay(in: plotRect, series: renderableSeries, frame: cpuFrame)
@@ -1623,7 +1957,10 @@ struct GeekPrecisionLineChart: View {
                         guard preparedValues.indices.contains(hoveredPoint.index),
                               preparedValues[hoveredPoint.index].indices.contains(column),
                               let value = preparedValues[hoveredPoint.index][column] else { return nil }
-                        return GeekHoverValue(title: item.title, value: unit.formatted(value), color: item.color,
+                        // The tooltip dot matches the hovered bar's own level color.
+                        let levelColor = preparedPressureLevels.indices.contains(hoveredPoint.index)
+                            ? pressureLevelColor?(preparedPressureLevels[hoveredPoint.index]) : nil
+                        return GeekHoverValue(title: item.title, value: unit.formatted(value), color: levelColor ?? item.color,
                                               isEstimated: preparedEstimated[hoveredPoint.index][column])
                     },
                     visibleDuration: duration,
@@ -1866,6 +2203,7 @@ struct GeekPrecisionLineChart: View {
 }
 
 struct GeekPrecisionNetworkChart: View {
+    @Environment(\.panelMetricColors) private var metricColors
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.panelChartAccentColor) private var panelChartAccentColor
     @Environment(\.displayScale) private var displayScale
@@ -1929,6 +2267,8 @@ struct GeekPrecisionNetworkChart: View {
                             MenuBarChartPreparation(kind: "network-frame", first: points.first?.date, last: points.last?.date,
                                 count: points.count,
                                 configuration: "\(plotRect):\(duration):\(displayScale)",
+                                shape: "\(plotRect):\(displayScale)",
+                                window: duration,
                                 clockRevision: floor(referenceDate.timeIntervalSince1970),
                                 cost: max(512, points.count * 128),
                                 build: { [duration, displayScale] in
@@ -1979,10 +2319,13 @@ struct GeekPrecisionNetworkChart: View {
                                     )
                                 }
                             }
+                            .menuBarPresentationProbe("hover", revision: MenuBarPresentationProbe.revision(hoverLocation), when: showsTooltip)
+                            .menuBarScriptHover("hover.network", enabled: showsTooltip) { hoverLocation = $0 }
                             .onContinuousHover { phase in
                                 guard showsTooltip else { return }
                                 switch phase {
                                 case let .active(location):
+                                    MenuBarPresentationTrace.beginInput("hover", label: "hover.network")
                                     hoverLocation = location
                                 case .ended:
                                     hoverLocation = nil
@@ -2025,11 +2368,11 @@ struct GeekPrecisionNetworkChart: View {
     }
 
     private var uploadBarColor: Color {
-        MenuBarNetworkPalette.upload
+        metricColors.networkUpload
     }
 
     private var downloadBarColor: Color {
-        MenuBarNetworkPalette.download
+        metricColors.networkDownload
     }
 
     private func networkBars(
@@ -2182,13 +2525,29 @@ struct GeekPrecisionNetworkChart: View {
     }
 }
 
+enum GeekDiskIOChartMode: Sendable {
+    case combined
+    case read
+    case write
+
+    func maximum(for frame: GeekPreparedDiskFrame) -> Double {
+        switch self {
+        case .combined: frame.maximum
+        case .read: GeekBarChartScale.throughputUpperBound(for: frame.reads.compactMap { $0 })
+        case .write: GeekBarChartScale.throughputUpperBound(for: frame.writes.compactMap { $0 })
+        }
+    }
+}
+
 struct GeekDiskIOChart: View {
+    @Environment(\.panelMetricColors) private var metricColors
     @Environment(\.displayScale) private var displayScale
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.panelChartAccentColor) private var panelChartAccentColor
 
     let points: [NativeDiskIOPoint]
     let accessibilityLabel: String
+    var mode: GeekDiskIOChartMode = .combined
     var duration: TimeInterval = GeekChartWindow.defaultDuration
     var showsLegend = true
     var showsTimelineLabels = true
@@ -2199,25 +2558,30 @@ struct GeekDiskIOChart: View {
     @StateObject private var dynamicAxisScale = PanelChartAxisScale()
 
     var body: some View {
-        MenuBarChartPreparation(kind: "disk-summary", first: points.first?.date, last: points.last?.date,
-            count: points.count, configuration: "disk:\(duration)", cost: 512,
-            build: { GeekPreparedDiskSummary(points: points, duration: duration) }) { summary in
-            chartBody(summary)
+        GeekLiveChartTimeline(duration: duration) { referenceDate in
+            MenuBarChartPreparation(kind: GeekPreparedDiskSummary.preparationKind, first: points.first?.date, last: points.last?.date,
+                count: points.count, configuration: GeekPreparedDiskSummary.preparationConfiguration(duration: duration),
+                shape: GeekPreparedDiskSummary.preparationShape,
+                clockRevision: referenceDate.timeIntervalSince1970, cost: 512,
+                build: { GeekPreparedDiskSummary(points: points, duration: duration, referenceDate: referenceDate) }) { summary in
+                chartBody(summary)
+            }
         }
     }
 
     private func chartBody(_ summary: GeekPreparedDiskSummary) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        // A pending clock update retains this complete prior window; never
+        // prepare a new frame against an older summary's statistics.
+        let referenceDate = summary.referenceDate
+        return VStack(alignment: .leading, spacing: 2) {
             if showsLegend {
                 HStack(spacing: 14) {
-                    GeekChartLegend(
-                        title: L10n.text("读取", "Read"),
-                        color: diskReadColor
-                    )
-                    GeekChartLegend(
-                        title: L10n.text("写入", "Write"),
-                        color: diskWriteColor
-                    )
+                    if mode != .write {
+                        GeekChartLegend(title: L10n.text("读取", "Read"), color: diskReadColor)
+                    }
+                    if mode != .read {
+                        GeekChartLegend(title: L10n.text("写入", "Write"), color: diskWriteColor)
+                    }
                 }
             }
 
@@ -2225,80 +2589,89 @@ struct GeekDiskIOChart: View {
                 if !summary.hasData {
                     PanelChartSamplingPlaceholder()
                 } else {
-                    GeekLiveChartTimeline(duration: duration) { referenceDate in
-                        GeometryReader { proxy in
-                            let plotRect = CGRect(
-                                x: horizontalInset,
-                                y: 4,
-                                width: max(1, proxy.size.width - horizontalInset * 2),
-                                height: max(1, proxy.size.height - (showsTimelineLabels ? 20 : 4))
-                            )
-                            MenuBarChartPreparation(kind: "disk-frame", first: points.first?.date, last: points.last?.date,
-                                count: points.count, configuration: "\(plotRect):\(duration):\(displayScale)",
-                                clockRevision: floor(referenceDate.timeIntervalSince1970), cost: max(1024, points.count * 128),
-                                build: { [points, duration, displayScale] in GeekPreparedDiskFrame(points: points, plot: plotRect, duration: duration,
-                                    reference: referenceDate, scale: displayScale) }) { prepared in
-                            let targetMaximum = prepared.maximum
-                            let maximum = dynamicAxisScale.displayedMaximum(
-                                fallback: targetMaximum
-                            )
+                    GeometryReader { proxy in
+                        let plotRect = CGRect(
+                            x: horizontalInset,
+                            y: 4,
+                            width: max(1, proxy.size.width - horizontalInset * 2),
+                            height: max(1, proxy.size.height - (showsTimelineLabels ? 20 : 4))
+                        )
+                        MenuBarChartPreparation(kind: "disk-frame", first: points.first?.date, last: points.last?.date,
+                            count: points.count, configuration: "\(plotRect):\(duration):\(displayScale)",
+                            shape: "\(plotRect):\(displayScale)",
+                            window: duration,
+                            clockRevision: referenceDate.timeIntervalSince1970, cost: max(1024, points.count * 128),
+                            build: { [points, duration, displayScale] in GeekPreparedDiskFrame(points: points, plot: plotRect, duration: duration,
+                                reference: referenceDate, scale: displayScale) }) { prepared in
+                        let targetMaximum = mode.maximum(for: prepared)
+                        let maximum = dynamicAxisScale.displayedMaximum(
+                            fallback: targetMaximum
+                        )
 
-                            ZStack(alignment: .topLeading) {
-                                Color.clear
+                        ZStack(alignment: .topLeading) {
+                            Color.clear
 
-                                zeroBaseline(in: plotRect)
+                            zeroBaseline(in: plotRect)
+                            if mode != .write {
                                 GeekMirroredBarSeries(marks: prepared.readMarks, plotRect: plotRect,
-                                    maximum: maximum, color: diskReadColor, upward: true)
+                                    maximum: maximum, color: diskReadColor, upward: true,
+                                    singleDirection: mode != .combined)
+                            }
+                            if mode != .read {
                                 GeekMirroredBarSeries(marks: prepared.writeMarks, plotRect: plotRect,
-                                    maximum: maximum, color: diskWriteColor, upward: false)
+                                    maximum: maximum, color: diskWriteColor,
+                                    upward: mode == .write, singleDirection: mode != .combined)
+                            }
 
-                                if showsTimelineLabels {
-                                    GeekBarTimelineLabels(
-                                        timeRange: prepared.range,
-                                        plotRect: plotRect
-                                    )
-                                }
-                                if showsTooltip {
-                                    hoverOverlay(
-                                        in: plotRect,
-                                        prepared: prepared
-                                    )
-                                }
-                            }
-                            .onContinuousHover { phase in
-                                guard showsTooltip else { return }
-                                switch phase {
-                                case let .active(location):
-                                    hoverLocation = location
-                                case .ended:
-                                    hoverLocation = nil
-                                }
-                            }
-                            .onAppear {
-                                dynamicAxisScale.update(
-                                    targetMaximum: targetMaximum,
-                                    at: referenceDate
+                            if showsTimelineLabels {
+                                GeekBarTimelineLabels(
+                                    timeRange: prepared.range,
+                                    plotRect: plotRect
                                 )
                             }
-                            .onChange(of: targetMaximum) { _, maximum in
-                                dynamicAxisScale.update(
-                                    targetMaximum: maximum,
-                                    at: referenceDate
+                            if showsTooltip {
+                                hoverOverlay(
+                                    in: plotRect,
+                                    prepared: prepared
                                 )
                             }
-                            .onChange(of: referenceDate) { _, date in
-                                dynamicAxisScale.update(
-                                    targetMaximum: targetMaximum,
-                                    at: date
-                                )
+                        }
+                        .menuBarPresentationProbe("hover", revision: MenuBarPresentationProbe.revision(hoverLocation), when: showsTooltip)
+                        .menuBarScriptHover("hover.disk", enabled: showsTooltip) { hoverLocation = $0 }
+                        .onContinuousHover { phase in
+                            guard showsTooltip else { return }
+                            switch phase {
+                            case let .active(location):
+                                MenuBarPresentationTrace.beginInput("hover", label: "hover.disk")
+                                hoverLocation = location
+                            case .ended:
+                                hoverLocation = nil
                             }
-                            .font(AdvancedPanelTypography.caption)
-                            .monospaced()
-                            .foregroundStyle(.tertiary)
-                            .transaction { transaction in
-                                transaction.animation = nil
-                            }
-                            }
+                        }
+                        .onAppear {
+                            dynamicAxisScale.update(
+                                targetMaximum: targetMaximum,
+                                at: referenceDate
+                            )
+                        }
+                        .onChange(of: targetMaximum) { _, maximum in
+                            dynamicAxisScale.update(
+                                targetMaximum: maximum,
+                                at: referenceDate
+                            )
+                        }
+                        .onChange(of: referenceDate) { _, date in
+                            dynamicAxisScale.update(
+                                targetMaximum: targetMaximum,
+                                at: date
+                            )
+                        }
+                        .font(AdvancedPanelTypography.caption)
+                        .monospaced()
+                        .foregroundStyle(.tertiary)
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
                         }
                     }
                 }
@@ -2311,17 +2684,17 @@ struct GeekDiskIOChart: View {
     }
 
     private var diskReadColor: Color {
-        AppChartPalette.cpuSystem
+        metricColors.diskRead
     }
 
     private var diskWriteColor: Color {
-        AppChartPalette.primary
+        metricColors.diskWrite
     }
 
     private func zeroBaseline(in plotRect: CGRect) -> some View {
         let hairline = MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
         let baselineY = MiniWindowPixel.strokeCenter(
-            plotRect.midY,
+            mode == .combined ? plotRect.midY : plotRect.maxY - 2,
             lineWidth: hairline,
             displayScale: displayScale
         )
@@ -2358,7 +2731,7 @@ struct GeekDiskIOChart: View {
             GeekHoverTooltip(
                 date: hoveredPoint.end,
                 values: [
-                    prepared.reads[index].map { value in
+                    (mode == .write ? nil : prepared.reads[index]).map { value in
                         GeekHoverValue(
                         title: L10n.text("读取", "Read"),
                         value: GeekChartUnit.bytesPerSecond.formatted(value),
@@ -2366,7 +2739,7 @@ struct GeekDiskIOChart: View {
                         isEstimated: hoveredPoint.isEstimated
                         )
                     },
-                    prepared.writes[index].map { value in
+                    (mode == .read ? nil : prepared.writes[index]).map { value in
                         GeekHoverValue(
                         title: L10n.text("写入", "Write"),
                         value: GeekChartUnit.bytesPerSecond.formatted(value),
@@ -2394,8 +2767,22 @@ struct GeekDiskIOChart: View {
     }
 
     private func accessibilitySummary(_ summary: GeekPreparedDiskSummary) -> String {
-        guard summary.hasData,
-              let readStatistics = summary.read,
+        guard summary.hasData else {
+            return PanelChartSampling.statusText
+        }
+        if mode == .read, let stats = summary.read {
+            return L10n.text(
+                "读取当前 \(GeekChartUnit.bytesPerSecond.formatted(stats.current))，平均 \(GeekChartUnit.bytesPerSecond.formatted(stats.average))，峰值 \(GeekChartUnit.bytesPerSecond.formatted(stats.maximum))",
+                "Read current \(GeekChartUnit.bytesPerSecond.formatted(stats.current)), average \(GeekChartUnit.bytesPerSecond.formatted(stats.average)), peak \(GeekChartUnit.bytesPerSecond.formatted(stats.maximum))"
+            )
+        }
+        if mode == .write, let stats = summary.write {
+            return L10n.text(
+                "写入当前 \(GeekChartUnit.bytesPerSecond.formatted(stats.current))，平均 \(GeekChartUnit.bytesPerSecond.formatted(stats.average))，峰值 \(GeekChartUnit.bytesPerSecond.formatted(stats.maximum))",
+                "Write current \(GeekChartUnit.bytesPerSecond.formatted(stats.current)), average \(GeekChartUnit.bytesPerSecond.formatted(stats.average)), peak \(GeekChartUnit.bytesPerSecond.formatted(stats.maximum))"
+            )
+        }
+        guard let readStatistics = summary.read,
               let writeStatistics = summary.write else {
             return PanelChartSampling.statusText
         }
@@ -2432,7 +2819,7 @@ struct GeekHoverTooltip: View {
                 .monospaced()
 
             ForEach(values) { item in
-                HStack(spacing: 5) {
+                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                     Circle()
                         .fill(item.color)
                         .frame(width: 6, height: 6)
@@ -2455,7 +2842,7 @@ struct GeekHoverTooltip: View {
         }
         .foregroundStyle(AppAppearanceColors.ink.opacity(0.95))
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.vertical, MiniWindowStyleTokens.rowSpacing)
         .frame(width: 156)
         .miniWindowTooltipChrome()
         .allowsHitTesting(false)

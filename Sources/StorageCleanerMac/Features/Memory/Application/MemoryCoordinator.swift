@@ -206,8 +206,8 @@ final class MemoryCoordinator {
                 after.measurements.availableBytes.value,
                 before.measurements.availableBytes.value
             ),
-            pressureBefore: before.pressureLevel,
-            pressureAfter: verificationAvailable ? after.pressureLevel : nil,
+            pressureBefore: before.reportablePressureLevel,
+            pressureAfter: verificationAvailable ? after.reportablePressureLevel : nil,
             swapUsedBeforeBytes: before.measurements.swapUsedBytes.value,
             swapUsedAfterBytes: after.measurements.swapUsedBytes.value,
             attributionNotice: L10n.text(
@@ -355,7 +355,7 @@ final class MemoryCoordinator {
             estimatedApplicationReductionBytes: plan.estimatedApplicationReductionBytes,
             observedApplicationMemoryDeltaBytes: nil,
             observedAvailableMemoryDeltaBytes: nil,
-            pressureBefore: before.pressureLevel,
+            pressureBefore: before.reportablePressureLevel,
             pressureAfter: nil,
             swapUsedBeforeBytes: before.measurements.swapUsedBytes.value,
             swapUsedAfterBytes: nil,

@@ -3,6 +3,37 @@ import XCTest
 
 #if DEBUG
 final class MiniWindowDemoDataTests: XCTestCase {
+    @MainActor
+    func testCleanupAfterSmartScanScenarioUsesTheExistingInertSessionAndCleanupRoute() throws {
+        let arguments = [MiniWindowDemoData.launchArgument,
+            "--capture-menu-bar-panel-directory=/tmp/mini-cleanup-snapshot",
+            "--capture-menu-bar-panel-scenario=menu.cleanup.afterSmartScan"]
+        let scenario = try XCTUnwrap(MiniWindowDemoData.capturedMenuBarPanelScenario(arguments: arguments))
+        XCTAssertEqual(scenario, .cleanupAfterSmartScan)
+        XCTAssertEqual(scenario.route, .secondary(.cleanup))
+        XCTAssertEqual(scenario.expectedPanelCount, 2)
+        XCTAssertFalse(MiniWindowDemoData.allowsTertiaryPresentation(arguments: arguments))
+        XCTAssertNil(MiniWindowDemoData.capturedMenuBarPanelScenario(arguments: Array(arguments.dropFirst())))
+
+        let defaults = TestPreferenceDomain.make(for: self)
+        let store = try ScanStore.makeForTests(for: self, scanHistoryDefaults: defaults, cleanupPreferences: defaults,
+                              cleanReportLoader: { [] }, interruptedOperationReconciler: { [] })
+        MiniWindowDemoData.configure(store: store, for: scenario)
+        let session = try XCTUnwrap(store.cleanupScanSession)
+        XCTAssertEqual(session.id, DebugSmartScanSessionFixture.session.id)
+        XCTAssertEqual(session.smartScanScopes, [.cleanupCandidates, .filesToReview])
+        XCTAssertEqual(store.cleanupWorkflowState, .results(sessionID: session.id))
+        XCTAssertFalse(store.isScanning)
+        XCTAssertTrue(store.isDebugSmartScanSessionFixtureActive, "Existing Store guards block scans and cleanup")
+        XCTAssertNil(store.pendingCleanPlan)
+        XCTAssertNil(store.cleanupExecutionProgress)
+        XCTAssertTrue(ScanHistoryService.load(defaults: defaults).isEmpty, "Demo installation does not persist a scan")
+        let presentation = MiniWindowCleanupPresentation.resolve(session: session, details: MiniWindowCleanupDetails(session: session), history: nil)
+        XCTAssertEqual(presentation.source, .session)
+        XCTAssertEqual(presentation.details?.items.map { $0.sourceURL.lastPathComponent },
+                       DebugSmartScanSessionFixture.session.candidates.filter(\.isPreselectedByDefault).sorted { $0.estimatedSizeBytes > $1.estimatedSizeBytes }.prefix(4).map { $0.sourceURL.lastPathComponent })
+    }
+
     func testValidationOptionsCannotEnableDemoOrChangeDefaultDataWithoutDemoFlag() {
         let options = [
             "--debug-memory-used-percent=20",

@@ -327,9 +327,8 @@ struct ArtworkIconTile: View {
     var showsGlow = false
 
     var body: some View {
-        Image(systemName: effectiveSystemImage)
-            .symbolRenderingMode(.hierarchical)
-            .font(.system(size: resolvedGlyphSize, weight: .semibold))
+        AppSymbolGlyph(systemImage: effectiveSystemImage, size: resolvedGlyphSize,
+                       weight: .semibold, renderingMode: .hierarchical)
             .foregroundStyle(effectiveTint)
             .frame(width: size, height: size)
             .fixedSize()
@@ -342,7 +341,7 @@ struct ArtworkIconTile: View {
     }
 
     private var resolvedGlyphSize: CGFloat {
-        min(glyphSize ?? size * 0.48, size * 0.50)
+        AppSymbolGeometry.tileGlyphSize(requested: glyphSize, slot: size)
     }
 
     private var effectiveSystemImage: String {

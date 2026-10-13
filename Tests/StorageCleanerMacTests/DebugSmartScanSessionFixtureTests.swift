@@ -10,6 +10,17 @@ final class DebugSmartScanSessionReleaseIsolationTests: XCTestCase {
         XCTAssertTrue(fixtureSource.contains("#if DEBUG"))
         XCTAssertTrue(storeSource.contains("#if DEBUG\n    @Published private(set) var isDebugSmartScanSessionFixtureActive"))
         XCTAssertTrue(contentSource.contains("#if DEBUG\n    private var debugSmartScanSession"))
+        // Review P2-2: the screenshot-only tier expansion is Debug-only too.
+        let resultsSource = try source("Sources/StorageCleanerMac/Views/CleanupScanViews.swift")
+        XCTAssertTrue(resultsSource.contains(
+            "#if DEBUG\n        // Review screenshots of the debug fixture open the green tier."
+        ))
+        XCTAssertTrue(resultsSource.contains(
+            "#if DEBUG\n        // Review screenshots of the debug fixture open the green groups too."
+        ))
+        XCTAssertTrue(resultsSource.contains(
+            "#if DEBUG\n        if store.isDebugSmartScanSessionFixtureActive { return }\n#endif"
+        ))
     }
 
     private func source(_ relativePath: String) throws -> String {
@@ -67,18 +78,62 @@ final class DebugSmartScanSessionFixtureTests: XCTestCase {
             $0.sourceURL.path.hasPrefix("/DebugFixture/")
                 || $0.sourceURL.path == "/Applications/Example Beta.app"
         })
+        // D47: both green rows are preselected; yellow and red are not.
         let selected = DebugSmartScanSessionFixture.selection.selectedCandidates(in: session)
-        XCTAssertEqual(selected.count, 1)
-        XCTAssertEqual(selected.first?.recommendation.level, .recommended)
-        XCTAssertFalse(selected.contains { $0.recommendation.level == .optional })
+        XCTAssertEqual(selected.count, 2)
+        XCTAssertTrue(selected.allSatisfy { $0.risk == .safe })
+        XCTAssertEqual(Set(selected.map(\.id)), Set(candidates.filter { $0.risk == .safe }.map(\.id)))
         XCTAssertEqual(
             candidates.first { $0.risk == .reviewOnly }?.selectionEligibility,
             .selectableWithReview
         )
     }
 
-    func testInstalledFixtureRendersResultsStateButCannotStartOrExecuteCleanup() {
-        let store = ScanStore()
+    /// Review P2-2: the D47 example rows for the results-page screenshots — a
+    /// cache whose app is unknown, one whose app is running, a large cache
+    /// and a recently written log — are added only with their launch
+    /// argument, so the default fixture stays as it was.
+    func testD47ExampleRowsCoverEachPreselectionCase() throws {
+        XCTAssertFalse(ProcessInfo.processInfo.arguments.contains(DebugSmartScanSessionFixture.d47RowsArgument))
+        XCTAssertEqual(DebugSmartScanSessionFixture.session.metrics.candidateCount, 4,
+                       "Without the argument the fixture is unchanged")
+
+        let session = DebugSmartScanSessionFixture.makeSession(includesD47Rows: true)
+        let candidates = session.candidates
+        XCTAssertEqual(candidates.count, 8)
+        XCTAssertEqual(session.metrics.candidateCount, candidates.count)
+        XCTAssertEqual(session.metrics.completeMeasurementCandidateCount, candidates.count)
+        XCTAssertEqual(session.metrics.estimatedCandidateBytes,
+                       candidates.reduce(0) { $0 + $1.estimatedSizeBytes })
+        XCTAssertTrue(candidates.allSatisfy {
+            $0.sourceURL.path.hasPrefix("/DebugFixture/")
+                || $0.sourceURL.path == "/Applications/Example Beta.app"
+        })
+
+        let unknownOwner = try XCTUnwrap(candidates.first { $0.ownerResolution == .unresolved })
+        let runningOwner = try XCTUnwrap(candidates.first(where: \.isOwnerRunning))
+        let largeCache = try XCTUnwrap(candidates.first { CleanupRebuildCostPolicy.showsHint(for: $0) })
+        let recentLog = try XCTUnwrap(candidates.first { $0.logWriteState == .recent })
+        for row in [unknownOwner, runningOwner, largeCache, recentLog] {
+            XCTAssertEqual(row.risk, .safe)
+            XCTAssertEqual(row.selectionEligibility, .selectable)
+        }
+        XCTAssertEqual(Set([unknownOwner.id, runningOwner.id, largeCache.id, recentLog.id]).count, 4)
+
+        // D47: every green row is preselected except the one whose app runs.
+        let selected = CleanupSelection.defaults(in: session).selectedCandidateIDs
+        XCTAssertEqual(selected, Set(candidates.filter { $0.risk == .safe && !$0.isOwnerRunning }.map(\.id)))
+        XCTAssertFalse(selected.contains(runningOwner.id))
+
+        XCTAssertEqual(CleanupCandidateRowHint.ownerStatus(for: unknownOwner)?.tone, .warning)
+        XCTAssertEqual(CleanupCandidateRowHint.ownerStatus(for: recentLog)?.tone, .warning)
+        XCTAssertNotNil(CleanupCandidateRowHint.rebuildCost(for: largeCache))
+        XCTAssertNil(CleanupCandidateRowHint.ownerStatus(for: largeCache))
+        XCTAssertNil(CleanupCandidateRowHint.rebuildCost(for: unknownOwner))
+    }
+
+    func testInstalledFixtureRendersResultsStateButCannotStartOrExecuteCleanup() throws {
+        let store = try ScanStore.makeForTests(for: self)
         store.installDebugSmartScanSessionFixture(.results)
 
         XCTAssertTrue(store.isDebugSmartScanSessionFixtureActive)
