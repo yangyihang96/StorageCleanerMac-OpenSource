@@ -8,3 +8,9 @@
 - Verify with `script/verify.sh` (`DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.app/Contents/Developer`, `STORAGE_CLEANER_VERIFY_BUNDLE=0`, `STORAGE_CLEANER_UI_SMOKE=0`, a private `STORAGE_CLEANER_VERIFY_ROOT`).
 - 2.0.0 work is coordinated in `docs/2.0.0/collab/`: `RULES.md` (how sessions work), `BOARD.md` (batches and status), `DECISIONS.md` (product decisions that override older rules and tests).
 - Do not initialize git in parent folders.
+
+## Cursor Cloud specific instructions
+
+Cloud Agent machines run Linux. This package targets macOS 14 and Xcode. `script/bootstrap.sh` exits unless the kernel is Darwin, and `script/build_and_run.sh`, `script/test.sh`, and `script/verify.sh` need the macOS SDK, `xcrun`, and `codesign`. Do not run those scripts here; they cannot compile or launch the app.
+
+`./script/verify_cloud.sh` is the host-independent gate. It runs the private-API allowlist check, the menu-bar presentation assertions, the helper plist and upgrade-status unit tests, the SwiftUI process and purge source guards, the conflict-copy check, and `git diff --check`. Python 3 from the base image is enough; those scripts use only the standard library. Compiling, signing, and launching Storage Cleaner still happens on a Mac.
