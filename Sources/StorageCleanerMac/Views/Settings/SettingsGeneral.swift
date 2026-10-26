@@ -30,11 +30,14 @@ extension SettingsView {
         }
     }
 
-    var selectedMiniWindowAppearance: Binding<MiniWindowAppearance> {
+    /// D135: iStat's theme for each appearance (`Menu.Theme.Dark`,
+    /// `Menu.Theme.Light`); they replace the former mini-window appearance,
+    /// dropdown surface and chart color choices.
+    func menuThemeBinding(_ storedID: Binding<String>, isDark: Bool) -> Binding<IStatMenuThemeChoice> {
         Binding {
-            MiniWindowAppearance(rawValue: miniWindowAppearanceRawValue) ?? .system
-        } set: { appearance in
-            miniWindowAppearanceRawValue = appearance.rawValue
+            IStatMenuThemeChoice.stored(storedID.wrappedValue, isDark: isDark)
+        } set: { choice in
+            storedID.wrappedValue = choice.id
         }
     }
 
@@ -138,6 +141,16 @@ extension SettingsView {
 
     func setLaunchAtLogin(_ shouldLaunch: Bool) {
         guard !isChangingLaunchAtLogin, launchAtLoginStatus != nil else { return }
+        // D106: macOS announces a login item change on the menu-bar display,
+        // and an acceptance session changes no system setting.
+        guard DisplayConfinementGate.shared.permitsExternal(
+            "SMAppService.mainApp", detail: shouldLaunch ? "register" : "unregister"
+        ) else {
+            launchAtLoginNotice = SettingsNotice.launchAtLoginFailure(
+                L10n.text("验收模式不更改登录项。", "Acceptance mode does not change login items.")
+            )
+            return
+        }
         launchAtLoginReadTask?.cancel()
         isChangingLaunchAtLogin = true
         launchAtLoginNotice = nil
@@ -173,6 +186,7 @@ extension SettingsView {
                     metadata: selectedAppearance.wrappedValue.title + " · " + selectedLanguage.wrappedValue.title,
                     expanded: $settingsInterfaceExpanded) { EmptyView() } content: { interfaceSection }
                 panelAppearanceSection
+                CombinedStatusIconSettingsSection()
                 launchBehaviorSection
             }
         } preview: {
@@ -185,60 +199,55 @@ extension SettingsView {
 
     var panelAppearanceSection: some View {
         LightfieldSettingsSection {
-            Picker(L10n.text("小窗外观", "Mini Window Appearance"), selection: selectedMiniWindowAppearance) {
-                ForEach(MiniWindowAppearance.allCases) { appearance in Text(appearance.title).tag(appearance) }
-            }.pickerStyle(.segmented)
+            // D135: iStat's menu themes, one for the dark appearance and one
+            // for the light (both indigo by default); 匹配系统外观 picks dark
+            // or light, transparent while 透明效果 is on.
+            SettingsPalettePicker(title: L10n.text("深色外观主题", "Dark Appearance Theme"),
+                items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeDarkID, isDark: true),
+                name: { $0.name }, color: { $0.swatch(isDark: true, vibrancy: menuThemeVibrancy) })
+            SettingsPalettePicker(title: L10n.text("浅色外观主题", "Light Appearance Theme"),
+                items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeLightID, isDark: false),
+                name: { $0.name }, color: { $0.swatch(isDark: false, vibrancy: menuThemeVibrancy) })
+            Toggle(L10n.text("透明效果", "Vibrancy"), isOn: $menuThemeVibrancy)
+                .help(L10n.text("选“匹配系统外观”时使用透明主题。", "Uses the transparent theme with System Appearance."))
             SettingsPalettePicker(title: L10n.text("菜单栏项目颜色", "Menu Bar Item Colors"),
                 items: PanelStatusColorPreset.allCases, selection: selectedStatusPreset,
                 name: { $0.title }, color: {
                     $0.ink(dark: colorScheme == .dark, customDayHex: statusCustomDayHex, customNightHex: statusCustomNightHex)
                         .map(Color.init(nsColor:)) ?? MiniWindowColorPalette.secondaryText
-                })
+                }, isCustom: { $0 == .custom })
             if selectedStatusPreset.wrappedValue == .custom {
                 ColorPicker(L10n.text("菜单栏日间颜色", "Menu Bar Day Color"),
                     selection: statusColorBinding(storedValue: $statusCustomDayHex, dark: false), supportsOpacity: false)
                 ColorPicker(L10n.text("菜单栏夜间颜色", "Menu Bar Night Color"),
                     selection: statusColorBinding(storedValue: $statusCustomNightHex, dark: true), supportsOpacity: false)
             }
-            SettingsPalettePicker(title: L10n.text("展开菜单底色", "Expanded Menu Background"),
-                items: PanelSurfacePreset.allCases, selection: selectedSurfacePreset,
-                name: { $0.title }, color: { $0.palette(for: colorScheme == .dark ? .black : .graphite)?.shell ?? MiniWindowColorPalette.secondaryText })
-            SettingsPalettePicker(title: L10n.text("图表颜色", "Chart Colors"),
-                items: PanelColorTheme.allCases, selection: selectedPanelColorTheme,
-                name: panelColorThemeTitle, color: {
-                    PanelAppearancePreferences.color(from: $0.chartHex ?? $0.backgroundHex ?? "") ?? MiniWindowColorPalette.blue
-                })
-            if selectedPanelColorTheme.wrappedValue == .custom {
-                if selectedSurfacePreset.wrappedValue == .original {
-                    ColorPicker(L10n.text("小窗背景色", "Panel Background Color"),
-                        selection: panelBackgroundColorBinding, supportsOpacity: false)
-                }
-                ColorPicker(L10n.text("柱状图颜色", "Bar Chart Color"),
-                    selection: panelChartColorBinding, supportsOpacity: false)
-            }
             LightfieldExpandableRow(title: L10n.text("各指标独立颜色", "Individual Metric Colors"),
                 metadata: L10n.text("18 项", "18 metrics"), expanded: $settingsMetricColorsExpanded) { EmptyView() } content: {
                 ForEach(PanelMetricColorRole.allCases) { role in PanelMetricColorPicker(role: role) }
             }
+            // D136: iStat's Statistics › Reset Disk Filtering shows every
+            // hidden volume again.
+            LabeledContent(L10n.text("隐藏的磁盘", "Hidden Disks"), value: hiddenDiskCountTitle)
+                .help(L10n.text("在小窗磁盘卷详情的右上角隐藏磁盘卷。", "Hide a volume from the top-right corner of its detail in the panel."))
+            Button {
+                hiddenDiskKeysRaw = ""
+            } label: {
+                Text(L10n.text("显示隐藏的磁盘", "Show Hidden Disks"))
+            }
+            .buttonStyle(FeatureLightfieldRowButtonStyle())
+            .disabled(hiddenDiskCount == 0)
         } header: { Text(L10n.text("菜单栏小窗", "Menu-Bar Panel")) }
     }
 
-    var selectedPanelColorTheme: Binding<PanelColorTheme> {
-        Binding {
-            PanelColorTheme.resolved(
-                storedTheme: panelColorThemeRawValue,
-                backgroundHex: panelBackgroundColor,
-                chartHex: panelChartColor
-            )
-        } set: { theme in
-            panelColorThemeRawValue = theme.rawValue
-            guard theme != .custom else {
-                seedCustomPanelColorsIfNeeded()
-                return
-            }
-            panelBackgroundColor = theme.backgroundHex ?? ""
-            panelChartColor = theme.chartHex ?? ""
-        }
+    var hiddenDiskCount: Int {
+        MiniWindowHiddenItems.keys(from: hiddenDiskKeysRaw).count
+    }
+
+    var hiddenDiskCountTitle: String {
+        hiddenDiskCount == 0
+            ? L10n.text("无", "None")
+            : L10n.text("\(ByteFormat.count(hiddenDiskCount)) 个", ByteFormat.count(hiddenDiskCount))
     }
 
     var selectedStatusPreset: Binding<PanelStatusColorPreset> {
@@ -247,72 +256,12 @@ extension SettingsView {
         } set: { panelStatusPresetRaw = $0.rawValue }
     }
 
-    var selectedSurfacePreset: Binding<PanelSurfacePreset> {
-        Binding {
-            PanelSurfacePreset(rawValue: panelSurfacePresetRaw) ?? .original
-        } set: { panelSurfacePresetRaw = $0.rawValue }
-    }
-
     func statusColorBinding(storedValue: Binding<String>, dark: Bool) -> Binding<Color> {
         Binding {
             PanelAppearancePreferences.color(from: storedValue.wrappedValue)
                 ?? Color(nsColor: PanelStatusColorPreset.blue.ink(dark: dark) ?? .systemBlue)
         } set: { color in
             if let value = PanelAppearancePreferences.hexString(from: color) {
-                storedValue.wrappedValue = value
-            }
-        }
-    }
-
-    func panelColorThemeTitle(_ theme: PanelColorTheme) -> String {
-        switch theme {
-        case .system:
-            L10n.text("跟随系统", "System")
-        case .ocean:
-            L10n.text("海洋蓝", "Ocean")
-        case .violet:
-            L10n.text("紫罗兰", "Violet")
-        case .mint:
-            L10n.text("薄荷绿", "Mint")
-        case .graphite:
-            L10n.text("石墨底 · 彩色数据", "Graphite · Data Colors")
-        case .custom:
-            L10n.text("自定义", "Custom")
-        }
-    }
-
-    func seedCustomPanelColorsIfNeeded() {
-        if PanelAppearancePreferences.normalizedHex(panelBackgroundColor) == nil {
-            panelBackgroundColor = "#48484A"
-        }
-        if PanelAppearancePreferences.normalizedHex(panelChartColor) == nil {
-            panelChartColor = "#0A84FF"
-        }
-    }
-
-    var panelBackgroundColorBinding: Binding<Color> {
-        colorBinding(
-            storedValue: $panelBackgroundColor,
-            fallback: Color(nsColor: .windowBackgroundColor)
-        )
-    }
-
-    var panelChartColorBinding: Binding<Color> {
-        colorBinding(
-            storedValue: $panelChartColor,
-            fallback: AppChartPalette.cpuUser
-        )
-    }
-
-    func colorBinding(
-        storedValue: Binding<String>,
-        fallback: Color
-    ) -> Binding<Color> {
-        Binding {
-            PanelAppearancePreferences.color(from: storedValue.wrappedValue) ?? fallback
-        } set: { color in
-            if let value = PanelAppearancePreferences.hexString(from: color) {
-                panelColorThemeRawValue = PanelColorTheme.custom.rawValue
                 storedValue.wrappedValue = value
             }
         }

@@ -65,7 +65,8 @@ enum AppPanelTypography {
 /// and chart-axis labels have separate roles; ordinary rows never scale down
 /// to compensate for a cramped layout.
 enum MenuBarPanelTypography {
-    static let header: Font = .system(size: 12, weight: .semibold)
+    // D118: iStat draws card titles in the regular 12 pt face.
+    static let header: Font = .system(size: 12)
     static let tabTitle = header
     static let section: Font = .system(size: 11, weight: .semibold)
     static let sectionTitle = section

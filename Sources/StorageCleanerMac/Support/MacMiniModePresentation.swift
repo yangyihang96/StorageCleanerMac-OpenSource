@@ -6,6 +6,16 @@ enum MacMiniModePresentation {
         L10n.text("Mac mini 模式：插电时不睡眠（合盖也继续运行）", "Mac mini mode: no sleep on AC (runs with lid closed)")
     }
 
+    /// D124: the section's major label and the line under it (the title
+    /// split for the text section; `title` stays the toggle's full name).
+    static var sectionTitle: String {
+        L10n.text("Mac mini 模式", "Mac mini Mode")
+    }
+
+    static var summary: String {
+        L10n.text("插电时不睡眠（合盖也继续运行）", "No sleep on AC (runs with lid closed)")
+    }
+
     static var safetyNotice: String {
         L10n.text("拔电后自动恢复睡眠", "Unplugging automatically restores sleep")
     }

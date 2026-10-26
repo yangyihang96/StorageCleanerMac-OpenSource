@@ -65,6 +65,13 @@ struct DuplicateFileResultStore: Sendable {
         )
     }
 
+    /// Report §4 item 12: Start Over forgets the shown result. Deletes only
+    /// this store's own snapshot file, a regular file in its own folder.
+    func remove() {
+        guard safeDirectoryStatus() != nil, safeRegularFileStatus() != nil else { return }
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     func save(
         configuration: DuplicateFileScanner.Configuration,
         items: [StorageItem],

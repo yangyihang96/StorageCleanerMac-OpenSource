@@ -10,9 +10,11 @@ enum GeekMemoryComponent: String, CaseIterable, Identifiable {
     // Activity Monitor names. Wired follows Apple's localization (联动内存).
     var title: String {
         switch self {
-        case .app: L10n.text("应用", "App")
-        case .wired: L10n.text("联动", "Wired")
-        case .compressed: L10n.text("压缩", "Compressed")
+        // D138: iStat's 'Memory.App', 'Memory.Wired', 'Memory.Compressed'
+        // and 'Memory.Free' (were 应用, 联动, 压缩).
+        case .app: L10n.text("App内存", "App")
+        case .wired: L10n.text("联动内存", "Wired")
+        case .compressed: L10n.text("已压缩", "Compressed")
         case .free: L10n.text("可用", "Free")
         }
     }
@@ -45,10 +47,11 @@ enum GeekMemoryComponent: String, CaseIterable, Identifiable {
     func legendColor(
         in palette: PanelMetricColors,
         colorScheme: ColorScheme,
-        visualMode: MiniWindowVisualMode
+        visualMode: MiniWindowVisualMode,
+        chrome: PanelChromePalette? = nil
     ) -> Color {
         self == .free
-            ? GeekVisualTokens.ringTrack(for: colorScheme, visualMode: visualMode)
+            ? GeekVisualTokens.ringTrack(for: colorScheme, visualMode: visualMode, palette: chrome)
             : color(in: palette)
     }
 
@@ -92,13 +95,14 @@ enum GeekMemoryComponent: String, CaseIterable, Identifiable {
         let amount = bytes(in: composition)
         return asPercent
             ? String(format: "%.1f%%", Double(amount) / Double(composition.physicalBytes) * 100)
-            : ByteFormat.string(Int64(clamping: amount))
+            : IStatNumberFormat.memory(amount)
     }
 }
 
 struct GeekMemoryCompositionRows: View {
     @Environment(\.panelMetricColors) private var metricColors
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.panelChromePalette) private var panelChromePalette
     @Environment(\.miniWindowVisualMode) private var visualMode
     @Environment(\.displayScale) private var displayScale
     let composition: MemoryRingComposition?
@@ -112,7 +116,8 @@ struct GeekMemoryCompositionRows: View {
                         .fill(component.legendColor(
                             in: metricColors,
                             colorScheme: colorScheme,
-                            visualMode: visualMode
+                            visualMode: visualMode,
+                            chrome: panelChromePalette
                         ))
                         .overlay {
                             if component.legendHasOutline {
@@ -141,9 +146,38 @@ struct GeekMemoryCompositionRows: View {
     }
 }
 
+/// D119: the memory page's composition section (iStat): one 15 pt row per
+/// component with its legend dot and the amount on the right, for the 17 pt
+/// pitch of `GeekIStatRowsCard`.
+struct GeekMemoryCompositionIStatRows: View {
+    @Environment(\.panelMetricColors) private var metricColors
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.panelChromePalette) private var panelChromePalette
+    @Environment(\.miniWindowVisualMode) private var visualMode
+    let composition: MemoryRingComposition?
+    /// The composition history (D121) shows each share of the memory.
+    var asPercent = false
+
+    var body: some View {
+        ForEach(GeekMemoryComponent.allCases) { component in
+            GeekIStatRow(
+                title: component.title,
+                value: component.value(in: composition, asPercent: asPercent),
+                dotColor: component.legendColor(in: metricColors, colorScheme: colorScheme, visualMode: visualMode,
+                                                 chrome: panelChromePalette),
+                dotHasOutline: component.legendHasOutline
+            )
+            .help(component.explanation)
+            .accessibilityHint(component.explanation)
+        }
+    }
+}
+
 struct GeekMemoryCompositionHistoryDetail: View {
     @Environment(\.panelMetricColors) private var metricColors
-    static let preferredSize = CGSize(width: MiniWindowStyleTokens.historyWidth, height: 280)
+    /// D121: the graph card and the composition rows below it, as on the
+    /// memory page (`GeekMemoryCompositionIStatRows`), in percent.
+    nonisolated static let preferredSize = GeekIStatHistoryGeometry.pageSize(rowCount: GeekMemoryComponent.allCases.count)
     let points: [MenuBarTelemetryPoint]
     let duration: TimeInterval
     let composition: MemoryRingComposition?
@@ -153,11 +187,11 @@ struct GeekMemoryCompositionHistoryDetail: View {
 
     var body: some View {
         GeekHoverDetailCanvas(
-            title: L10n.text("内存组成占比", "Memory Composition"),
-            showsRangePicker: true,
-            spacing: MiniWindowStyleTokens.rowSpacing
+            // D138: iStat's composition mode, 'Memory.Memory' (was 内存组成占比 /
+            // Memory Composition).
+            title: L10n.text("内存", "Memory"),
+            showsRangePicker: true
         ) {
-            GeekMemoryCompositionRows(composition: composition, showsPercent: true)
             GeekPrecisionLineChart(
                 points: points,
                 series: GeekMemoryComponent.chartComponents.map {
@@ -172,13 +206,20 @@ struct GeekMemoryCompositionHistoryDetail: View {
                 showsLegend: false,
                 showsTimelineLabels: false,
                 showsTooltip: true,
-                horizontalInset: 2,
-                showsSamplingDetails: false
+                horizontalInset: MiniWindowStyleTokens.historyChartInset,
+                verticalInset: 0,
+                showsSamplingDetails: false,
+                // D130: iStat's history buckets.
+                bucketing: .history
             )
             // Composition colors must match the rows and ring, including in
             // a custom panel theme. A single chart accent loses that mapping.
             .environment(\.panelChartAccentColor, nil)
             .geekHistoryAxis(GeekHistoryAxisFooter(duration: duration, valueRange: "0–100%", isUpdating: isUpdating))
+        } below: {
+            GeekIStatRowsCard(rowCount: GeekMemoryComponent.allCases.count) {
+                GeekMemoryCompositionIStatRows(composition: composition, asPercent: true)
+            }
         }
     }
 }

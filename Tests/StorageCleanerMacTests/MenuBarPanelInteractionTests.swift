@@ -395,7 +395,8 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         XCTAssertTrue(tertiary.contains("scheduleHoverDismissal("))
         XCTAssertTrue(hover.contains("inlineTertiaryEvent?(.present(GeekInlineTertiaryRequest("))
         XCTAssertTrue(advanced.contains("activeInlineTertiaryRequest = request"))
-        XCTAssertEqual(HoverIntentPolicy.menuBar.ordinaryCloseDelay, .milliseconds(260))
+        // D123 (2026-10-19): the dismissal runs on the next turn (was 260 ms).
+        XCTAssertEqual(HoverIntentPolicy.menuBar.ordinaryCloseDelay, .zero)
         XCTAssertTrue(advanced.contains("@State private var geekPanelDismissIntent: GeekPanelCoordinator.HoverIntent?"))
         XCTAssertTrue(advanced.contains("onHoverChange: geekAttachedPanelHoverChanged"))
         XCTAssertTrue(advanced.contains(".environment(\\.geekPanelHoverActivity, geekPanelHoverActivityChanged)"))

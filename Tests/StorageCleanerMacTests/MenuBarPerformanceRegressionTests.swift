@@ -164,7 +164,9 @@ final class MenuBarPerformanceRegressionTests: XCTestCase {
         XCTAssertEqual(hour.writePeakBytesPerSecond, 400_000)
         XCTAssertEqual(try XCTUnwrap(hour.read).maximum, Double(try XCTUnwrap(hour.readPeakBytesPerSecond)))
         XCTAssertEqual(try XCTUnwrap(hour.write).maximum, Double(try XCTUnwrap(hour.writePeakBytesPerSecond)))
-        XCTAssertEqual(hour.readPeakText, GeekChartUnit.bytesPerSecond.formatted(200_000))
+        // D128 (2026-10-19): disk peaks use iStat's disk activity format, the
+        // disk chart's unit (was `GeekChartUnit.bytesPerSecond`, the network's).
+        XCTAssertEqual(hour.readPeakText, GeekChartUnit.diskBytesPerSecond.formatted(200_000))
         let short = GeekPreparedDiskSummary(points: points, duration: 60, referenceDate: end)
         XCTAssertEqual(short.readPeakBytesPerSecond, 100_000)
         let day = GeekPreparedDiskSummary(points: points, duration: 86_400, referenceDate: end)
@@ -175,7 +177,8 @@ final class MenuBarPerformanceRegressionTests: XCTestCase {
         XCTAssertEqual(empty.readPeakText, "--")
         let zero = GeekPreparedDiskSummary(points: Array(points.suffix(1)), duration: 3_600, referenceDate: end)
         XCTAssertEqual(zero.readPeakBytesPerSecond, 0)
-        XCTAssertEqual(zero.readPeakText, "0 B/s")
+        // D128: iStat's rates start at KB/s (was "0 B/s").
+        XCTAssertEqual(zero.readPeakText, "0 KB/s")
     }
 
     func testDiskPeakAndChartConsumersSharePreparationButRangeChangesInvalidate() async {
@@ -189,6 +192,8 @@ final class MenuBarPerformanceRegressionTests: XCTestCase {
         await withTaskGroup(of: GeekPreparedDiskSummary.self) { group in
             // Peak row plus combined/read/write plot summaries use this same
             // production key; the mode changes drawing, not the statistics.
+            // D146: the peak row reads its card's plot frame instead; the
+            // plots still share the key.
             for _ in 0..<4 {
                 group.addTask { await cache.value(for: sharedKey, cost: 512) {
                     GeekPreparedDiskSummary(points: points, duration: 3_600, referenceDate: end)
@@ -288,8 +293,9 @@ final class MenuBarPerformanceRegressionTests: XCTestCase {
         XCTAssertEqual(zero.referenceDate, end)
         XCTAssertEqual(zero.readPeakBytesPerSecond, 0)
         XCTAssertEqual(zero.writePeakBytesPerSecond, 0)
-        XCTAssertEqual(zero.readPeakText, "0 B/s")
-        XCTAssertEqual(zero.writePeakText, "0 B/s")
+        // D128: iStat's rates start at KB/s (was "0 B/s").
+        XCTAssertEqual(zero.readPeakText, "0 KB/s")
+        XCTAssertEqual(zero.writePeakText, "0 KB/s")
         let expiredDate = end.addingTimeInterval(3_600.5)
         let expired = GeekPreparedDiskSummary(points: points, duration: 3_600, referenceDate: expiredDate)
         XCTAssertEqual(expired.referenceDate, expiredDate)
@@ -374,6 +380,9 @@ final class MenuBarPerformanceRegressionTests: XCTestCase {
         throw XCTSkip("Timing is enforced against optimized shipping code by the local packaging gate.")
 #else
         let points = Self.points(count: 44000)
+        // A full known-pause store, owned by this test rather than read from
+        // the machine's preferences (D113). No pause hides a sample.
+        let pauses = Self.knownPauses(count: 512, before: points[0].date)
         let cache = MenuBarDerivedCache()
         var preparation: [Double] = []
         var cached: [Double] = []
@@ -384,10 +393,11 @@ final class MenuBarPerformanceRegressionTests: XCTestCase {
                 GeekPreparedLineFrame(points: points, channels: [.cpuUser, .cpuSystem],
                     plot: .init(x: 0, y: 0, width: 360, height: 100), duration: 28 * 86400,
                     reference: points.last!.date, samplingInterval: 1, scale: 2,
-                    stacked: true, valueRange: 0...100)
+                    stacked: true, valueRange: 0...100, unrecordedIntervals: pauses)
             }
             preparation.append(ProcessInfo.processInfo.systemUptime - start)
             XCTAssertFalse(frame.buckets.isEmpty)
+            XCTAssertEqual(frame.buckets.reduce(0) { $0 + $1.indices.count }, points.count)
             let cachedStart = ProcessInfo.processInfo.systemUptime
             let _: GeekPreparedLineFrame = await cache.value(for: key, cost: 0) { frame }
             cached.append(ProcessInfo.processInfo.systemUptime - cachedStart)
@@ -398,6 +408,67 @@ final class MenuBarPerformanceRegressionTests: XCTestCase {
         XCTAssertLessThanOrEqual(p95, MenuBarPerformancePolicy.publicationBudget)
         XCTAssertLessThanOrEqual(cachedP95, MenuBarPerformancePolicy.warmPresentationBudget)
 #endif
+    }
+
+    // D113: the timed frame uses exactly the known pauses it is given. A
+    // private store holding a conflicting pause changes nothing, and
+    // nothing it holds reaches a later frame.
+    func testLongHistoryFrameUsesOnlyTheKnownPausesItIsGiven() {
+        let points = Self.points(count: 44000)
+        let reference = points.last!.date
+        func frame(_ pauses: [DateInterval]) -> GeekPreparedLineFrame {
+            GeekPreparedLineFrame(points: points, channels: [.cpuUser, .cpuSystem],
+                plot: .init(x: 0, y: 0, width: 360, height: 100), duration: 28 * 86400,
+                reference: reference, samplingInterval: 1, scale: 2,
+                stacked: true, valueRange: 0...100, unrecordedIntervals: pauses)
+        }
+        func assertSame(_ actual: GeekPreparedLineFrame, _ expected: GeekPreparedLineFrame,
+                        _ message: String, line: UInt = #line) {
+            XCTAssertEqual(actual.buckets.map(\.indices), expected.buckets.map(\.indices), message, line: line)
+            XCTAssertEqual(actual.values, expected.values, message, line: line)
+            XCTAssertEqual(actual.hoverValues, expected.hoverValues, message, line: line)
+        }
+        let none = frame([])
+        XCTAssertEqual(none.buckets.count, 120)
+        XCTAssertEqual(none.buckets.flatMap(\.indices).sorted(), Array(points.indices))
+        XCTAssertTrue(none.values.contains { $0.allSatisfy { $0 != nil } })
+        let full = Self.knownPauses(count: 512, before: points[0].date)
+        for count in [433, 512] {
+            let pauses = Self.knownPauses(count: count, before: points[0].date)
+            XCTAssertEqual(pauses.count, count)
+            XCTAssertTrue(zip(pauses, pauses.dropFirst()).allSatisfy { $0.end < $1.start })
+            assertSame(frame(pauses), none, "\(count) earlier pauses")
+        }
+        // An active pause hides exactly its half-open span of samples.
+        let active = DateInterval(start: points[40_000].date, end: points[42_000].date)
+        let paused = frame(Array(full.dropFirst()) + [active])
+        XCTAssertEqual(paused.buckets.flatMap(\.indices).sorted(), Array(0..<40_000) + Array(42_000..<44_000))
+
+        // A private preferences fixture whose pause covers every sample.
+        let store = MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self))
+        let cover = DateInterval(start: points[0].date, end: reference.addingTimeInterval(1))
+        store.begin(.paused, at: cover.start)
+        store.end(.paused, at: cover.end)
+        let conflicting = store.intervals(at: reference)
+        XCTAssertTrue(conflicting.contains(cover))
+        let hidden = frame(conflicting)
+        XCTAssertEqual(hidden.buckets.count, 120)
+        XCTAssertTrue(hidden.buckets.allSatisfy { $0.indices.isEmpty })
+        XCTAssertTrue(hidden.values.allSatisfy { $0.allSatisfy { $0 == nil } })
+        // The explicit lists still give the same frames, and the store is untouched.
+        let injected = frame(full)
+        assertSame(injected, none, "after the conflicting store")
+        assertSame(frame(Array(full.dropFirst()) + [active]), paused, "active pause after the conflicting store")
+        XCTAssertEqual(store.intervals(at: reference), conflicting)
+    }
+
+    /// `count` disjoint 0.1 s pauses, at most 512 as the shared store keeps,
+    /// spread over the retention period before `date`; none covers a sample.
+    private static func knownPauses(count: Int, before date: Date) -> [DateInterval] {
+        let spacing = (MenuBarHistoryRetention.duration - 86400) / 512
+        return (0..<count).map { index in
+            DateInterval(start: date.addingTimeInterval(-Double(count - index) * spacing), duration: 0.1)
+        }
     }
 
     private static func points(count: Int) -> [MenuBarTelemetryPoint] {

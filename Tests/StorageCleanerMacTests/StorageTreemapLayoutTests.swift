@@ -130,6 +130,18 @@ final class StorageTreemapLayoutTests: XCTestCase {
         XCTAssertTrue(StorageSunburstLayout.segments(entries: [entry("empty", 0)]) { _ in [] }.isEmpty)
     }
 
+    /// D189: `/.nofollow`, `/.resolve` and `/.vol` reach the whole volume a
+    /// second time; the map of Macintosh HD skips them, and only there.
+    func testInternalStorageMapSkipsTheSpecialLookupDirectories() throws {
+        for path in ["/.nofollow", "/.nofollow/Users", "/.resolve", "/.resolve/16777231/2", "/.vol", "/.vol/16777231/2"] {
+            XCTAssertTrue(DiskScanner.shouldSkipLogicalDataMirror(path: path, rootPath: "/", targetKind: .internalVolume), path)
+            XCTAssertFalse(DiskScanner.shouldSkipLogicalDataMirror(path: path, rootPath: "/", targetKind: .externalVolume), path)
+        }
+        for path in ["/.nofollowed", "/Users/someone/.nofollow", "/.volume", "/.resolved", "/Users"] {
+            XCTAssertFalse(DiskScanner.shouldSkipLogicalDataMirror(path: path, rootPath: "/", targetKind: .internalVolume), path)
+        }
+    }
+
     func testInternalStorageMapUsesLogicalMacintoshHDViewWithoutDataMirror() throws {
         let target = try XCTUnwrap(
             DiskScanner.storageMapScanTargets().first { $0.kind == .internalVolume }
@@ -184,6 +196,8 @@ final class StorageTreemapLayoutTests: XCTestCase {
         ), "/Users")
     }
 
+    /// D193: app bundles are measured by local usage too; the name is the D84
+    /// one. Old value: the app bundle executable measured `logicalSize`.
     func testStorageMapUsesLogicalSizeOnlyInsideApplicationBundles() {
         let logicalSize = 8_000_000
         let allocatedSize = 4_096
@@ -194,7 +208,7 @@ final class StorageTreemapLayoutTests: XCTestCase {
                 allocatedSize: allocatedSize,
                 path: "/Applications/Example.app/Contents/MacOS/Example"
             ),
-            logicalSize
+            allocatedSize
         )
         XCTAssertEqual(
             DiskScanner.storageMapPreferredSize(

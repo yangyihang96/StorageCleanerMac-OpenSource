@@ -38,14 +38,7 @@ struct AppUpdaterView: View {
 
             VStack(spacing: 0) {
                 AppUpdateRecoveryPanel(store: store)
-                if !usesFeatureTemplate && store.appUpdatePresentationState.phase != .scanning {
-                    HStack {
-                        Spacer()
-                        ownUpdateButton
-                    }
-                    .padding(.horizontal, AppDesignTokens.Layout.pagePadding)
-                    .padding(.top, AppDesignTokens.Spacing.compact)
-                }
+                SystemUpdateAvailableCard()
 
                 if shouldShowOrchestratorStatusBanner {
                     AppUpdateOrchestratorStatusBanner(
@@ -94,10 +87,17 @@ struct AppUpdaterView: View {
             reduceMotion ? AppMotion.reducedFade : AppMotion.pageChange,
             value: store.appUpdatePresentationState.phase
         )
+        // D202: Smart Care's Review of Applications opens this page.
+        .careStudioReviewBack(.updater)
     }
 
     private func refreshImmediately() {
         StartupApplicationUpdateScheduler.shared.performUserRequest { store.refreshAppUpdates() }
+    }
+
+    /// D207: a row's "加入忽略列表", while the list may change.
+    private var ignoreAction: ((InstalledApplication) -> Void)? {
+        store.canModifyAppUpdateList ? { app in store.ignoreAppUpdates([app]) } : nil
     }
 
     private func retryImmediately(applicationIDs: Set<String>) {
@@ -106,16 +106,6 @@ struct AppUpdaterView: View {
 
     private var usesFeatureTemplate: Bool {
         !isShowingSessionLog && [.idle, .scanning, .scanSummary].contains(store.appUpdatePresentationState.phase)
-    }
-
-    private var ownUpdateButton: some View {
-        AppButton(
-            title: L10n.text("本软件更新…", "This App’s Updates…"),
-            systemImage: "arrow.down.app",
-            kind: .toolbar,
-            isDisabled: ownUpdateCheckDisabled,
-            action: { AppUpdater.shared.checkForUpdates() }
-        )
     }
 
     @ViewBuilder
@@ -144,7 +134,8 @@ struct AppUpdaterView: View {
                 onUpdateAll: { store.previewOneClickAppUpdates(); store.confirmOneClickAppUpdates() },
                 onManage: store.showAppUpdateManager,
                 onRescan: refreshImmediately,
-                onOwnUpdate: ownUpdateCheckDisabled ? nil : { AppUpdater.shared.checkForUpdates() }
+                onOwnUpdate: ownUpdateCheckDisabled ? nil : { AppUpdater.shared.checkForUpdates() },
+                onIgnore: ignoreAction
             )
         case let .managing(snapshot):
             AppUpdateManagerPage(
@@ -163,7 +154,10 @@ struct AppUpdaterView: View {
                 onAutomaticUpdate: { app in store.requestAppUpdate(app) },
                 onAppStoreUpdate: { app in store.requestAppStoreUpdate(app) },
                 onOpenUpdateEntry: { app in store.openUpdateEntry(app) },
-                onRecheckExternalUpdate: { app in store.recheckExternalUpdate(app) }
+                onRecheckExternalUpdate: { app in store.recheckExternalUpdate(app) },
+                ownUpdateDisabled: ownUpdateCheckDisabled,
+                onOwnUpdate: { AppUpdater.shared.checkForUpdates() },
+                onIgnore: ignoreAction
             )
         case let .preparingUpdate(plan):
             AppUpdatePreparingPage(
@@ -296,8 +290,8 @@ private struct WebsiteUpdateAssistantCard: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(L10n.text(
-                    "官网更新 · \(current.displayName) · \(completedCount)/\(queue.items.count)",
-                    "Website Update · \(current.displayName) · \(completedCount)/\(queue.items.count)"
+                    "官网更新 · \(current.displayName) · \(ByteFormat.count(completedCount))/\(ByteFormat.count(queue.items.count))",
+                    "Website Update · \(current.displayName) · \(ByteFormat.count(completedCount))/\(ByteFormat.count(queue.items.count))"
                 ))
                 .font(.system(size: 12.5, weight: .semibold))
                 .foregroundStyle(theme.primaryText)
@@ -423,8 +417,8 @@ private struct AppUpdateOrchestratorStatusBanner: View {
         let failed = queue.tasks.count { $0.state == .failed }
         let cancelled = queue.tasks.count { $0.state == .cancelled }
         return L10n.text(
-            "\(completed) 个成功，\(failed) 个失败，\(cancelled) 个取消",
-            "\(completed) succeeded, \(failed) failed, \(cancelled) cancelled"
+            "\(ByteFormat.count(completed)) 个成功，\(ByteFormat.count(failed)) 个失败，\(ByteFormat.count(cancelled)) 个取消",
+            "\(ByteFormat.count(completed)) succeeded, \(ByteFormat.count(failed)) failed, \(ByteFormat.count(cancelled)) cancelled"
         )
     }
 }
@@ -515,7 +509,7 @@ struct AppUpdateScanningPage: View {
         FeatureRunningTemplate(module: .updater,
             title: progress.stage.title, fraction: progress.progressFraction,
             metrics: [.init(title: L10n.text("已处理", "Processed"), value: progress.totalUnitCount.map {
-                "\(progress.completedUnitCount) / \($0)"
+                "\(ByteFormat.count(progress.completedUnitCount)) / \($0)"
             } ?? String(progress.completedUnitCount))],
             currentItem: progress.currentApplicationName, taskIdentity: progress.sessionID.uuidString,
             pageTitle: ReviewFilter.updater.sidebarTitle,
@@ -648,12 +642,13 @@ struct AppUpdateScanSummaryPage: View {
     let onManage: () -> Void
     let onRescan: () -> Void
     var onOwnUpdate: (() -> Void)? = nil
+    var onIgnore: ((InstalledApplication) -> Void)? = nil
 
     var body: some View {
         let presentation = AppUpdateLightfieldPresentation(summary: summary)
         FeatureLightfieldPage(module: .updater, phase: .result, title: ReviewFilter.updater.sidebarTitle,
-            status: L10n.text("已检查 \(summary.scannedCount) 个应用 · \(presentation.entries.count) 个有更新",
-                "Checked \(summary.scannedCount) applications · \(presentation.entries.count) updates"),
+            status: IgnoreListSnapshot.appendingSummary(summary.ignoredCount, to: L10n.text("已检查 \(ByteFormat.count(summary.scannedCount)) 个应用 · \(ByteFormat.count(presentation.confirmedUpdateCount)) 个有更新",
+                "Checked \(ByteFormat.count(summary.scannedCount)) applications · \(ByteFormat.count(presentation.confirmedUpdateCount)) updates")),
             safety: AppUpdateBatchPresentation(applications: summary.applications).detail,
             actionTitle: AppUpdateBatchPresentation(applications: summary.applications).title,
             actionEnabled: canManage && AppUpdateBatchPresentation(applications: summary.applications).count > 0,
@@ -663,7 +658,8 @@ struct AppUpdateScanSummaryPage: View {
                 LightfieldApplicationListHeader(kind: .updater)
                 LazyVStack(spacing: 0) {
                     ForEach(Array(presentation.entries.enumerated()), id: \.element.id) { index, entry in
-                        AppUpdateLightfieldRow(entry: entry, index: index, onReview: onManage)
+                        AppUpdateLightfieldRow(entry: entry, index: index, onReview: onManage,
+                                               onIgnore: onIgnore.map { ignore in { ignore(entry.application) } })
                             .disabled(!canManage)
                     }
                 }
@@ -676,8 +672,8 @@ struct AppUpdateScanSummaryPage: View {
                     Button(L10n.text("随 macOS 更新 · 打开软件更新", "Updated with macOS · Open Software Update")) {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension") { NSWorkspace.shared.open(url) }
                     }.buttonStyle(FeatureLightfieldRowButtonStyle())
-                    Text(L10n.text("另有 \(summary.systemManagedCount) 个应用由系统管理，计入检查总数，不加入应用内批量更新",
-                        "Another \(summary.systemManagedCount) system-managed apps are counted in the checked total and excluded from in-app batch updates"))
+                    Text(L10n.text("另有 \(ByteFormat.count(summary.systemManagedCount)) 个应用由系统管理，计入检查总数，不加入应用内批量更新",
+                        "Another \(ByteFormat.count(summary.systemManagedCount)) system-managed apps are counted in the checked total and excluded from in-app batch updates"))
                         .font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg3)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
                 }
@@ -766,6 +762,9 @@ private struct AppUpdateManagerPage: View {
     let onAppStoreUpdate: (InstalledApplication) -> Void
     let onOpenUpdateEntry: (InstalledApplication) -> Void
     let onRecheckExternalUpdate: (InstalledApplication) -> Void
+    let ownUpdateDisabled: Bool
+    let onOwnUpdate: () -> Void
+    var onIgnore: ((InstalledApplication) -> Void)? = nil
 
     var body: some View {
         ManagementListPage(
@@ -784,7 +783,13 @@ private struct AppUpdateManagerPage: View {
                 isDisabled: !canRunActions,
                 action: onRescan
             )
-
+            // With the header's other actions, not in a row of its own above it.
+            GlassToolbarButton(
+                title: L10n.text("本软件更新…", "This App’s Updates…"),
+                systemImage: "arrow.down.app",
+                isDisabled: ownUpdateDisabled,
+                action: onOwnUpdate
+            )
         } controls: {
             catalogControls
         } content: {
@@ -825,8 +830,8 @@ private struct AppUpdateManagerPage: View {
             AppSeparator()
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.text(
-                    "显示 \(visibleEntries.count) / \(snapshot.entries.count) 个应用；已选 \(selectedUpdateApplicationIDs.count) 个，其中筛选外 \(selectedUpdateApplicationIDs.subtracting(visibleEligibleApplicationIDs).count) 个",
-                    "Showing \(visibleEntries.count) of \(snapshot.entries.count) apps; \(selectedUpdateApplicationIDs.count) selected, including \(selectedUpdateApplicationIDs.subtracting(visibleEligibleApplicationIDs).count) outside this filter"
+                    "显示 \(ByteFormat.count(visibleEntries.count)) / \(ByteFormat.count(snapshot.entries.count)) 个应用；已选 \(ByteFormat.count(selectedUpdateApplicationIDs.count)) 个，其中筛选外 \(selectedUpdateApplicationIDs.subtracting(visibleEligibleApplicationIDs).count) 个",
+                    "Showing \(ByteFormat.count(visibleEntries.count)) of \(ByteFormat.count(snapshot.entries.count)) apps; \(ByteFormat.count(selectedUpdateApplicationIDs.count)) selected, including \(selectedUpdateApplicationIDs.subtracting(visibleEligibleApplicationIDs).count) outside this filter"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
                 .foregroundStyle(.secondary)
@@ -856,7 +861,7 @@ private struct AppUpdateManagerPage: View {
                 selectedUpdateApplicationIDs.removeAll()
             }.disabled(selectedUpdateApplicationIDs.isEmpty)
         }.menuStyle(.borderlessButton)
-        Button(L10n.text("更新所选 · \(selectedUpdateApplicationIDs.count)", "Update Selected · \(selectedUpdateApplicationIDs.count)")) {
+        Button(L10n.text("更新所选 · \(ByteFormat.count(selectedUpdateApplicationIDs.count))", "Update Selected · \(ByteFormat.count(selectedUpdateApplicationIDs.count))")) {
             onUpdateAutomatic(selectedUpdateApplicationIDs)
         }.appButtonChrome(.primary)
             .disabled(!canRunActions || selectedUpdateApplicationIDs.isEmpty)
@@ -949,7 +954,7 @@ private struct AppUpdateManagerPage: View {
     }
 
     private var subtitle: String {
-        let base = L10n.text("\(snapshot.entries.count) 个应用", "\(snapshot.entries.count) applications")
+        let base = L10n.text("\(ByteFormat.count(snapshot.entries.count)) 个应用", "\(ByteFormat.count(snapshot.entries.count)) applications")
         guard batchState != .idle, !batchState.title.isEmpty else { return base }
         return "\(base) · \(batchState.title)"
     }
@@ -1007,6 +1012,11 @@ private struct AppUpdateManagerPage: View {
                     )
                         .tag(entry.id)
                         .appUpdateListInsets()
+                        .contextMenu {
+                            if let onIgnore, entry.application.updateStatus != .ignored {
+                                Button(IgnoreListMenu.title(count: 1)) { onIgnore(entry.application) }
+                            }
+                        }
                 }
             }
             .listStyle(.sidebar)
@@ -1116,10 +1126,17 @@ private struct AppUpdateCatalogRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .help(entry.application.path)
-                Label(entry.category.title, systemImage: entry.category.systemImage)
+                Label(entry.application.updateStatus == .ignored ? L10n.text("已忽略", "Ignored") : entry.category.title, systemImage: entry.category.systemImage)
                     .font(AppDesignTokens.Typography.metadata)
                     .foregroundStyle(entry.category.color)
                     .fixedSize(horizontal: false, vertical: true)
+                if !entry.canJoinAutomaticUpdateBatch,
+                   let reason = entry.application.updateError?.trimmed.nonEmpty {
+                    Text(reason)
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer(minLength: 4)
@@ -1197,6 +1214,8 @@ private struct AppUpdateApplicationIcon: View {
 
 private struct AppUpdateCatalogDetail: View {
     @Environment(\.moduleTheme) private var theme
+    /// CleanMyMac explains first why it cannot run this update itself.
+    @State private var manualExplanation: ManualUpdateExplanation.Reason?
 
     let entry: AppUpdateCatalogEntry
     let canRunActions: Bool
@@ -1219,7 +1238,7 @@ private struct AppUpdateCatalogDetail: View {
                         Text(app.name)
                             .font(.system(size: 23, weight: .bold))
                             .fixedSize(horizontal: false, vertical: true)
-                        Label(entry.category.title, systemImage: entry.category.systemImage)
+                        Label(entry.application.updateStatus == .ignored ? L10n.text("已忽略", "Ignored") : entry.category.title, systemImage: entry.category.systemImage)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(entry.category.color)
                         Text(app.bundleIdentifier.trimmed.nonEmpty ?? L10n.text("无 Bundle ID", "No Bundle ID"))
@@ -1316,7 +1335,8 @@ private struct AppUpdateCatalogDetail: View {
         guard let downloadSize = app.downloadSize, downloadSize >= 0 else {
             return L10n.text("暂无", "Unavailable")
         }
-        return ByteCountFormatter.string(fromByteCount: downloadSize, countStyle: .file)
+        // D228 (D178): through ByteFormat, so 0 reads "0 字节", not "Zero KB".
+        return ByteFormat.storageString(downloadSize)
     }
 
     @ViewBuilder
@@ -1364,8 +1384,9 @@ private struct AppUpdateCatalogDetail: View {
                     "Open the public App Store page; you still confirm the update and the app never automates the App Store"
                 )
             ) {
-                onAppStoreUpdate(app)
+                manualExplanation = .appStore
             }
+            .manualUpdateExplanation($manualExplanation, for: .appStore) { onAppStoreUpdate(app) }
         case .inApplication:
             AppButton(
                 title: L10n.text("打开应用内更新", "Open In-App Updater"),
@@ -1374,8 +1395,9 @@ private struct AppUpdateCatalogDetail: View {
                 tint: theme.accent,
                 isDisabled: !canRunActions
             ) {
-                onOpenUpdateEntry(app)
+                manualExplanation = .application
             }
+            .manualUpdateExplanation($manualExplanation, for: .application) { onOpenUpdateEntry(app) }
         case .website where app.hasConfirmedOfficialWebsiteSource:
             AppButton(
                 title: L10n.text("打开已验证官网", "Open Verified Website"),
@@ -1757,12 +1779,12 @@ private struct AppUpdateProgressPage: View {
         }
         return isFinalizing
             ? L10n.text("正在核验安装结果", "Verifying Installed Versions")
-            : L10n.text("\(snapshot.items.count) 个应用", "\(snapshot.items.count) applications")
+            : L10n.text("\(ByteFormat.count(snapshot.items.count)) 个应用", "\(ByteFormat.count(snapshot.items.count)) applications")
     }
 
     private var progressCountText: String {
         let processed = snapshot.items.count { $0.task.state.isTerminal }
-        return "\(processed) / \(snapshot.items.count)"
+        return "\(processed) / \(ByteFormat.count(snapshot.items.count))"
     }
 }
 
@@ -1945,8 +1967,8 @@ private struct AppUpdateReportPage: View {
                         if !retryableApplicationIDs.isEmpty {
                             AppButton(
                                 title: L10n.text(
-                                    "重试失败项（\(retryableApplicationIDs.count)）",
-                                    "Retry Failed (\(retryableApplicationIDs.count))"
+                                    "重试失败项（\(ByteFormat.count(retryableApplicationIDs.count))）",
+                                    "Retry Failed (\(ByteFormat.count(retryableApplicationIDs.count)))"
                                 ),
                                 systemImage: "arrow.clockwise",
                                 kind: .secondary,
@@ -2134,7 +2156,7 @@ private struct AppUpdateSessionLogPage: View {
                             )
                             AppUpdateLogMetric(
                                 title: L10n.text("需操作", "Action Needed"),
-                                value: "\(manualActionCount)"
+                                value: ByteFormat.count(manualActionCount)
                             )
                             AppUpdateLogMetric(
                                 title: L10n.text("下载大小", "Download Size"),
@@ -2180,8 +2202,8 @@ private struct AppUpdateSessionLogPage: View {
                         if !retryableApplicationIDs.isEmpty {
                             AppButton(
                                 title: L10n.text(
-                                    "重试失败项目 · \(retryableApplicationIDs.count)",
-                                    "Retry Failed · \(retryableApplicationIDs.count)"
+                                    "重试失败项目 · \(ByteFormat.count(retryableApplicationIDs.count))",
+                                    "Retry Failed · \(ByteFormat.count(retryableApplicationIDs.count))"
                                 ),
                                 systemImage: "arrow.clockwise",
                                 kind: .primary,
@@ -2273,10 +2295,8 @@ private struct AppUpdateSessionLogPage: View {
     private var totalDownloadSizeText: String {
         let knownSizes = entries.compactMap(\.downloadSize)
         guard !knownSizes.isEmpty else { return L10n.text("暂无", "Unavailable") }
-        let formatted = ByteCountFormatter.string(
-            fromByteCount: knownSizes.reduce(0, +),
-            countStyle: .file
-        )
+        // D228 (D178): through ByteFormat, so 0 reads "0 字节", not "Zero KB".
+        let formatted = ByteFormat.storageString(knownSizes.reduce(0, +))
         guard knownSizes.count == entries.count else {
             return L10n.text("已知至少 \(formatted)", "At least \(formatted) known")
         }
@@ -2372,8 +2392,8 @@ private struct AppUpdateLogRow: View {
                     .textSelection(.enabled)
                 if entry.attemptCount > 0 {
                     Text(L10n.text(
-                        "第 \(entry.attemptCount) 次尝试",
-                        "Attempt \(entry.attemptCount)"
+                        "第 \(ByteFormat.count(entry.attemptCount)) 次尝试",
+                        "Attempt \(ByteFormat.count(entry.attemptCount))"
                     ))
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.secondary)

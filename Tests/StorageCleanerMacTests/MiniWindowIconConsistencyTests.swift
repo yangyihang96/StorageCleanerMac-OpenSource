@@ -75,10 +75,17 @@ final class MiniWindowIconConsistencyTests: XCTestCase {
         for file in ["GeekProcessorView.swift", "GeekMemoryView.swift", "GeekPowerView.swift",
                      "GeekDiskView.swift", "GeekNetworkView.swift"] {
             let content = try source(base + file)
-            XCTAssertTrue(content.contains("GeekSecondaryProcessIcon(path:"), file)
+            // D119: a page built on iStat's shared process row draws the
+            // cached icon through it (`GeekIStatProcessRow`, checked below).
+            XCTAssertTrue(content.contains("GeekSecondaryProcessIcon(path:")
+                || content.contains("GeekIStatProcessRow(iconPath:"), file)
             XCTAssertFalse(content.contains(".scaleEffect(0.62)"), file)
             XCTAssertFalse(content.contains("AdvancedAppIcon(path:"), file)
         }
+        let sections = try source(base + "GeekIStatSections.swift")
+        let istatRow = try XCTUnwrap(sections.components(separatedBy: "struct GeekIStatProcessRow<Values: View>: View {").last)
+            .components(separatedBy: "struct GeekIStatProcessPlaceholder")[0]
+        XCTAssertTrue(istatRow.contains("GeekSecondaryProcessIcon(path: iconPath"))
         let components = try source(base + "GeekPanelComponents.swift")
         let processIcon = try XCTUnwrap(components.components(separatedBy: "struct GeekSecondaryProcessIcon: View {").last)
             .components(separatedBy: "enum GeekPanelLayout")[0]

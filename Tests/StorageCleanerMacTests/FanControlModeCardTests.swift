@@ -4,14 +4,21 @@ import SwiftUI
 import XCTest
 @testable import StorageCleanerMac
 
-/// UI plan U1 117/118 and docs/mini-window-design.md "风扇控制": the four
-/// exclusive fan modes are vertical single-choice cards — icon, title,
-/// a round selection mark on the right. D64 moves subtitle copy to AX hints. A switch is only used
-/// for synchronising the fans. Only the views are rendered here: no fan
-/// coordinator, helper or hardware call is involved.
+/// D152: iStat Menus 7.30's fan submenu — a text section per mode with
+/// iStat's switch on its major label (Automatic, Custom Fan Curve, Manual
+/// and our Maximum), the Sync tick row and the sliders in the manual
+/// section; the subtitles stay AX hints (D64). Was UI plan U1 117/118's
+/// single-choice cards (icon, title, a round selection mark on the right)
+/// and a switch for synchronising the fans. Only the views are rendered
+/// here, with read-only fixtures or coordinators whose transport fails the
+/// test or refuses the ping; no hardware call is involved.
 @MainActor
 final class FanControlModeCardTests: XCTestCase {
-    func testPaletteOffersFourSingleChoiceModesWithIconTitleAndSubtitle() {
+    /// D152: iStat's titles (自动 / Automatic, 自定义风扇曲线 / Custom Fan
+    /// Curve, 手动 / Manual) and our Maximum, in iStat's order, without icons
+    /// (were 自动控制 and 手动控制 with the sensors, advanced and settings
+    /// symbols).
+    func testPaletteOffersFourSingleChoiceModesWithIconTitleAndSubtitle() throws {
         XCTAssertEqual(FanControlModeChoice.allCases.map(\.mode), [.systemAutomatic, .customCurve, .manual, .maximum])
         XCTAssertEqual(FanControlModeChoice(mode: .systemAutomatic), .automatic)
         XCTAssertEqual(FanControlModeChoice(mode: .customCurve), .curve)
@@ -21,15 +28,15 @@ final class FanControlModeCardTests: XCTestCase {
         XCTAssertEqual(FanControlModeChoice.maximum.subtitle, L10n.text("所有风扇使用硬件最大转速", "Use the hardware maximum RPM for every fan"))
         XCTAssertNil(FanControlModeChoice(mode: .fanSet))
 
-        XCTAssertEqual(FanControlModeChoice.automatic.title, L10n.text("自动控制", "Automatic"))
+        XCTAssertEqual(FanControlModeChoice.automatic.title, L10n.text("自动", "Automatic"))
         XCTAssertEqual(FanControlModeChoice.automatic.subtitle, L10n.text("交给 macOS 动态调节", "macOS adjusts the fans"))
         XCTAssertEqual(FanControlModeChoice.curve.title, L10n.text("自定义风扇曲线", "Custom Fan Curve"))
         XCTAssertEqual(FanControlModeChoice.curve.subtitle, L10n.text("按温度曲线调节转速", "Follows a temperature curve"))
-        XCTAssertEqual(FanControlModeChoice.manual.title, L10n.text("手动控制", "Manual"))
+        XCTAssertEqual(FanControlModeChoice.manual.title, L10n.text("手动", "Manual"))
         XCTAssertEqual(FanControlModeChoice.manual.subtitle, L10n.text("直接设置目标转速", "Set a target speed directly"))
-        XCTAssertEqual(FanControlModeChoice.automatic.systemImage, AppSymbols.Monitor.sensors)
-        XCTAssertEqual(FanControlModeChoice.curve.systemImage, AppSymbols.Monitor.advanced)
-        XCTAssertEqual(FanControlModeChoice.manual.systemImage, AppSymbols.Panel.settings)
+        let choice = try r2SourceDeclaration("enum FanControlModeChoice",
+            in: try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift"))
+        XCTAssertFalse(choice.contains("systemImage"))
     }
 
     func testEntryAXPressPresentsFanPaletteAcrossSetupStates() async throws {
@@ -59,6 +66,15 @@ final class FanControlModeCardTests: XCTestCase {
         }
     }
 
+    /// D152: the four sections stay visible in every setup state. A
+    /// fixture's switches are off-limits behind the preview note and change
+    /// nothing; the switch that is on is the fixture's mode; the manual
+    /// section holds the fans' slider; the helper's setup keeps its action
+    /// below the sections; there is no Apply and no Edit Curve (was: setup
+    /// blocked the cards with its reason as help and a status capsule, and
+    /// with the helper enabled the manual card showed Apply and the speed
+    /// control, Maximum was selectable and the curve card's Edit Curve
+    /// opened the editor page).
     func testPaletteModesStayVisibleButSetupBlocksSelectionAndManualShowsApply() async throws {
         for state: MiniWindowDemoData.HardwareControlDemoState in [.fanAutomatic, .fanManual65, .fanMaximum, .helperNotRegistered,
                 .awaitingSystemApproval, .connectionInterrupted, .helperUntrusted, .helperUnavailable] {
@@ -68,59 +84,62 @@ final class FanControlModeCardTests: XCTestCase {
             let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
             let snapshot = MiniWindowDemoData.fixture.snapshot
             let fanControl = FanControlCoordinator.makeReadOnlyFixture(defaults: defaults, profile: profile, snapshot: snapshot)
+            let selectedMode = fanControl.selectedMode
+            let percentage = fanControl.manualPercentage(for: nil)
             let presentation = ControlPalettePresentationState()
             presentation.present(.fan)
             let view = FanControlPaletteView(presentation: presentation, fanControl: fanControl,
                 telemetry: MiniWindowDemoData.fanTelemetry(for: state), thermalState: .nominal)
-                .frame(width: 280)
+                .frame(width: ControlPaletteMetrics.fanSize.width - 2 * GeekPanelLayout.contentPadding)
                 .environment(\.accessibilityEnabled, true)
             let fixture = FanCardAccessibilityFixture(root: view, height: 560)
             defer { fixture.close() }
+            let displayed = FanControlPaletteView.displayedMode(requested: nil, selected: selectedMode)
             for choice in FanControlModeChoice.allCases {
-                let button = try await fixture.button(label: choice.title)
-                if profile.helperState != .enabled {
-                    XCTAssertEqual(fixture.text(button, "accessibilityHelp"), FanControlSetupPresentation.reason(profile.helperState))
-                    _ = try fixture.press(button)
-                }
+                let toggle = try await fixture.element(identifier: "fan-mode-" + choice.mode.rawValue)
+                let tag = "\(state) \(choice)"
+                XCTAssertEqual(fixture.text(toggle, "accessibilityLabel"), choice.title, tag)
+                XCTAssertEqual(fixture.text(toggle, "accessibilityHelp"), FanControlPaletteView.previewNote, tag)
+                // A native toggle: VoiceOver reads the state from its value.
+                XCTAssertEqual(fixture.text(toggle, "accessibilityRole"), NSAccessibility.Role.checkBox.rawValue, tag)
+                XCTAssertEqual(fixture.text(toggle, "accessibilitySubrole"), NSAccessibility.Subrole.toggle.rawValue, tag)
+                XCTAssertEqual(fixture.number(toggle, "accessibilityValue"), choice.mode == displayed ? 1 : 0, tag)
+                XCTAssertEqual(try fixture.isEnabled(toggle), false, "\(tag): a preview disables every switch")
+                _ = try fixture.press(toggle)
             }
+            let slider = try await fixture.element(identifier: "fan-manual-slider--1")
+            XCTAssertEqual(fixture.text(slider, "accessibilityLabel"), L10n.text("风扇", "Fans"))
+            // The percentage is the adjustable element's value description,
+            // as the slider before D152 exposed it.
+            XCTAssertEqual(fixture.text(slider, "accessibilityValueDescription"),
+                           FanControlSliderGeometry.valueText(fraction: percentage / 100))
             if profile.helperState != .enabled {
-                XCTAssertTrue(fixture.contains(label: FanControlSetupPresentation.capsuleTitle(profile.helperState)),
-                    "The status capsule must describe setup, not show a dash")
-            }
-            if profile.helperState == .enabled {
-                let manual = try await fixture.button(label: FanControlModeChoice.manual.title)
-                XCTAssertTrue(try fixture.press(manual))
-                _ = try await fixture.button(label: L10n.text("应用", "Apply"))
-                _ = try await fixture.button(label: L10n.text("风扇转速", "Fan Speed"), role: nil)
-                let manualReadback = try await fixture.button(label: FanControlModeChoice.manual.title)
-                XCTAssertEqual(fixture.text(manualReadback, "accessibilityValue"), L10n.text("已选择", "Selected"))
-                let maximum = try await fixture.button(label: FanControlModeChoice.maximum.title)
-                XCTAssertTrue(try fixture.press(maximum))
-                let selectedMaximum = try await fixture.button(label: FanControlModeChoice.maximum.title)
-                XCTAssertEqual(fixture.text(selectedMaximum, "accessibilityValue"), L10n.text("已选择", "Selected"))
-                let curve = try await fixture.button(label: FanControlModeChoice.curve.title)
-                XCTAssertTrue(try fixture.press(curve))
-                let editor = try await fixture.button(label: L10n.text("编辑曲线", "Edit Curve"))
-                XCTAssertTrue(try fixture.press(editor))
-                for _ in 0..<50 where presentation.fanPage != .curveEditor {
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                XCTAssertEqual(presentation.fanPage, .curveEditor)
-            } else {
-                try await Task.sleep(for: .milliseconds(50))
-                for choice in FanControlModeChoice.allCases {
-                    let button = try await fixture.button(label: choice.title)
-                    XCTAssertEqual(fixture.text(button, "accessibilityValue"), L10n.text("未选择", "Not Selected"))
-                }
+                // D152: the setup note below the sections names the setup step
+                // (was the status capsule's capsuleTitle).
+                XCTAssertTrue(fixture.contains(text: FanControlSetupPresentation.reason(profile.helperState)),
+                    "The setup note must describe setup, not show a dash")
                 _ = try await fixture.button(label: FanControlSetupPresentation.actionTitle(profile.helperState))
             }
+            XCTAssertFalse(fixture.contains(text: L10n.text("应用", "Apply")))
+            XCTAssertFalse(fixture.contains(text: L10n.text("编辑曲线", "Edit Curve")))
+            try await Task.sleep(for: .milliseconds(50))
             XCTAssertNil(fanControl.requestedMode, "Preview and disabled controls must never send a write")
+            XCTAssertEqual(fanControl.selectedMode, selectedMode)
             XCTAssertEqual(fanControl.observedMode, profile.observedMode)
         }
     }
 
-    func testChargeSegmentsUseEffectiveReadbackAndDoNotHighlightUnconfirmedWrites() async throws {
+    /// D149: the targets are one row of segments again (D124 had tick rows).
+    /// The manual limit macOS reads back is selected (100 % when none is
+    /// set), whatever the effective limit (was: only the effective limit); a
+    /// segment writes its target once, never asks for a temporary full
+    /// charge, and an unconfirmed write selects nothing.
+    func testChargeSegmentsSelectTheManualReadbackAndDoNotHighlightUnconfirmedWrites() async throws {
         let targets = [80, 90, 100].compactMap(BatteryChargeTarget.init(rawValue:))
+        let labels = targets.map { BatteryChargeLimitPresentation.manualTargetLabel($0) }
+        XCTAssertEqual(labels, ["80%", "90%", "100%"])
+        let selected = L10n.text("已选择", "Selected")
+        let notSelected = L10n.text("未选择", "Not Selected")
         for effective: Int? in [80, 100, nil, 83] {
             let state = BatteryChargeLimitState(target: .full, availableTargets: targets,
                 effectiveLimit: effective, source: .optimized)
@@ -133,28 +152,31 @@ final class FanControlModeCardTests: XCTestCase {
                 onChargeToFull: { calls.fullCharge += 1; return .accepted },
                 onSetChargeTarget: { calls.targets.append($0); return .applied },
                 onOpenBatterySettings: {}, onChangeMode: { _, _ in })
-                .frame(width: 280)
+                .frame(width: ControlPaletteMetrics.powerSize.width - 2 * GeekPanelLayout.contentPadding)
             let fixture = FanCardAccessibilityFixture(root: view, height: 240)
             defer { fixture.close() }
-            let segments = try await fixture.segmentedControl()
-            let expected = targets.firstIndex { $0.rawValue == effective } ?? -1
-            XCTAssertEqual(segments.selectedSegment, expected, "Only the actual limit may be selected")
-            XCTAssertEqual(segments.segmentCount, 3)
-            XCTAssertEqual((0..<segments.segmentCount).map { segments.label(forSegment: $0) }, ["80%", "90%", "100%"])
-            segments.selectedSegment = 1
-            XCTAssertTrue(segments.sendAction(segments.action, to: segments.target))
+            for (target, label) in zip(targets, labels) {
+                let row = try await fixture.button(label: label)
+                XCTAssertEqual(fixture.text(row, "accessibilityValue"),
+                               target == .full ? selected : notSelected,
+                               "Only the manual limit read back may be selected")
+            }
+            let middle = try await fixture.button(label: labels[1])
+            XCTAssertTrue(try fixture.press(middle))
             for _ in 0..<50 where calls.targets.isEmpty {
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTAssertEqual(calls.targets, [targets[1]])
-            XCTAssertEqual(calls.fullCharge, 0, "A segment must never request temporary full charge")
+            XCTAssertEqual(calls.fullCharge, 0, "A target row must never request temporary full charge")
             // The closure reports applied, but the supplied system reading has not changed.
-            // A new layout must return the highlight to that reading rather than the request.
-            let readback = try await fixture.segmentedControl()
-            XCTAssertEqual(readback.selectedSegment, expected)
+            // A new layout must keep the selection on that reading rather than the request.
+            let readback = try await fixture.button(label: labels[1])
+            XCTAssertEqual(fixture.text(readback, "accessibilityValue"), notSelected)
         }
     }
 
+    /// D149: the segments follow the write permission in both appearances
+    /// (D124: tick rows); the selection stays on the readback either way.
     func testWritableChargeSegmentAppearanceUsesEnabledNativeControls() async throws {
         for dark in [false, true] {
             for writable in [false, true] {
@@ -168,14 +190,16 @@ final class FanControlModeCardTests: XCTestCase {
                     onChargeToFull: { XCTFail("Appearance check must never write"); return .accepted },
                     onSetChargeTarget: { _ in XCTFail("Appearance check must never write"); return .applied },
                     onOpenBatterySettings: {}, onChangeMode: { _, _ in })
-                    .frame(width: 280).environment(\.colorScheme, dark ? .dark : .light)
+                    .frame(width: ControlPaletteMetrics.powerSize.width - 2 * GeekPanelLayout.contentPadding)
+                    .environment(\.colorScheme, dark ? .dark : .light)
                 let fixture = FanCardAccessibilityFixture(root: view, height: 200)
                 defer { fixture.close() }
-                let segments = try await fixture.segmentedControl()
-                XCTAssertEqual(segments.isEnabled, writable)
-                XCTAssertEqual(segments.selectedSegment, 0)
-                XCTAssertEqual(segments.label(forSegment: 0), "80%")
-                XCTAssertEqual(segments.label(forSegment: 1), "100%")
+                let protected = try await fixture.button(label: "80%")
+                let full = try await fixture.button(label: "100%")
+                XCTAssertEqual(try fixture.isEnabled(protected), writable)
+                XCTAssertEqual(try fixture.isEnabled(full), writable)
+                XCTAssertEqual(fixture.text(protected, "accessibilityValue"), L10n.text("已选择", "Selected"))
+                XCTAssertEqual(fixture.text(full, "accessibilityValue"), L10n.text("未选择", "Not Selected"))
                 if let directory = ProcessInfo.processInfo.environment["STORAGE_CLEANER_FIX1_EVIDENCE"] {
                     let url = URL(fileURLWithPath: directory).appendingPathComponent("charge-\(writable ? "writable" : "readonly")-\(dark ? "dark" : "light").png")
                     try fixture.savePNG(to: url)
@@ -195,9 +219,13 @@ final class FanControlModeCardTests: XCTestCase {
                         let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
                         defer { TestPreferenceDomain.cleanup(suiteName: suite) }
                         let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
+                        // D152: a fixture refuses Sync like every write, so the
+                        // stored preference sets it (was setManualFansSynchronized
+                        // on the fixture).
+                        defaults.set(synchronized, forKey: FanControlPreferences.manualSyncKey)
                         let fanControl = FanControlCoordinator.makeReadOnlyFixture(defaults: defaults, profile: profile,
                             snapshot: MiniWindowDemoData.makeFixture(arguments: [MiniWindowDemoData.hardwareControlStateArgumentPrefix + state.rawValue]).snapshot)
-                        fanControl.setManualFansSynchronized(synchronized)
+                        XCTAssertEqual(fanControl.synchronizesManualFans, synchronized)
                         let presentation = ControlPalettePresentationState()
                         presentation.present(.fan)
                         let recorder = FanCardFrameRecorder()
@@ -249,117 +277,163 @@ final class FanControlModeCardTests: XCTestCase {
                         }
                     let host = FanCardHost(root: root, size: CGSize(width: width, height: 200))
                     defer { host.close() }
-                    let frames = try await host.frames(from: recorder, required: ["overview.sensor.card", "overview.sensor.header", "overview.sensor.entry", "overview.sensor.cpu"])
+                    // D118 (old: `overview.sensor.header`, the card's title row
+                    // with the "风扇控制 · 状态" button at its trailing end): the
+                    // card has no title; the fan control is iStat's card menu,
+                    // the "⋮" in the card's top-left 24 pt corner, and its
+                    // label and status are the button's help and VoiceOver value.
+                    let frames = try await host.frames(from: recorder, required: ["overview.sensor.card", "overview.sensor.entry", "overview.sensor.cpu"])
                     let card = try XCTUnwrap(frames["overview.sensor.card"])
-                    let header = try XCTUnwrap(frames["overview.sensor.header"])
                     let row = try XCTUnwrap(frames["overview.sensor.entry"])
                     let ring = try XCTUnwrap(frames["overview.sensor.cpu"])
                     XCTAssertEqual(card.height, GeekPanelLayout.overviewSensorsCardHeight, accuracy: 0.5)
-                    XCTAssertEqual(row.height, FanControlEntryRow.headerHeight, accuracy: 0.5)
-                    XCTAssertEqual(FanControlEntryRow.height, 24, "Secondary-page rows retain their original hit area")
+                    XCTAssertEqual(row.width, GeekIStatCardMenuButton.side, accuracy: 0.5)
+                    XCTAssertEqual(row.height, GeekIStatCardMenuButton.side, accuracy: 0.5)
+                    // D119 (old value: 24): a secondary-page fan row is iStat's
+                    // 15 pt row; its hit area covers the 17 pt pitch.
+                    XCTAssertEqual(FanControlEntryRow.height, 15, "Secondary-page rows are iStat's rows")
                     XCTAssertTrue(card.insetBy(dx: -0.5, dy: -0.5).contains(row))
-                    // fix2 replaces the full-width bottom row with the title's
-                    // trailing button. Both insets remain owned by the same card.
-                    XCTAssertEqual(header.minX, card.minX + GeekVisualTokens.cardHorizontalPadding, accuracy: 0.5)
-                    XCTAssertEqual(row.maxX, card.maxX - GeekVisualTokens.cardHorizontalPadding, accuracy: 0.5)
-                    XCTAssertTrue(header.insetBy(dx: -0.5, dy: -0.5).contains(row))
-                    XCTAssertEqual(row.midY, header.midY, accuracy: 0.5)
-                    XCTAssertLessThanOrEqual(header.maxY, ring.minY - 4 + 0.5)
-                    let titleWidth = (L10n.text("传感器", "Sensors") as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).width
-                    XCTAssertGreaterThanOrEqual(row.minX - header.minX, titleWidth + MiniWindowStyleTokens.moduleIconSlotSize
-                        + MiniWindowStyleTokens.moduleIconSpacing + MiniWindowStyleTokens.inlineSpacing - 0.5,
-                        "The full Sensors heading must keep its original width")
-                    let labelWidth = ((L10n.text("风扇控制", "Fan Control") + " · " + entry.headerStatus) as NSString)
-                        .size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
-                    XCTAssertLessThanOrEqual(labelWidth * 0.75, row.width - MiniWindowStyleTokens.disclosureIconSlotSize - 4,
-                        "The complete title-row entry must fit for \(state) in \(language)")
+                    XCTAssertEqual(row.minX, card.minX, accuracy: 0.5)
+                    XCTAssertEqual(row.minY, card.minY, accuracy: 0.5)
+                    // The entry adds no row: the rings keep iStat's place in the
+                    // 88 pt card, 72 pt and vertically centered.
+                    XCTAssertEqual(ring.height, GeekIStatCardGeometry.sensorRingSize, accuracy: 0.5)
+                    XCTAssertEqual(ring.midY - card.minY, GeekIStatCardGeometry.sensorsHeight / 2, accuracy: 0.5)
                 }
             }
         }
     }
 
+    /// D152: each mode is iStat's text section: the major label row 15 tall
+    /// at 5 with the switch 26 × 14 at W − 34, 25 tall alone and 73 with one
+    /// fan's manual rows (5 + 15 + 2 + 16 + 30 + 5), the switch in the same
+    /// place on or off (was a card with an icon, the title and a round 16 pt
+    /// mark 8 from its trailing edge, at least 35.5 tall).
     func testModeCardDrawsARoundSelectionMarkOnTheRight() async throws {
+        let telemetry = FanTelemetryState.resolve(snapshot: SystemMonitorSnapshot(
+            generatedAt: Date(), metrics: [], networkThroughput: nil, fanReadings: [
+                SystemFanReading(index: 0, actualRPM: 2_000, minimumRPM: 1_000, maximumRPM: 4_000, targetRPM: nil),
+            ]))
+        let width = ControlPaletteMetrics.fanSize.width - 2 * GeekPanelLayout.contentPadding
+        let required = Set(FanControlModeChoice.allCases.flatMap {
+            ["fan.section." + $0.mode.rawValue, "fan.mode.switch." + $0.mode.rawValue]
+        })
         for language in [AppLanguage.zhHans, .english] {
             let languageScope = FanCardLanguageScope(language)
             defer { languageScope.restore() }
-            for choice in FanControlModeChoice.allCases {
-                for selected in [true, false] {
-                    let recorder = FanCardFrameRecorder()
-                    let root = VStack(spacing: 0) {
-                        FanControlModeCard(
-                            choice: choice, selected: selected, isApplying: false, isDisabled: false,
-                            action: { XCTFail("Layout inspection must not choose a fan mode") }
-                        )
-                    }
-                    .frame(width: 248)
+            for selected in FanControlModeChoice.allCases {
+                let suite = TestPreferenceDomain.makeSuite()
+                let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+                defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+                let fanControl = FanControlCoordinator(
+                    defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
+                    requestSender: { _ in XCTFail("Layout inspection must not reach the helper"); throw CancellationError() },
+                    legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
+                    serviceStatusProvider: { .enabled },
+                    serviceRegistrar: { XCTFail("Layout inspection must not register Helper") })
+                defer { fanControl.disconnectForTermination() }
+                fanControl.selectedMode = selected.mode
+                let recorder = FanCardFrameRecorder()
+                let root = FanControlPaletteView(presentation: ControlPalettePresentationState(), fanControl: fanControl,
+                    telemetry: telemetry, thermalState: .nominal)
+                    .frame(width: width)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .onPreferenceChange(LayoutFramePreferenceKey.self) { frames in
                         Task { @MainActor in recorder.frames = frames }
                     }
-                    let host = FanCardHost(root: root, size: CGSize(width: 260, height: 160))
-                    defer { host.close() }
-                    let frames = try await host.frames(
-                        from: recorder,
-                        required: ["fan.mode.card", "fan.mode.icon", "fan.mode.title", "fan.mode.mark"]
-                    )
-                    let tag = "\(choice) selected=\(selected) \(language)"
-                    let card = try XCTUnwrap(frames["fan.mode.card"])
-                    let icon = try XCTUnwrap(frames["fan.mode.icon"])
-                    let title = try XCTUnwrap(frames["fan.mode.title"])
-                    XCTAssertNil(recorder.frames["fan.mode.subtitle"], "D64 removes visible option explanations")
-                    let mark = try XCTUnwrap(frames["fan.mode.mark"])
-
-                    // A round mark, not the old 32 × 18 switch capsule.
-                    XCTAssertEqual(mark.width, 16, accuracy: 0.5, tag)
-                    XCTAssertEqual(mark.height, 16, accuracy: 0.5, tag)
-                    XCTAssertEqual(mark.maxX, card.maxX - 8, accuracy: 1, "Mark sits on the right: \(tag)")
-                    XCTAssertEqual(mark.midY, card.midY, accuracy: 1, tag)
-                    // D64: icon and title remain aligned in the single row.
-                    XCTAssertEqual(icon.minX, card.minX + 8, accuracy: 1, tag)
-                    XCTAssertGreaterThanOrEqual(title.minX, icon.maxX, tag)
-                    XCTAssertEqual(title.midY, icon.midY, accuracy: 1, tag)
-                    XCTAssertLessThanOrEqual(icon.maxX, title.minX, tag)
-                    XCTAssertLessThanOrEqual(title.maxX, mark.minX, tag)
-                    // The whole card is the click target and is taller than the old 27 pt row.
-                    XCTAssertGreaterThanOrEqual(card.height, 35.5, tag)
-                    XCTAssertEqual(card.width, 248, accuracy: 0.5, tag)
-                    XCTAssertTrue(card.insetBy(dx: -0.5, dy: -0.5).contains(title), tag)
+                let host = FanCardHost(root: root, size: CGSize(width: 260, height: 400))
+                defer { host.close() }
+                let frames = try await host.frames(from: recorder, required: required)
+                for choice in FanControlModeChoice.allCases {
+                    let tag = "\(choice) on=\(selected) \(language)"
+                    let section = try XCTUnwrap(frames["fan.section." + choice.mode.rawValue])
+                    let toggle = try XCTUnwrap(frames["fan.mode.switch." + choice.mode.rawValue])
+                    XCTAssertEqual(section.width, width, accuracy: 0.5, tag)
+                    XCTAssertEqual(section.height, choice == .manual ? 73 : 25, accuracy: 0.5, tag)
+                    XCTAssertEqual(toggle.width, GeekIStatTextSectionGeometry.toggleTrackSize.width, accuracy: 0.5, tag)
+                    XCTAssertEqual(toggle.height, GeekIStatTextSectionGeometry.toggleTrackSize.height, accuracy: 0.5, tag)
+                    XCTAssertEqual(toggle.maxX, section.maxX - GeekIStatTextSectionGeometry.leading, accuracy: 0.5,
+                                   "The switch sits on the right: \(tag)")
+                    XCTAssertEqual(toggle.midY, section.minY + GeekIStatTextSectionGeometry.top
+                                   + GeekIStatTextSectionGeometry.rowHeight / 2, accuracy: 0.5, tag)
                 }
+                XCTAssertNil(fanControl.requestedMode)
+                XCTAssertEqual(fanControl.selectedMode, selected.mode)
             }
         }
     }
 
-    /// Review P1-2: the card is one native accessibility button. A VoiceOver
-    /// press (AXPress) runs the selection callback, and the element still
-    /// reads the title, the subtitle as its hint and whether it is selected.
+    /// D152: each mode's switch is one native toggle (AXCheckBox with the
+    /// AXToggle subrole): the title, the subtitle as its help and 1 or 0 as
+    /// its value. A VoiceOver press (AXPress) on a switch that is off
+    /// chooses the mode at once, which starts with the helper's ping (the
+    /// test refuses it); one that is on does nothing, as iStat's handler
+    /// returns (was the card's press running the selection callback either
+    /// way, reading Selected or Not Selected).
     func testVoiceOverPressChoosesTheMode() async throws {
+        let telemetry = FanTelemetryState.resolve(snapshot: SystemMonitorSnapshot(
+            generatedAt: Date(), metrics: [], networkThroughput: nil, fanReadings: [
+                SystemFanReading(index: 0, actualRPM: 2_000, minimumRPM: 1_000, maximumRPM: 4_000, targetRPM: nil),
+            ]))
         for selected in [false, true] {
-            let counter = FanCardPressCounter()
-            let card = FanControlModeCard(
-                choice: .manual, selected: selected, isApplying: false, isDisabled: false,
-                action: { counter.presses += 1 }
-            )
-            .frame(width: 248)
-            .fixedSize(horizontal: false, vertical: true)
-            // SwiftUI builds its native accessibility tree only when asked to.
-            .environment(\.accessibilityEnabled, true)
-            let fixture = FanCardAccessibilityFixture(root: card)
-            defer { fixture.close() }
-            let element = try await fixture.button(label: FanControlModeChoice.manual.title)
-            XCTAssertEqual(fixture.text(element, "accessibilityHelp"), FanControlModeChoice.manual.subtitle)
-            XCTAssertEqual(
-                fixture.text(element, "accessibilityValue"),
-                selected ? L10n.text("已选择", "Selected") : L10n.text("未选择", "Not Selected")
-            )
-            XCTAssertTrue(try fixture.press(element), "AXPress must be handled (selected=\(selected))")
-            for _ in 0..<50 where counter.presses == 0 {
-                try await Task.sleep(for: .milliseconds(10))
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+            var operations: [FanControlHelperRequest.Operation] = []
+            let fanControl = FanControlCoordinator(
+                defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
+                requestSender: { request in
+                    operations.append(request.operation)
+                    return FanControlHelperReply(operation: request.operation, success: false,
+                        message: "test refuses", appliedTargetRPMByFan: [:])
+                },
+                legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
+                serviceStatusProvider: { .enabled },
+                serviceRegistrar: { XCTFail("A VoiceOver press must not register Helper") })
+            defer { fanControl.disconnectForTermination() }
+            if selected {
+                fanControl.selectedMode = .manual
             }
-            XCTAssertEqual(counter.presses, 1, "A VoiceOver press must choose the mode (selected=\(selected))")
+            let view = FanControlPaletteView(presentation: ControlPalettePresentationState(), fanControl: fanControl,
+                telemetry: telemetry, thermalState: .nominal)
+                .frame(width: ControlPaletteMetrics.fanSize.width - 2 * GeekPanelLayout.contentPadding)
+                .fixedSize(horizontal: false, vertical: true)
+                // SwiftUI builds its native accessibility tree only when asked to.
+                .environment(\.accessibilityEnabled, true)
+            let fixture = FanCardAccessibilityFixture(root: view, height: 300)
+            defer { fixture.close() }
+            let element = try await fixture.element(identifier: "fan-mode-" + GeekFanControlMode.manual.rawValue)
+            XCTAssertEqual(fixture.text(element, "accessibilityLabel"), FanControlModeChoice.manual.title)
+            XCTAssertEqual(fixture.text(element, "accessibilityHelp"), FanControlModeChoice.manual.subtitle)
+            XCTAssertEqual(fixture.text(element, "accessibilityRole"), NSAccessibility.Role.checkBox.rawValue)
+            XCTAssertEqual(fixture.text(element, "accessibilitySubrole"), NSAccessibility.Subrole.toggle.rawValue)
+            XCTAssertEqual(fixture.number(element, "accessibilityValue"), selected ? 1 : 0)
+            let pressed = try fixture.press(element)
+            if selected {
+                try await Task.sleep(for: .milliseconds(100))
+                XCTAssertTrue(operations.isEmpty, "The switch that is on does nothing")
+                XCTAssertEqual(fanControl.selectedMode, .manual)
+            } else {
+                XCTAssertTrue(pressed, "AXPress must be handled")
+                for _ in 0..<50 where operations.isEmpty {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertEqual(operations.first, .ping, "A VoiceOver press must choose the mode")
+                for _ in 0..<50 where fanControl.isSwitchingMode {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertEqual(fanControl.selectedMode, .systemAutomatic, "The refused ping keeps automatic")
+                XCTAssertFalse(operations.contains(.apply))
+            }
         }
     }
 
+    /// D152: iStat's Sync tick row in the manual section, 15 tall, reads
+    /// Selected or Not Selected. A VoiceOver press switches between the
+    /// shared slider and one per fan, stored outside manual mode, without
+    /// moving the row; disabled in a preview it changes nothing (was the
+    /// 24 pt 同步所有风扇 switch reading On or Off over a draft).
     func testVoiceOverPressTogglesFanSyncWithoutMovingTheSwitch() async throws {
         let telemetry = FanTelemetryState.resolve(snapshot: SystemMonitorSnapshot(
             generatedAt: Date(), metrics: [], networkThroughput: nil, fanReadings: [
@@ -370,74 +444,170 @@ final class FanControlModeCardTests: XCTestCase {
             let languageScope = FanCardLanguageScope(language)
             defer { languageScope.restore() }
             for disabled in [false, true] {
-                let state = FanSyncTestDraft(telemetry: telemetry)
+                let suite = TestPreferenceDomain.makeSuite()
+                let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+                defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+                let fanControl: FanControlCoordinator
+                if disabled {
+                    let profile = MiniWindowDemoData.hardwareControlProfile(for: .dualFan)
+                    fanControl = FanControlCoordinator.makeReadOnlyFixture(defaults: defaults, profile: profile,
+                        snapshot: MiniWindowDemoData.fixture.snapshot)
+                } else {
+                    fanControl = FanControlCoordinator(
+                        defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
+                        requestSender: { _ in XCTFail("Sync outside manual mode must not reach the helper"); throw CancellationError() },
+                        legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
+                        serviceStatusProvider: { .enabled },
+                        serviceRegistrar: { XCTFail("Sync must not register Helper") })
+                }
+                defer { fanControl.disconnectForTermination() }
                 let recorder = FanCardFrameRecorder()
-                let root = FanSyncTestControls(state: state, telemetry: telemetry, disabled: disabled)
-                    .frame(width: 248)
+                let root = FanControlPaletteView(presentation: ControlPalettePresentationState(), fanControl: fanControl,
+                    telemetry: telemetry, thermalState: .nominal)
+                    .frame(width: ControlPaletteMetrics.fanSize.width - 2 * GeekPanelLayout.contentPadding)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .environment(\.accessibilityEnabled, true)
                     .onPreferenceChange(LayoutFramePreferenceKey.self) { frames in
                         Task { @MainActor in recorder.frames = frames }
                     }
-                let fixture = FanCardAccessibilityFixture(root: root)
+                let fixture = FanCardAccessibilityFixture(root: root, height: 360)
                 defer { fixture.close() }
-                let label = L10n.text("同步所有风扇", "Synchronize All Fans")
-                let button = try await fixture.button(label: label)
-                XCTAssertEqual(fixture.text(button, "accessibilityValue"), L10n.text("已开启", "On"))
+                let label = L10n.text("同步", "Sync")
+                let button = try await fixture.element(identifier: "fan-manual-sync")
+                XCTAssertEqual(fixture.text(button, "accessibilityLabel"), label)
+                XCTAssertEqual(fixture.text(button, "accessibilityValue"), L10n.text("已选择", "Selected"))
+                XCTAssertEqual(try fixture.isEnabled(button), !disabled, "A preview disables Sync")
                 let original = try await fixture.syncFrame(from: recorder)
-                XCTAssertGreaterThanOrEqual(original.height, 24 - 0.5, "Preserve the switch's click height")
+                XCTAssertEqual(original.height, GeekIStatTextSectionGeometry.rowHeight, accuracy: 0.5, "iStat's 15 pt tick row")
                 let pressed = try fixture.press(button)
                 if disabled {
                     try await Task.sleep(for: .milliseconds(30))
-                    XCTAssertTrue(state.draft.synchronizesFans, "Disabled AXPress must not edit the draft")
+                    XCTAssertTrue(fanControl.synchronizesManualFans, "Disabled AXPress must not change Sync")
                 } else {
                     XCTAssertTrue(pressed)
-                    for _ in 0..<100 where state.draft.synchronizesFans {
+                    for _ in 0..<100 where fanControl.synchronizesManualFans {
                         try await Task.sleep(for: .milliseconds(10))
                     }
-                    XCTAssertFalse(state.draft.synchronizesFans)
-                    let offButton = try await fixture.button(label: label)
-                    XCTAssertEqual(fixture.text(offButton, "accessibilityValue"), L10n.text("已关闭", "Off"))
+                    XCTAssertFalse(fanControl.synchronizesManualFans)
+                    let offButton = try await fixture.element(identifier: "fan-manual-sync")
+                    XCTAssertEqual(fixture.text(offButton, "accessibilityValue"), L10n.text("未选择", "Not Selected"))
                     let unsynchronized = try await fixture.syncFrame(from: recorder)
                     XCTAssertEqual(unsynchronized.minY, original.minY, accuracy: 0.5,
-                        "Showing Target Fan must not shift the switch down a row")
+                        "The per-fan sliders must not shift the row down")
                     XCTAssertEqual(unsynchronized.height, original.height, accuracy: 0.5)
                     XCTAssertEqual(unsynchronized.maxX, original.maxX, accuracy: 0.5,
-                        "The switch sits at the row's trailing edge; Target Fan must not push it sideways")
+                        "The row keeps the section's trailing edge")
                     XCTAssertTrue(try fixture.press(offButton))
-                    for _ in 0..<100 where !state.draft.synchronizesFans {
+                    for _ in 0..<100 where !fanControl.synchronizesManualFans {
                         try await Task.sleep(for: .milliseconds(10))
                     }
-                    XCTAssertTrue(state.draft.synchronizesFans)
+                    XCTAssertTrue(fanControl.synchronizesManualFans)
                     let synchronized = try await fixture.syncFrame(from: recorder)
                     XCTAssertEqual(synchronized.minY, original.minY, accuracy: 0.5)
                     XCTAssertEqual(synchronized.maxX, original.maxX, accuracy: 0.5)
                 }
-                XCTAssertEqual(state.draft.mode, .manual, "AXPress changes only the local sync draft")
+                XCTAssertEqual(fanControl.selectedMode, .systemAutomatic, "AXPress changes only the stored Sync")
+                XCTAssertNil(fanControl.requestedMode)
             }
         }
     }
 
+    /// D152: apart, each fan's slider reads its own stored value under the
+    /// fan's name and a VoiceOver step (5 %) stores only that fan's;
+    /// synchronized, the one Fans slider reads and steps the shared value.
+    /// Outside manual mode a step reaches no helper.
+    func testVoiceOverReadsAndStepsEachFansSlider() async throws {
+        let readings = [
+            SystemFanReading(index: 0, identity: .cpu, actualRPM: 2_000, minimumRPM: 1_000, maximumRPM: 4_000, targetRPM: nil),
+            SystemFanReading(index: 1, identity: .gpu, actualRPM: 3_000, minimumRPM: 2_000, maximumRPM: 6_000, targetRPM: nil),
+        ]
+        let telemetry = FanTelemetryState.resolve(snapshot: SystemMonitorSnapshot(
+            generatedAt: Date(), metrics: [], networkThroughput: nil, fanReadings: readings))
+        for language in [AppLanguage.zhHans, .english] {
+            let languageScope = FanCardLanguageScope(language)
+            defer { languageScope.restore() }
+            let suite = TestPreferenceDomain.makeSuite()
+            let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+            defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+            let fanControl = FanControlCoordinator(
+                defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
+                requestSender: { _ in XCTFail("A step outside manual mode must not reach the helper"); throw CancellationError() },
+                legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
+                serviceStatusProvider: { .enabled },
+                serviceRegistrar: { XCTFail("A step must not register Helper") })
+            defer { fanControl.disconnectForTermination() }
+            fanControl.commitManualPercentage(40)
+            fanControl.setManualFansSynchronized(false)
+            fanControl.commitManualPercentage(25, fanID: 0)
+            fanControl.commitManualPercentage(75, fanID: 1)
+            let root = FanControlPaletteView(presentation: ControlPalettePresentationState(), fanControl: fanControl,
+                telemetry: telemetry, thermalState: .nominal)
+                .frame(width: ControlPaletteMetrics.fanSize.width - 2 * GeekPanelLayout.contentPadding)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            let fixture = FanCardAccessibilityFixture(root: root, height: 360)
+            defer { fixture.close() }
+            for (fanID, value) in [(0, "25%"), (1, "75%")] {
+                let slider = try await fixture.element(identifier: "fan-manual-slider-\(fanID)")
+                XCTAssertEqual(fixture.text(slider, "accessibilityLabel"), readings[fanID].displayName)
+                XCTAssertEqual(fixture.text(slider, "accessibilityValueDescription"), value)
+            }
+            let second = try await fixture.element(identifier: "fan-manual-slider-1")
+            XCTAssertTrue(try fixture.perform("accessibilityPerformIncrement", on: second))
+            let first = try await fixture.element(identifier: "fan-manual-slider-0")
+            XCTAssertTrue(try fixture.perform("accessibilityPerformDecrement", on: first))
+            for _ in 0..<100 where fanControl.manualPercentage(for: 0) > 20.5 || fanControl.manualPercentage(for: 1) < 79.5 {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(fanControl.manualPercentage(for: 0), 20, accuracy: 1e-9)
+            XCTAssertEqual(fanControl.manualPercentage(for: 1), 80, accuracy: 1e-9)
+            XCTAssertEqual(fanControl.manualPercentage(for: nil), 40, accuracy: 1e-9, "a fan's step leaves the shared value")
+            var shown: String?
+            for _ in 0..<100 where shown != "80%" {
+                let slider = try await fixture.element(identifier: "fan-manual-slider-1")
+                shown = fixture.text(slider, "accessibilityValueDescription")
+                if shown != "80%" { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            XCTAssertEqual(shown, "80%", "the slider reads the stored step")
+            fanControl.setManualFansSynchronized(true)
+            let shared = try await fixture.element(identifier: "fan-manual-slider--1")
+            XCTAssertEqual(fixture.text(shared, "accessibilityLabel"), L10n.text("风扇", "Fans"))
+            XCTAssertEqual(fixture.text(shared, "accessibilityValueDescription"), "40%")
+            XCTAssertTrue(try fixture.perform("accessibilityPerformIncrement", on: shared))
+            for _ in 0..<100 where fanControl.manualPercentage(for: nil) < 44.5 {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(fanControl.manualPercentage(for: nil), 45, accuracy: 1e-9)
+            fanControl.setManualFansSynchronized(false)
+            XCTAssertEqual(fanControl.manualPercentage(for: 0), 20, accuracy: 1e-9, "the shared step leaves the fans' values")
+            XCTAssertEqual(fanControl.manualPercentage(for: 1), 80, accuracy: 1e-9)
+            XCTAssertEqual(fanControl.selectedMode, .systemAutomatic)
+            XCTAssertNil(fanControl.requestedMode)
+        }
+    }
+
+    /// D152: the modes are text sections with iStat's switch on the major
+    /// label and Sync is a tick row (were FanControlModeCard with a round
+    /// FanControlModeSelectionMark, a selection that edited the draft until
+    /// Apply, and FanSyncToggleRow's 双风扇同步 capsule switch).
     func testPaletteUsesCardsForModesAndKeepsTheSwitchForFanSync() throws {
         let palette = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift")
         let shared = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/FanControlInlineControls.swift")
-        XCTAssertTrue(palette.contains("FanControlModeCard("))
+        XCTAssertFalse(palette.contains("FanControlModeCard("))
+        XCTAssertFalse(palette.contains("FanControlModeSelectionMark"))
         XCTAssertFalse(palette.contains("ControlPaletteModeRow"))
-        // The mode cards no longer draw a switch capsule. Only the card and its
-        // mark are checked; other views in the file may use capsules (P2-6).
-        let card = try r2SourceDeclaration("struct FanControlModeCard: View", in: palette)
-        let mark = try r2SourceDeclaration("struct FanControlModeSelectionMark: View", in: palette)
-        XCTAssertTrue(card.contains("FanControlModeSelectionMark("))
-        XCTAssertFalse(card.contains(".frame(width: 32, height: 18)"))
-        XCTAssertFalse(card.contains("Capsule("))
-        XCTAssertTrue(mark.contains("Circle()"))
-        // Selection still only edits the draft; Apply submits.
-        XCTAssertTrue(palette.contains("draft.selectMode(mode)"))
-        // The only switch left is "sync both fans".
-        let sync = try r2SourceDeclaration("struct FanSyncToggleRow: View", in: shared)
-        XCTAssertTrue(sync.contains("Capsule(style: .continuous)"))
-        XCTAssertTrue(sync.contains("双风扇同步"))
+        let view = try r2SourceDeclaration("struct FanControlPaletteView: View", in: palette)
+        XCTAssertTrue(view.contains("GeekIStatTextSectionCard {\n            GeekIStatMajorLabelRow(title: choice.title, hasRowsBelow: choice == .manual) {"))
+        XCTAssertTrue(view.contains(".toggleStyle(GeekIStatSwitchToggleStyle())"))
+        XCTAssertTrue(view.contains("GeekIStatTickRow(\n                    title: L10n.text(\"同步\", \"Sync\"),"))
+        XCTAssertFalse(view.contains("Capsule("))
+        // A switch chooses at once; the one that is on does nothing.
+        XCTAssertFalse(palette.contains("draft.selectMode(mode)"))
+        XCTAssertTrue(view.contains("set: { isOn in if isOn { choose(choice.mode) } }"))
+        XCTAssertTrue(view.contains("guard mode != displayedMode, disabledReason(mode) == nil else { return }"))
+        XCTAssertFalse(shared.contains("FanSyncToggleRow"))
+        XCTAssertFalse(shared.contains("双风扇同步"))
     }
 
     private func source(_ relativePath: String) throws -> String {
@@ -447,24 +617,6 @@ final class FanControlModeCardTests: XCTestCase {
                 .appendingPathComponent(relativePath),
             encoding: .utf8
         )
-    }
-}
-
-@MainActor
-private final class FanSyncTestDraft: ObservableObject {
-    @Published var draft: FanControlDraft
-    init(telemetry: FanTelemetryState) {
-        draft = FanControlDraft(telemetry: telemetry, observedMode: .manual, synchronizesFans: true)
-    }
-}
-
-@MainActor
-private struct FanSyncTestControls: View {
-    @ObservedObject var state: FanSyncTestDraft
-    let telemetry: FanTelemetryState
-    let disabled: Bool
-    var body: some View {
-        FanManualSliderList(draft: $state.draft, telemetry: telemetry, isDisabled: disabled, compact: true)
     }
 }
 
@@ -500,22 +652,22 @@ private final class ChargeSegmentTestCalls {
     var fullCharge = 0
 }
 
-@MainActor
-private final class FanCardPressCounter {
-    var presses = 0
-}
-
 /// Hosts a view in a borderless window and drives it through the native
 /// accessibility tree, as VoiceOver does (same approach as
 /// `SafeCleanupScopeCardLayoutTests`).
 @MainActor
 private final class FanCardAccessibilityFixture<Root: View> {
-    private let controller: NSHostingController<Root>
+    private let controller: NSHostingController<AnyView>
     private let window: NSWindow
 
     init(root: Root, height: CGFloat = 120) {
         _ = NSApplication.shared
-        controller = NSHostingController(rootView: root)
+        // SwiftUI builds the accessibility tree of its own controls (the
+        // charge-limit segments, D149; D124's tick rows) only for an
+        // assistive client. Enable the public environment for this inert
+        // host, as CalibrationAppKitLayoutHost does; no macOS preference
+        // changes, and the tree and actions still come from SwiftUI.
+        controller = NSHostingController(rootView: AnyView(root.environment(\.accessibilityEnabled, true)))
         controller.sizingOptions = []
         window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 260, height: height),
                           styleMask: [.borderless], backing: .buffered, defer: false)
@@ -538,23 +690,41 @@ private final class FanCardAccessibilityFixture<Root: View> {
         ])
     }
 
-    func segmentedControl() async throws -> NSSegmentedControl {
-        func find(_ view: NSView) -> NSSegmentedControl? {
-            if let control = view as? NSSegmentedControl { return control }
-            return view.subviews.lazy.compactMap(find).first
-        }
+    /// D124: the element's enabled state through the accessibility protocol
+    /// (the charge-limit rows; was the segmented picker's finder).
+    func isEnabled(_ element: NSObject) throws -> Bool? {
+        let selector = NSSelectorFromString("isAccessibilityEnabled")
+        guard element.responds(to: selector) else { return nil }
+        typealias NativeFlag = @convention(c) (AnyObject, Selector) -> Bool
+        let implementation = try XCTUnwrap(element.method(for: selector))
+        return unsafeBitCast(implementation, to: NativeFlag.self)(element, selector)
+    }
+
+    func contains(label: String) -> Bool { find(label: label, role: nil) != nil }
+
+    /// D152: whether an element shows this text as its label, title or value
+    /// (a static text exposes its string as the value).
+    func contains(text: String) -> Bool { find(text: text) != nil }
+
+    /// D152: a numeric attribute, such as a native toggle's 1 or 0.
+    func number(_ object: NSObject, _ selector: String) -> Int? {
+        (objectValue(object, selector) as? NSNumber)?.intValue
+    }
+
+    /// D152: the element with this accessibility identifier, whatever its
+    /// role (a section's switch, a slider, the Sync row).
+    func element(identifier: String) async throws -> NSObject {
         for _ in 0..<100 {
             controller.view.needsLayout = true
             controller.view.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            if let control = find(controller.view) { return control }
+            if let match = find(identifier: identifier) { return match }
             try await Task.sleep(for: .milliseconds(10))
         }
-        throw NSError(domain: "FanControlModeCardTests", code: 4,
-            userInfo: [NSLocalizedDescriptionKey: "No native segmented charge-limit picker"])
+        throw NSError(domain: "FanControlModeCardTests", code: 4, userInfo: [
+            NSLocalizedDescriptionKey: "No native element \(identifier): \(snapshot())",
+        ])
     }
-
-    func contains(label: String) -> Bool { find(label: label, role: nil) != nil }
 
     func savePNG(to url: URL) throws {
         let view = controller.view
@@ -573,6 +743,16 @@ private final class FanCardAccessibilityFixture<Root: View> {
         return unsafeBitCast(implementation, to: NativePress.self)(element, selector)
     }
 
+    /// D152: another native action by its selector, such as a slider's
+    /// accessibilityPerformIncrement; false when the element lacks it.
+    func perform(_ selectorName: String, on element: NSObject) throws -> Bool {
+        let selector = NSSelectorFromString(selectorName)
+        guard element.responds(to: selector) else { return false }
+        typealias NativeAction = @convention(c) (AnyObject, Selector) -> Bool
+        let implementation = try XCTUnwrap(element.method(for: selector))
+        return unsafeBitCast(implementation, to: NativeAction.self)(element, selector)
+    }
+
     func text(_ object: NSObject, _ selector: String) -> String? {
         let value = objectValue(object, selector)
         if let text = value as? String { return text }
@@ -580,9 +760,18 @@ private final class FanCardAccessibilityFixture<Root: View> {
         return nil
     }
 
+    /// SwiftUI publishes accessibility on a later main-actor turn; detaching
+    /// the host synchronously makes SDK 27's render state machine throw
+    /// InvalidTransition(failed(deinit)) into the next test. Hide the window
+    /// now and detach after those turns, as CalibrationAppKitLayoutHost does.
     func close() {
-        window.contentViewController = nil
-        window.close()
+        window.orderOut(nil)
+        Task { @MainActor [window, controller] in
+            await Task.yield()
+            window.contentViewController = nil
+            window.close()
+            _ = controller
+        }
     }
 
     func syncFrame(from recorder: FanCardFrameRecorder) async throws -> CGRect {
@@ -593,14 +782,15 @@ private final class FanCardAccessibilityFixture<Root: View> {
             controller.view.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
             try await Task.sleep(for: .milliseconds(20))
-            if let frame = recorder.frames["fan.sync.toggle"] {
+            // D152: the Sync tick row's probe (was the switch's "fan.sync.toggle").
+            if let frame = recorder.frames["fan.manual.sync"] {
                 stable = frame == last ? stable + 1 : 0
                 last = frame
                 if stable >= 2 { return frame }
             }
         }
         throw NSError(domain: "FanControlModeCardTests", code: 3,
-            userInfo: [NSLocalizedDescriptionKey: "Sync switch frame did not stabilize"])
+            userInfo: [NSLocalizedDescriptionKey: "Sync row frame did not stabilize"])
     }
 
     private func find(label: String, role: String?) -> NSObject? {
@@ -611,6 +801,34 @@ private final class FanCardAccessibilityFixture<Root: View> {
                (role == nil || text(element, "accessibilityRole") == role) {
                 return element
             }
+            for child in children(element) {
+                if let match = search(child) { return match }
+            }
+            return nil
+        }
+        return search(controller.view) ?? search(window)
+    }
+
+    private func find(text value: String) -> NSObject? {
+        var visited = Set<ObjectIdentifier>()
+        func search(_ element: NSObject) -> NSObject? {
+            guard visited.insert(ObjectIdentifier(element)).inserted else { return nil }
+            let shown = [text(element, "accessibilityLabel"), text(element, "accessibilityTitle"),
+                         text(element, "accessibilityValue")]
+            if shown.contains(value) { return element }
+            for child in children(element) {
+                if let match = search(child) { return match }
+            }
+            return nil
+        }
+        return search(controller.view) ?? search(window)
+    }
+
+    private func find(identifier: String) -> NSObject? {
+        var visited = Set<ObjectIdentifier>()
+        func search(_ element: NSObject) -> NSObject? {
+            guard visited.insert(ObjectIdentifier(element)).inserted else { return nil }
+            if text(element, "accessibilityIdentifier") == identifier { return element }
             for child in children(element) {
                 if let match = search(child) { return match }
             }
@@ -674,9 +892,19 @@ private final class FanCardHost<Root: View> {
                       userInfo: [NSLocalizedDescriptionKey: "Native layout frames did not stabilize"])
     }
 
+    /// As the accessibility fixture does: hide now and detach after SwiftUI's
+    /// pending main-actor turns. A synchronous detach makes SDK 27's render
+    /// state machine throw InvalidTransition(failed(deinit)) into a later
+    /// test (D152: testOverviewEntry… after the palette layouts; was
+    /// `window.contentView = nil` at once).
     func close() {
-        window.contentView = nil
-        window.close()
+        window.orderOut(nil)
+        Task { @MainActor [window, host] in
+            await Task.yield()
+            window.contentView = nil
+            window.close()
+            _ = host
+        }
     }
 }
 #endif

@@ -1,501 +1,274 @@
 import SwiftUI
 
-/// A value-only edit session. No selection, slider, preset or cancellation
-/// changes the coordinator; the explicit Apply action is the only submitter.
-struct FanControlDraft: Equatable {
-    struct Configuration: Equatable {
-        var mode: GeekFanControlMode?
-        var synchronizesFans: Bool
-        var percentagesByFan: [Int: Double]
+/// D152: iStat Menus 7.30's manual fan slider (`-[BBRSensorsMenuFanSlider
+/// drawRect:]`, `mouseDown:`, `mouseDragged:`, `mouseUp:`), in points in a
+/// view as wide as its text section (W) and 30 tall:
+/// - the label at (8, −3, W − 16, 15) in the label style, the value
+///   '%.0f%%' right-aligned to W − 10 in the value style;
+/// - the track (8, 18, W − 16, 8) at radius 4 in the theme's graph border
+///   color, the same rect p × (W − 16) wide in the primary color;
+/// - the knob, a 16 pt circle at (p × (W − 16), 14) in the value color;
+/// - a press on the knob (its 16 pt box at (p × (W − 16), 17)) starts a
+///   drag; a press elsewhere between 8 and W − 8 sets p = (x − 8) / (W − 16)
+///   and writes at once, then drags; a press outside does nothing;
+/// - a drag clamps the whole-point x to [8, W − 8] and writes 0.2 s after
+///   the last move (`FanControlSafetyPolicy.manualControlDebounce`); the
+///   release writes at once.
+/// The container (`BBRSensorsManualFanItem`) stacks the sliders 8 apart.
+enum FanControlSliderGeometry {
+    static let height: CGFloat = 30
+    static let spacing: CGFloat = 8
+    static let inset: CGFloat = 8
+    static let labelTop: CGFloat = -3
+    static let labelHeight: CGFloat = 15
+    static let valueTrailing: CGFloat = 10
+    static let trackTop: CGFloat = 18
+    static let trackHeight: CGFloat = 8
+    static let trackRadius: CGFloat = 4
+    static let knobSize: CGFloat = 16
+    static let knobTop: CGFloat = 14
+    static let knobHitTop: CGFloat = 17
+    /// One VoiceOver increment or decrement (ours; iStat has none).
+    static let accessibilityStep = 0.05
+
+    static func clamped(_ fraction: Double) -> Double {
+        min(1, max(0, fraction.isFinite ? fraction : 0))
     }
 
-    private(set) var baseline: Configuration
-    private(set) var configuration: Configuration
+    static func trackWidth(_ width: CGFloat) -> CGFloat {
+        max(0, width - 2 * inset)
+    }
 
-    init(
-        telemetry: FanTelemetryState,
-        observedMode: GeekFanControlMode?,
-        synchronizesFans: Bool,
-        confirmedFractions: [Int: Double] = [:]
-    ) {
-        let mode: GeekFanControlMode? = switch observedMode {
-        case .fanSet: .manual
-        default: observedMode
+    /// The knob's leading edge: p × (W − 16), so its center is on the track
+    /// at 8 + p × (W − 16).
+    static func knobLeading(fraction: Double, width: CGFloat) -> CGFloat {
+        CGFloat(clamped(fraction)) * trackWidth(width)
+    }
+
+    static func knobHitRect(fraction: Double, width: CGFloat) -> CGRect {
+        CGRect(x: knobLeading(fraction: fraction, width: width), y: knobHitTop,
+               width: knobSize, height: knobSize)
+    }
+
+    /// The value a press at x sets; nil outside [8, W − 8].
+    static func fraction(pressAt x: CGFloat, width: CGFloat) -> Double? {
+        guard trackWidth(width) > 0, x >= inset, x <= width - inset else { return nil }
+        return clamped(Double((x - inset) / trackWidth(width)))
+    }
+
+    /// The value a drag at x sets: iStat takes the whole-point x and clamps
+    /// it to [8, (int)(W − 8)].
+    static func fraction(dragAt x: CGFloat, width: CGFloat) -> Double {
+        guard trackWidth(width) > 0 else { return 0 }
+        let upper = (width - inset).rounded(.towardZero)
+        let point = min(max(x.rounded(.towardZero), inset), upper)
+        return clamped(Double((point - inset) / trackWidth(width)))
+    }
+
+    static func valueText(fraction: Double) -> String {
+        String(format: "%.0f%%", clamped(fraction) * 100)
+    }
+
+    /// n sliders: 30n + 8(n − 1); none is empty.
+    static func listHeight(count: Int) -> CGFloat {
+        count > 0 ? CGFloat(count) * height + CGFloat(count - 1) * spacing : 0
+    }
+
+    /// iStat's mouse handlers as a value, so they are testable without a
+    /// window: a press on the knob holds the stored value, a press beside it
+    /// writes at once, a press outside makes the rest of the gesture do
+    /// nothing, a move stores for the debounced write, the release writes
+    /// what the gesture holds.
+    struct Tracking: Equatable {
+        enum Write: Equatable {
+            /// Store the value; the coordinator writes it after the debounce.
+            case drag(Double)
+            /// Write the value now.
+            case commit(Double)
         }
-        let uniqueReadings = Set(telemetry.readings.map(\.index)).count == telemetry.readings.count
-            ? telemetry.readings : []
-        let percentages = Dictionary(uniqueKeysWithValues: uniqueReadings.compactMap { reading -> (Int, Double)? in
-            guard let fraction = FanControlPlanner.manualEntryFraction(fanReadings: [reading]) else { return nil }
-            let confirmed = mode == .manual ? confirmedFractions[reading.index] : nil
-            return (reading.index, min(100, max(0, (confirmed ?? fraction) * 100)))
-        })
-        let initial = Configuration(mode: mode, synchronizesFans: synchronizesFans, percentagesByFan: percentages)
-        baseline = initial
-        configuration = initial
-    }
 
-    var hasChanges: Bool { configuration != baseline }
-    var mode: GeekFanControlMode? { configuration.mode }
-    var synchronizesFans: Bool { configuration.synchronizesFans }
+        private typealias Geometry = FanControlSliderGeometry
+        /// The value the running gesture holds; nil without a gesture.
+        private(set) var fraction: Double?
+        /// The gesture began outside the track.
+        private(set) var isIgnored = false
 
-    mutating func selectMode(_ mode: GeekFanControlMode) {
-        guard [.systemAutomatic, .manual, .customCurve, .maximum].contains(mode) else { return }
-        configuration.mode = mode
-    }
-
-    mutating func setSynchronized(_ enabled: Bool) {
-        guard enabled != configuration.synchronizesFans else { return }
-        if enabled, let percentage = percentage(for: nil) {
-            for fanID in configuration.percentagesByFan.keys {
-                configuration.percentagesByFan[fanID] = percentage
-            }
-        }
-        configuration.synchronizesFans = enabled
-    }
-
-    func percentage(for fanID: Int?) -> Double? {
-        if let fanID { return configuration.percentagesByFan[fanID] }
-        let values = configuration.percentagesByFan.values
-        guard !values.isEmpty else { return nil }
-        return values.reduce(0, +) / Double(values.count)
-    }
-
-    mutating func setPercentage(_ value: Double, fanID: Int?) {
-        guard value.isFinite else { return }
-        let value = min(100, max(0, value))
-        if let fanID, configuration.percentagesByFan[fanID] != nil {
-            configuration.percentagesByFan[fanID] = value
-        } else if fanID == nil {
-            for fanID in configuration.percentagesByFan.keys {
-                configuration.percentagesByFan[fanID] = value
-            }
-        }
-    }
-
-    mutating func cancel() { configuration = baseline }
-    mutating func markConfirmed() { baseline = configuration }
-
-    func targetRPM(fanID: Int?, telemetry: FanTelemetryState) -> Int? {
-        let readings = telemetry.readings.filter { fanID == nil || $0.index == fanID }
-        guard let percentage = percentage(for: fanID) else { return nil }
-        return FanCurveEditor.targetRPM(percentage: percentage, fanReadings: readings)
-    }
-
-    mutating func setTargetRPM(_ rpm: Int, fanID: Int?, telemetry: FanTelemetryState) {
-        let readings = telemetry.readings.filter { fanID == nil || $0.index == fanID }
-        guard let minimum = FanCurveEditor.targetRPM(percentage: 0, fanReadings: readings),
-              let maximum = FanCurveEditor.targetRPM(percentage: 100, fanReadings: readings),
-              maximum > minimum else { return }
-        setPercentage((Double(rpm) - Double(minimum)) / Double(maximum - minimum) * 100, fanID: fanID)
-    }
-
-    func matchesReadback(mode: GeekFanControlMode?, fractions: [Int: Double]) -> Bool {
-        guard mode == configuration.mode else { return false }
-        guard mode == .manual else { return true }
-        guard !configuration.percentagesByFan.isEmpty,
-              Set(fractions.keys) == Set(configuration.percentagesByFan.keys) else { return false }
-        return configuration.percentagesByFan.allSatisfy { fanID, percentage in
-            let expected = synchronizesFans ? self.percentage(for: nil)! : percentage
-            return abs(fractions[fanID]! * 100 - expected) < 0.1
-        }
-    }
-
-    /// Only called by an explicit Apply button. Existing coordinator validation,
-    /// serialization, target ramping and authenticated readback remain intact.
-    @MainActor
-    func submit(to fanControl: FanControlCoordinator, telemetry: FanTelemetryState, thermalState: SystemThermalState) async -> Bool {
-        guard let mode,
-              !fanControl.isDataOnlyFixture,
-              fanControl.helperState == .enabled,
-              !fanControl.isApplying,
-              !fanControl.isSwitchingMode else { return false }
-        if mode != .systemAutomatic {
-            guard telemetry.hasVerifiedRanges,
-                  thermalState != .serious, thermalState != .critical else { return false }
-        }
-        switch mode {
-        case .systemAutomatic:
-            await fanControl.selectMode(.systemAutomatic)
-        case .customCurve:
-            await fanControl.applyFanCurveDraft()
-        case .manual:
-            guard Set(configuration.percentagesByFan.keys) == Set(telemetry.readings.map(\.index)) else { return false }
-            if fanControl.selectedMode != .manual {
-                await fanControl.selectMode(.manual)
-            }
-            guard fanControl.selectedMode == .manual, fanControl.helperState == .enabled else { return false }
-            fanControl.setManualFansSynchronized(synchronizesFans)
-            if synchronizesFans {
-                guard let percentage = percentage(for: nil) else { return false }
-                fanControl.commitManualPercentage(percentage)
-            } else {
-                // Stage every fan before the single final commit. These calls
-                // share the existing debounce and never originate in a gesture.
-                let fanIDs = configuration.percentagesByFan.keys.sorted()
-                for fanID in fanIDs {
-                    fanControl.updateManualPercentage(configuration.percentagesByFan[fanID]!, fanID: fanID)
-                }
-                if let last = fanIDs.last {
-                    fanControl.commitManualPercentage(configuration.percentagesByFan[last]!, fanID: last)
-                }
-            }
-        case .maximum:
-            await fanControl.selectMode(.maximum)
-        case .fanSet:
-            return false
-        }
-        return true
-    }
-}
-
-struct FanSyncToggleRow: View {
-    @Binding var draft: FanControlDraft
-    var isDisabled = false
-
-    var body: some View {
-        Button {
-            guard !isDisabled else { return }
-            draft.setSynchronized(!draft.synchronizesFans)
-        } label: {
-            // U1 117: the only switch in the fan palette; the modes above are
-            // single-choice cards.
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(title)
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
-                Capsule(style: .continuous)
-                    .fill(draft.synchronizesFans ? AppDesignTokens.Palette.information : Color.secondary.opacity(0.32))
-                    .frame(width: 30, height: 17)
-                    .overlay(alignment: draft.synchronizesFans ? .trailing : .leading) {
-                        Circle().fill(.white).frame(width: 13, height: 13).padding(2)
-                    }
-                    .accessibilityHidden(true)
-            }
-            .frame(maxWidth: .infinity, minHeight: MiniWindowStyleTokens.controlRowHeight, alignment: .trailing)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(ResponsivePlainButtonStyle())
-        .font(AdvancedPanelTypography.caption)
-        .disabled(isDisabled)
-        .accessibilityLabel(L10n.text("同步所有风扇", "Synchronize All Fans"))
-        .accessibilityValue(draft.synchronizesFans ? L10n.text("已开启", "On") : L10n.text("已关闭", "Off"))
-        #if DEBUG
-        .layoutProbe("fan.sync.toggle")
-        #endif
-    }
-
-    private var title: String {
-        draft.configuration.percentagesByFan.count == 2
-            ? L10n.text("双风扇同步", "Sync Both Fans")
-            : L10n.text("风扇同步", "Sync Fans")
-    }
-}
-
-/// The compact button has a bounded name; menu items and assistive text retain
-/// the hardware name. Chinese keeps the existing localized button names.
-struct FanTargetPickerPresentation: Equatable {
-    let buttonTitle: String
-    let fullName: String
-
-    init(reading: SystemFanReading, usesChinese: Bool) {
-        fullName = reading.displayName
-        buttonTitle = usesChinese ? fullName : "Fan \(reading.index + 1)"
-    }
-}
-
-struct FanManualSliderList: View {
-    @Binding var draft: FanControlDraft
-    let telemetry: FanTelemetryState
-    let isDisabled: Bool
-    var compact = false
-    var compactFooter: ((Int?) -> AnyView)? = nil
-    @State private var selectedFanID: Int?
-
-    var body: some View {
-        if compact && telemetry.fanCount > 1 {
-            // Keep the header outside the synchronized/individual slider
-            // branches so switching targets cannot replace its layout owner.
-            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-                compactFanHeader
-                manualSlider
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            manualSlider
-        }
-    }
-
-    @ViewBuilder
-    private var manualSlider: some View {
-        if draft.synchronizesFans {
-            sliderRow(fanID: nil, title: compact ? L10n.text("风扇", "Fans") : L10n.text("全部风扇", "All Fans"))
-        } else if let reading = telemetry.readings.first(where: { $0.index == selectedFanID }) ?? telemetry.readings.first {
-            if !compact {
-                targetFanPicker(reading: reading)
-            }
-            sliderRow(fanID: reading.index, title: reading.displayName)
-        }
-    }
-
-    private var compactFanHeader: some View {
-        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-            if !draft.synchronizesFans,
-               let reading = telemetry.readings.first(where: { $0.index == selectedFanID }) ?? telemetry.readings.first {
-                compactTargetFanMenu(reading: reading)
-            }
-            FanSyncToggleRow(draft: $draft, isDisabled: isDisabled)
-        }
-        .frame(maxWidth: .infinity, minHeight: MiniWindowStyleTokens.dataRowHeight, alignment: .trailing)
-    }
-
-    private func targetFanPicker(reading: SystemFanReading) -> some View {
-        Picker(L10n.text("目标风扇", "Target Fan"), selection: Binding(
-            get: { reading.index },
-            set: { selectedFanID = $0 }
-        )) {
-            ForEach(telemetry.readings) { fan in Text(fan.displayName).tag(fan.index) }
-        }
-        .pickerStyle(.menu)
-        .disabled(isDisabled)
-        // The Picker's title is already its accessibility label (review r4 P2-1).
-    }
-
-    private func compactTargetFanMenu(reading: SystemFanReading) -> some View {
-        let presentation = FanTargetPickerPresentation(reading: reading, usesChinese: L10n.usesChinese)
-        return Menu {
-            Picker(L10n.text("目标风扇", "Target Fan"), selection: Binding(
-                get: { selectedFanID ?? reading.index },
-                set: { selectedFanID = $0 }
-            )) {
-                ForEach(telemetry.readings) { fan in
-                    Text(FanTargetPickerPresentation(reading: fan, usesChinese: L10n.usesChinese).fullName)
-                        .tag(fan.index)
-                }
-            }
-            .pickerStyle(.inline)
-        } label: {
-            Text(presentation.buttonTitle)
-                .font(AdvancedPanelTypography.caption)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-        }
-        .menuStyle(.borderlessButton)
-        .frame(width: 80)
-        .disabled(isDisabled)
-        .help(presentation.fullName)
-        .accessibilityLabel(L10n.text("目标风扇：\(presentation.fullName)", "Target Fan: \(presentation.fullName)"))
-        #if DEBUG
-        .layoutProbe("fan.target.menu")
-        #endif
-    }
-
-    private func sliderRow(fanID: Int?, title: String) -> some View {
-        let readings = telemetry.readings.filter { fanID == nil || $0.index == fanID }
-        let minimum = FanCurveEditor.targetRPM(percentage: 0, fanReadings: readings)
-        let maximum = FanCurveEditor.targetRPM(percentage: 100, fanReadings: readings)
-        return VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-            if !compact {
-                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                    Text(title).lineLimit(1)
-                    Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
-                    if compact && telemetry.fanCount == 1 {
-                        Text(draft.percentage(for: fanID).map { "\(Int($0.rounded()))%" } ?? "—")
-                            .monospacedDigit()
-                    } else if !compact {
-                        Text(Self.actualRPM(fanID: fanID, telemetry: telemetry).map {
-                            L10n.text("实际 ", "Actual ") + SystemFanSpeedFormat.string($0)
-                        } ?? L10n.text("实际 —", "Actual —"))
-                            .monospacedDigit().foregroundStyle(.secondary)
-                    }
-                }
-                .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
-            }
-            if !compact {
-                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                    Text(fanID == nil && telemetry.fanCount > 1
-                        ? L10n.text("平均目标", "Average Target")
-                        : L10n.text("目标转速", "Target Speed"))
-                    Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
-                    targetRPMField(fanID: fanID, title: title)
-                }
-            }
-            if let minimum, let maximum, let percentage = draft.percentage(for: fanID) {
-                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                    FanControlSlider(value: Binding(
-                        get: { draft.percentage(for: fanID) ?? percentage },
-                        set: { guard !isDisabled else { return }; draft.setPercentage($0, fanID: fanID) }
-                    ), isDisabled: isDisabled) { _ in }
-                    .help(L10n.text("硬件量程 \(minimum)–\(maximum) RPM；0% 为最低转速，不代表停转。", "Hardware range \(minimum)–\(maximum) RPM; 0% is minimum speed, not stopped."))
-                    if compact {
-                        Text("\(Int(percentage.rounded()))%")
-                            .monospacedDigit().fixedSize()
-                    }
-                }
-                if compact, let compactFooter {
-                    compactFooter(fanID)
-                } else if compact {
-                    HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                        Text(Self.actualRPM(fanID: fanID, telemetry: telemetry).map {
-                            L10n.text("实际 ", "Actual ") + SystemFanSpeedFormat.string($0)
-                        } ?? L10n.text("实际 —", "Actual —"))
-                        Spacer(minLength: 0)
-                        Text(draft.targetRPM(fanID: fanID, telemetry: telemetry).map {
-                            L10n.text("草稿目标 ", "Draft Target ") + SystemFanSpeedFormat.string($0)
-                        } ?? L10n.text("草稿目标 —", "Draft Target —"))
-                    }
-                    .font(AdvancedPanelTypography.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+        /// A gesture step (`mouseDown:`, then `mouseDragged:`) over the
+        /// stored value.
+        mutating func changed(start: CGPoint, location: CGPoint, width: CGFloat, stored: Double) -> [Write] {
+            guard !isIgnored else { return [] }
+            var writes: [Write] = []
+            if fraction == nil {
+                if Geometry.knobHitRect(fraction: stored, width: width).contains(start) {
+                    fraction = Geometry.clamped(stored)
+                } else if let value = Geometry.fraction(pressAt: start.x, width: width) {
+                    fraction = value
+                    writes.append(.commit(value))
                 } else {
-                    HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                        Text(SystemFanSpeedFormat.string(minimum))
-                        Spacer(minLength: 0)
-                        Text(SystemFanSpeedFormat.string(maximum))
-                    }
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    isIgnored = true
+                    return []
                 }
-                if fanID == nil && !compact {
-                    HStack(spacing: MiniWindowStyleTokens.rowSpacing) {
-                        ForEach([25.0, 50.0, 75.0, 100.0], id: \.self) { preset in
-                            Button("\(Int(preset))%") {
-                                guard !isDisabled else { return }
-                                draft.setPercentage(preset, fanID: nil)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(isDisabled)
-                            .accessibilityLabel(L10n.text("草稿设为 \(Int(preset))%", "Set draft to \(Int(preset))%"))
-                        }
-                    }
-                }
-            } else {
-                Text(L10n.text("量程未完整读取，保留实际转速监测。", "Range unavailable; actual RPM monitoring remains available."))
-                    .foregroundStyle(.secondary)
+                // The press itself does not move the knob; the drag does.
+                guard location != start else { return writes }
             }
+            let value = Geometry.fraction(dragAt: location.x, width: width)
+            fraction = value
+            writes.append(.drag(value))
+            return writes
         }
-        .font(AdvancedPanelTypography.body)
-        .accessibilityElement(children: .contain)
-    }
 
-    @ViewBuilder private func targetRPMField(fanID: Int?, title: String) -> some View {
-        if let target = draft.targetRPM(fanID: fanID, telemetry: telemetry) {
-            HStack(spacing: MiniWindowStyleTokens.rowSpacing) {
-                TextField("", value: Binding(
-                    get: { draft.targetRPM(fanID: fanID, telemetry: telemetry) ?? target },
-                    set: { guard !isDisabled else { return }; draft.setTargetRPM($0, fanID: fanID, telemetry: telemetry) }
-                ), format: .number.grouping(.never))
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 62)
-                .disabled(isDisabled)
-                .accessibilityLabel(title + L10n.text("草稿目标 RPM", " Draft Target RPM"))
-                Text("rpm").lineLimit(1).fixedSize()
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            .foregroundStyle(.primary)
-        } else {
-            Text("—")
+        /// The release (`mouseUp:`); the next gesture starts afresh.
+        mutating func ended() -> [Write] {
+            defer { self = Tracking() }
+            guard !isIgnored, let fraction else { return [] }
+            return [.commit(fraction)]
         }
-    }
-
-    static func actualRPM(fanID: Int?, telemetry: FanTelemetryState) -> Int? {
-        guard let fanID else { return telemetry.actualRPM }
-        return telemetry.readings.first { $0.index == fanID }?.actualRPM
     }
 }
 
-/// A DragGesture-based slider. AppKit's NSSlider (behind SwiftUI's `Slider`)
-/// runs a blocking event-tracking loop while the mouse is down, which
-/// freezes every MainActor task — telemetry publishing, lease renewals and
-/// UI updates — long enough to trip the helper's fan-control watchdog
-/// mid-drag ("lease expired" reverts) and to make the panel visibly lag. A
-/// gesture-driven slider keeps the run loop alive for the whole drag.
+/// One slider of the manual section. The value comes from the coordinator
+/// and is written back through it; the view keeps only the gesture.
+///
+/// A DragGesture rather than AppKit's NSSlider (behind SwiftUI's `Slider`):
+/// NSSlider runs a blocking event-tracking loop while the mouse is down,
+/// which freezes every MainActor task — telemetry publishing, lease
+/// renewals and UI updates — long enough to trip the helper's fan-control
+/// watchdog mid-drag ("lease expired" reverts) and to make the panel
+/// visibly lag. A gesture keeps the run loop alive for the whole drag.
 struct FanControlSlider: View {
-    @Binding var value: Double
-    var isDisabled = false
-    let onEditingChanged: (Bool) -> Void
-
-    @State private var isDragging = false
-
-    private let range: ClosedRange<Double> = 0...100
-    private let knobDiameter: CGFloat = 13
+    private typealias Geometry = FanControlSliderGeometry
+    @Environment(\.panelChromePalette) private var panelChromePalette
+    @Environment(\.panelMetricColors) private var metricColors
+    @Environment(\.isEnabled) private var isEnabled
+    let title: String
+    /// The stored value, 0 … 1.
+    let fraction: Double
+    /// A drag step: store the value; the coordinator writes after the debounce.
+    let onDrag: (Double) -> Void
+    /// A press beside the knob, the release or an accessibility step: write now.
+    let onCommit: (Double) -> Void
+    @State private var tracking = Geometry.Tracking()
 
     var body: some View {
         GeometryReader { proxy in
-            let usableWidth = max(1, proxy.size.width - knobDiameter)
-            let fraction = min(max(value / range.upperBound, 0), 1)
-            let knobOffset = usableWidth * CGFloat(fraction)
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.secondary.opacity(0.28))
-                    .frame(height: 4)
-                Capsule()
-                    .fill(controlTint)
-                    .frame(width: knobOffset + knobDiameter / 2, height: 4)
+            let width = proxy.size.width
+            let value = Geometry.clamped(fraction)
+            ZStack(alignment: .topLeading) {
+                Text(title)
+                    .geekIStatLabelText()
+                    .frame(width: Geometry.trackWidth(width), height: Geometry.labelHeight, alignment: .leading)
+                    .offset(x: Geometry.inset, y: Geometry.labelTop)
+                Text(Geometry.valueText(fraction: value))
+                    .geekIStatValueText()
+                    .frame(width: max(0, width - 2 * Geometry.valueTrailing), height: Geometry.labelHeight,
+                           alignment: .trailing)
+                    .offset(x: Geometry.valueTrailing, y: Geometry.labelTop)
+                RoundedRectangle(cornerRadius: Geometry.trackRadius, style: .circular)
+                    .fill(panelChromePalette?.graphBorder ?? Color.primary.opacity(0.2))
+                    .frame(width: Geometry.trackWidth(width), height: Geometry.trackHeight)
+                    .offset(x: Geometry.inset, y: Geometry.trackTop)
+                RoundedRectangle(cornerRadius: Geometry.trackRadius, style: .circular)
+                    .fill(metricColors.sensorGraph)
+                    .frame(width: CGFloat(value) * Geometry.trackWidth(width), height: Geometry.trackHeight)
+                    .offset(x: Geometry.inset, y: Geometry.trackTop)
                 Circle()
-                    .fill(.white)
-                    .frame(width: knobDiameter, height: knobDiameter)
-                    .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
-                    .offset(x: knobOffset)
+                    .fill(GeekIStatCardGeometry.valueColor(panelChromePalette))
+                    .frame(width: Geometry.knobSize, height: Geometry.knobSize)
+                    .offset(x: Geometry.knobLeading(fraction: value, width: width), y: Geometry.knobTop)
             }
-            .frame(maxHeight: .infinity, alignment: .leading)
+            .frame(width: width, height: Geometry.height, alignment: .topLeading)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        guard !isDisabled else { return }
-                        if !isDragging {
-                            isDragging = true
-                            onEditingChanged(true)
-                        }
-                        value = resolvedValue(
-                            locationX: gesture.location.x,
-                            usableWidth: usableWidth
-                        )
+                    .onChanged { step in
+                        guard isEnabled else { return }
+                        perform(tracking.changed(start: step.startLocation, location: step.location,
+                                                 width: width, stored: fraction))
                     }
-                    .onEnded { gesture in
-                        guard !isDisabled else { isDragging = false; return }
-                        value = resolvedValue(
-                            locationX: gesture.location.x,
-                            usableWidth: usableWidth
-                        )
-                        isDragging = false
-                        onEditingChanged(false)
+                    .onEnded { _ in
+                        let writes = tracking.ended()
+                        guard isEnabled else { return }
+                        perform(writes)
                     }
             )
         }
-        .frame(height: 22)
+        .frame(height: Geometry.height)
         .transaction { $0.animation = nil }
-        .opacity(isDisabled ? 0.45 : 1)
-        .allowsHitTesting(!isDisabled)
-        .disabled(isDisabled)
+        .opacity(isEnabled ? 1 : 0.55)
+        .allowsHitTesting(isEnabled)
         .accessibilityElement()
-        .accessibilityLabel(L10n.text("风扇转速", "Fan Speed"))
-        .accessibilityValue(Text("\(Int(value.rounded()))%"))
+        .accessibilityLabel(title)
+        .accessibilityValue(Text(Geometry.valueText(fraction: fraction)))
         .accessibilityHint(L10n.text(
-            "拖动或使用辅助功能增减目标转速",
-            "Drag or use accessibility actions to change the target speed"
+            "拖动或使用辅助功能增减目标转速；0% 为硬件最低转速，不代表停转。",
+            "Drag or use accessibility actions to change the target speed; 0% is the hardware minimum, not stopped."
         ))
         .accessibilityAdjustableAction { direction in
-            guard !isDisabled else { return }
+            guard isEnabled else { return }
+            let value = Geometry.clamped(fraction)
             switch direction {
-            case .increment:
-                value = min(range.upperBound, value + 5)
-            case .decrement:
-                value = max(range.lowerBound, value - 5)
-            @unknown default:
-                return
+            case .increment: onCommit(min(1, value + Geometry.accessibilityStep))
+            case .decrement: onCommit(max(0, value - Geometry.accessibilityStep))
+            @unknown default: return
             }
-            onEditingChanged(false)
         }
     }
 
-    private func resolvedValue(locationX: CGFloat, usableWidth: CGFloat) -> Double {
-        let clamped = min(max(0, locationX - knobDiameter / 2), usableWidth)
-        return (Double(clamped / usableWidth) * range.upperBound).rounded()
+    private func perform(_ writes: [Geometry.Tracking.Write]) {
+        for write in writes {
+            switch write {
+            case .drag(let value): onDrag(value)
+            case .commit(let value): onCommit(value)
+            }
+        }
+    }
+}
+
+/// D152: iStat's slider container (`-[BBRSensorsManualFanItem update]`): one
+/// slider labelled Fans while the fans are synchronized (always with a
+/// single fan), otherwise one per fan under its name; iStat's fan groups
+/// have no counterpart here. Was one slider at a time with a fan picker.
+struct FanManualSliderList: View {
+    struct Slider: Equatable, Identifiable {
+        /// nil for the synchronized slider.
+        let fanID: Int?
+        let title: String
+        var id: Int { fanID ?? -1 }
     }
 
-    private var controlTint: Color {
-        AppDesignTokens.Palette.information
+    @ObservedObject var fanControl: FanControlCoordinator
+    let readings: [SystemFanReading]
+
+    /// The sliders need every fan's verified range and each fan once; the
+    /// planner writes nothing otherwise (as the draft before D152).
+    static func isAvailable(for telemetry: FanTelemetryState) -> Bool {
+        telemetry.hasVerifiedRanges
+            && Set(telemetry.readings.map(\.index)).count == telemetry.readings.count
+    }
+
+    static func sliders(readings: [SystemFanReading], synchronizes: Bool) -> [Slider] {
+        guard !readings.isEmpty, Set(readings.map(\.index)).count == readings.count else { return [] }
+        if synchronizes || readings.count < 2 {
+            return [Slider(fanID: nil, title: L10n.text("风扇", "Fans"))]
+        }
+        return readings.map { Slider(fanID: $0.index, title: $0.displayName) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FanControlSliderGeometry.spacing) {
+            ForEach(Self.sliders(readings: readings, synchronizes: fanControl.synchronizesManualFans)) { slider in
+                FanControlSlider(
+                    title: slider.title,
+                    fraction: fanControl.manualPercentage(for: slider.fanID) / 100,
+                    onDrag: { fanControl.updateManualPercentage($0 * 100, fanID: slider.fanID) },
+                    onCommit: { fanControl.commitManualPercentage($0 * 100, fanID: slider.fanID) }
+                )
+                .accessibilityIdentifier("fan-manual-slider-\(slider.id)")
+#if DEBUG
+                .layoutProbe("fan.manual.slider.\(slider.id)")
+#endif
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

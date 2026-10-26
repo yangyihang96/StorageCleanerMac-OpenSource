@@ -1,4 +1,5 @@
 import AppKit
+import FileOperationShared
 import Foundation
 import Security
 
@@ -430,21 +431,26 @@ enum UninstallAuthorizationDecision: Equatable, Sendable {
     static let notOfferedDomainPrefix = "UninstallAuthorization.not-offered."
 }
 
-/// The lock flags the helper checks before it moves a bundle.
+/// The lock flags the helper checks before it moves a bundle; D101 G4-2:
+/// both read them with `FileProtectionFlags`.
 enum UninstallBundleProtection: Equatable, Sendable {
     case none
-    /// UF_IMMUTABLE ("Locked" in Finder's Get Info).
+    /// An owner flag: "Locked" in Finder's Get Info (UF_IMMUTABLE) or
+    /// append-only (UF_APPEND).
     case userLocked
-    /// SF_IMMUTABLE or SF_RESTRICTED: only the system can lift them.
+    /// A system flag (SF_IMMUTABLE, SF_APPEND, SF_RESTRICTED, SF_NOUNLINK):
+    /// only the system can lift them.
     case systemProtected
 
     /// lstat, like the helper: the bundle itself, never a link target.
     static func of(_ path: String) -> Self {
         var info = stat()
         guard lstat(path, &info) == 0 else { return .none }
-        if info.st_flags & UInt32(SF_IMMUTABLE | SF_RESTRICTED) != 0 { return .systemProtected }
-        if info.st_flags & UInt32(UF_IMMUTABLE) != 0 { return .userLocked }
-        return .none
+        switch FileProtectionFlags.lock(info.st_flags) {
+        case .none: return .none
+        case .owner: return .userLocked
+        case .system: return .systemProtected
+        }
     }
 }
 

@@ -83,15 +83,15 @@ final class SafeCleanupScopeCardLayoutTests: XCTestCase {
             XCTAssertEqual(try host.accessibilityValue(label: label), "Not selected")
         }
         XCTAssertTrue(model.selectedScopes.isEmpty, "Presentation must allow the existing all-deselected state")
-        try await host.waitForAccessibility(label: englishLabel(.logs), expectedValue: "Not selected")
-        XCTAssertTrue(try host.press(label: englishLabel(.logs)))
-        try await host.waitForSelection([.logs])
+        try await host.waitForAccessibility(label: englishLabel(.aiClutter), expectedValue: "Not selected")
+        XCTAssertTrue(try host.press(label: englishLabel(.aiClutter)))
+        try await host.waitForSelection([.aiClutter])
         host.resize(width: 304)
         _ = try await host.frames(expectedWidth: 304)
-        try await host.waitForAccessibility(label: englishLabel(.logs), expectedValue: "Selected")
-        XCTAssertEqual(model.selectedScopes, [.logs])
-        XCTAssertEqual(try host.accessibilityValue(label: englishLabel(.logs)), "Selected")
-        XCTAssertEqual(model.toggleCount[.logs], 2)
+        try await host.waitForAccessibility(label: englishLabel(.aiClutter), expectedValue: "Selected")
+        XCTAssertEqual(model.selectedScopes, [.aiClutter])
+        XCTAssertEqual(try host.accessibilityValue(label: englishLabel(.aiClutter)), "Selected")
+        XCTAssertEqual(model.toggleCount[.aiClutter], 2)
     }
 
     func testDaylightProductionIconsKeepFourDistinctPigments() async throws {
@@ -130,12 +130,13 @@ final class SafeCleanupScopeCardLayoutTests: XCTestCase {
         }
     }
 
+    // D192＋旧值：四张卡片原为 System Caches / Log Files / Temporary Files / Download Residue。
     private func englishLabel(_ scope: SafeCleanupScanScope) -> String {
         switch scope {
-        case .caches: "System Caches"
-        case .logs: "Log Files"
-        case .temporaryFiles: "Temporary Files"
-        case .downloadResidue: "Download Residue"
+        case .systemJunk: "System Junk"
+        case .aiClutter: "AI Clutter"
+        case .mailAttachments: "Mail Attachments"
+        case .trashBins: "Trash"
         }
     }
 }

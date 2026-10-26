@@ -79,7 +79,8 @@ struct ApplicationUpdatePlanBuilder: Sendable {
         hostBundleURL: URL
     ) -> Bool {
         let hostIdentifier = hostBundleIdentifier?.trimmed ?? ""
-        guard hasConfirmedUpdateEvidence(application),
+        guard application.updateStatus != .ignored, !application.isPresentationSystemManaged,
+              hasConfirmedUpdateEvidence(application),
               (hostIdentifier.isEmpty || application.bundleIdentifier != hostIdentifier),
               ApplicationPathNormalizer.comparisonKey(for: application.bundleURL)
                 != ApplicationPathNormalizer.comparisonKey(for: hostBundleURL),
@@ -109,14 +110,15 @@ struct ApplicationUpdatePlanBuilder: Sendable {
     static func destination(
         for application: InstalledApplication
     ) -> ApplicationUpdatePlanDisposition {
-        if SystemApplicationPolicy.isSystemManaged(application)
-            || application.updateProvider == .systemManaged
-            || application.updateCapability == .systemManaged {
+        // D192: authorization/quit branches must obey the same duplicate and
+        // system gates as immediate updates and the confirmed-update count.
+        if application.updateStatus == .ignored || application.isPresentationSystemManaged {
             return .skipped
         }
         guard hasConfirmedUpdateEvidence(application) else {
             return .skipped
         }
+        if application.isDuplicate { return .manual }
 
         if application.requiresAdministratorAuthorization, [.sparkle, .officialWebsite].contains(application.updateProvider),
            !AppUpdateProtectedReplacementPolicy.accepts(application) {
@@ -188,7 +190,7 @@ struct ApplicationUpdatePlanBuilder: Sendable {
     }
 
     private static func hasConfirmedUpdateEvidence(_ application: InstalledApplication) -> Bool {
-        application.effectiveSourceResolutionState == .resolved
+        application.updateStatus != .ignored && application.effectiveSourceResolutionState == .resolved
             && application.effectiveVersionCheckState == .updateAvailable
             && (application.availableVersion.map { SparkleAutomaticUpdateAdapter.isNewer($0, than: application.installedVersion) } == true
                 || (application.updateProvider == .homebrew

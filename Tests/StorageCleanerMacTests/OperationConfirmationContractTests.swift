@@ -23,9 +23,10 @@ final class OperationConfirmationContractTests: XCTestCase {
         // then the ones that will run — and the same ready bytes.
         XCTAssertTrue(sheet.contains("facts.cleanupPlanTitle("))
         XCTAssertTrue(sheet.contains("compactMetric(L10n.items(facts.itemCount)"))
-        XCTAssertTrue(sheet.contains("ByteFormat.string(facts.trashBytes + facts.quarantineBytes)"))
-        XCTAssertTrue(sheet.contains("ByteFormat.string(facts.permanentDeletionBytes)"))
-        XCTAssertFalse(sheet.contains("ByteFormat.string(plan.trashMoveBytes)"))
+        // D178: decimal sizes (was `ByteFormat.string(…)`).
+        XCTAssertTrue(sheet.contains("ByteFormat.storageString(facts.trashBytes + facts.quarantineBytes)"))
+        XCTAssertTrue(sheet.contains("ByteFormat.storageString(facts.permanentDeletionBytes)"))
+        XCTAssertFalse(sheet.contains("ByteFormat.storageString(plan.trashMoveBytes)"))
         XCTAssertTrue(sheet.contains("compactMetric(L10n.items(facts.readyCount)"))
         XCTAssertTrue(sheet.contains("facts.cleanupTrashReleaseNote(planHasTrashMoves:"))
         XCTAssertFalse(sheet.contains("plan.trashMoveItems.count"))

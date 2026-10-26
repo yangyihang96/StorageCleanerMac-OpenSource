@@ -137,7 +137,7 @@ struct MemoryQuitSelectionSummary: Equatable, Sendable {
             return shown.joined(separator: L10n.text("、", ", "))
         }
         return L10n.text(
-            "\(shown.joined(separator: "、")) 等 \(total) 个",
+            "\(shown.joined(separator: "、")) 等 \(ByteFormat.count(total)) 个",
             "\(shown.joined(separator: ", ")) and \(total - shown.count) more"
         )
     }
@@ -151,7 +151,7 @@ struct MemoryQuitSelectionSummary: Equatable, Sendable {
     /// and their current use.
     var confirmationMessage: String {
         let names = appNameList(limit: Self.confirmationNameLimit)
-        let bytes = ByteFormat.string(estimatedBytes)
+        let bytes = ByteFormat.storageString(estimatedBytes)
         return L10n.text(
             "将正常退出：\(names)。未保存的内容由各应用自行处理，可能会提示你保存；不会强制退出。这些应用目前约占 \(bytes)，预计释放量以退出后的刷新重测为准。",
             "These apps will quit normally: \(names). Each app handles its own unsaved work and may ask you to save it; nothing is force quit. They currently use about \(bytes); the memory freed is measured again after they quit."
@@ -668,6 +668,8 @@ struct MemoryOptimizationResult: Sendable {
     let detail: String
     let durationSeconds: TimeInterval
     let executionResult: MemoryOptimizationExecutionResult?
+    /// D144: the measured push of "释放内存"; nil for quitting apps.
+    let reclaim: MemoryReclaimer.Outcome?
 
     init(
         beforeSnapshot: MemorySnapshot,
@@ -675,7 +677,8 @@ struct MemoryOptimizationResult: Sendable {
         status: MemoryOptimizationStatus,
         detail: String,
         durationSeconds: TimeInterval,
-        executionResult: MemoryOptimizationExecutionResult? = nil
+        executionResult: MemoryOptimizationExecutionResult? = nil,
+        reclaim: MemoryReclaimer.Outcome? = nil
     ) {
         self.beforeSnapshot = beforeSnapshot
         self.snapshot = snapshot
@@ -683,6 +686,7 @@ struct MemoryOptimizationResult: Sendable {
         self.detail = detail
         self.durationSeconds = durationSeconds
         self.executionResult = executionResult
+        self.reclaim = reclaim
     }
 
     var freeDeltaBytes: Int64 {
@@ -827,7 +831,7 @@ struct EnergyImpactApp: Identifiable, Hashable, Sendable {
         case .measured:
             return L10n.text("实测", "Measured")
         case .mixed:
-            return L10n.text("实测 \(measuredProcessCount)/\(processCount)", "Measured \(measuredProcessCount)/\(processCount)")
+            return L10n.text("实测 \(ByteFormat.count(measuredProcessCount))/\(ByteFormat.count(processCount))", "Measured \(ByteFormat.count(measuredProcessCount))/\(ByteFormat.count(processCount))")
         case .estimated:
             return L10n.text("估算", "Estimated")
         }
@@ -959,8 +963,8 @@ struct EnergyImpactSnapshot: Sendable {
             return L10n.text("没有可归因的应用进程", "No attributable app processes")
         }
         return L10n.text(
-            "\(measuredProcessCount)/\(processCount) 个应用进程实测",
-            "\(measuredProcessCount)/\(processCount) app processes measured"
+            "\(ByteFormat.count(measuredProcessCount))/\(ByteFormat.count(processCount)) 个应用进程实测",
+            "\(ByteFormat.count(measuredProcessCount))/\(ByteFormat.count(processCount)) app processes measured"
         )
     }
 
@@ -1376,8 +1380,8 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
 
         if reasons.isEmpty, totalFootprintBytes >= 1_000_000_000 {
             reasons.append(L10n.text(
-                "应用与常见关联文件合计占用 \(ByteFormat.string(totalFootprintBytes))",
-                "The app and common associated files use \(ByteFormat.string(totalFootprintBytes))"
+                "应用与常见关联文件合计占用 \(ByteFormat.storageString(totalFootprintBytes))",
+                "The app and common associated files use \(ByteFormat.storageString(totalFootprintBytes))"
             ))
         }
 
@@ -1444,8 +1448,8 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
         }
 
         return L10n.text(
-            "已读取应用包信息并统计占用，同时发现 \(relatedItems.count) 个常见关联文件，合计 \(ByteFormat.string(relatedBytes))；卸载确认时可一并移到废纸篓。",
-            "App bundle information and storage usage were read, along with \(relatedItems.count) common associated files totaling \(ByteFormat.string(relatedBytes)); they can be moved to Trash during uninstall confirmation."
+            "已读取应用包信息并统计占用，同时发现 \(ByteFormat.count(relatedItems.count)) 个常见关联文件，合计 \(ByteFormat.storageString(relatedBytes))；卸载确认时可一并移到废纸篓。",
+            "App bundle information and storage usage were read, along with \(ByteFormat.count(relatedItems.count)) common associated files totaling \(ByteFormat.storageString(relatedBytes)); they can be moved to Trash during uninstall confirmation."
         )
     }
 
@@ -1461,13 +1465,13 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
             .sorted { $0.sizeBytes > $1.sizeBytes }
             .prefix(2)
             .map { item in
-                "\(URL(fileURLWithPath: item.path).lastPathComponent) \(ByteFormat.string(item.sizeBytes))"
+                "\(URL(fileURLWithPath: item.path).lastPathComponent) \(ByteFormat.storageString(item.sizeBytes))"
             }
             .joined(separator: " · ")
 
         return L10n.text(
-            "发现 \(relatedItems.count) 个常见关联文件，合计 \(ByteFormat.string(relatedBytes))。最大：\(preview)。卸载确认时可一并移到废纸篓。",
-            "\(relatedItems.count) common associated files were found, totaling \(ByteFormat.string(relatedBytes)). Largest: \(preview). They can be moved to Trash during uninstall confirmation."
+            "发现 \(ByteFormat.count(relatedItems.count)) 个常见关联文件，合计 \(ByteFormat.storageString(relatedBytes))。最大：\(preview)。卸载确认时可一并移到废纸篓。",
+            "\(ByteFormat.count(relatedItems.count)) common associated files were found, totaling \(ByteFormat.storageString(relatedBytes)). Largest: \(preview). They can be moved to Trash during uninstall confirmation."
         )
     }
 

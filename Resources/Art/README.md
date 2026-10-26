@@ -1,33 +1,46 @@
-# 主视觉与状态插画（D58，风格 A“玻璃光泽 3D”）
+# 模块主图、状态插画与结果卡物件（D166：Blender 建模，风格 A“亮面陶瓷”）
 
-- 来源：Codex `codex exec` 的图片生成工具，提示词由主会话编写；工具没有返回实际模型名。用户在 2026-10-07 晚的三种风格样图中选定 A。
-- 母版（1024×1024 RGBA PNG）放在仓库外 `~/Developer/.sc-build/art/set-A/`，不提交。本目录只放导出件：
-  - `*-512.heic`：初始页插画中心（最大约 256 pt @2x）；
-  - `*-192.heic`：页头主图标（约 64–96 pt @2x）。
-  - 都由 `sips` 转成 HEIC，质量 80，保留透明通道；共 40 个文件，约 888 KB。
-- 打包：`script/build_and_run.sh` 与 `script/make_release_dmg.sh` 把本目录的 `*.heic` 复制到应用包 `Contents/Resources/Art/`；代码经 `GeneratedArt`（`Sources/StorageCleanerMac/Support/GeneratedArt.swift`）按需解码一次并缓存，缺图时退回代码绘制的图块，不会崩溃或空着。
+- 来源：
+  - D58（2026-10-07）：最初的 20 张由 Codex `codex exec` 的图片生成工具出图（风格“玻璃光泽 3D”）。
+  - D166（2026-10-21）：用户认为生成图“果冻感太强了，不好看”，要求让 Codex 在后台用 Blender 建模。68 张全部改为 Blender 真实建模渲染：D58 原有 20 张（文件名、主题不变）＋ D154 新模块和工具页的 9 张主图＋ 1 张完成庆祝图＋ 38 个 `tile-*` 结果卡角／管理器左栏物件。材质由用户在三种样张（亮面陶瓷／金属＋白釉／实体＋磨砂玻璃）中选定 A“亮面陶瓷”。
+- 建模与渲染（都在仓库外，不提交）：`~/Developer/.sc-build/art/blender/`
+  - `kit/`：程序化建模工具包（`bpy`，Blender 4.5.13 LTS）——统一的影棚三灯、Blender 自带 `studio.exr` 只作反射、AgX “Medium High Contrast”、70 mm 透视相机自动取景（轮廓占画面约 80%）、透明背景、Cycles（Metal GPU）192 采样＋OpenImageDenoise；每个模型渲染前检查网格封闭；主体材质无透射、无次表面散射。
+  - 物件源码：`kit/objects_p1.py`（30 张大图）、`kit/objects_p2.py`（38 个物件），各带 `shapes_*.py`；可编辑场景 `models/A/*.blend`；成品 `final-p1/A/`、`final-p2/A/`（`tile-topapps` 取 `final-p2-r2/A/`）。
+  - Codex（gpt-6.1-sol）在沙箱里写模型；沙箱里没有 Metal 设备，Blender 启动即崩溃，所以经仓库外的渲染桥（`~/Developer/.sc-build/art/tools/render_bridge.sh`，只接受该目录内的 `.py`，一次一个任务）调用本机 Blender。
+- 导出：`normalize.py`（已按 80% 取景的保持原样）后由 `sips` 转 HEIC，质量 80，保留透明通道。模块主图和状态图 `*-512.heic`（起始页中心，最大约 256 pt @2x）＋ `*-192.heic`（页头、侧栏，约 64–96 pt @2x）；`tile-*` 只出 192——卡角 64–96 pt、左栏 20–28 pt 都由它缩小，同一张只解码一次，`resourceName(.landing)` 对 tile 返回 192 那张。共 107 个文件，约 1.0 MB（D166② 加 9 个）。
+- 颜色：每张一个色相（加瓷白和镀铬细节），色表 `~/Developer/.sc-build/art/blender/palette.txt`。模块图按 `CareStudioFamily` 的色相生成，D58 状态图沿用原来的色相。AgX 会让紫色偏蓝约 15–20°、绿色约 10°，所以 `GeneratedArt.dominantHue` 写的是 192 导出件的实测值（测试核对误差小于 10°）；五张 D58 状态图保留其完成页转色约定的值。
+- 打包：`script/build_and_run.sh` 与 `script/make_release_dmg.sh` 把本目录的 `*.heic` 复制到应用包 `Contents/Resources/Art/`；代码经 `GeneratedArt`（`Sources/StorageCleanerMac/Support/GeneratedArt.swift`）按需解码一次并缓存，缺图时退回代码绘制的图块，不会崩溃或空着。`headerResourceNames` 只预载模块主图和状态图（30 张），tile 在卡片或行出现时才读。
+- 预算：D58 原有 20 张（含 D70 跑分选项图标）仍按 1 MB 核对；D166 新增的图（48 张，D166② 后 55 张，D166③ 后 61 张，D166④ 后 63 张）另计 1 MB。
 - 对应关系：
-  - `module-smartscan`：智能扫描
-  - `module-cleanup`：安全清理
-  - `module-devcaches`：开发工具与产物
-  - `module-health`：系统健康
-  - `module-privacy`：浏览器隐私
-  - `module-benchmark`：性能测试
-  - `module-startup`：登录项与后台任务
-  - `module-memory`：内存管理
-  - `module-energy`：能耗
-  - `module-uninstall`：卸载
-  - `module-updater`：应用更新
-  - `module-fileanalysis`：文件分析
-  - `module-migration`：文件搬家
-  - `module-duplicates`：重复文件
-  - `module-similarphotos`：相似照片
-  - `state-success`：清理完成
-  - `state-allclear`：没发现问题
-  - `state-empty`：空列表
-  - `state-permission`：需要权限
-  - `state-error`：出错
-- 无第三方素材，不含文字和品牌标志。全部是装饰图，对读屏隐藏；轨道、节点、星点和光晕仍由代码绘制。
+  - `module-smartscan`：智能扫描（雷达）
+  - `module-cleanup`：安全清理（盾牌＋扫帚）
+  - `module-devcaches`：开发工具与产物（扳手＋锤子）
+  - `module-health`：系统健康（心形＋心电线）
+  - `module-privacy`：浏览器隐私（地球＋锁）
+  - `module-benchmark`：性能测试（仪表盘）
+  - `module-startup`：登录项与后台任务（电源＋开关）
+  - `module-memory`：内存管理（芯片）
+  - `module-energy`：能耗（电池＋闪电）
+  - `module-uninstall`：卸载（应用方块缺一角）
+  - `module-updater`：应用更新（循环箭头）
+  - `module-fileanalysis`：文件分析（文档＋放大镜）
+  - `module-migration`：文件搬家（文件夹→硬盘）
+  - `module-duplicates`：重复文件（两份文档＋对勾）
+  - `module-similarphotos`：相似照片（照片叠）
+  - `module-performance` 性能优化（火箭）、`module-apps` 应用管理、`module-clutter` 杂乱文件、`module-cloudcleanup` 云盘清理、`module-mytools` 我的工具、`module-myactivity` 我的活动、`module-extensions` 扩展（D160）、`module-maintenance` 维护任务（D161）、`module-chatfiles` 聊天文件（D162）
+  - `state-success` 清理完成、`state-allclear` 没发现问题、`state-empty` 空列表、`state-permission` 需要权限、`state-error` 出错、`state-celebration` 完成庆祝
+  - 垃圾组（绿）：`tile-systemjunk` 系统垃圾、`tile-devjunk` 开发者垃圾、`tile-aiclutter` AI 工具缓存、`tile-mail` 邮件附件、`tile-trash` 废纸篓、`tile-review` 需要确认的文件
+  - 应用（蓝）：`tile-appupdates` 应用更新、`tile-unused` 长期未用、`tile-leftovers` 应用残留、`tile-installers` 安装文件、`tile-legacyapps` 无法运行的旧应用、`tile-systemupdate` macOS 更新、`tile-pickapps` 挑出用不到的应用、`tile-appstore` 商店、`tile-othersources` 其他来源、`tile-vendors` 提供商
+  - 性能（橙）：`tile-maintenance` 维护任务、`tile-loginitems` 登录项、`tile-background` 后台项目、`tile-sync` 更新与同步、`tile-attention` 需要关注
+  - 内存（橙）：`tile-pressure` 内存压力、`tile-topapps` 占用最多的应用、`tile-freeable` 可释放、`tile-processes` 进程
+  - 杂乱（青）：`tile-compare` 需要人工比较
+  - 防护（洋红）：`tile-history` 浏览记录、`tile-sensitive` 敏感网站、`tile-cookies` Cookie 与其他数据、`tile-browsers` 正在运行的浏览器
+  - 云盘（天蓝）：`tile-downloaded` 本机已下载、`tile-largecloud` 超过 100 MB、`tile-cloudonly` 只在云端、`tile-otherclouds` 其他云盘
+  - 我的活动（紫）：`tile-cleaned` 本机清理、`tile-month` 本月、`tile-count` 清理次数、`tile-restore` 可以放回
+  - D166②（2026-10-22，CMM 清单《图位清单-首次引导与设置页签》）：`onboard-welcome` 首次引导·欢迎与隐私承诺（显示器上带对勾的盾牌）、`onboard-diskaccess` 首次引导·完全磁盘访问（插着钥匙的硬盘），色相约 290，512＋192；`tile-notifications` 完成提醒铃铛（金黄）、`tile-general` 设置·通用（齿轮＋开关，蓝灰）、`tile-miniwindow` 设置·小窗（玫红）、`tile-scansafety` 设置·扫描与安全（盾牌＋放大镜，青）、`tile-systemcontrol` 设置·系统控制（风扇，绿），只出 192；设置窗口不转色，这些按最终颜色渲染。源码 `kit/objects_p3.py`，成品 `final-p3/A/`。
+  - D166③（2026-10-22，CMM 清单《图位清单-工具面板左栏》，CMM 第三批 Q）：维护任务左栏 `tile-purgeable` 可清除空间（硬盘上方飘出渐淡的小方块）、`tile-permissions` 修复权限（挂锁斜靠小扳手），橙；扩展左栏 `tile-quicklook` 快速查看插件（圆润的眼睛）、`tile-screensaver` 屏幕保护程序（显示器里的弯月和星星）、`tile-audio` 音频插件（双单元音箱）、`tile-appextension` 应用扩展（App 方块右下角贴一块小拼图），蓝；只出 192，左栏 28 pt 转到模块色。源码 `kit/objects_p4.py`、`kit/shapes_p4.py`，成品 `final-p4/A/`（`tile-appextension` 在 `final-p4-r2/A/`：第一版的小拼图在 28 px 缩成一团，重做）。
+  - D166④（2026-10-22，CMM 清单《图位清单-两张可选主图》，CMM 第三批 R）：`module-protection` 安全防护（立盾上一只张开的瓷白手掌，洋红）、`module-spacemap` 空间地图（四颗挤在一起的光面球，最小一颗瓷白，没加文件夹，蓝紫）；出 512＋192，页面转到模块色。经典的浏览器隐私、文件分析页仍用 `module-privacy`、`module-fileanalysis`。源码 `kit/objects_p5.py`、`kit/shapes_p5.py`，成品 `final-p5/A/`。
+- 无第三方素材，不含文字、数字和品牌标志。全部是装饰图，对读屏隐藏；轨道、节点、星点和光晕仍由代码绘制。
 
 ## 光场二期选项图标（D70）
 

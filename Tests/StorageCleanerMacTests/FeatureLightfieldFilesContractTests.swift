@@ -228,6 +228,8 @@ final class FeatureLightfieldFilesContractTests: XCTestCase {
     private func viewport<V: View>(_ view: V, module: ReviewFilter) -> some View {
         AdaptivePageViewport(resetID: module) { view }
             .environment(\.featureLightfieldModule, module).environment(\.featureDisablesLayoutAnimations, true)
+            // These are the D67/D70 file pages; the studio's Space Lens has its own review (D154 batch 3G).
+            .environment(\.careStudioClassicResults, true)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .transaction { $0.disablesAnimations = true }
     }

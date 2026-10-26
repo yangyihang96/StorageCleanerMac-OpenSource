@@ -4,18 +4,24 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class MenuBarPrestoredSamplingTests: XCTestCase {
+    /// D127 (iStat `-[Statistics update]`): outside Low Power every source,
+    /// process lists included, uses the selected 1/2/3 s tick, panel open or
+    /// closed (process lists still only run while their page is open). Was
+    /// D74/D75 with 1/2/5 s: cheap = visible ? selected : 5, expensive 5,
+    /// processes 10 visible / 15 hidden, nettop 10 visible / 60 hidden.
+    /// Low Power (30/30/60, nettop 60/180) and the helper (5/60) are kept.
     func testSchedulingMatrixAndStatusVisibilityDoesNotDisablePrestorage() {
         for visible in [false, true] {
             for lowPower in [false, true] {
                 for suspended in [false, true] {
-                    for selected in [1.0, 2.0, 5.0] {
+                    for selected in [1.0, 2.0, 3.0] {
                         let cadence = MenuBarSamplingCadence.resolve(visible: visible, lowPower: lowPower,
                             suspended: suspended, selectedInterval: selected)
-                        XCTAssertEqual(cadence.cheap, lowPower ? 30 : (visible ? selected : 5))
-                        XCTAssertEqual(cadence.expensive, lowPower ? 30 : 5)
-                        XCTAssertEqual(cadence.processes, lowPower ? 60 : (visible ? 10 : 15))
-                        XCTAssertEqual(cadence.networkProcesses, lowPower ? (visible ? 60 : 180) : (visible ? 10 : 60),
-                            "D75 changes only hidden nettop; existing visible and low-power-visible policies remain")
+                        XCTAssertEqual(cadence.cheap, lowPower ? 30 : selected)
+                        XCTAssertEqual(cadence.expensive, lowPower ? 30 : selected)
+                        XCTAssertEqual(cadence.processes, lowPower ? 60 : selected)
+                        XCTAssertEqual(cadence.networkProcesses, lowPower ? (visible ? 60 : 180) : selected,
+                            "D127: nettop follows the tick; the Low Power policies remain")
                         XCTAssertEqual(cadence.helperPower, lowPower ? 180 : (visible ? 5 : 60))
                         XCTAssertEqual(cadence.suspended, suspended)
                         let plan = MenuBarSamplingPlan.resolve(statusMode: .memory, statusVisible: false,
@@ -230,6 +236,13 @@ final class MenuBarPrestoredSamplingTests: XCTestCase {
         XCTAssertEqual(bounded.count, 3)
     }
 
+    /// D127 (iStat `startItemsForKey:` / `stopItemsForKey:`): no process list
+    /// is read before a page shows one; opening one reads at once and again
+    /// 0.5 s later (the first rates), then on each tick, never two reads less
+    /// than 1 s apart; leaving the page drops its rates and the next page
+    /// starts from a new baseline. Was D74: a list prestored before any page
+    /// (one baseline plus a first delta), kept across page changes, re-read
+    /// 15 s later, and the memory list prestored as well.
     @MainActor
     func testResidentProcessSampleExistsBeforeAnyPageAndReopenDoesNotResetIt() async throws {
         let reader = Frames()
@@ -238,30 +251,59 @@ final class MenuBarPrestoredSamplingTests: XCTestCase {
             menuBarProcessSampler: MenuBarProcessSampler(read: { await reader.next() }))
         let context = MenuBarSamplingContext()
         context.configure(statusMode: .memory, statusVisible: false, panelVisible: false,
-            customFanControlActive: false, paused: false)
+            customFanControlActive: false, paused: false, selectedInterval: 2)
         store.attachMenuBarResidentSampling(context)
         defer { store.suspendMenuBarResidentSampling() }
-        let at = Date()
-        store.refreshMenuBarResidentSamples(now: at)
-        try await waitUntil { store.menuBarPreparedProcesses != nil && store.menuBarPreparedMemoryAppsSampledAt != nil }
-        let sampleDate = store.menuBarPreparedProcesses?.snapshot.generatedAt
-        XCTAssertNotNil(sampleDate)
-        let calls = await reader.count
-        XCTAssertEqual(calls, 2, "one baseline plus first delta, before a panel opens")
-        for section in [PanelSection.processor, .disk, .power, .overview, .processor] {
-            store.setMenuBarProcessDemand(section)
-            XCTAssertEqual(store.menuBarPreparedProcesses?.snapshot.generatedAt, sampleDate)
-            XCTAssertFalse(store.isMenuBarProcessSamplePending)
+        for offset in [0.0, 2, 4, 60] {
+            store.refreshMenuBarResidentSamples(now: Date().addingTimeInterval(offset))
         }
-        store.refreshMenuBarResidentSamples(now: at.addingTimeInterval(14.99))
-        let before = await reader.count
-        XCTAssertEqual(before, calls)
-        store.refreshMenuBarResidentSamples(now: at.addingTimeInterval(15))
-        try await waitUntil { store.menuBarPreparedProcesses?.snapshot.generatedAt != sampleDate }
-        let after = await reader.count
-        XCTAssertEqual(after, 3, "visibility changes must not reset the baseline")
+        try await Task.sleep(for: .milliseconds(100))
+        var calls = await reader.count
+        XCTAssertEqual(calls, 0, "D127: nothing is enumerated before a page shows processes")
+        XCTAssertNil(store.menuBarPreparedProcesses)
+        XCTAssertNil(store.menuBarPreparedMemoryAppsSampledAt)
+        context.configure(statusMode: .memory, statusVisible: false, panelVisible: true,
+            customFanControlActive: false, paused: false, selectedInterval: 2)
+        var dates: [Date] = []
+        for section in [PanelSection.processor, .disk] {
+            store.setMenuBarProcessDemand(section)
+            XCTAssertNil(store.menuBarPreparedProcesses, "\(section): the rates of the page left are dropped")
+            XCTAssertTrue(store.isMenuBarProcessSamplePending)
+            // D171: the page lists its first read at once; this waits for the
+            // first rates (was `store.menuBarPreparedProcesses != nil`).
+            try await waitUntil { store.menuBarPreparedProcesses?.isFirstRead == false }
+            dates.append(try XCTUnwrap(store.menuBarPreparedProcesses?.snapshot.generatedAt))
+            calls = await reader.count
+            XCTAssertEqual(calls, 2 * dates.count, "\(section): at once (a new baseline) and 0.5 s later")
+        }
+        XCTAssertLessThan(dates[0], dates[1])
+        store.setMenuBarProcessDemand(.overview)
+        XCTAssertNil(store.menuBarPreparedProcesses, "closing the page drops its rates")
+        XCTAssertFalse(store.isMenuBarProcessSamplePending)
+        store.setMenuBarProcessDemand(.memory)
+        try await waitUntil { store.menuBarPreparedMemoryAppsSampledAt != nil }
+        calls = await reader.count
+        XCTAssertEqual(calls, 4, "the memory page reads the memory list, not the counter frame")
+        let opened = Date()
+        store.setMenuBarProcessDemand(.processor)
+        // D171: waits for the first rates, not the first read listed at once
+        // (was `store.menuBarPreparedProcesses != nil`).
+        try await waitUntil { store.menuBarPreparedProcesses?.isFirstRead == false }
+        calls = await reader.count
+        XCTAssertEqual(calls, 6)
+        let followUp = store.menuBarPreparedProcesses?.snapshot.generatedAt
+        store.refreshMenuBarResidentSamples(now: opened.addingTimeInterval(0.85))
+        try await Task.sleep(for: .milliseconds(50))
+        calls = await reader.count
+        XCTAssertEqual(calls, 6, "no two reads less than the 1 s spacing apart")
+        store.refreshMenuBarResidentSamples(now: opened.addingTimeInterval(2))
+        try await waitUntil { store.menuBarPreparedProcesses?.snapshot.generatedAt != followUp }
+        calls = await reader.count
+        XCTAssertEqual(calls, 7, "the next tick reads once, against the kept baseline")
     }
 
+    /// D127: the first read of an opened page starts the timeout (was the
+    /// first resident read before any page).
     @MainActor
     func testResidentFirstNoSampleWaitsThenBecomesUnavailableOnSharedTick() async throws {
         let store = try ScanStore.makeForTests(for: self, menuBarMemoryProcessProvider: { Self.memory },
@@ -271,10 +313,12 @@ final class MenuBarPrestoredSamplingTests: XCTestCase {
             customFanControlActive: false, paused: false)
         store.attachMenuBarResidentSampling(context)
         defer { store.suspendMenuBarResidentSampling() }
-        let at = Date()
-        store.refreshMenuBarResidentSamples(now: at)
+        store.refreshMenuBarResidentSamples(now: Date())
         store.setMenuBarProcessDemand(.processor)
+        let at = Date()
         XCTAssertTrue(store.isMenuBarProcessSamplePending)
+        store.refreshMenuBarResidentSamples(now: at.addingTimeInterval(4.9))
+        XCTAssertTrue(store.isMenuBarProcessSamplePending, "still sampling before the timeout")
         store.refreshMenuBarResidentSamples(now: at.addingTimeInterval(5))
         XCTAssertFalse(store.isMenuBarProcessSamplePending)
         XCTAssertTrue(store.isMenuBarProcessSampleUnavailable)

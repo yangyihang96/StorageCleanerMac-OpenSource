@@ -40,6 +40,7 @@ enum StartupItemsCategory: String, CaseIterable, Identifiable, Sendable {
     case all
     case loginItems
     case background
+    case otherBackground
     case updatesAndSync
     case attention
 
@@ -49,7 +50,8 @@ enum StartupItemsCategory: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .all: L10n.text("全部", "All")
         case .loginItems: L10n.text("登录时打开", "Open at Login")
-        case .background: L10n.text("后台运行", "Background")
+        case .background: L10n.text("后台项目", "Background Items")
+        case .otherBackground: L10n.text("其他后台组件", "Other Background Components")
         case .updatesAndSync: L10n.text("更新与同步", "Updates & Sync")
         case .attention: L10n.text("需要关注", "Needs Attention")
         }
@@ -167,7 +169,7 @@ struct StartupItemsPresentation: Sendable {
         build(
             items: items.filter { filter.matches($0) },
             query: query,
-            category: .all,
+            category: filter == .background ? .background : .all,
             status: .all,
             source: .all,
             includeAppleSystem: true,
@@ -211,6 +213,20 @@ struct StartupItemsPresentation: Sendable {
         searchTechnicalDetails: Bool = false
     ) -> StartupItemsPresentation {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        // D217: reuse scanner evidence, before application grouping. Each
+        // launchd plist has its own row and keeps its own management capability.
+        let backgroundItems = items.flatMap(\.components).filter(\.isCountedBackgroundPlist)
+            .map { component in
+                StartupItemsDomain.Item(id: "background:\(component.id)", kind: component.kind,
+                    scope: component.scope, name: component.name, components: [component],
+                    state: component.state, attribution: component.attribution,
+                    actionCapability: component.actionCapability, warnings: component.diagnosticEvidence)
+            }
+        let otherBackgroundItems = items.flatMap { item in
+            StartupItemMerger().merge(item.components.filter {
+                $0.isOtherBackgroundComponent
+            })
+        }.filter { includeAppleSystem || !$0.isAppleSystem }
         let baseItems = includeAppleSystem ? items : items.filter { !$0.isAppleSystem }
         // "All" means every non-Apple result. Previously low-confidence,
         // administrator-required and information-only rows were silently
@@ -219,9 +235,15 @@ struct StartupItemsPresentation: Sendable {
         let primaryItems = baseItems.filter { !$0.isAppleSystem }
         let primaryAttentionItems = baseItems.filter(\.isPrimaryAttentionReviewItem)
         let usesPrimaryAttentionProjection = !includeTechnicalDetails && category == .attention
-        let visibleUniverse = includeTechnicalDetails
-            ? baseItems
-            : (usesPrimaryAttentionProjection ? primaryAttentionItems : primaryItems)
+        let visibleUniverse: [StartupItemsDomain.Item]
+        switch category {
+        case .background: visibleUniverse = backgroundItems
+        case .otherBackground: visibleUniverse = otherBackgroundItems
+        default:
+            visibleUniverse = includeTechnicalDetails
+                ? baseItems
+                : (usesPrimaryAttentionProjection ? primaryAttentionItems : primaryItems)
+        }
         let summaryItems = includeTechnicalDetails ? baseItems : primaryItems
         let visible = visibleUniverse
             .filter { usesPrimaryAttentionProjection || category.matches($0) }
@@ -244,7 +266,7 @@ struct StartupItemsPresentation: Sendable {
                         component.kind == .openAtLogin || component.kind == .loginItem
                     }
                 }.count,
-                background: summaryItems.filter(\.hasBackgroundComponent).count,
+                background: backgroundItems.count,
                 manageable: summaryItems.filter(\.isDirectlyManageable).count,
                 unidentified: summaryItems.filter {
                     ($0.attribution?.confidence ?? .unknown) < .high
@@ -256,6 +278,10 @@ struct StartupItemsPresentation: Sendable {
             categoryCounts: Dictionary(uniqueKeysWithValues: StartupItemsCategory.allCases.map { category in
                 let count: Int
                 switch category {
+                case .background:
+                    count = backgroundItems.count
+                case .otherBackground:
+                    count = otherBackgroundItems.count
                 case .all:
                     count = summaryItems.count
                 case .attention where !includeTechnicalDetails:
@@ -272,7 +298,7 @@ struct StartupItemsPresentation: Sendable {
 
 private extension StartupItemsListFilter {
     func matches(_ item: StartupItemsDomain.Item) -> Bool {
-        if self != .appleSystem, item.isAppleSystem { return false }
+        if self != .appleSystem, self != .background, item.isAppleSystem { return false }
         switch self {
         case .all:
             return true
@@ -283,7 +309,7 @@ private extension StartupItemsListFilter {
         case .openAtLogin:
             return item.components.contains { $0.kind == .openAtLogin || $0.kind == .loginItem }
         case .background:
-            return item.hasBackgroundComponent
+            return item.components.contains(where: \.isCountedBackgroundPlist)
         case .userAgents:
             return item.components.contains { $0.kind == .userLaunchAgent }
         case .globalAgents:
@@ -313,7 +339,9 @@ private extension StartupItemsCategory {
                 $0.kind == .openAtLogin || $0.kind == .loginItem
             }
         case .background:
-            item.hasBackgroundComponent
+            item.components.contains(where: \.isCountedBackgroundPlist)
+        case .otherBackground:
+            item.components.contains(where: \.isOtherBackgroundComponent)
         default:
             item.consoleCategory == self
         }
@@ -453,6 +481,18 @@ extension StartupItemsDomain.Scope {
 }
 
 extension StartupItemsDomain.Candidate {
+    /// Only the three non-system launchd directories use these scanner kinds.
+    /// The custom location uses the same kinds for isolated scanner fixtures.
+    var isCountedBackgroundPlist: Bool {
+        source == .launchdPlist
+            && [.userLaunchAgent, .globalLaunchAgent, .launchDaemon].contains(kind)
+            && plistURL?.pathExtension.lowercased() == "plist"
+    }
+
+    var isOtherBackgroundComponent: Bool {
+        !isCountedBackgroundPlist && kind != .openAtLogin && kind != .loginItem
+    }
+
     /// Derived only from the immutable scan evidence; the presentation layer
     /// never touches the file system to manufacture a status.
     var configurationState: StartupItemsDomain.ConfigurationState {
@@ -676,8 +716,8 @@ extension StartupItemsDomain.Item {
         }
         if runningComponentCount > 0 {
             return L10n.text(
-                "\(runningComponentCount) 个正在运行",
-                "\(runningComponentCount) running"
+                "\(ByteFormat.count(runningComponentCount)) 个正在运行",
+                "\(ByteFormat.count(runningComponentCount)) running"
             )
         }
         let hasUnknownProcessState = backgroundComponents.contains { component in
@@ -685,7 +725,9 @@ extension StartupItemsDomain.Item {
             return false
         }
         if hasUnknownProcessState {
-            return L10n.text("运行状态待确认", "Runtime state pending")
+            // D206: names the background components; beside the item's own
+            // "Not Running" the old "Runtime state pending" read as a contradiction.
+            return L10n.text("后台组件状态待确认", "Background component state pending")
         }
         return L10n.text("0 个正在运行", "0 running")
     }

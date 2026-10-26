@@ -10,12 +10,17 @@ struct HealthSecurityChecksView: View {
                 let finding = snapshot?.findings.first { $0.check == check }
                 let state = finding?.state ?? .unknown
                 FeatureLightfieldStatusDisclosure(title: check.title,
-                    detail: finding?.evidenceSummary ?? L10n.text("尚未检查", "Not Checked"),
+                    detail: finding?.evidenceRowSummary ?? L10n.text("尚未检查", "Not Checked"),
                     value: state.displayText, status: Self.status(for: state),
                     leadingProbe: "lightfield.health.security.leading.\(check.rawValue)",
                     disclosureProbe: "lightfield.health.security.disclosure.\(check.rawValue)") {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(Self.advice(for: check))
+                        // The row names the evidence in words; the command it
+                        // came from is shown here.
+                        if let finding, finding.evidenceSummary != finding.evidenceRowSummary {
+                            Text(finding.evidenceSummary)
+                        }
                         if let checkedAt = snapshot?.checkedAt {
                             Text(checkedAt.formatted(date: .abbreviated, time: .shortened)).monospacedDigit()
                         }
@@ -111,7 +116,7 @@ struct HealthRecentChangesView: View {
                         isExpanded.toggle()
                     } label: {
                         Text(isExpanded ? L10n.text("收起", "Show Less")
-                            : L10n.text("查看全部（\(events.count) 条）", "View All (\(events.count))"))
+                            : L10n.text("查看全部（\(ByteFormat.count(events.count)) 条）", "View All (\(ByteFormat.count(events.count)))"))
                             .font(.system(size: 13)).foregroundStyle(palette.fg2)
                             .padding(.vertical, 12)
                     }

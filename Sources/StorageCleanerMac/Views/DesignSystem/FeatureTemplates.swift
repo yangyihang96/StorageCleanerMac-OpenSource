@@ -173,6 +173,7 @@ struct FeatureRunningTemplate<Details: View, Actions: View>: View {
     @Environment(\.pageLayout) private var pageLayout
     @Environment(\.smartScanFlowNamespace) private var flowNamespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.careStudioClassicResults) private var usesClassicLayout
     @AppSurfaces private var surfaces
     @State private var clockStartedAt = Date()
     @State private var isVisible = false
@@ -198,7 +199,9 @@ struct FeatureRunningTemplate<Details: View, Actions: View>: View {
 
     var body: some View {
         Group {
-        if FeatureLightfield.owns(module) {
+        if !usesClassicLayout, let studio = CareStudioModule(filter: module) {
+            studioPage(studio)
+        } else if FeatureLightfield.owns(module) {
             lightfieldPage
         } else {
         FeaturePageScaffold(systemImage: pageSystemImage ?? module.systemImage,
@@ -239,6 +242,28 @@ struct FeatureRunningTemplate<Details: View, Actions: View>: View {
                 cancellationIsEnabled: onCancel != nil && canCancel && state != .stopping,
                 safetyText: trustText)])
 #endif
+    }
+
+    /// D154: CleanMyMac's running page — the picture floats, the stage is
+    /// the title, the current item below it, and Stop carries the progress
+    /// ring. The page's details stay underneath when there is room.
+    private func studioPage(_ studio: CareStudioModule) -> some View {
+        let measured = RuntimeWorkflowState.measuredFraction(fraction)
+        let facts = metrics.map { $0.title + " " + $0.value }.joined(separator: " · ")
+        return CareStudioRunningPage(
+            module: studio,
+            title: title,
+            detail: currentItem ?? subtitle,
+            headlineValue: facts.isEmpty ? nil : facts,
+            progress: measured.map { .fraction($0) } ?? .indeterminate,
+            // CleanMyMac's round button always reads Stop; the page's own
+            // wording stays its help text.
+            actionTitle: L10n.text("停止", "Stop"),
+            canStop: onCancel != nil && canCancel && state != .stopping,
+            footnote: trustText,
+            accessory: AnyView(details),
+            onStop: { onCancel?() })
+            .help(cancelHelp ?? cancellationText)
     }
 
     private var lightfieldPage: some View {

@@ -24,20 +24,24 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
         let rows = rows(profile: .m5Pro, powerSource: .acPower)
         XCTAssertEqual(rows.map(\.title), ["整机", "电源输入", "电池", "屏幕背光", "芯片合计"])
         XCTAssertFalse(rows.contains { $0.value == "—" })
-        XCTAssertEqual(rows[0].value, "87.90 W")
-        XCTAssertEqual(rows[1].value, "63.36 W")
+        // D128 (2026-10-19): unsigned power in iStat's sensor format, at most
+        // one decimal (was "87.90 W", "63.36 W", "4.67 W", "18.80 W"); the
+        // signed battery row keeps our direction format.
+        XCTAssertEqual(rows[0].value, "87.9 W")
+        XCTAssertEqual(rows[1].value, "63.4 W")
         XCTAssertEqual(rows[2].value, "-10.75 W", "B0AP, negative because B0AC flows out of the battery")
-        XCTAssertEqual(rows[3].value, "4.67 W")
-        XCTAssertEqual(rows[4].value, "18.80 W")
+        XCTAssertEqual(rows[3].value, "4.7 W")
+        XCTAssertEqual(rows[4].value, "18.8 W")
         let battery = try XCTUnwrap(rows.first { $0.id == "power-battery" })
         XCTAssertEqual(battery.source, "SMC B0AP")
         XCTAssertEqual(battery.detailRows.map(\.title), ["方向", "电池轨（SMC）"])
-        XCTAssertEqual(battery.detailRows.map(\.value), ["放电中", "11.43 W"], "PPBR only as a third-level reference")
+        // D128: was "11.43 W".
+        XCTAssertEqual(battery.detailRows.map(\.value), ["放电中", "11.4 W"], "PPBR only as a third-level reference")
         XCTAssertTrue(battery.note.contains("依据电池电流"))
         XCTAssertFalse(battery.note.contains("正值为充电"), "charging is not measured; the sign follows the current")
         let input = try XCTUnwrap(rows.first { $0.id == "power-input" })
         XCTAssertEqual(input.detailRows.map(\.title), ["输入电压", "输入电流", "协商功率"])
-        XCTAssertEqual(input.detailRows.first?.value, "19.43 V")
+        XCTAssertEqual(input.detailRows.first?.value, "19.4 V", "D128: was 19.43 V")
         let backlight = try XCTUnwrap(rows.first { $0.id == "power-backlight" })
         XCTAssertEqual(backlight.source, "SMC PDBR")
         XCTAssertEqual(backlight.detailRows.first?.value, "382 尼特")
@@ -46,7 +50,8 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
             "CPU", "超级核心簇", "性能核心簇", "GPU", "神经网络引擎", "内存", "内存控制器", "显示引擎", "媒体", "片上互连",
             "校验：系统控制器估计",
         ])
-        XCTAssertEqual(chip.detailRows.first { $0.title == "神经网络引擎" }?.value, "0.00 W", "legal zero")
+        // D128: iStat's zero power is "0 W" (was "0.00 W").
+        XCTAssertEqual(chip.detailRows.first { $0.title == "神经网络引擎" }?.value, "0 W", "legal zero")
         XCTAssertEqual(
             chip.detailRows.filter(\.isIndented).map(\.title), ["超级核心簇", "性能核心簇"],
             "the clusters are parts of the CPU row, not more terms of the total"
@@ -91,9 +96,10 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
             hasInternalBattery: true, powerSource: .acPower, telemetry: ultra, electrical: nil, now: Self.now
         )
         let chip = try XCTUnwrap(rows.first { $0.id == "power-chip" })
-        XCTAssertEqual(chip.value, "30.00 W", "CPU 16 + GPU 12 + memory 2, not the GPU and memory alone")
+        // D128 (2026-10-19): iStat's sensor format (was "30.00 W", "16.00 W").
+        XCTAssertEqual(chip.value, "30 W", "CPU 16 + GPU 12 + memory 2, not the GPU and memory alone")
         XCTAssertEqual(chip.detailRows.first?.title, "CPU")
-        XCTAssertEqual(chip.detailRows.first?.value, "16.00 W")
+        XCTAssertEqual(chip.detailRows.first?.value, "16 W")
         XCTAssertEqual(chip.detailRows.filter(\.isIndented).map(\.title), ["性能核心簇", "能效核心簇"])
     }
 
@@ -132,7 +138,7 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
         XCTAssertEqual(computed.value, "-10.28 W", "12.302 V × -0.836 A")
         XCTAssertEqual(computed.source, "电压 × 电流（SMC）")
         XCTAssertTrue(computed.note.contains("B0AV × B0AC"))
-        XCTAssertEqual(computed.detailRows.map(\.value), ["放电中", "11.43 W"])
+        XCTAssertEqual(computed.detailRows.map(\.value), ["放电中", "11.4 W"], "D128: was 11.43 W")
         XCTAssertNil(
             batteryRow { $0.keys["B0AP"] = nil; $0.keys["B0AV"] = nil; $0.keys["B0AC"] = nil },
             "PPBR alone is not the battery row"
@@ -216,7 +222,8 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
 
     func testLegalZerosAreShown() throws {
         let rows = rows(profile: .zeros, powerSource: .acPower)
-        XCTAssertEqual(try XCTUnwrap(rows.first { $0.id == "power-backlight" }).value, "0.00 W", "dark display")
+        // D128: iStat's zero power (was "0.00 W"); the signed battery row is ours.
+        XCTAssertEqual(try XCTUnwrap(rows.first { $0.id == "power-backlight" }).value, "0 W", "dark display")
         XCTAssertEqual(try XCTUnwrap(rows.first { $0.id == "power-battery" }).value, "0.00 W", "idle battery")
         XCTAssertEqual(HardwareReadingText.signedAmps(0), "0.00 A", "a zero current has no sign")
         XCTAssertEqual(HardwareReadingText.signedAmps(-0.836), "-0.84 A")
@@ -270,7 +277,7 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
             now: Self.now.addingTimeInterval(30)
         )
         XCTAssertTrue(stale.allSatisfy(\.isUpdating), "a kept reading is marked until replaced")
-        XCTAssertEqual(stale.first?.value, "87.90 W")
+        XCTAssertEqual(stale.first?.value, "87.9 W", "D128: was 87.90 W")
         XCTAssertTrue(GeekPowerReadouts.rows(
             hasInternalBattery: true, powerSource: .acPower, telemetry: nil, electrical: nil
         ).isEmpty)
@@ -317,7 +324,8 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
         let smc = SMCPowerTelemetryService.batteryTelemetry(read: Profile.m5Pro.smc.read, platform: .appleSilicon)
         let live = try XCTUnwrap(NativeBatteryElectricalService.snapshot(properties: ["Voltage": 12_311], smcBattery: smc))
         let rows = GeekBatteryElectricalReadouts.rows(electrical: live)
-        XCTAssertEqual(rows.map(\.value), ["-0.84 A", "12.30 V"])
+        // D128: iStat's voltage (was "12.30 V"); the signed current is ours.
+        XCTAssertEqual(rows.map(\.value), ["-0.84 A", "12.3 V"])
         XCTAssertEqual(rows.map(\.source), ["SMC B0AC", "SMC B0AV"])
 
         var broken = Profile.m5Pro.smc
@@ -334,22 +342,26 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
 
     func testBatteryHoverRowsUseTheRuleInTheThirdLevel() {
         XCTAssertEqual(GeekBatteryHoverReadings.cellRows([]).map(\.1), ["本机不支持"])
+        // D128 (2026-10-19): iStat's battery submenu formats cell voltages as
+        // sensor type 6, at most one decimal (was "4.095 V", "4.102 V").
         XCTAssertEqual(
             GeekBatteryHoverReadings.cellRows([.value(4.095), .invalid, .value(4.102)]).map { "\($0.0) \($0.1)" },
-            ["电芯 1 4.095 V", "电芯 2 读数无效", "电芯 3 4.102 V"]
+            ["电芯 1 4.1 V", "电芯 2 读数无效", "电芯 3 4.1 V"]
         )
         XCTAssertEqual(GeekBatteryHoverReadings.usbPowerOutRows(.unsupported).map(\.1), ["本机不支持"])
         XCTAssertEqual(GeekBatteryHoverReadings.usbPowerOutRows(.invalid).map(\.1), ["读数无效"])
-        XCTAssertEqual(GeekBatteryHoverReadings.usbPowerOutRows(.value([])).map(\.1), ["0.00 W"], "legal zero")
+        // D128: iStat's power format (was "0.00 W" and "1.26 W").
+        XCTAssertEqual(GeekBatteryHoverReadings.usbPowerOutRows(.value([])).map(\.1), ["0 W"], "legal zero")
         XCTAssertEqual(
             GeekBatteryHoverReadings.usbPowerOutRows(.value([
                 USBPowerOutPort(portIndex: 2, watts: 1.258), USBPowerOutPort(portIndex: 3, watts: 0),
             ])).map { "\($0.0) \($0.1)" },
-            ["端口 2 1.26 W"], "only ports that supply power"
+            ["端口 2 1.3 W"], "only ports that supply power"
         )
         XCTAssertEqual(HardwareReadingText.detail(HardwareReading<Double>.unsupported, format: HardwareReadingText.celsius), "本机不支持")
         XCTAssertEqual(HardwareReadingText.detail(HardwareReading<Double>.invalid, format: HardwareReadingText.celsius), "读数无效")
-        XCTAssertEqual(HardwareReadingText.detail(HardwareReading.value(36.7), format: HardwareReadingText.celsius), "36.7°C")
+        // D128: iStat's whole degrees (was "36.7°C").
+        XCTAssertEqual(HardwareReadingText.detail(HardwareReading.value(36.7), format: HardwareReadingText.celsius), "37°")
     }
 
     // MARK: - Sensors page
@@ -399,8 +411,9 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(details.last?.celsius), 96.0987, accuracy: 0.0001, "SMC TPDX/TRDX/TUDX without HID")
         let rows = GeekTemperatureRowDetail.rows(zone: .chip, celsius: 102.2, details: details)
         XCTAssertEqual(rows.map(\.title), ["最高", "平均（18 个传感器）"], "sensors, not cores (review item 9)")
-        XCTAssertEqual(rows.first?.value, "102.2°C")
-        XCTAssertEqual(rows.last?.value, "91.0°C")
+        // D128 (2026-10-19): iStat's whole degrees (was "102.2°C", "91.0°C").
+        XCTAssertEqual(rows.first?.value, "102°")
+        XCTAssertEqual(rows.last?.value, "91°")
         XCTAssertTrue(GeekTemperatureRowDetail.rows(zone: .gpu, celsius: 80, details: details).isEmpty)
         XCTAssertEqual(GeekTemperatureRowDetail.note(zone: .palmRest, inferredZones: [.palmRest]), "依据键名推断：该位置的传感器没有公开定义")
         XCTAssertNil(GeekTemperatureRowDetail.note(zone: .palmRest, inferredZones: []))
@@ -416,7 +429,7 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
         }
         let rows = GeekTemperatureRowDetail.rows(zone: .chip, celsius: 76, details: details)
         XCTAssertEqual(rows.map(\.title), ["最高", "平均（6 个传感器）"])
-        XCTAssertEqual(rows.last?.value, "69.0°C")
+        XCTAssertEqual(rows.last?.value, "69°", "D128: was 69.0°C")
     }
 
     func testChassisKeysNeedTheM5TopologyAndChargingCircuitNeedsAppleSilicon() {
@@ -436,8 +449,9 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
     func testAmbientLightRow() {
         XCTAssertNil(GeekAmbientLightReadout.readout(nil, sampledAt: nil))
         XCTAssertNil(GeekAmbientLightReadout.readout(.unsupported, sampledAt: nil))
-        XCTAssertEqual(GeekAmbientLightReadout.readout(.value(161), sampledAt: nil)?.value, "161 lx")
-        XCTAssertEqual(GeekAmbientLightReadout.readout(.value(0), sampledAt: nil)?.value, "0 lx")
+        // D128 (2026-10-19): iStat's light sensor (type 7) unit (was "161 lx", "0 lx").
+        XCTAssertEqual(GeekAmbientLightReadout.readout(.value(161), sampledAt: nil)?.value, "161 Lux")
+        XCTAssertEqual(GeekAmbientLightReadout.readout(.value(0), sampledAt: nil)?.value, "0 Lux")
         let invalid = GeekAmbientLightReadout.readout(.invalid, sampledAt: nil)
         XCTAssertEqual(invalid?.value, "—")
         XCTAssertEqual(invalid?.note.hasPrefix("读数无效"), true)
@@ -456,7 +470,10 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
 
     func testPowerTelemetryIsSampledOnlyForThePowerPageAndOffTheMainThread() async throws {
         XCTAssertTrue(PanelDensity.geek.auxiliaryDemand(for: .power).needsPowerTelemetry)
-        for section in [PanelSection.overview, .processor, .memory, .disk, .network, .sensors] {
+        // D119 (2026-10-18): the sensors page's power group reads the same
+        // telemetry, so it samples there too; every other page stays off.
+        XCTAssertTrue(PanelDensity.geek.auxiliaryDemand(for: .sensors).needsPowerTelemetry)
+        for section in [PanelSection.overview, .processor, .memory, .disk, .network] {
             XCTAssertFalse(PanelDensity.geek.auxiliaryDemand(for: section).needsPowerTelemetry, "\(section)")
         }
 
@@ -482,7 +499,7 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
         let consumer = UUID()
         state.registerConsumer(consumer, demand: demand(power: false), paused: false)
         try await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(probe.sampleCount, 0, "no power reads off the power page")
+        XCTAssertEqual(probe.sampleCount, 0, "no power reads off the power and sensors pages")
         XCTAssertNil(state.powerTelemetry)
 
         state.updateConsumer(consumer, demand: demand(power: true))
@@ -509,9 +526,10 @@ final class MiniSensorsNoValueRuleTests: XCTestCase {
         let detail = try MiniWindowLogicFixtures.section(source, from: "private var tertiaryPowerDetail", to: "if hasInternalBattery {")
         XCTAssertTrue(detail.contains("let input = powerTelemetry?.smc"))
         XCTAssertTrue(detail.contains("input?.inputPowerWatts.value"))
-        XCTAssertTrue(detail.contains("L10n.text(\"协商功率\", \"Negotiated Power\"), value: String(format: \"%.0f W\", adapterPower)"))
+        // D128 (2026-10-19): iStat's power format (was `String(format: "%.0f W", adapterPower)`).
+        XCTAssertTrue(detail.contains("L10n.text(\"协商功率\", \"Negotiated Power\"), value: IStatNumberFormat.power(adapterPower)"))
         XCTAssertFalse(
-            detail.contains("L10n.text(\"输入功率\", \"Input Power\"), value: String(format: \"%.0f W\", adapterPower)"),
+            detail.contains("L10n.text(\"输入功率\", \"Input Power\"), value: IStatNumberFormat.power(adapterPower)"),
             "the negotiated rating is not labelled as the measured input"
         )
     }

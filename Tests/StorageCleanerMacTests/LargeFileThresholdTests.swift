@@ -2,22 +2,28 @@ import Foundation
 import XCTest
 @testable import StorageCleanerMac
 
-/// D85：大文件门槛 50 MiB / 200 MiB（默认）/ 1 GiB；截断时说明“仅显示前 N 项”。
+/// D85：大文件门槛三档，默认中间一档；截断时说明“仅显示前 N 项”。D178：门槛按十进制
+/// 50 MB / 200 MB / 1 GB（原来按二进制 50 MiB / 200 MiB / 1 GiB）。
 final class LargeFileThresholdTests: XCTestCase {
-    func testThreeBinaryThresholdsWithTheDefaultUnchanged() {
+    /// D178: renamed from testThreeBinaryThresholdsWithTheDefaultUnchanged.
+    func testThreeDecimalThresholdsWithTheDefaultInTheMiddle() {
         XCTAssertEqual(LargeFileThreshold.allCases, [.mib50, .mib200, .gib1])
-        XCTAssertEqual(LargeFileThreshold.mib50.bytes, 52_428_800)
-        XCTAssertEqual(LargeFileThreshold.mib200.bytes, 209_715_200)
-        XCTAssertEqual(LargeFileThreshold.gib1.bytes, 1_073_741_824)
-        XCTAssertEqual(LargeFileThreshold.allCases.map(\.title), ["50 MiB", "200 MiB", "1 GiB"])
+        // D178: decimal bytes (was 52_428_800, 209_715_200 and 1_073_741_824).
+        XCTAssertEqual(LargeFileThreshold.mib50.bytes, 50_000_000)
+        XCTAssertEqual(LargeFileThreshold.mib200.bytes, 200_000_000)
+        XCTAssertEqual(LargeFileThreshold.gib1.bytes, 1_000_000_000)
+        // D178 (was ["50 MiB", "200 MiB", "1 GiB"]).
+        XCTAssertEqual(LargeFileThreshold.allCases.map(\.title), ["50 MB", "200 MB", "1 GB"])
         XCTAssertEqual(LargeFileThreshold.standard, .mib200)
         // 修复轮 1：删掉无引用的 ScanMode.largeFileMinimumBytes，默认档字节数改由 LargeFileThreshold 直接锁定。
-        XCTAssertEqual(LargeFileThreshold.standard.bytes, 200 * 1024 * 1024)
+        // D178 (was 200 * 1024 * 1024).
+        XCTAssertEqual(LargeFileThreshold.standard.bytes, 200_000_000)
         XCTAssertEqual(ScanMode.standard.largeFileResultLimit, 80)
         XCTAssertEqual(LargeFileThreshold.stored(nil), .mib200)
         XCTAssertEqual(LargeFileThreshold.stored("bogus"), .mib200)
         XCTAssertEqual(LargeFileThreshold.stored("gib1"), .gib1)
-        XCTAssertTrue(LargeFileThreshold.unitHelp.contains("1,048,576"))
+        // D178 (was "1,048,576").
+        XCTAssertTrue(LargeFileThreshold.unitHelp.contains("1,000,000"))
     }
 
     @MainActor
@@ -54,7 +60,8 @@ final class LargeFileThresholdTests: XCTestCase {
         XCTAssertTrue(made.summary.isTruncated)
         XCTAssertTrue(made.summary.note.contains(L10n.text("仅显示前 80 项（共找到 87 项）",
             "Showing only the first 80 items (87 found)")), made.summary.note)
-        XCTAssertTrue(made.summary.note.contains("50 MiB"))
+        // D178 (was "50 MiB").
+        XCTAssertTrue(made.summary.note.contains("50 MB"))
 
         let exact = LargeFileListingSummary.make(candidates: Array(candidates.prefix(80)), threshold: .mib200, resultLimit: 80,
             reachedTimeLimit: false, reachedFolderLimit: false, lowerBoundPaths: [])
@@ -62,16 +69,19 @@ final class LargeFileThresholdTests: XCTestCase {
         XCTAssertFalse(exact.summary.note.contains(L10n.text("仅显示前", "Showing only")))
     }
 
-    /// 边界：恰好 50 MiB 的文件计入，少 4 KiB 的不计入；200 MiB 档两个都不计入。
+    /// 边界：本地占用刚到门槛的文件计入，少 4 KiB 的不计入；200 MB 档两个都不计入。
+    /// D178：门槛 50,000,000 字节不是 4 KiB 的整数倍，所以“刚到门槛”取门槛以上
+    /// 第一个整块（50,003,968 字节）；原来门槛 50 MiB 本身就是整块，直接用它。
     func testThresholdBoundaryUsesLocalUsageInclusively() throws {
         let root = try makeRoot()
-        try Data(count: Int(LargeFileThreshold.mib50.bytes)).write(to: root.appendingPathComponent("exact.bin"))
-        try Data(count: Int(LargeFileThreshold.mib50.bytes) - 4096).write(to: root.appendingPathComponent("below.bin"))
+        let atThreshold = (LargeFileThreshold.mib50.bytes + 4095) / 4096 * 4096
+        try Data(count: Int(atThreshold)).write(to: root.appendingPathComponent("exact.bin"))
+        try Data(count: Int(atThreshold) - 4096).write(to: root.appendingPathComponent("below.bin"))
         let deadline = Date().addingTimeInterval(60)
         let fifty = DiskScanner(excludedPaths: [], largeFileRoots: [root.path], largeFileThreshold: .mib50)
             .largeFileListing(deadline: deadline)
         XCTAssertEqual(fifty.entries.map(\.name), ["exact.bin"])
-        XCTAssertEqual(fifty.entries.first?.sizeBytes, LargeFileThreshold.mib50.bytes)
+        XCTAssertEqual(fifty.entries.first?.sizeBytes, atThreshold)
         XCTAssertEqual(fifty.summary.threshold, .mib50)
         XCTAssertFalse(fifty.summary.isTruncated)
 
@@ -110,7 +120,8 @@ final class LargeFileThresholdTests: XCTestCase {
         XCTAssertTrue(listing.summary.note.contains(L10n.text("已到扫描时间上限", "Scan time limit reached")))
         let notStarted = LargeFileListingSummary.notStarted(threshold: .gib1, resultLimit: 80)
         XCTAssertTrue(notStarted.reachedTimeLimit)
-        XCTAssertTrue(notStarted.note.contains("1 GiB"))
+        // D178 (was "1 GiB").
+        XCTAssertTrue(notStarted.note.contains("1 GB"))
     }
 
     /// 扫描用选中的门槛；取消时保留上次的结果与截断说明。

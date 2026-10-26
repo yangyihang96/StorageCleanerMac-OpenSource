@@ -17,6 +17,7 @@ enum HelperPowerMetricsPresentation {
     }
 
     static var source: String { L10n.text("系统助手 · powermetrics", "System Helper · powermetrics") }
+    static var title: String { L10n.text("芯片功率与频率 · 系统助手", "Chip Power & Frequency · System Helper") }
 
     static func sample(_ state: HelperPowerMetricsState, now: Date) -> PowermetricsSample? {
         guard case .available(let sample, let at) = state, sample.isValid,

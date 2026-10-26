@@ -183,11 +183,11 @@ extension MenuBarAdvancedStatusView {
     func batteryPowerModeText(_ mode: BatteryPowerMode) -> String {
         switch mode {
         case .lowPower:
-            L10n.text("低功耗", "Low Power")
+            L10n.text("低能耗", "Low Power")
         case .automatic:
             L10n.text("自动", "Automatic")
         case .highPower:
-            L10n.text("高功率", "High Power")
+            L10n.text("高能耗", "High Power")
         }
     }
 
@@ -241,8 +241,10 @@ extension MenuBarAdvancedStatusView {
         return rawName
     }
 
+    /// D128: iStat's frequency (sensor type 8), at most two decimals
+    /// ("3.2 GHz"; was "%.2f GHz").
     func processorFrequencyText(_ megahertz: Double) -> String {
-        String(format: "%.2f GHz", megahertz / 1_000)
+        IStatNumberFormat.frequency(megahertz: megahertz)
     }
 
     /// The fan charts' scale from the window's largest fan reading, prepared
@@ -338,12 +340,14 @@ extension MenuBarAdvancedStatusView {
         memorySnapshot?.measuredUsedRatio
     }
 
+    /// D128: memory amounts in iStat's memory format ("8.0 GB"; was KiB-based
+    /// ByteFormat), here and on every memory surface.
     var memoryUsedAmountText: String {
-        memorySnapshot?.measuredUsedBytes.map { ByteFormat.string(Int64(clamping: $0)) } ?? "—"
+        memorySnapshot?.measuredUsedBytes.map { IStatNumberFormat.memory($0) } ?? "—"
     }
 
     var memoryTotalAmountText: String {
-        memorySnapshot?.measurements.physicalBytes.value.map { ByteFormat.string(Int64(clamping: $0)) } ?? "—"
+        memorySnapshot?.measurements.physicalBytes.value.map { IStatNumberFormat.memory($0) } ?? "—"
     }
 
     func memorySampleStatusText(at date: Date) -> String {
@@ -367,16 +371,20 @@ extension MenuBarAdvancedStatusView {
         guard let snapshot = memorySnapshot,
               let used = snapshot.measuredUsedBytes,
               let total = snapshot.measurements.physicalBytes.value else { return "—" }
-        return "\(ByteFormat.string(Int64(clamping: used))) / \(ByteFormat.string(Int64(clamping: total)))"
+        return "\(IStatNumberFormat.memory(used)) / \(IStatNumberFormat.memory(total))"
     }
 
     var memoryRingExplanation: String {
         guard let composition = memorySnapshot?.ringComposition else {
             return L10n.text("内存组成读取中。", "Memory composition is being read.")
         }
+        let app = IStatNumberFormat.memory(composition.appOrOtherBytes)
+        let wired = IStatNumberFormat.memory(composition.wiredBytes)
+        let compressed = IStatNumberFormat.memory(composition.compressedBytes)
+        let available = IStatNumberFormat.memory(composition.availableBytes)
         return L10n.text(
-            "应用及其他 \(ByteFormat.string(Int64(clamping: composition.appOrOtherBytes)))，联动 \(ByteFormat.string(Int64(clamping: composition.wiredBytes)))，压缩 \(ByteFormat.string(Int64(clamping: composition.compressedBytes)))，可用 \(ByteFormat.string(Int64(clamping: composition.availableBytes)))。",
-            "Apps and other \(ByteFormat.string(Int64(clamping: composition.appOrOtherBytes))), wired \(ByteFormat.string(Int64(clamping: composition.wiredBytes))), compressed \(ByteFormat.string(Int64(clamping: composition.compressedBytes))), available \(ByteFormat.string(Int64(clamping: composition.availableBytes)))."
+            "应用及其他 \(app)，联动 \(wired)，压缩 \(compressed)，可用 \(available)。",
+            "Apps and other \(app), wired \(wired), compressed \(compressed), available \(available)."
         )
     }
 
@@ -437,25 +445,34 @@ extension MenuBarAdvancedStatusView {
     var uptimeText: String {
         let seconds = monitorSnapshot?.systemUptimeSeconds ?? 0
         guard seconds > 0 else { return "--" }
-        let minutes = Int(seconds) / 60
-        let days = minutes / 1_440
-        let hours = (minutes % 1_440) / 60
-        let remainingMinutes = minutes % 60
-        if days > 0 {
-            return L10n.text("\(days) 天 \(hours) 小时", "\(days)d \(hours)h")
-        }
-        if hours > 0 {
-            return L10n.text("\(hours) 小时 \(remainingMinutes) 分", "\(hours)h \(remainingMinutes)m")
-        }
-        return L10n.text("\(remainingMinutes) 分钟", "\(remainingMinutes)m")
+        return GeekUptimeFormat.duration(seconds)
     }
 
+    /// D122: the uptime page's awake and asleep durations. D147: the demo
+    /// fixture only exists in DEBUG and beta builds (the release build failed
+    /// to compile).
+    var uptimeBreakdownTexts: (awake: String, asleep: String) {
+#if DEBUG || STORAGE_CLEANER_BETA
+        let awake = GeekUptimeFormat.awakeSeconds(usesDemoData: MiniWindowDemoData.isEnabled)
+#else
+        let awake = GeekUptimeFormat.awakeSeconds(usesDemoData: false)
+#endif
+        let asleep = GeekUptimeFormat.asleepSeconds(
+            bootAt: monitorSnapshot?.systemBootAt,
+            sinceBootSeconds: monitorSnapshot?.systemUptimeSeconds,
+            awakeSeconds: awake
+        )
+        return (GeekUptimeFormat.duration(awake), GeekUptimeFormat.duration(asleep))
+    }
+
+    /// D128: the current rates are iStat's large bandwidth values
+    /// (`formatLarge:`, no early upgrade).
     var networkDownText: String {
-        rateText(networkCurrentRates.down)
+        rateText(networkCurrentRates.down, style: .large)
     }
 
     var networkUpText: String {
-        rateText(networkCurrentRates.up)
+        rateText(networkCurrentRates.up, style: .large)
     }
 
     /// BOARD N16-3: the network history's current reading (D39), keeping the
@@ -471,17 +488,11 @@ extension MenuBarAdvancedStatusView {
         )
     }
 
-    func rateText(_ bytes: Int64?) -> String {
+    /// D128: iStat's bandwidth format; rows and peaks by default (was
+    /// ByteFormat + "/s", which showed B/s and KiB).
+    func rateText(_ bytes: Int64?, style: IStatNumberFormat.RateStyle = .menu) -> String {
         guard let bytes else { return "--" }
-        return "\(ByteFormat.string(bytes))/s"
-    }
-
-    var sessionDownloadedBytes: Int64 {
-        monitorState.sessionDownloadedBytes
-    }
-
-    var sessionUploadedBytes: Int64 {
-        monitorState.sessionUploadedBytes
+        return IStatNumberFormat.bandwidth(bytes, style: style)
     }
 
     var fanTelemetryRows: [AdvancedTelemetryRow] {
@@ -579,14 +590,14 @@ extension MenuBarAdvancedStatusView {
         guard let entry = store.latestSafeCleanupEntry else {
             return L10n.text("尚未扫描", "Not Scanned Yet")
         }
-        return ByteFormat.string(entry.greenBytes)
+        return IStatNumberFormat.space(entry.greenBytes)
     }
 
     var safeCleanupCountText: String {
         guard let entry = store.latestSafeCleanupEntry else {
             return L10n.text("等待扫描", "Waiting for Scan")
         }
-        return L10n.text("\(entry.greenCount) 项", "\(entry.greenCount) items")
+        return L10n.text("\(ByteFormat.count(entry.greenCount)) 项", "\(ByteFormat.count(entry.greenCount)) items")
     }
 
     var cleanupSummaryTitle: String {
@@ -846,7 +857,7 @@ struct AdvancedCleanupItemRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            Text(ByteFormat.string(item.sizeBytes))
+            Text(IStatNumberFormat.space(item.sizeBytes))
                 .font(AdvancedPanelTypography.compactValue)
                 .monospacedDigit()
         }

@@ -17,6 +17,7 @@ struct ProjectArtifactScanner: Sendable {
     var limits = ProjectArtifactScanLimits()
     var home = FileManager.default.homeDirectoryForCurrentUser
     var excludedURLs: [URL] = []
+    var ignoreList: IgnoreListSnapshot = .empty
 
     func scan(roots: [URL], now: Date = Date()) async throws -> ProjectArtifactScanResult {
         let worker = Task.detached(priority: .utility) { try scanSynchronously(roots: roots, now: now) }
@@ -25,9 +26,11 @@ struct ProjectArtifactScanner: Sendable {
 
     func scanSynchronously(roots: [URL], now: Date = Date()) throws -> ProjectArtifactScanResult {
         let home = home.standardizedFileURL
+        let excludedURLs = self.excludedURLs + ignoreList.paths(for: .systemJunk).map { URL(fileURLWithPath: $0) }
+        var ignoredPaths = Set<String>()
         var queue = roots.map { ($0.standardizedFileURL, 0, Optional<URL>.none) }
         var seen = Set<String>(), projects = Set<URL>(), times = [URL: Date]()
-        var raw = [(URL, ProjectArtifactRequirement, FileSnapshot, FileSnapshot, String?)]()
+        var raw = [(URL, ProjectArtifactRequirement, FileSnapshot, FileSnapshot, String?, CleanupReclaimableEstimate?)]()
         var claimedArtifacts = Set<FileIdentity>()
         var scopeWarnings = [String]()
         var visited = 0, limited = false
@@ -43,6 +46,9 @@ struct ProjectArtifactScanner: Sendable {
             try Task.checkCancellation()
             guard seen.insert(directory.path).inserted else { continue }
             guard Date() < deadline, visited < limits.maximumEntries, projects.count < limits.maximumProjects else { markIncomplete(directory); for pending in queue { markIncomplete(pending.0) }; break }
+            if ScanExclusionService.isExcluded(directory.path, excludedPaths: excludedURLs.map(\.path)) {
+                ignoredPaths.insert(PathSafety.normalizedPath(directory.path)); continue
+            }
             // No default home scan, no traversal of a selected cloud/symlink root.
             guard directory.path != home.path,
                   PathSafety.isContained(directory.path, in: home.path, resolvingSymlinks: false),
@@ -89,14 +95,20 @@ struct ProjectArtifactScanner: Sendable {
                     guard let rootSnapshot = try? fileSystem.snapshot(at: artifact) else { continue }
                     guard rootSnapshot.identity.entryKind == .directory || rootSnapshot.identity.entryKind == .symbolicLink else { continue }
                     artifactPaths.insert(PathSafety.lexicalPath(artifact.path))
+                    if ScanExclusionService.intersectsExcludedTree(artifact.path, excludedPaths: excludedURLs.map(\.path)) {
+                        ignoredPaths.insert(PathSafety.normalizedPath(artifact.path)); continue
+                    }
                     // Mixed-ecosystem projects can name the same build folder.
                     // First catalog rule claims the identity, like the D82 scanner.
                     guard claimedArtifacts.insert(rootSnapshot.identity).inserted else { continue }
-                    let assessment = assess(artifact: artifact, project: project, requirement: requirement)
+                    // D104 G1: what emptying the Trash frees, read while the artifact is measured.
+                    var sharing: CleanupReclaimableTally? = CleanupReclaimableTally()
+                    let assessment = assess(artifact: artifact, project: project, requirement: requirement, sharing: &sharing)
                     if let modified = date(assessment.snapshot?.modificationTimeNanoseconds ?? rootSnapshot.modificationTimeNanoseconds) {
                         times[project] = max(times[project] ?? .distantPast, modified)
                     }
-                    raw.append((project, requirement, rootSnapshot, assessment.snapshot ?? rootSnapshot, assessment.reason))
+                    raw.append((project, requirement, rootSnapshot, assessment.snapshot ?? rootSnapshot, assessment.reason,
+                        assessment.reason == nil ? sharing?.estimate : nil))
                 }
             }
             for child in children {
@@ -129,7 +141,7 @@ struct ProjectArtifactScanner: Sendable {
         let rules = CleanupRuleSet(schemaVersion: 2, rulesVersion: "project-artifacts.1", rules: raw.map { $0.1.rule(project: $0.0, home: home) })
         let provenance = rules.effectiveProvenance
         let rows = zip(raw, rules.rules).map { entry, rule -> ProjectArtifactRow in
-            let (project, requirement, _, measured, blocked) = entry
+            let (project, requirement, _, measured, blocked, reclaimable) = entry
             let source = project.appendingPathComponent(requirement.relativeArtifact)
             let reason = blocked
             let candidate = ScanCandidate(id: ScanCandidateID(), sessionID: id, ruleID: rule.id,
@@ -143,12 +155,12 @@ struct ProjectArtifactScanner: Sendable {
                 requiredClosedBundleIDs: [], reason: reason ?? "由项目清单确认，产物可重建；默认不预选",
                 latestContentModificationTimeNanoseconds: measured.modificationTimeNanoseconds,
                 ownerResolution: .noApplication, ruleRevision: rule.maintenance?.revision,
-                rulesProvenance: provenance, cleanupImpactText: rule.maintenance?.impact)
+                rulesProvenance: provenance, cleanupImpactText: rule.maintenance?.impact, reclaimableEstimate: reclaimable)
             return .init(project: project, requirement: requirement, candidate: candidate, blockedReason: reason, projectModifiedAt: incompleteProjects.contains(project) ? nil : times[project])
         }
         let session = ScanSession(id: id, rulesVersion: rules.rulesVersion, startedAt: now, completedAt: Date(), outcome: limited ? .partial : .complete,
             categories: [.init(id: "project-artifacts", title: "项目产物", subcategories: [.init(id: "project-artifacts", title: "项目产物", risk: .reviewOnly, recommendation: .optional, reason: "默认不预选", candidates: rows.map(\.candidate))])],
-            issues: [], permissions: [], metrics: .init(visitedEntryCount: visited, candidateCount: rows.count, deduplicatedIdentityCount: 0,
+            issues: [], permissions: [], metrics: .init(ignoredItemCount: ignoredPaths.count, visitedEntryCount: visited, candidateCount: rows.count, deduplicatedIdentityCount: 0,
                 estimatedCandidateBytes: CleanupByteCount.sum(rows.map { $0.candidate.estimatedSizeBytes }), duration: Date().timeIntervalSince(now)), rulesProvenance: provenance)
         return .init(rows: rows, rules: rules, session: session, limited: limited, scopeWarnings: scopeWarnings)
     }
@@ -188,6 +200,15 @@ struct ProjectArtifactScanner: Sendable {
     }
 
     func assess(artifact: URL, project: URL, requirement: ProjectArtifactRequirement) -> (snapshot: FileSnapshot?, reason: String?) {
+        var sharing: CleanupReclaimableTally?
+        return assess(artifact: artifact, project: project, requirement: requirement, sharing: &sharing)
+    }
+
+    /// D104 G1: `sharing`, when given, tallies how much of each regular file
+    /// deleting it frees (`FileStorageSharing`), once per file like the
+    /// sizes. Nil (the executor's recheck) reads nothing extra.
+    private func assess(artifact: URL, project: URL, requirement: ProjectArtifactRequirement,
+                        sharing: inout CleanupReclaimableTally?) -> (snapshot: FileSnapshot?, reason: String?) {
         if ScanExclusionService.intersectsExcludedTree(artifact.path, excludedPaths: excludedURLs.map(\.path)) { return (nil, "用户排除的位置，仅显示") }
         if Self.isCloudPath(artifact) { return (nil, "云盘位置，仅显示；不读取内容或触发同步删除") }
         guard let root = try? fileSystem.snapshot(at: artifact), let projectRoot = try? fileSystem.snapshot(at: project) else { return (nil, "目录不可读") }
@@ -234,6 +255,10 @@ struct ProjectArtifactScanner: Sendable {
             if !identities.insert(entry.identity).inserted { continue }
             logical = CleanupByteCount.adding(measurement.logicalSizeBytes, to: logical)
             if let current = allocated, let size = measurement.allocatedSizeBytes { allocated = CleanupByteCount.adding(size, to: current) } else { allocated = nil }
+            if entry.identity.entryKind == .regularFile {
+                sharing?.record(fileSystem.storageSharing(at: url),
+                    allocatedBytes: measurement.allocatedSizeBytes ?? measurement.logicalSizeBytes, deviceID: entry.identity.deviceID)
+            }
             if let value = measurement.modificationTimeNanoseconds { latest = max(latest ?? value, value) } else { return (nil, "修改时间不可读，仅显示") }
             if entry.identity.entryKind == .directory {
                 guard let children = try? fileSystem.children(of: url) else { return (nil, "产物包含不可读目录，仅显示") }

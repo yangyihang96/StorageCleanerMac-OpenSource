@@ -335,11 +335,10 @@ extension MenuBarAdvancedStatusView {
     var geekProcessorCard: some View {
         GeekProcessorPresentation(cpuChartHistory: cpuChartHistory, cpuChartRange: cpuChartRange, samplingInterval: store.menuBarRefreshInterval.seconds, processorTint: processorTint, geekCPUUserBarColor: geekCPUUserBarColor, geekCPUSystemBarColor: geekCPUSystemBarColor, currentPoint: cpuCurrentReading,
                                   isUpdating: cpuDisplayedHistory.isUpdating,
-                                  // D43: frequency and temperature, only what was read;
-                                  // the temperature color when there is one.
+                                  // D43: frequency and temperature, only what was read
+                                  // (D118: in the value color, as on iStat).
                                   headerFrequencyText: geekCompactFrequencyText,
-                                  headerTemperatureText: temperatureValue.map(geekCompactTemperature),
-                                  headerReadoutTint: temperatureValue == nil ? .primary : temperatureTint)
+                                  headerTemperatureText: temperatureValue.map(geekCompactTemperature))
     }
 
     private var geekCPUUserBarColor: Color {
@@ -365,9 +364,9 @@ extension MenuBarAdvancedStatusView {
             .map(processorFrequencyText)
     }
 
+    /// D128: iStat's whole degrees ("45°"; was the metric's "45°C").
     var geekCompactTemperatureText: String {
-        metricValue(.chipTemperature)
-            .replacingOccurrences(of: " °C", with: "°C")
+        numericValue(metricValue(.chipTemperature)).map { IStatNumberFormat.temperature($0) } ?? "--"
     }
 
     var geekCompactFrequencyText: String? {
@@ -384,14 +383,18 @@ extension MenuBarAdvancedStatusView {
 
     func geekMemoryPressureRing(size: CGFloat) -> some View {
         let percent = memorySnapshot?.pressureEstimatePercent
+        // D119: iStat's one-line "PRESSURE" with its 10 pt label, as on the
+        // overview card (D118); was "压力评估 / Pressure estimate". That the
+        // number is an estimate stays in the help below.
         return GeekCombinedRing(
-            title: L10n.text("压力评估", "Pressure estimate"),
+            title: L10n.text("压力", "Pressure"),
             value: percent.map { "\($0)%" } ?? "—",
             progress: percent.map { Double($0) / 100 },
             tint: memoryTint,
             size: size,
             fixedValueFontSize: size >= 90 ? 28 : 24,
-            strokeWidth: GeekVisualTokens.gaugeStrokeWidth(size: size)
+            strokeWidth: GeekVisualTokens.gaugeStrokeWidth(size: size),
+            fixedLabelFontSize: GeekIStatCardGeometry.ringLabelFontSize
         )
         // D28: the number is the estimate; the ring color is the level.
         .help(L10n.text(
@@ -406,7 +409,8 @@ extension MenuBarAdvancedStatusView {
     }
 
     var geekDiskCard: some View {
-        GeekDiskPresentation(storageSnapshot: storageSnapshot, volumeName: volumeName, geekPrimaryDiskHealthText: geekPrimaryDiskHealthText, geekPrimaryDiskHealthTint: geekPrimaryDiskHealthTint, healthHelp: GeekDiskHealthTimestamp.detailText(GeekDiskHealthTimestamp.checkedAt(snapshot: computerHealthStore.snapshot?.disk, fallbackRemainingLifePercent: healthSummary?.diskRemainingLifePercent)))
+        GeekDiskPresentation(storageSnapshot: storageSnapshot, volumeName: volumeName, geekPrimaryDiskHealthText: geekPrimaryDiskHealthText, geekPrimaryDiskHealthTint: geekPrimaryDiskHealthTint, healthHelp: GeekDiskHealthTimestamp.detailText(GeekDiskHealthTimestamp.checkedAt(snapshot: computerHealthStore.snapshot?.disk, fallbackRemainingLifePercent: healthSummary?.diskRemainingLifePercent)),
+                             latestDiskIO: nativeDiskIOHistory.last)
     }
 
     var geekSensorsCard: some View {
@@ -447,91 +451,54 @@ extension MenuBarAdvancedStatusView {
         GeekBatteryPresentation(percent: batterySnapshot?.chargePercent, geekOverviewPowerSourceAndModeTitle: geekOverviewPowerSourceAndModeTitle, geekOverviewBatteryHelpText: geekOverviewBatteryHelpText)
     }
 
+    /// No battery and no adapter reading: the apps' measured power, in the
+    /// battery card's iStat layout (title row, then one 15 pt row at 22).
     private var geekAppPowerSummaryCard: some View {
         let snapshot = store.menuBarPreparedProcesses?.snapshot
-        return GeekCombinedCard(
-            height: GeekPanelLayout.overviewPowerCardHeight
-        ) {
-            HStack(spacing: 8) {
-                GeekCombinedRing(
-                    title: L10n.text("功率", "POWER"),
-                    value: snapshot?.currentPowerWattsText ?? "--",
-                    progress: nil,
-                    tint: resolvedEnergyTint,
-                    size: 35
-                )
-
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(L10n.text("App 功耗", "APP POWER"))
-                            .font(AdvancedPanelTypography.captionStrong)
-                            .foregroundStyle(.secondary)
-
-                        Spacer(minLength: 4)
-
-                        Text(snapshot?.source ?? L10n.text("采样中", "Sampling"))
-                            .font(AdvancedPanelTypography.body)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    Text(snapshot.map {
-                        L10n.text("\($0.activeAppCount) 个活跃 App", "\($0.activeAppCount) active apps")
-                    } ?? L10n.text("正在测量 App 能耗", "Measuring app energy"))
-                    .font(AdvancedPanelTypography.body)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        return GeekIStatCard(height: GeekPanelLayout.overviewPowerCardHeight) {
+            GeekModuleHeader(title: L10n.text("App 功耗", "APP POWER")) {
+                Text(snapshot?.currentPowerWattsText ?? "--").geekIStatValueText()
             }
-            .frame(maxHeight: .infinity, alignment: .center)
-            .accessibilityElement(children: .combine)
-            .help(snapshot.map {
-                "\($0.currentPowerWattsText) · \($0.energyCoverageText)"
-            } ?? L10n.text("正在测量 App 能耗", "Measuring app energy"))
+            .geekIStatLayer(top: GeekIStatCardGeometry.titleTop, height: GeekIStatCardGeometry.titleHeight)
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                Text(snapshot.map {
+                    L10n.text("\($0.activeAppCount) 个活跃 App", "\($0.activeAppCount) active apps")
+                } ?? L10n.text("正在测量 App 能耗", "Measuring app energy"))
+                .geekIStatValueText()
+                Spacer(minLength: 4)
+                Text(snapshot?.source ?? L10n.text("采样中", "Sampling"))
+                    .geekIStatLabelText()
+            }
+            .geekIStatLayer(top: GeekIStatCardGeometry.diskSecondRowTop, height: GeekIStatCardGeometry.titleHeight)
         }
+        .accessibilityElement(children: .combine)
+        .help(snapshot.map {
+            "\($0.currentPowerWattsText) · \($0.energyCoverageText)"
+        } ?? L10n.text("正在测量 App 能耗", "Measuring app energy"))
     }
 
+    /// A Mac without a battery that reports its adapter: the adapter's power
+    /// in the title row, voltage and current below.
     private var geekAdapterSummaryCard: some View {
-        GeekCombinedCard(
-            height: GeekPanelLayout.overviewPowerCardHeight
-        ) {
-            HStack(spacing: 8) {
-                GeekCombinedRing(
-                    title: "AC",
-                    value: batteryElectricalSnapshot?.adapterPowerWatts
-                        .map { String(format: "%.0fW", $0) } ?? "--",
-                    progress: nil,
-                    tint: AppDesignTokens.Palette.success,
-                    size: 35,
-                    fixedValueFontSize: 9
-                )
-
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(L10n.text("电源适配器", "Power Adapter").uppercased())
-                            .font(AdvancedPanelTypography.captionStrong)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 4)
-                        Text(geekOverviewPowerModeText
-                            ?? batteryElectricalSnapshot?.adapterName
-                            ?? L10n.text("已连接", "Connected"))
-                            .font(AdvancedPanelTypography.body)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    Text(geekOverviewAdapterElectricalText)
-                        .font(AdvancedPanelTypography.body)
-                        .foregroundStyle(.primary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        GeekIStatCard(height: GeekPanelLayout.overviewPowerCardHeight) {
+            GeekModuleHeader(title: L10n.text("电源适配器", "Power Adapter")) {
+                Text(batteryElectricalSnapshot?.adapterPowerWatts
+                    .map { IStatNumberFormat.power($0) } ?? "--")
+                    .geekIStatValueText()
             }
-            .frame(maxHeight: .infinity, alignment: .center)
-            .accessibilityElement(children: .combine)
+            .geekIStatLayer(top: GeekIStatCardGeometry.titleTop, height: GeekIStatCardGeometry.titleHeight)
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                Text(geekOverviewAdapterElectricalText)
+                    .geekIStatValueText()
+                Spacer(minLength: 4)
+                Text(geekOverviewPowerModeText
+                    ?? batteryElectricalSnapshot?.adapterName
+                    ?? L10n.text("已连接", "Connected"))
+                    .geekIStatLabelText()
+            }
+            .geekIStatLayer(top: GeekIStatCardGeometry.diskSecondRowTop, height: GeekIStatCardGeometry.titleHeight)
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var geekOverviewPowerModeText: String? {
@@ -543,11 +510,13 @@ extension MenuBarAdvancedStatusView {
         [batteryPowerSourceTitle, batteryStatusTitle].joined(separator: " · ")
     }
 
+    /// D128: iStat's sensor formats ("20 V", "4.7 A", "850 mA"; was
+    /// "%.1f V" and "%.2f A").
     private var geekOverviewAdapterElectricalText: String {
         let voltage = batteryElectricalSnapshot?.adapterVoltageVolts
-            .map { String(format: "%.1f V", $0) } ?? "-- V"
+            .map { IStatNumberFormat.voltage($0) } ?? "-- V"
         let current = batteryElectricalSnapshot?.adapterAmperageAmps
-            .map { String(format: "%.2f A", $0) } ?? "-- A"
+            .map { IStatNumberFormat.current($0) } ?? "-- A"
         return "\(voltage) · \(current)"
     }
 
@@ -571,9 +540,10 @@ extension MenuBarAdvancedStatusView {
         var values = [level, status, batteryPowerSourceTitle]
         if let estimate = batteryRuntimeEstimate,
            let time = GeekBatteryRemainingTime.text(for: estimate.minutes) {
+            let power = IStatNumberFormat.power(estimate.powerWatts)
             values.append(L10n.text(
-                "耗电预测 \(time)（\(String(format: "%.1f W", estimate.powerWatts))）",
-                "Power-based \(time) at \(String(format: "%.1f W", estimate.powerWatts))"
+                "耗电预测 \(time)（\(power)）",
+                "Power-based \(time) at \(power)"
             ))
         }
         return values.joined(separator: " · ")
@@ -611,16 +581,19 @@ extension MenuBarAdvancedStatusView {
         nativeDiskIOHistory
     }
 
+    /// D123: a click on a card opens its module unpinned, as hover does
+    /// (was `selectModule`, which pinned).
     func selectGeekSection(_ section: PanelSection) {
-        panelCoordinator.selectModule(section)
+        panelCoordinator.openModule(section)
     }
 
     func previewGeekSection(_ section: PanelSection) {
         panelCoordinator.previewModule(section)
     }
 
+    /// D123: unpinned, as `selectGeekSection` (was `selectHardwareDetail`).
     func selectGeekHardwareDetail(_ focus: GeekHardwareDetailFocus) {
-        panelCoordinator.selectHardwareDetail(focus)
+        panelCoordinator.openHardwareDetail(focus)
     }
 
     func previewGeekHardwareDetail(_ focus: GeekHardwareDetailFocus) {
@@ -637,7 +610,7 @@ extension MenuBarAdvancedStatusView {
 
     var geekCleanupDiskTile: AdvancedMetricTileModel {
         AdvancedMetricTileModel(id: "disk-free", title: L10n.text("启动卷可用", "Disk Available"),
-                                value: storageSnapshot.map { ByteFormat.storageString($0.userAvailableBytes) } ?? "--",
+                                value: storageSnapshot.map { IStatNumberFormat.space($0.userAvailableBytes) } ?? "--",
                                 detail: storagePressureTitle, tint: storageTint, progress: storageSnapshot?.userAvailableRatio)
     }
 
@@ -682,22 +655,15 @@ extension MenuBarAdvancedStatusView {
         store.isMenuBarProcessSampleUnavailable && store.menuBarPreparedProcesses == nil
     }
 
+    /// D128: iStat's large disk activity values (`formatLarge:`).
     var geekDiskReadRateText: String {
         guard let point = nativeDiskIOHistory.last else { return "--" }
-        return "\(ByteFormat.string(point.readBytesPerSecond))/s"
+        return IStatNumberFormat.diskActivity(point.readBytesPerSecond, style: .large)
     }
 
     var geekDiskWriteRateText: String {
         guard let point = nativeDiskIOHistory.last else { return "--" }
-        return "\(ByteFormat.string(point.writeBytesPerSecond))/s"
-    }
-
-    var geekNetworkDownPeak: Int64? {
-        networkChartHistory.compactMap { MenuBarTelemetryChannel.download.peak(in: $0) }.max().map { Int64(clampingHistoryValue: $0) }
-    }
-
-    var geekNetworkUpPeak: Int64? {
-        networkChartHistory.compactMap { MenuBarTelemetryChannel.upload.peak(in: $0) }.max().map { Int64(clampingHistoryValue: $0) }
+        return IStatNumberFormat.diskActivity(point.writeBytesPerSecond, style: .large)
     }
 
 }

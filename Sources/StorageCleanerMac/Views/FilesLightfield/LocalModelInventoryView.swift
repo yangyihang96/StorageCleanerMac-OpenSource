@@ -41,7 +41,7 @@ enum LocalModelInventoryPresentation {
             return L10n.text("没有找到 Ollama 或 LM Studio 的模型文件夹", "No Ollama or LM Studio model folder found")
         }
         return L10n.text(
-            "\(inventory.models.count) 个模型 · 本地占用 \(ByteFormat.storageString(inventory.totalBytes))（共享文件只计一次）",
+            "\(ByteFormat.count(inventory.models.count)) 个模型 · 本地占用 \(ByteFormat.storageString(inventory.totalBytes))（共享文件只计一次）",
             "\(L10n.englishCount(inventory.models.count, "model", "models")) · \(ByteFormat.storageString(inventory.totalBytes)) local usage (shared files counted once)"
         )
     }
@@ -49,9 +49,9 @@ enum LocalModelInventoryPresentation {
     static func detail(_ model: LocalModelEntry) -> String {
         var parts = [model.source.title]
         parts.append(model.format ?? L10n.text("格式未知", "Unknown format"))
-        parts.append(L10n.text("\(model.fileCount) 个文件", L10n.englishCount(model.fileCount, "file", "files")))
+        parts.append(L10n.text("\(ByteFormat.count(model.fileCount)) 个文件", L10n.englishCount(model.fileCount, "file", "files")))
         if model.missingFileCount > 0 {
-            parts.append(L10n.text("缺少 \(model.missingFileCount) 个文件",
+            parts.append(L10n.text("缺少 \(ByteFormat.count(model.missingFileCount)) 个文件",
                                    L10n.englishCount(model.missingFileCount, "file", "files") + " missing"))
         }
         return parts.joined(separator: " · ")
@@ -87,32 +87,32 @@ enum LocalModelInventoryPresentation {
         var lines = [String]()
         if !inventory.unknownManifests.isEmpty {
             lines.append(L10n.text(
-                "\(inventory.unknownManifests.count) 个无法识别的模型清单，已保留、未计入",
+                "\(ByteFormat.count(inventory.unknownManifests.count)) 个无法识别的模型清单，已保留、未计入",
                 L10n.englishCount(inventory.unknownManifests.count, "unrecognised manifest", "unrecognised manifests") + " kept and not counted"
             ))
         }
         if inventory.unreferencedBlobCount > 0 {
             lines.append(L10n.text(
-                "Ollama 中 \(inventory.unreferencedBlobCount) 个文件（\(ByteFormat.storageString(inventory.unreferencedBlobBytes))）没有被任何已识别模型引用，可能属于下载中或无法识别的模型，未计入合计",
+                "Ollama 中 \(ByteFormat.count(inventory.unreferencedBlobCount)) 个文件（\(ByteFormat.storageString(inventory.unreferencedBlobBytes))）没有被任何已识别模型引用，可能属于下载中或无法识别的模型，未计入合计",
                 L10n.englishCount(inventory.unreferencedBlobCount, "Ollama file", "Ollama files") + " (\(ByteFormat.storageString(inventory.unreferencedBlobBytes))) not used by any recognised model (possibly partial downloads or unrecognised models); not counted"
             ))
         }
         if !inventory.skippedSymbolicLinks.isEmpty {
             lines.append(L10n.text(
-                "跳过 \(inventory.skippedSymbolicLinks.count) 个符号链接（可能指向外部位置），未跟随、未计入",
+                "跳过 \(ByteFormat.count(inventory.skippedSymbolicLinks.count)) 个符号链接（可能指向外部位置），未跟随、未计入",
                 "Skipped " + L10n.englishCount(inventory.skippedSymbolicLinks.count, "symbolic link", "symbolic links") + " (possibly to external locations); not followed or counted"
             ))
         }
         if !inventory.skippedDeepFolders.isEmpty {
             lines.append(L10n.text(
-                "\(inventory.skippedDeepFolders.count) 个文件夹层级过深，未进入、未计入；其余照常盘点",
+                "\(ByteFormat.count(inventory.skippedDeepFolders.count)) 个文件夹层级过深，未进入、未计入；其余照常盘点",
                 L10n.englishCount(inventory.skippedDeepFolders.count, "folder", "folders")
                     + " nested too deep; skipped and not counted, the rest was read"
             ))
         }
         if !inventory.unreadableFolders.isEmpty {
             lines.append(L10n.text(
-                "\(inventory.unreadableFolders.count) 个文件夹无法读取，未计入，结果不完整",
+                "\(ByteFormat.count(inventory.unreadableFolders.count)) 个文件夹无法读取，未计入，结果不完整",
                 L10n.englishCount(inventory.unreadableFolders.count, "folder", "folders")
                     + " unreadable; not counted, results are incomplete"
             ))

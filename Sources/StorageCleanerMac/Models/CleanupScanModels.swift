@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 enum CleanupByteCount {
@@ -62,6 +63,53 @@ enum CleanupOwnerInference: String, Codable, Sendable {
     case candidateName
 }
 
+/// D-FP6: a rule that lists a file only when its content qualifies. Read
+/// only for regular files the path rules already matched, and bounded.
+enum CleanupContentRequirement: String, Codable, Sendable {
+    /// A preference file macOS cannot load: not a property list, empty, or
+    /// not a dictionary (CleanMyMac's and Tencent Lemon's broken preferences).
+    case unreadablePropertyList
+
+    func isMet(at url: URL, snapshot: FileSnapshot) -> Bool {
+        switch self {
+        case .unreadablePropertyList:
+            BrokenPropertyListCheck.isBroken(at: url, snapshot: snapshot)
+        }
+    }
+}
+
+enum BrokenPropertyListCheck {
+    /// Larger files are not read; a preference file is far smaller.
+    static let maximumBytes: Int64 = 8 * 1_024 * 1_024
+
+    /// True only when the file was read and is not a usable preference
+    /// file; a file that cannot be read is not listed.
+    static func isBroken(at url: URL, snapshot: FileSnapshot) -> Bool {
+        guard snapshot.identity.entryKind == .regularFile, !snapshot.isCloudPlaceholder,
+              !snapshot.hasSymbolicLinkComponent, snapshot.logicalSizeBytes <= maximumBytes else { return false }
+        guard let data = read(url, limit: snapshot.logicalSizeBytes) else { return false }
+        return isBroken(data)
+    }
+
+    static func isBroken(_ data: Data) -> Bool {
+        guard !data.isEmpty else { return true }
+        guard let value = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) else {
+            return true
+        }
+        return !(value is [String: Any])
+    }
+
+    private static func read(_ url: URL, limit: Int64) -> Data? {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        guard let data = try? handle.read(upToCount: Int(limit) + 1), data.count <= Int(limit) else {
+            return limit == 0 ? Data() : nil
+        }
+        return data
+    }
+}
+
 /// The owner used for the running-app check before preselection (D22, D47)
 /// and again before cleanup.
 enum CleanupOwnerResolution: String, Codable, Hashable, Sendable {
@@ -79,6 +127,8 @@ enum CleanupOwnerResolution: String, Codable, Hashable, Sendable {
 }
 
 enum CleanupCloudPolicy: String, Codable, Sendable {
+    /// Includes placeholders. For iCloud Trash this uses only POSIX metadata,
+    /// including SF_DATALESS and st_blocks, throughout scanning and execution.
     case metadataOnly
     case skipPlaceholder
     case excludeCloudRoots
@@ -87,12 +137,18 @@ enum CleanupCloudPolicy: String, Codable, Sendable {
 enum CleanupRuleRootKind: String, Codable, Sendable {
     case homeRelative
     case applicationsDirectory
+    /// D181: the user's Trash folder on each other mounted volume
+    /// (`/Volumes/<name>/.Trashes/<uid>`, `VolumeTrashLocator`); the root
+    /// path is `/Volumes`.
+    case mountedVolumeTrashes
 }
 
 enum CleanupRuleCandidateScope: String, Codable, Sendable {
     case immediateChildren
     case root
     case descendantAggregate
+    /// D183: one row per exactly named descendant directory; stop at a match.
+    case namedDescendantDirectories
 }
 
 enum FileEntryKind: String, Codable, Hashable, Sendable {
@@ -224,6 +280,8 @@ struct CleanupRule: Codable, Identifiable, Sendable {
     let titleKey: String
     let root: CleanupRuleRoot
     var candidateScope: CleanupRuleCandidateScope? = nil
+    /// D183: nil keeps the scanner's existing 40-row limit.
+    var maximumCandidates: Int? = nil
     let maximumDepth: Int
     let minimumAgeDays: Int
     let minimumBytes: Int64
@@ -247,9 +305,18 @@ struct CleanupRule: Codable, Identifiable, Sendable {
     var ownerInference: CleanupOwnerInference? = nil
     var maintenance: CleanupRuleMaintenance? = nil
     var projectArtifact: ProjectArtifactRequirement? = nil
+    /// D-FP6: the file's content must also qualify (broken preferences).
+    var contentRequirement: CleanupContentRequirement? = nil
 
     var effectiveCandidateScope: CleanupRuleCandidateScope {
         candidateScope ?? .immediateChildren
+    }
+
+    /// D192: only this exact Trash root permits deleting cloud-only entries.
+    var isICloudDriveTrash: Bool {
+        id == "trash.icloud-drive" && action == .emptyTrash
+            && root.kind == .homeRelative && root.path == "Library/Mobile Documents/.Trash"
+            && cloudPolicy == .metadataOnly
     }
 
     /// A rule that lists every child of its root as its own row, such as one
@@ -400,6 +467,10 @@ enum DeveloperToolArtifactCatalog {
         // graded by activity like the other developer caches.
         .init(id: "developer.claude-code-cli-cache", rootPath: "Library/Caches", candidateNames: ["claude-cli-nodejs"], tool: .claudeCode, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib),
         .init(id: "developer.claude-code-logs", rootPath: ".claude", candidateNames: ["debug", "logs"], tool: .claudeCode, kind: .logs, policy: .disposableLogs, minimumBytes: 64 * kib),
+        // D145: queued usage events CleanMyMac 5.7.2 also lists as AI junk
+        // (`分报告/cleanmymac.md` §2.2). `shell-snapshots` stays out: running
+        // sessions source them.
+        .init(id: "developer.claude-code-telemetry", rootPath: ".claude", candidateNames: ["telemetry"], tool: .claudeCode, kind: .temporaryFiles, policy: .regenerable, minimumBytes: 256 * kib, checkedAt: "2026-10-19"),
 
         .init(id: "developer.cursor-cache", rootPath: "Library/Application Support/Cursor", candidateNames: ["Cache", "CachedData", "Code Cache", "GPUCache"], tool: .cursor, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: [cursorBundleID]),
         .init(id: "developer.cursor-app-cache", rootPath: "Library/Caches", candidateNames: [cursorBundleID], tool: .cursor, kind: .cache, policy: .regenerable, minimumBytes: 64 * kib, requiredClosedBundleIDs: [cursorBundleID]),
@@ -916,6 +987,9 @@ struct ScanCandidate: Identifiable, Sendable {
     var rulesProvenance: CleanupRuleSetProvenance? = nil
     var ruleOwnerDisplayName: String? = nil
     var cleanupImpactText: String? = nil
+    /// D100 G1: sharing found while the item was measured; nil when it was
+    /// not read, in which case the item's size is what it frees.
+    var reclaimableEstimate: CleanupReclaimableEstimate? = nil
 
     /// D82: prepared for the result-row view batch; no selection decisions here.
     var applicationOwnershipText: String {
@@ -929,6 +1003,7 @@ struct ScanCandidate: Identifiable, Sendable {
     var preselectionExplanationText: String {
         switch preselectionReason {
         case .ownerRunning: "所属应用正在运行，本次不预选"
+        case .freesLittle: "清空废纸篓后预计释放不到 1 MB 或不到列出大小的十分之一，本次不预选"
         case .preselected: "绿色项目符合本次安全策略，按默认规则预选；执行前仍会复查"
         case .permanentDeletion: "永久删除需要单独确认，不预选"
         case .protected: "最近仍在使用或风险较高，需要两次确认，不预选"
@@ -970,17 +1045,19 @@ struct ScanCandidate: Identifiable, Sendable {
     }
 
     /// D47 (replaces D22's unidentified-owner rule and D40's 7-day log rule):
-    /// the only check that holds back a green row is a running owner app,
-    /// because cleanup would skip that row anyway. A cache whose owner is
-    /// unknown and a log written in the last 7 days are preselected; the row
-    /// says so (`CleanupCandidateRowHint`).
+    /// a running owner app holds back a green row, because cleanup would skip
+    /// that row anyway. A cache whose owner is unknown and a log written in
+    /// the last 7 days are preselected; the row says so
+    /// (`CleanupCandidateRowHint`). D101 G10 adds rows that free too little
+    /// (`freesTooLittleToPreselect`).
     var isHeldBackFromPreselection: Bool {
-        isOwnerRunning
+        isOwnerRunning || freesTooLittleToPreselect
     }
 
     /// D47: every green row (selectable without extra review, moved to Trash)
-    /// is preselected unless its app is running. Yellow and red rows and
-    /// "Empty Trash" (D23) never are, whatever their rule says.
+    /// is preselected unless its app is running or, D101 G10, it frees too
+    /// little. Yellow and red rows and "Empty Trash" (D23) never are, whatever
+    /// their rule says.
     var isPreselectedByDefault: Bool {
         selectionEligibility == .selectable
             && defaultSelection != .forbidden
@@ -1064,6 +1141,33 @@ struct ScanCandidate: Identifiable, Sendable {
     /// scanner's allocated-size estimate and retain logical size as fallback.
     var estimatedSizeBytes: Int64 {
         max(0, snapshot.allocatedSizeBytes ?? snapshot.logicalSizeBytes)
+    }
+
+    /// D100 G1: what cleaning the item frees once the Trash is emptied: its
+    /// size less the blocks shared with clones or held by a local snapshot
+    /// (review A-R1: full clones all inside count as kept too). Thresholds,
+    /// sorting and plans keep `estimatedSizeBytes`.
+    var reclaimableSizeBytes: Int64 {
+        reclaimableEstimate?.reclaimableBytes(ofAllocated: estimatedSizeBytes) ?? estimatedSizeBytes
+    }
+
+    /// D101 G10: the row says it frees noticeably less than its size, because
+    /// clones or a local snapshot share its blocks (the same test as the G1
+    /// row note), and what it likely frees is under 1 MiB or under a tenth of
+    /// the size. D116: likely is G1's conservative amount plus the full clone
+    /// groups that lie wholly inside the row, since cleaning the row removes
+    /// every member; groups with members outside the row still count as kept.
+    /// The inside part counts at most the clone-shared bytes, so blocks held
+    /// by a local snapshot never count. A row whose sharing was not read, or
+    /// that shares little, is preselected as before.
+    var freesTooLittleToPreselect: Bool {
+        guard let estimate = reclaimableEstimate, estimate.reason != nil else { return false }
+        let size = estimatedSizeBytes
+        let freed = reclaimableSizeBytes
+        let inside = min(estimate.wholeCloneGroupBytes, estimate.cloneSharedBytes)
+        let likely = CleanupByteCount.adding(inside, to: freed)
+        return CleanupReclaimableEstimate.isNoticeable(size - freed, of: size)
+            && !CleanupReclaimableEstimate.isNoticeable(likely, of: size)
     }
 
     var latestContentModificationDate: Date? {
@@ -1166,6 +1270,66 @@ enum CleanupCandidateRowHint {
         )
     }
 
+    /// D100 G1: the row frees noticeably less than its size, and why. Moving
+    /// to the Trash frees nothing; the amount is what emptying it frees.
+    static func reclaimable(for candidate: ScanCandidate) -> Line? {
+        reclaimable(candidate.reclaimableEstimate, ofSize: candidate.estimatedSizeBytes)
+    }
+
+    /// D104 G1: the same note for an item listed outside a cleanup scan (a
+    /// project artifact, a large file, a file to move to the Trash). D178:
+    /// in decimal units, as every page now writes sizes (was in the byte
+    /// format of the page that lists it, binary unless it passed another).
+    static func reclaimable(
+        _ estimate: CleanupReclaimableEstimate?,
+        ofSize size: Int64
+    ) -> Line? {
+        guard let estimate else { return nil }
+        let freed = estimate.reclaimableBytes(ofAllocated: size)
+        let mayBeHigh = CleanupReclaimableEstimate.isNoticeable(estimate.unknownBytes, of: size)
+        if CleanupReclaimableEstimate.isNoticeable(size - freed, of: size), let reason = estimate.reason {
+            let amount = ByteFormat.storageString(freed)
+            let high = mayBeHigh ? L10n.text("（可能高估）", " (may be overestimated)") : ""
+            switch reason {
+            case .sharedWithClones:
+                // Review A-R1: full clones all inside the item may be freed too.
+                let whole = estimate.wholeCloneGroupBytes
+                let possible = CleanupReclaimableEstimate.isNoticeable(whole, of: size - freed)
+                    ? L10n.text(
+                        "，其中 \(ByteFormat.storageString(whole)) 的克隆都在本项内，别处没有共享时也会释放",
+                        ", and \(ByteFormat.storageString(whole)) of it, cloned only within this item, is freed too if nothing elsewhere shares it"
+                    )
+                    : ""
+                return Line(
+                    text: L10n.text(
+                        "清空废纸篓后预计释放 \(amount)\(high)；其余与其他文件共享存储（克隆）\(possible)",
+                        "Emptying the Trash frees about \(amount)\(high); the rest is shared with other files (clones)\(possible)"
+                    ),
+                    systemImage: "square.on.square",
+                    tone: .secondary
+                )
+            case .heldBySnapshot:
+                return Line(
+                    text: L10n.text(
+                        "清空废纸篓后预计释放 \(amount)\(high)；其余被本地快照占用，快照过期后释放",
+                        "Emptying the Trash frees about \(amount)\(high); a local snapshot holds the rest until it expires"
+                    ),
+                    systemImage: "clock.arrow.circlepath",
+                    tone: .secondary
+                )
+            }
+        }
+        guard mayBeHigh else { return nil }
+        return Line(
+            text: L10n.text(
+                "部分文件无法读取是否与其他文件共享存储，可释放空间可能高估",
+                "Whether some files share storage could not be read; the space freed may be overestimated"
+            ),
+            systemImage: "questionmark.circle",
+            tone: .secondary
+        )
+    }
+
     /// D47: large caches cost time or downloads to rebuild.
     static func rebuildCost(for candidate: ScanCandidate) -> Line? {
         guard CleanupRebuildCostPolicy.showsHint(for: candidate) else { return nil }
@@ -1237,6 +1401,9 @@ struct CleanupPermissionReport: Identifiable, Sendable {
 }
 
 struct ScanMetrics: Sendable {
+    var ignoredItemCount: Int = 0
+    var ignoredPathsByRule: [String: Set<String>] = [:]
+    var ignoredSummary: String { IgnoreListSnapshot.summary(ignoredItemCount) }
     let visitedEntryCount: Int
     let visitedDirectoryCount: Int
     let candidateCount: Int
@@ -1258,6 +1425,8 @@ struct ScanMetrics: Sendable {
     let protectedDataCandidateCount: Int
 
     init(
+        ignoredItemCount: Int = 0,
+        ignoredPathsByRule: [String: Set<String>] = [:],
         visitedEntryCount: Int,
         visitedDirectoryCount: Int = 0,
         candidateCount: Int,
@@ -1278,6 +1447,8 @@ struct ScanMetrics: Sendable {
         self.notActionableCandidateCount = notActionableCandidateCount
         self.excludedPathCandidateCount = excludedPathCandidateCount
         self.protectedDataCandidateCount = protectedDataCandidateCount
+        self.ignoredPathsByRule = ignoredPathsByRule
+        self.ignoredItemCount = ignoredItemCount
         self.visitedEntryCount = visitedEntryCount
         self.visitedDirectoryCount = visitedDirectoryCount
         self.candidateCount = candidateCount
@@ -1309,6 +1480,15 @@ struct CleanupScanSubcategory: Identifiable, Sendable {
     var selectableCandidateIDs: [ScanCandidateID] {
         candidates.filter(\.isSelectable).map(\.id)
     }
+}
+
+/// D207: a candidate a manager put on the ignore list, held where it was so
+/// Put Back returns it to the same place.
+struct HeldCleanupCandidate: Sendable {
+    let candidate: ScanCandidate
+    let categoryID: String
+    let subcategoryID: String
+    let index: Int
 }
 
 struct CleanupScanCategory: Identifiable, Sendable {
@@ -1409,6 +1589,66 @@ struct ScanSession: Identifiable, Sendable {
     func mappingCandidates(
         _ transform: (ScanCandidate) -> ScanCandidate?
     ) -> ScanSession {
+        rebuilding(ignoredPathsByRule: metrics.ignoredPathsByRule) { _, subcategory in
+            subcategory.candidates.compactMap(transform)
+        }
+    }
+
+    /// D207 (CleanMyMac's Add to Ignore List): `ids` leave the result as a
+    /// scan leaves out what the ignore list covers; their paths join
+    /// `ignoredPathsByRule`, so the ignored count and a later partial rescan
+    /// agree with a full scan.
+    func holdingBack(_ ids: Set<ScanCandidateID>) -> (session: ScanSession, held: [HeldCleanupCandidate]) {
+        var held: [HeldCleanupCandidate] = []
+        var ignored = metrics.ignoredPathsByRule
+        for category in categories {
+            for subcategory in category.subcategories {
+                for (index, candidate) in subcategory.candidates.enumerated() where ids.contains(candidate.id) {
+                    held.append(HeldCleanupCandidate(candidate: candidate, categoryID: category.id,
+                                                     subcategoryID: subcategory.id, index: index))
+                    ignored[candidate.ruleID, default: []].insert(candidate.snapshot.standardizedPath)
+                }
+            }
+        }
+        let session = rebuilding(ignoredPathsByRule: ignored) { _, subcategory in
+            subcategory.candidates.filter { !ids.contains($0.id) }
+        }
+        return (session, held)
+    }
+
+    /// D207: Put Back. Held candidates of this session return to their places
+    /// and leave the ignored count.
+    func puttingBack(_ held: [HeldCleanupCandidate]) -> ScanSession {
+        func place(_ categoryID: String, _ subcategoryID: String) -> String { categoryID + "\u{1F}" + subcategoryID }
+        let present = Set(candidates.map(\.id))
+        let places = Set(categories.flatMap { category in category.subcategories.map { place(category.id, $0.id) } })
+        let returning = held.filter {
+            $0.candidate.sessionID == id && !present.contains($0.candidate.id) && places.contains(place($0.categoryID, $0.subcategoryID))
+        }
+        guard !returning.isEmpty else { return self }
+        var ignored = metrics.ignoredPathsByRule
+        for item in returning {
+            ignored[item.candidate.ruleID]?.remove(item.candidate.snapshot.standardizedPath)
+            if ignored[item.candidate.ruleID]?.isEmpty == true { ignored[item.candidate.ruleID] = nil }
+        }
+        let bySubcategory = Dictionary(grouping: returning) { place($0.categoryID, $0.subcategoryID) }
+        return rebuilding(ignoredPathsByRule: ignored) { category, subcategory in
+            guard let items = bySubcategory[place(category.id, subcategory.id)] else { return subcategory.candidates }
+            var candidates = subcategory.candidates
+            for item in items.sorted(by: { $0.index < $1.index }) {
+                candidates.insert(item.candidate, at: min(item.index, candidates.count))
+            }
+            return candidates
+        }
+    }
+
+    /// The same session with each subcategory's candidates from `candidates`.
+    /// A changed `ignoredPathsByRule` moves the ignored count by the paths it
+    /// gains or loses; everything else is counted again from the result.
+    private func rebuilding(
+        ignoredPathsByRule: [String: Set<String>],
+        _ candidates: (CleanupScanCategory, CleanupScanSubcategory) -> [ScanCandidate]
+    ) -> ScanSession {
         let mapped = categories.map { category in
             CleanupScanCategory(
                 id: category.id,
@@ -1420,12 +1660,14 @@ struct ScanSession: Identifiable, Sendable {
                         risk: subcategory.risk,
                         recommendation: subcategory.recommendation,
                         reason: subcategory.reason,
-                        candidates: subcategory.candidates.compactMap(transform)
+                        candidates: candidates(category, subcategory)
                     )
                 }
             )
         }
         let remaining = mapped.flatMap(\.candidates)
+        let ignoredChange = Set(ignoredPathsByRule.values.flatMap { $0 }).count
+            - Set(metrics.ignoredPathsByRule.values.flatMap { $0 }).count
         return ScanSession(
             id: id,
             rulesVersion: rulesVersion,
@@ -1436,6 +1678,8 @@ struct ScanSession: Identifiable, Sendable {
             issues: issues,
             permissions: permissions,
             metrics: ScanMetrics(
+                ignoredItemCount: metrics.ignoredItemCount + ignoredChange,
+                ignoredPathsByRule: ignoredPathsByRule,
                 visitedEntryCount: metrics.visitedEntryCount,
                 visitedDirectoryCount: metrics.visitedDirectoryCount,
                 candidateCount: remaining.count,
@@ -1586,23 +1830,30 @@ struct CleanupScanRequest: Sendable {
     let mode: CleanupScanMode
     let userHomeURL: URL
     let excludedURLs: [URL]
+    var ignoreList: IgnoreListSnapshot
     let maximumDuration: TimeInterval
     let developerInactivityThresholdDays: Int
     let includedCategoryIDs: Set<String>?
     let includedRuleIDs: Set<String>?
+    /// D104 G5: the session these results complete, so their rows belong to
+    /// it; nil starts a new session.
+    let sessionID: ScanSessionID?
 
     init(
         mode: CleanupScanMode = .standard,
         userHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         excludedURLs: [URL] = [],
+        ignoreList: IgnoreListSnapshot = .empty,
         maximumDuration: TimeInterval = CleanupScanRequest.standardMaximumDuration,
         developerInactivityThresholdDays: Int = DeveloperCleanupAgePolicy.defaultThresholdDays,
         includedCategoryIDs: Set<String>? = nil,
-        includedRuleIDs: Set<String>? = nil
+        includedRuleIDs: Set<String>? = nil,
+        sessionID: ScanSessionID? = nil
     ) {
         self.mode = mode
         self.userHomeURL = userHomeURL
         self.excludedURLs = excludedURLs
+        self.ignoreList = ignoreList
         self.maximumDuration = maximumDuration.isFinite
             ? max(0, maximumDuration)
             : Self.standardMaximumDuration
@@ -1611,39 +1862,36 @@ struct CleanupScanRequest: Sendable {
         )
         self.includedCategoryIDs = includedCategoryIDs.flatMap { $0.isEmpty ? nil : $0 }
         self.includedRuleIDs = includedRuleIDs
+        self.sessionID = sessionID
     }
 }
 
 enum SafeCleanupScanScope: String, CaseIterable, Identifiable, Hashable, Sendable {
-    case caches
-    case logs
-    case temporaryFiles
-    case downloadResidue
+    case systemJunk
+    case aiClutter
+    case mailAttachments
+    case trashBins
 
     static let defaultSelection: Set<SafeCleanupScanScope> = Set(allCases)
+    static let defaultsKey = "cleanup.selected-scopes.v1"
 
     var id: String { rawValue }
 
+    /// D203: a switch takes in whole result groups (System Junk also the
+    /// developer and to-review groups).
     func includes(_ rule: CleanupRule) -> Bool {
-        let isLog = rule.developerArtifactKind == .logs
-            || rule.id.localizedCaseInsensitiveContains("log")
-        switch self {
-        case .caches:
-            return !isLog && (
-                rule.categoryID == "browser-cache"
-                    || rule.categoryID == "application-cache"
-                    || rule.id == "system.user-caches"
-                    || rule.id.hasPrefix("system-cache.")
-                    || (rule.categoryID != "developer"
-                        && rule.id.localizedCaseInsensitiveContains("cache"))
-            )
-        case .logs:
-            return isLog
-        case .temporaryFiles:
-            return rule.developerArtifactKind == .temporaryFiles
-        case .downloadResidue:
-            return rule.categoryID == "downloads"
-        }
+        CareJunkGroup.group(for: rule).scanScope == self
+    }
+
+    static func selection(in defaults: UserDefaults) -> Set<Self> {
+        guard let values = defaults.array(forKey: defaultsKey) as? [String],
+              values.allSatisfy({ Self(rawValue: $0) != nil }) else { return defaultSelection }
+        // An explicitly saved empty selection disables starting the scan.
+        return Set(values.compactMap(Self.init(rawValue:)))
+    }
+
+    static func save(_ selection: Set<Self>, in defaults: UserDefaults) {
+        defaults.set(allCases.filter(selection.contains).map(\.rawValue), forKey: defaultsKey)
     }
 }
 

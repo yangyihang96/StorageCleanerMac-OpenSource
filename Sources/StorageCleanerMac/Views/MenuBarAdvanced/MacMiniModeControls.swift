@@ -11,48 +11,52 @@ struct MacMiniModeControls: View {
         }
     }
 
+    /// D124: a text section of the energy-mode page: the major label with
+    /// iStat's text-section toggle on the right, the policy and its notes
+    /// below, the helper update as an action row (was a native switch with
+    /// the full title beside it).
     private var controls: some View {
-        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-            Toggle(isOn: Binding(
-                get: { MacMiniModePresentation.isOn(fanControl.macMiniModeStatus) },
-                set: { enabled in
-                    Task { @MainActor in
-                        await fanControl.setMacMiniMode(enabled ? .whenOnAC : .off)
+        GeekIStatTextSectionCard {
+            GeekIStatMajorLabelRow(title: MacMiniModePresentation.sectionTitle) {
+                Toggle(isOn: Binding(
+                    get: { MacMiniModePresentation.isOn(fanControl.macMiniModeStatus) },
+                    set: { enabled in
+                        Task { @MainActor in
+                            await fanControl.setMacMiniMode(enabled ? .whenOnAC : .off)
+                        }
                     }
+                )) {
+                    EmptyView()
                 }
-            )) {
-                Text(MacMiniModePresentation.title)
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .fixedSize(horizontal: false, vertical: true)
+                .toggleStyle(GeekIStatSwitchToggleStyle())
+                .disabled(fanControl.isDataOnlyFixture || fanControl.isChangingMacMiniMode
+                    || fanControl.isPreparingHelper || fanControl.macMiniHelperNeedsUpdate)
+                .accessibilityIdentifier("mac-mini-mode-toggle")
+                .accessibilityLabel(MacMiniModePresentation.title)
+                .accessibilityHint(MacMiniModePresentation.detail(fanControl.macMiniModeStatus))
+                .help(MacMiniModePresentation.title + "\n" + MacMiniModePresentation.detail(fanControl.macMiniModeStatus))
             }
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .disabled(fanControl.isDataOnlyFixture || fanControl.isChangingMacMiniMode
-                || fanControl.isPreparingHelper || fanControl.macMiniHelperNeedsUpdate)
-            .accessibilityIdentifier("mac-mini-mode-toggle")
-            .accessibilityLabel(MacMiniModePresentation.title)
-            .accessibilityValue(MacMiniModePresentation.detail(fanControl.macMiniModeStatus))
-            .help(MacMiniModePresentation.title + "\n" + MacMiniModePresentation.detail(fanControl.macMiniModeStatus))
 
+            Text(MacMiniModePresentation.summary)
+                .geekIStatSectionNote()
             if MacMiniModePresentation.isOn(fanControl.macMiniModeStatus) {
                 Text(MacMiniModePresentation.safetyNotice)
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .geekIStatSectionNote()
             }
             if let message = fanControl.macMiniModeMessage
                 ?? MacMiniModePresentation.reason(fanControl.macMiniModeStatus) {
                 Text(message)
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(AppDesignTokens.Palette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .geekIStatSectionNote(AppDesignTokens.Palette.warning)
                     .accessibilityIdentifier("mac-mini-mode-reason")
             }
             if fanControl.macMiniHelperNeedsUpdate {
-                Button(L10n.text("更新并重新授权系统助手", "Update and Authorize System Helper")) {
+                GeekIStatTickRow(
+                    title: L10n.text("更新并重新授权系统助手", "Update and Authorize System Helper"),
+                    isSelected: false,
+                    showsCheck: false
+                ) {
                     Task { @MainActor in await fanControl.updateMacMiniModeHelper() }
                 }
-                .buttonStyle(ResponsivePlainButtonStyle())
                 .disabled(fanControl.isDataOnlyFixture || fanControl.isChangingMacMiniMode || fanControl.isPreparingHelper)
             }
         }

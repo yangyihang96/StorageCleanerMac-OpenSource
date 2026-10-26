@@ -44,8 +44,9 @@ struct MemoryRunningApplicationIdentity: Equatable, Sendable {
 }
 
 /// Compatibility facade for the existing views and store. System reads live in
-/// `SystemMemoryProbe`; this type no longer launches `purge` or allocates memory
-/// to manufacture a larger "released" number.
+/// `SystemMemoryProbe`. It never launches `purge`; since D144 `optimize()`
+/// runs the bounded push of `MemoryReclaimer` and reports the measured
+/// counters, never a manufactured "released" number.
 enum MemoryOptimizerService {
     static func snapshot() async -> MemorySnapshot {
         await MenuBarPresentationTrace.measureAsyncSample("process.memory.libproc") {
@@ -60,20 +61,69 @@ enum MemoryOptimizerService {
         )
     }
 
+    /// D144 "释放内存": the bounded push of `MemoryReclaimer`, then a fresh
+    /// snapshot. Cancelling the task stops the push between steps.
     static func optimize() async -> MemoryOptimizationResult {
         let startedAt = Date()
         let before = await snapshot()
+        let cancellation = MemoryReclaimCancellation()
+        let outcome = await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) {
+                MemoryReclaimer.run(isCancelled: { cancellation.isCancelled })
+            }.value
+        } onCancel: {
+            cancellation.cancel()
+        }
         let after = await snapshot()
         return MemoryOptimizationResult(
             beforeSnapshot: before,
             snapshot: after,
-            status: .notNeeded,
-            detail: L10n.text(
-                "未执行缓存清空。请根据内存压力和交换趋势处理具体应用；系统缓存属于可用内存。",
-                "No cache purge was performed. Use memory pressure and swap trends to decide whether to quit specific apps; system cache remains available memory."
-            ),
-            durationSeconds: Date().timeIntervalSince(startedAt)
+            status: reclaimStatus(outcome),
+            detail: reclaimDetail(outcome),
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            reclaim: outcome
         )
+    }
+
+    static func reclaimStatus(_ outcome: MemoryReclaimer.Outcome?) -> MemoryOptimizationStatus {
+        guard let outcome else { return .unavailable }
+        switch outcome.stopReason {
+        // Stopping where other apps' memory would start is the designed end.
+        case .finished, .compressorGrowing, .pressureRose: return .completed
+        case .allocationFailed, .timedOut, .readingUnavailable: return outcome.pushedBytes > 0 ? .partial : .unavailable
+        case .cancelled: return .cancelled
+        case .nothingToReclaim, .pressureAlreadyRaised: return .notNeeded
+        }
+    }
+
+    static func reclaimDetail(_ outcome: MemoryReclaimer.Outcome?) -> String {
+        guard let outcome else {
+            return L10n.text("读不到内存统计，没有执行释放。", "Memory statistics could not be read; nothing was done.")
+        }
+        switch outcome.stopReason {
+        case .finished:
+            return L10n.text("系统已收回可以直接丢弃的文件缓存和可清除内存。macOS 会在需要时再次把空闲内存用作缓存。",
+                             "The system handed back file cache and purgeable memory it could drop. macOS will use idle memory as cache again when useful.")
+        case .compressorGrowing:
+            return L10n.text("压缩内存开始增长，已在影响其他应用之前停止。",
+                             "The compressor started to grow, so the push stopped before it reached other apps.")
+        case .pressureRose:
+            return L10n.text("内存压力离开正常，已立即停止并归还全部内存。",
+                             "Memory pressure left normal, so the push stopped at once and returned all memory.")
+        case .allocationFailed:
+            return L10n.text("无法再分配内存，已停止并归还全部内存。", "No more memory could be allocated; the push stopped and returned all memory.")
+        case .timedOut:
+            return L10n.text("超过 30 秒，已停止并归还全部内存。", "The push stopped after 30 seconds and returned all memory.")
+        case .readingUnavailable:
+            return L10n.text("读不到内存统计，已停止并归还全部内存。", "Memory statistics became unreadable; the push stopped and returned all memory.")
+        case .cancelled:
+            return L10n.text("已取消，占用的内存已全部归还。", "Cancelled; all memory used by the push was returned.")
+        case .nothingToReclaim:
+            return L10n.text("可以收回的文件缓存不足 256 MB，无需释放。", "Less than 256 MB of file cache could be handed back, so nothing was done.")
+        case .pressureAlreadyRaised:
+            return L10n.text("内存压力已经升高：系统正在自行回收缓存，再施压只会压缩或换出其他应用的内存。请退出占用多的应用。",
+                             "Memory pressure is already raised: the system is reclaiming cache itself, and more pressure would only compress or swap other apps. Quit apps that use a lot of memory instead.")
+        }
     }
 
     @MainActor

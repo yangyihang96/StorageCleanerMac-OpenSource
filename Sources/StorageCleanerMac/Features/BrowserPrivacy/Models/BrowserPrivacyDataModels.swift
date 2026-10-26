@@ -144,7 +144,7 @@ enum BrowserPrivacyDataFailure: Error, Equatable {
     case browserRunning, unsupported, changed, pendingWrites, readback, database, rollback, capacity, concurrentOperation, lockUnverifiable, unknownDownloadTable
     static func describe(_ error: Error) -> String {
         if let run = error as? BrowserPrivacyDataRunFailure {
-            return L10n.text("本次运行已回读确认删除 \(run.completedCount) 条，备份保留；后续批次停止：", "This run confirmed deletion of \(run.completedCount) records and kept their backups; later batches stopped: ") + describe(run.underlying)
+            return L10n.text("本次运行已回读确认删除 \(ByteFormat.count(run.completedCount)) 条，备份保留；后续批次停止：", "This run confirmed deletion of \(ByteFormat.count(run.completedCount)) records and kept their backups; later batches stopped: ") + describe(run.underlying)
         }
         if let failure = error as? Self { return failure.text }
         if error is BrowserPrivacyBackupStorageFailure {
@@ -182,7 +182,7 @@ enum BrowserPrivacyDataConfirmation {
         var parts = [L10n.text("将备份并删除：", "Back up and delete: ") + types.map(\.title).sorted().joined(separator: "、")]
         // Several profiles of one browser can hold the same site; name the profile.
         parts += groups.prefix(limit).map { $0.profile.browser.displayName + " · " + $0.profile.displayName + " · " + $0.contract.type.title + " · " + $0.label }
-        if groups.count > limit { parts.append(L10n.text("等 \(groups.count) 项（仅列前 \(limit) 项）", "\(groups.count) items in total (first \(limit) shown)")) }
+        if groups.count > limit { parts.append(L10n.text("等 \(ByteFormat.count(groups.count)) 项（仅列前 \(ByteFormat.count(limit)) 项）", "\(ByteFormat.count(groups.count)) items in total (first \(ByteFormat.count(limit)) shown)")) }
         if types.contains(.cookies) {
             parts.append(L10n.text("将退出这些网站的登录。同域名的所有 Cookie 分区会一起删除；分区和过期可能使登录无法恢复。同步可能回填数据。", "You will be signed out. All cookie partitions of a selected domain are deleted together; partitioning and expiry may prevent login restoration. Sync may refill data."))
             if groups.contains(where: { $0.contract == .firefoxCookies }) {

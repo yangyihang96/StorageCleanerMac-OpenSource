@@ -95,11 +95,14 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         let localList = try XCTUnwrap(source.range(of: "geekDiskVolumeList"))
         let networkSection = try XCTUnwrap(source.range(of: "geekNetworkDiskSection"))
         XCTAssertLessThan(localList.lowerBound, networkSection.lowerBound)
-        XCTAssertTrue(source.contains("L10n.text(\"网络硬盘\", \"Network Drives\")"))
+        // D138: iStat's 'Disks.Network Disks' (was "网络硬盘", "Network Drives").
+        XCTAssertTrue(source.contains("L10n.text(\"网络磁盘\", \"Network Disks\")"))
         XCTAssertTrue(source.contains("GeekDiskVolumePresentation.hasReadableCapacity($0.capacity)"))
         XCTAssertTrue(source.contains("guard Self.hasReadableCapacity(capacity) else { return nil }"))
         XCTAssertTrue(source.contains("return capacity?.userUsedPercent"))
-        XCTAssertTrue(source.contains("ByteFormat.storageString(capacity.userAvailableBytes)"))
+        // D128 (2026-10-19): iStat's disk space format (was
+        // `ByteFormat.storageString(capacity.userAvailableBytes)`).
+        XCTAssertTrue(source.contains("IStatNumberFormat.space(capacity.userAvailableBytes)"))
     }
 
     /// Decision D14 (2026-10-04): the level-one bar shows the used share like
@@ -116,7 +119,12 @@ final class DetailedPanelViewProfileTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDiskView.swift"
         )
 
-        XCTAssertTrue(overview.contains(".frame(width: proxy.size.width * storageSnapshot.userUsedRatio)"))
+        // D118 (2026-10-18): the level-one bar became iStat's capacity ring,
+        // filled to the same used share (was
+        // `.frame(width: proxy.size.width * storageSnapshot.userUsedRatio)`);
+        // `MiniWindowDiskLevelOneBarTests` measures the rendered arc.
+        XCTAssertTrue(overview.contains("progress: Self.ringProgress(storageSnapshot)"))
+        XCTAssertTrue(overview.contains("storageSnapshot.userUsedRatio"))
         XCTAssertFalse(overview.contains("1 - storageSnapshot.userUsedRatio"))
         XCTAssertFalse(detail.contains("GeekDiskUsageRing"))
         XCTAssertTrue(detail.contains("GeekDiskVolumeCapacityRing(volume: volume"))
@@ -142,10 +150,22 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         )
         XCTAssertFalse(components.contains(".stroke(\n                    GeekVisualTokens.cardBorder"))
         XCTAssertTrue(memory.contains("ViewThatFits(in: .horizontal)"))
-        XCTAssertTrue(memory.contains("height: showsExtendedGeekDetails ? 119 : 83"))
+        // D119: the card's minimum is iStat's process section, 25 + 17 per
+        // row of its capacity (five or three); was
+        // `height: showsExtendedGeekDetails ? 119 : 83`.
+        XCTAssertTrue(memory.contains("height: GeekIStatSectionGeometry.processesHeight(geekMemoryProcessCapacity)"))
+        XCTAssertEqual(GeekMemoryProcessLayout.rowCapacity(extended: true), 5)
+        XCTAssertEqual(GeekMemoryProcessLayout.rowCapacity(extended: false), 3)
         XCTAssertTrue(memory.contains("private var memoryProcessActions: some View"))
         XCTAssertTrue(memory.contains(".fixedSize(horizontal: true, vertical: false)"))
-        XCTAssertTrue(network.contains("private var hardwareAddressValue: some View"))
+        // D125 (2026-10-19): the MAC address is the interface section's row,
+        // its label fixed and its value giving way in the middle (was
+        // `hardwareAddressValue` with a "Show" button).
+        let interfaceSections = try sourceText(
+            "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekIStatInterfaceSections.swift"
+        )
+        XCTAssertTrue(interfaceSections.contains("struct GeekIStatHardwareAddressRow: View"))
+        XCTAssertTrue(network.contains("revealsHardwareAddress: $revealsHardwareAddress"))
         XCTAssertTrue(network.contains("private var wiFiHeaderStatus: some View"))
         XCTAssertTrue(network.contains(".truncationMode(.middle)"))
     }
@@ -160,15 +180,22 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         XCTAssertTrue(network.contains("GeekVPNDisclosure"))
         XCTAssertTrue(network.contains("GeekVPNHoverDetail.preferredSize(for: tunnel)"))
         XCTAssertTrue(network.contains("tunnel.tunnelIPv6"))
-        XCTAssertTrue(network.contains("additionalScopedDNSCount"))
+        // D125 (2026-10-19): every scoped DNS server is a row (was three and
+        // "N more").
+        XCTAssertFalse(network.contains("additionalScopedDNSCount"))
+        XCTAssertTrue(network.contains("GeekIStatInterfaceModel(tunnel: tunnel)"))
         XCTAssertTrue(network.contains("VPNControlCapabilityResolver"))
         XCTAssertTrue(network.contains("tunnel.tunnelIPv4"))
         XCTAssertTrue(network.contains("tunnel.scopedDNSServers"))
         XCTAssertTrue(network.contains("geekNetworkProcessCard"))
-        XCTAssertTrue(network.contains("GeekNetworkAddressLine("))
+        // D140 (2026-10-19): iStat's IP sections, every listed address a row
+        // that wraps and copies (were `GeekNetworkAddressLine(`, `.help(value)`
+        // and `.accessibilityLabel("\(version), \(value)")`).
+        XCTAssertFalse(network.contains("GeekNetworkAddressLine("))
+        XCTAssertTrue(network.contains("GeekIStatIPSection("))
         XCTAssertTrue(network.contains(".truncationMode(.middle)"))
-        XCTAssertTrue(network.contains(".help(value)"))
-        XCTAssertTrue(network.contains(".accessibilityLabel(\"\\(version), \\(value)\")"))
+        XCTAssertFalse(network.contains(".help(value)"))
+        XCTAssertFalse(network.contains(".accessibilityLabel(\"\\(version), \\(value)\")"))
         XCTAssertFalse(network.contains("GeekNetworkInterfaceDisclosure"))
         XCTAssertFalse(network.contains("minimumScaleFactor"))
     }

@@ -347,17 +347,13 @@ final class UtilityPresentationPerformanceTests: XCTestCase {
             from: "struct AppUninstallListPresentation {",
             to: "struct AppUpdateListPresentation {"
         )
-        XCTAssertEqual(
-            uninstallerSource.components(separatedBy: "AppUninstallListPresentation.make(").count - 1,
-            1
-        )
+        // The CleanMyMac manager builds its visible list once per render in
+        // the model and keeps lazy rows with stable identities.
+        XCTAssertTrue(uninstallerSource.contains("ApplicationsManagerView(store: store)"))
         XCTAssertFalse(uninstallerSource.contains("private var apps:"))
-        XCTAssertNil(
-            uninstallerSource.range(of: #"\.last(?:\?|\b)"#, options: .regularExpression)
-        )
-        // D67 keeps a lazy stable-ID list in the bounded result viewport.
-        XCTAssertTrue(uninstallerSource.contains("FeatureLightfieldUninstallList(apps: presentation.apps"))
-        XCTAssertFalse(uninstallerSource.contains("VStack { ForEach(presentation.apps)"))
+        let manager = try sourceText(at: "Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift")
+        XCTAssertEqual(manager.components(separatedBy: "model.visibleEntries").count - 1, 1)
+        XCTAssertTrue(manager.contains("LazyVStack(spacing: 0)"))
         let rows = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldUninstallList.swift")
         XCTAssertTrue(rows.contains("LazyVStack(spacing: 0)"))
         XCTAssertTrue(rows.contains("id: \\.element.id"))
@@ -426,12 +422,12 @@ final class UtilityPresentationPerformanceTests: XCTestCase {
         XCTAssertTrue(energyPage.contains(".id(first.id)"))
         XCTAssertTrue(energyPage.contains("ForEach(apps.dropFirst())"))
         XCTAssertTrue(shared.contains("LazyVStack(spacing: 0) { rows }"))
-        // D67 keeps a lazy stable-ID list in the bounded result viewport.
-        XCTAssertTrue(uninstallerSource.contains("FeatureLightfieldUninstallList(apps: presentation.apps"))
-        XCTAssertFalse(uninstallerSource.contains("VStack { ForEach(presentation.apps)"))
-        let uninstallList = try sourceText(at: "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldUninstallList.swift")
-        XCTAssertTrue(uninstallList.contains("LazyVStack(spacing: 0)"))
-        XCTAssertTrue(uninstallList.contains("ForEach(Array(apps.enumerated()), id: \\.element.id)"))
+        // The CleanMyMac manager keeps lazy rows with stable identities.
+        XCTAssertTrue(uninstallerSource.contains("ApplicationsManagerView(store: store)"))
+        let manager = try sourceText(at: "Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift")
+        XCTAssertTrue(manager.contains("LazyVStack(spacing: 0)"))
+        XCTAssertTrue(manager.contains("ForEach(Array(entries.enumerated()), id: \\.element.id) { index, entry in"))
+        XCTAssertFalse(manager.contains("VStack { ForEach("))
     }
 
     private func makeEnergyApp(

@@ -43,7 +43,7 @@ final class MSeriesV11HistoryTests: XCTestCase {
         let repository = BenchmarkV7HistoryRepository(storageURL: url)
         let raw = MSeriesV11TestFixtures.result()
         try await repository.save(raw)
-        let originalBytes = try Data(contentsOf: url)
+        let originalBytes = try BenchmarkV7HistoryStoreProbe.files(for: url)
         let provisional = try MSeriesV11TestFixtures.load(MSeriesV11TestFixtures.reference())
         let first = try await repository.recalculate(reference: provisional)
         XCTAssertNil(first.entries.first?.scores.chipScore) // v10 has no v11 GPU peak/tail.
@@ -61,13 +61,13 @@ final class MSeriesV11HistoryTests: XCTestCase {
         })
         do { _ = try await failing.recalculate(reference: final); XCTFail("Expected write failure") } catch FixtureError.writeFailed {}
         XCTAssertEqual(try Data(contentsOf: cacheURL), firstBytes)
-        XCTAssertEqual(try Data(contentsOf: url), originalBytes)
+        XCTAssertEqual(try BenchmarkV7HistoryStoreProbe.files(for: url), originalBytes)
         let replacement = try await repository.recalculate(reference: final)
         XCTAssertEqual(replacement.referenceIdentity.referenceStatus, .final)
         XCTAssertEqual(replacement.previousSnapshots, first.entries)
         XCTAssertNotEqual(replacement.entries.first?.key, first.entries.first?.key)
         XCTAssertEqual(replacement.entries.first?.scores.componentScores["cpu"], 500)
-        XCTAssertEqual(try Data(contentsOf: url), originalBytes)
+        XCTAssertEqual(try BenchmarkV7HistoryStoreProbe.files(for: url), originalBytes)
         XCTAssertEqual(replacement.entries.first?.originalCompletedAt, raw.completedAt)
         do { _ = try await repository.recalculate(reference: .unavailable); XCTFail("Invalid reference must fail") } catch {}
         let after = try await repository.loadDerivedCache()

@@ -161,8 +161,27 @@ extension MenuBarChartContext {
 
 /// Static previews outside the live panel retain synchronous rendering. Every
 /// live panel and attached history provides a context and uses the worker path.
+#if DEBUG
+private struct MenuBarChartsPreparedInlineKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Offscreen page tests (D119): build every chart in the body.
+    /// `ImageRenderer` draws once, before a chart's preparation task can
+    /// deliver, so a prepared chart would stay at its placeholder.
+    var menuBarChartsPreparedInline: Bool {
+        get { self[MenuBarChartsPreparedInlineKey.self] }
+        set { self[MenuBarChartsPreparedInlineKey.self] = newValue }
+    }
+}
+#endif
+
 struct MenuBarChartPreparation<Value: Sendable, Content: View>: View {
     @Environment(\.menuBarChartContext) private var context
+#if DEBUG
+    @Environment(\.menuBarChartsPreparedInline) private var preparesInline
+#endif
     let kind: String
     let first: Date?
     let last: Date?
@@ -181,8 +200,15 @@ struct MenuBarChartPreparation<Value: Sendable, Content: View>: View {
     var placeholder: AnyView? = nil
     @ViewBuilder let content: (Value) -> Content
 
+    private var preparedContext: MenuBarChartContext? {
+#if DEBUG
+        if preparesInline { return nil }
+#endif
+        return context
+    }
+
     var body: some View {
-        if let context {
+        if let context = preparedContext {
             MenuBarPreparedChart(key: context.key(kind: kind, first: first, last: last, count: count, clockRevision: clockRevision,
                                                   configuration: configuration),
                                  shape: shape, window: window,
@@ -225,47 +251,78 @@ struct GeekPreparedLineFrame: Sendable {
     /// prepared only for the memory-pressure channel.
     let pressureLevels: [MemoryPressureLevel?]
 
+    /// `unrecordedIntervals` nil reads the shared known pauses, as every chart
+    /// does. A caller that owns its pauses (a test fixture) passes them here,
+    /// and every step of this frame then uses that list instead.
+    /// D130, D131: `bucketing` picks iStat's history buckets (level three) or
+    /// one bar per sample (levels one and two); neither estimates a missing
+    /// bucket, and the history weights a folded minute by its sample count.
     init(points: [MenuBarTelemetryPoint], channels: [MenuBarTelemetryChannel],
          plot: CGRect, duration: TimeInterval, reference: Date, samplingInterval: TimeInterval,
-         scale: CGFloat, stacked: Bool, valueRange: ClosedRange<Double>) {
+         scale: CGFloat, stacked: Bool, valueRange: ClosedRange<Double>,
+         unrecordedIntervals: [DateInterval]? = nil, bucketing: GeekChartBucketing = .projection) {
         let points = MenuBarTelemetryPoint.historyPoints(points, channels: channels)
         sourcePoints = points
         let dates = points.map(\.date)
         let bucketRange = GeekChartWindow.barRange(for: dates, duration: duration, referenceDate: reference)
-        let averagingInterval = GeekHistoryAveraging.interval(for: duration)
-        if stacked { range = bucketRange }
-        else {
-            let window = GeekChartWindow.range(for: dates, duration: duration, referenceDate: reference)
-            range = (window.start, window.end, dates.first ?? window.start)
-        }
+        let averagingInterval = bucketing == .projection ? GeekHistoryAveraging.interval(for: duration) : nil
         let usesCPU = stacked && !channels.isEmpty && channels.allSatisfy { [.cpuTotal, .cpuUser, .cpuSystem].contains($0) }
         var preparedBuckets: [GeekChartBucketSnapshot]
-        if stacked || averagingInterval != nil {
-            preparedBuckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: bucketRange,
-                referenceDate: reference, displayScale: scale,
-                isValid: { index in channels.allSatisfy { $0.value(in: points[index])?.isFinite == true } },
+        switch bucketing {
+        case .samples:
+            preparedBuckets = GeekIStatSampleBars.buckets(dates: dates, plotRect: plot, displayScale: scale,
+                referenceDate: reference, isSample: { index in
+                    points[index].bucketStatistics == nil && channels.contains { $0.value(in: points[index]) != nil }
+                })
+            range = GeekIStatHistoryBuckets.range(of: preparedBuckets.filter { !$0.indices.isEmpty }, fallback: reference)
+        case .history:
+            let gaps = unrecordedIntervals ?? MenuBarSamplingGaps.shared.intervals(at: reference)
+            preparedBuckets = GeekIStatHistoryBuckets.buckets(dates: dates,
+                interval: GeekIStatHistoryBuckets.interval(for: duration), plotRect: plot,
+                referenceDate: reference, displayScale: scale, gaps: gaps,
                 isMissing: { index in
-                    if usesCPU, averagingInterval != nil {
-                        return !GeekCPUHistoryFrame.isComplete(points[index])
-                    }
-                    return stacked && channels.allSatisfy { $0.value(in: points[index]) == nil }
+                    usesCPU ? !GeekCPUHistoryFrame.isComplete(points[index])
+                        : channels.allSatisfy { $0.mean(in: points[index]) == nil }
                 },
-                holdLatestWhileFresh: true)
-        } else {
-            preparedBuckets = GeekChartWindow.barBucketSnapshots(for: dates, in: plot, range: bucketRange,
-                referenceDate: reference, displayScale: scale)
+                weight: { index in
+                    Double(max(1, channels.first.flatMap { points[index].bucketStatistics?.metrics[$0.rawValue]?.sampleCount } ?? 1))
+                })
+            range = GeekIStatHistoryBuckets.range(of: preparedBuckets, fallback: reference)
+        case .projection:
+            if stacked { range = bucketRange }
+            else {
+                let window = GeekChartWindow.range(for: dates, duration: duration, referenceDate: reference)
+                range = (window.start, window.end, dates.first ?? window.start)
+            }
+            if stacked || averagingInterval != nil {
+                preparedBuckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: bucketRange,
+                    referenceDate: reference, displayScale: scale,
+                    isValid: { index in channels.allSatisfy { $0.value(in: points[index])?.isFinite == true } },
+                    isMissing: { index in
+                        if usesCPU, averagingInterval != nil {
+                            return !GeekCPUHistoryFrame.isComplete(points[index])
+                        }
+                        return stacked && channels.allSatisfy { $0.value(in: points[index]) == nil }
+                    },
+                    unrecordedIntervals: unrecordedIntervals,
+                    holdLatestWhileFresh: true)
+            } else {
+                preparedBuckets = GeekChartWindow.barBucketSnapshots(for: dates, in: plot, range: bucketRange,
+                    referenceDate: reference, displayScale: scale)
+            }
         }
-        let compressed = points.contains { $0.bucketStatistics != nil }
+        let compressed = bucketing == .projection && points.contains { $0.bucketStatistics != nil }
         if compressed, let channel = channels.first {
-            let gaps = MenuBarSamplingGaps.shared.intervals(at: reference)
+            let gaps = unrecordedIntervals ?? MenuBarSamplingGaps.shared.intervals(at: reference)
             preparedBuckets = GeekCompressedHistoryProjection.buckets(preparedBuckets, dates: dates,
                 records: points.indices.map { points[$0].statistic(for: channel, previous: $0 > 0 ? points[$0 - 1] : nil, gaps: gaps) })
         }
         buckets = preparedBuckets
-        cpu = usesCPU ? GeekCPUHistoryFrame.prepare(points: points, plotRect: plot, duration: duration,
+        cpu = usesCPU && bucketing == .projection ? GeekCPUHistoryFrame.prepare(points: points, plotRect: plot, duration: duration,
                                                     referenceDate: reference, samplingInterval: samplingInterval,
                                                     displayScale: scale,
-                                                    preparedAveragedBuckets: averagingInterval == nil ? nil : buckets) : nil
+                                                    preparedAveragedBuckets: averagingInterval == nil ? nil : buckets,
+                                                    unrecordedIntervals: unrecordedIntervals) : nil
         if let cpu, averagingInterval != nil {
             let means = Dictionary(uniqueKeysWithValues: cpu.marks.map { ($0.bucket.x, $0.mean) })
             values = buckets.map { bucket in
@@ -284,11 +341,14 @@ struct GeekPreparedLineFrame: Sendable {
         let filled = channels.indices.map { channel in
             TimeBucketAggregator.nearestFilled(values.map { $0[channel] })
         }
+        // D130: iStat's tooltip shows a bucket's mean, never an estimate.
+        let estimates = bucketing == .projection
         hoverValues = bucketValues.indices.map { index in channels.indices.map { channel in
-            bucketValues[index].averagingGroups != nil ? values[index][channel] : filled[channel][index].value
+            !estimates || bucketValues[index].averagingGroups != nil ? values[index][channel] : filled[channel][index].value
         } }
         hoverEstimated = bucketValues.indices.map { index in channels.indices.map { channel in
-            bucketValues[index].averagingGroups == nil && (bucketValues[index].isEstimated || filled[channel][index].isEstimated)
+            estimates && bucketValues[index].averagingGroups == nil
+                && (bucketValues[index].isEstimated || filled[channel][index].isEstimated)
         } }
         let buckets = self.buckets
         var paths: [MenuBarTelemetryChannel: [[CGPoint]]] = [:]
@@ -298,11 +358,12 @@ struct GeekPreparedLineFrame: Sendable {
                 let observedValues = buckets.map { bucket in
                     bucket.displayValue { channel.mean(in: points[$0]) }
                 }
-                let filled = compressed
+                let filled = compressed || !estimates
                     ? observedValues.enumerated().map { TimeBucketValue(value: $0.element, isEstimated: false, sourceIndex: $0.offset) }
                     : TimeBucketAggregator.nearestFilled(observedValues)
                 paths[channel] = TimeBucketAggregator.observedSegments(filled.map(\.value), in: buckets,
-                    sampleDates: dates, isSampleValid: { channel.value(in: points[$0])?.isFinite == true }).map { segment in
+                    sampleDates: dates, unrecordedIntervals: unrecordedIntervals,
+                    isSampleValid: { channel.value(in: points[$0])?.isFinite == true }).map { segment in
                     segment.map { sample in
                         let value = min(valueRange.upperBound, max(valueRange.lowerBound, sample.value))
                         return CGPoint(x: buckets[sample.index].x,
@@ -334,8 +395,9 @@ struct GeekPreparedDiskSummary: Sendable {
     let write: GeekSeriesStatistics?
     let readPeakBytesPerSecond: Int64?
     let writePeakBytesPerSecond: Int64?
-    var readPeakText: String { readPeakBytesPerSecond.map { "\(ByteFormat.string($0))/s" } ?? "--" }
-    var writePeakText: String { writePeakBytesPerSecond.map { "\(ByteFormat.string($0))/s" } ?? "--" }
+    /// D128: iStat's disk activity rows (`format:label:alignment:`).
+    var readPeakText: String { readPeakBytesPerSecond.map { IStatNumberFormat.diskActivity($0) } ?? "--" }
+    var writePeakText: String { writePeakBytesPerSecond.map { IStatNumberFormat.diskActivity($0) } ?? "--" }
     init(points allPoints: [NativeDiskIOPoint], duration: TimeInterval = GeekChartWindow.defaultDuration, referenceDate: Date) {
         self.referenceDate = referenceDate
         let points = MenuBarHistoryRetention.selected(allPoints, duration: duration, date: \.date, referenceDate: referenceDate)
@@ -358,17 +420,43 @@ struct GeekPreparedDiskFrame: Sendable {
     let writes: [Double?]
     let readMarks: [GeekMirroredBarMark]
     let writeMarks: [GeekMirroredBarMark]
-    let maximum: Double
+    /// Scale of the read series and of the write series (D117).
+    let readMaximum: Double
+    let writeMaximum: Double
+    /// D146: the highest read and the highest write the bars show, iStat's
+    /// peak row (without the scales' 1 KB/s floor); nil without a bar.
+    let readPeak: Double?
+    let writePeak: Double?
     let range: (start: Date, end: Date, dataStart: Date)
-    init(points allPoints: [NativeDiskIOPoint], plot: CGRect, duration: TimeInterval, reference: Date, scale: CGFloat) {
+    /// D130, D131: `bucketing` as `GeekPreparedLineFrame`'s. A rate is a
+    /// sample at its own time, as iStat's, not spread over the interval it
+    /// was measured across.
+    init(points allPoints: [NativeDiskIOPoint], plot: CGRect, duration: TimeInterval, reference: Date, scale: CGFloat,
+         bucketing: GeekChartBucketing = .projection) {
         let points = MenuBarHistoryRetention.selected(allPoints, duration: duration, date: \.date, referenceDate: reference)
         let dates = points.map(\.date)
         let window = GeekChartWindow.barRange(for: dates, duration: duration, referenceDate: reference)
-        range = window
-        var buckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: window,
-            referenceDate: reference, displayScale: scale,
-            intervalStart: { points[$0].intervalStart }, holdLatestWhileFresh: true)
-        let compressed = points.contains { $0.bucketStatistics != nil }
+        var buckets: [GeekChartBucketSnapshot]
+        switch bucketing {
+        case .samples:
+            buckets = GeekIStatSampleBars.buckets(dates: dates, plotRect: plot, displayScale: scale,
+                referenceDate: reference, isSample: { points[$0].bucketStatistics == nil })
+            range = GeekIStatHistoryBuckets.range(of: buckets.filter { !$0.indices.isEmpty }, fallback: reference)
+        case .history:
+            buckets = GeekIStatHistoryBuckets.buckets(dates: dates,
+                interval: GeekIStatHistoryBuckets.interval(for: duration), plotRect: plot,
+                referenceDate: reference, displayScale: scale,
+                gaps: MenuBarSamplingGaps.shared.intervals(at: reference),
+                weight: { Double(max(1, points[$0].bucketStatistics?.metrics["diskRead"]?.sampleCount ?? 1)) })
+            range = GeekIStatHistoryBuckets.range(of: buckets, fallback: reference)
+        case .projection:
+            range = window
+            buckets = GeekChartWindow.displayBuckets(for: dates, in: plot, range: window,
+                referenceDate: reference, displayScale: scale,
+                intervalStart: { points[$0].intervalStart }, holdLatestWhileFresh: true)
+        }
+        let compressed = bucketing == .projection && points.contains { $0.bucketStatistics != nil }
+        let estimates = bucketing == .projection && !compressed
         if compressed {
             let gaps = MenuBarSamplingGaps.shared.intervals(at: reference)
             buckets = GeekCompressedHistoryProjection.buckets(buckets, dates: dates,
@@ -379,9 +467,12 @@ struct GeekPreparedDiskFrame: Sendable {
         let writes = buckets.map { $0.displayValue { points[$0].bucketStatistics?.metrics["diskWrite"]?.mean ?? Double(points[$0].writeBytesPerSecond) } }
         self.reads = reads
         self.writes = writes
-        maximum = GeekBarChartScale.throughputUpperBound(for: (reads + writes).compactMap { $0 })
+        readMaximum = GeekBarChartScale.throughputUpperBound(for: reads.compactMap { $0 })
+        writeMaximum = GeekBarChartScale.throughputUpperBound(for: writes.compactMap { $0 })
+        readPeak = reads.compactMap { $0 }.filter(\.isFinite).max()
+        writePeak = writes.compactMap { $0 }.filter(\.isFinite).max()
         func marks(_ values: [Double?]) -> [GeekMirroredBarMark] {
-            let filled = compressed
+            let filled = !estimates
                 ? values.enumerated().map { TimeBucketValue(value: $0.element, isEstimated: false, sourceIndex: $0.offset) }
                 : TimeBucketAggregator.nearestFilled(values)
             return zip(buckets, filled).compactMap { bucket, value in

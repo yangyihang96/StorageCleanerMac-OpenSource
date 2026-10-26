@@ -1,9 +1,11 @@
 import Foundation
 
 struct SpotlightApplicationScanner: Sendable {
+    var contentTypeAttribute: String = NSMetadataItemContentTypeKey
+
     func scan(timeout: Duration) async throws -> SpotlightApplicationScanResult {
         let session = await MainActor.run { SpotlightApplicationQuerySession() }
-        return try await session.scan(timeout: timeout)
+        return try await session.scan(timeout: timeout, contentTypeAttribute: contentTypeAttribute)
     }
 }
 
@@ -14,11 +16,11 @@ private final class SpotlightApplicationQuerySession: NSObject {
     private var timeoutTask: Task<Void, Never>?
     private var didFinish = false
 
-    func scan(timeout: Duration) async throws -> SpotlightApplicationScanResult {
+    func scan(timeout: Duration, contentTypeAttribute: String) async throws -> SpotlightApplicationScanResult {
         try Task.checkCancellation()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                start(continuation: continuation, timeout: timeout)
+                start(continuation: continuation, timeout: timeout, contentTypeAttribute: contentTypeAttribute)
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -29,7 +31,8 @@ private final class SpotlightApplicationQuerySession: NSObject {
 
     private func start(
         continuation: CheckedContinuation<SpotlightApplicationScanResult, Error>,
-        timeout: Duration
+        timeout: Duration,
+        contentTypeAttribute: String
     ) {
         guard self.continuation == nil else {
             continuation.resume(throwing: ApplicationScanningError.spotlightUnavailable)
@@ -39,7 +42,7 @@ private final class SpotlightApplicationQuerySession: NSObject {
         let query = NSMetadataQuery()
         query.predicate = NSPredicate(
             format: "%K == %@",
-            NSMetadataItemContentTypeKey,
+            contentTypeAttribute,
             "com.apple.application-bundle"
         )
         query.searchScopes = [NSMetadataQueryLocalComputerScope]

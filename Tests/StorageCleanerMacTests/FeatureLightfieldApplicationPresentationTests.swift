@@ -11,8 +11,19 @@ final class FeatureLightfieldApplicationPresentationTests: XCTestCase {
         XCTAssertEqual(total, 40_800_000_000)
         XCTAssertEqual(FeatureLightfieldAmount.parse(ByteFormat.storageString(total, locale: locale)),
             .init(value: 40.8, unit: "GB", precision: 1, qualifier: ""))
-        let page = try text("Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
-        XCTAssertTrue(page.contains("FeatureLightfieldAmount.parse(ByteFormat.storageString(totalBytes))"))
+        // D14x: the uninstall result is the CleanMyMac manager page (was
+        // SystemUtilitiesView.swift); its summary, rows, groups and status
+        // keep D70's decimal storage formatter.
+        let page = try text("Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift")
+        // D154: the summary band left with the D67 skeleton; the manager's
+        // footer and the result tiles keep the decimal storage formatter.
+        XCTAssertTrue(page.contains("ByteFormat.storageString(summary.bytes)"))
+        let tiles = try text("Sources/StorageCleanerMac/Views/CareStudio/CareStudioApplications.swift")
+        XCTAssertTrue(tiles.contains("ByteFormat.storageString(model.leftoverBytes)"))
+        XCTAssertFalse(tiles.contains("ByteFormat.string("))
+        XCTAssertTrue(page.contains("private var size: String { ByteFormat.storageString(entry.totalBytes) }"))
+        XCTAssertTrue(page.contains(".accessibilityLabel(entry.item.name + \" · \" + entry.item.path + \" · \" + size)"))
+        XCTAssertFalse(page.contains("ByteFormat.string("))
         let rows = try text("Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldUninstallList.swift")
         XCTAssertTrue(rows.contains("Text(ByteFormat.storageString(app.sizeBytes))"))
         XCTAssertTrue(rows.contains(".help(ByteFormat.storageString(app.sizeBytes))"))

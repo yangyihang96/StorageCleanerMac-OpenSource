@@ -27,7 +27,9 @@ struct StartupScanCoordinator: Sendable {
             LaunchdPlistScanner(location: .systemLaunchAgents),
             LaunchdPlistScanner(location: .launchDaemons),
             LaunchdPlistScanner(location: .systemLaunchDaemons),
-            BackgroundTaskManagementScanner(),
+            // D177: through the helper, so no password dialog (was the
+            // opt-in command scanner, BackgroundTaskManagementScanner()).
+            BackgroundTaskManagementScanner.helperBacked(),
         ]
         self.secondaryScannerFactory = secondaryScannerFactory ?? { _ in
             [
@@ -108,10 +110,12 @@ struct StartupScanCoordinator: Sendable {
         let deduplicated = deduplicator.deduplicate(visibleCandidates)
         let items = merger.merge(deduplicated)
         let batches = primaryBatches + secondaryBatches
-        let managedItemCoverageAvailable = initialContext.includeBackgroundTaskDiagnostic
-            && batches.contains {
-                $0.source == .backgroundTaskDiagnostic && $0.errorDescription == nil
-            }
+        // D177: the helper's read needs no opt-in; the command's still does.
+        let managedItemCoverageAvailable = batches.contains {
+            $0.source == .backgroundTaskDiagnostic && $0.errorDescription == nil
+                && (initialContext.includeBackgroundTaskDiagnostic
+                    || $0.identifier == BackgroundTaskManagementScanner.helperCoverageIdentifier)
+        }
         let coverage = coverageReport(
             batches: batches,
             rawEvidenceCount: allCandidates.count,

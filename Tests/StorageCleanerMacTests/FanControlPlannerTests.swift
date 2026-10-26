@@ -587,6 +587,10 @@ final class FanControlPlannerTests: XCTestCase {
         )
     }
 
+    /// D152: manual applies the stored slider value, as iStat writes the
+    /// values with the mode, ramped from the current speed (was: the
+    /// current speed became the manual value and was applied unchanged).
+    /// The slider writes 0.2 s after its last move (was 0.15 s).
     @MainActor
     func testManualSelectionUsesCurrentRPMAndDebouncesSliderWrites() async {
         let defaultsSuiteName = TestPreferenceDomain.makeSuite()
@@ -603,17 +607,23 @@ final class FanControlPlannerTests: XCTestCase {
         coordinator.process(snapshot: snapshot(at: clock.now, actualRPM: currentRPM))
 
         await coordinator.selectMode(.manual)
-        try? await Task.sleep(for: .milliseconds(220))
+        // D152: the entry write follows the ping after the 0.2 s debounce (was 220 ms for 0.15 s).
+        try? await Task.sleep(for: .milliseconds(300))
         await waitUntilIdle(coordinator)
 
+        // D152: the stored value stays (the 0.70 default here; was
+        // (4_000 − 2_300) / (7_800 − 2_300), the current speed).
         XCTAssertEqual(
             coordinator.manualFraction,
-            Double(currentRPM - 2_300) / Double(7_800 - 2_300),
+            FanControlPreferences.defaultManualFraction,
             accuracy: 0.000_1
         )
+        // D152: 0.70 maps to 6_150 rpm; the first write ramps from the
+        // current 4_000 rpm by 500 rpm/s over the 2 s minimum interval (was
+        // [0: currentRPM]).
         XCTAssertEqual(
             recorder.requests.last(where: { $0.operation == .apply })?.targetRPMByFan,
-            [0: currentRPM]
+            [0: currentRPM + 1_000]
         )
         let initialApplyCount = recorder.requests.filter { $0.operation == .apply }.count
 
@@ -626,7 +636,8 @@ final class FanControlPlannerTests: XCTestCase {
             initialApplyCount
         )
 
-        try? await Task.sleep(for: .milliseconds(140))
+        // D152: 200 ms more for the 0.2 s debounce (was 140 ms for 0.15 s).
+        try? await Task.sleep(for: .milliseconds(200))
         await waitUntilIdle(coordinator)
         XCTAssertEqual(
             recorder.requests.filter { $0.operation == .apply }.count,

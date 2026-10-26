@@ -115,9 +115,10 @@ final class MiniWindowUser1011Tests: XCTestCase {
             clusters: [.init(name: "E0", kind: .efficiency, megahertz: 0)], gpuMegahertz: nil, durationSeconds: 1)
         let presentation = GeekHelperPowerMetricsPresentation(state: .available(partial, sampledAt: now), now: now)
         XCTAssertEqual(presentation.powerRows.map(\.id), ["gpu"])
-        XCTAssertEqual(presentation.powerRows.map(\.value), ["0.00 W"])
+        // D128 (2026-10-19): iStat's power and frequency formats (was "0.00 W", "0 MHz").
+        XCTAssertEqual(presentation.powerRows.map(\.value), ["0 W"])
         XCTAssertEqual(presentation.frequencyRows.map(\.title), ["能效簇"])
-        XCTAssertEqual(presentation.frequencyRows.map(\.value), ["0 MHz"])
+        XCTAssertEqual(presentation.frequencyRows.map(\.value), ["0 GHz"])
     }
 
     func testAvailableReadingsEnterPowerAndFrequencyCardsWithProvenanceInHelp() {

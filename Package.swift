@@ -22,7 +22,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4")
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
     ],
     targets: [
         .executableTarget(name: "StorageCleanerUpdateAskpass", dependencies: ["FileOperationShared"], path: "Sources/UpdateAskpass"),
@@ -40,12 +40,20 @@ let package = Package(
             name: "FanControlShared",
             path: "Sources/FanControlShared"
         ),
+        // D153: the combined status icon (battery ring, network glyph, volume),
+        // ported from Status Trio 1.6.0 under the Apache License 2.0
+        // (THIRD_PARTY_NOTICES.md).
+        .target(
+            name: "CombinedStatusIcon",
+            path: "Sources/CombinedStatusIcon"
+        ),
         .systemLibrary(
             name: "CSQLite"
         ),
         .executableTarget(
             name: "StorageCleanerMac",
             dependencies: [
+                "CombinedStatusIcon",
                 "FanControlShared",
                 "FileOperationShared",
                 "UninstallHandoffShared",
@@ -79,9 +87,21 @@ let package = Package(
             name: "MemoryFixtureApp",
             path: "Tests/StorageCleanerMacTests/Fixtures/MemoryFixtureApp"
         ),
+        // D153: Status Trio 1.6.0's tests of the ported icon code (Apache
+        // License 2.0) and this app's tests of the module. No test in it shows
+        // a window: the module draws offscreen and onto a button it is given.
+        .testTarget(
+            name: "CombinedStatusIconTests",
+            dependencies: ["CombinedStatusIcon"],
+            path: "Tests/CombinedStatusIconTests"
+        ),
+        // D106: a load-time constructor that installs the display gate in
+        // the test bundle before any test runs (TestDisplayGateBootstrap).
+        .target(name: "StorageCleanerTestDisplayBootstrap", path: "Tests/StorageCleanerTestDisplayBootstrap"),
         .testTarget(
             name: "StorageCleanerMacTests",
-            dependencies: ["StorageCleanerMac", "FanControlShared", "FileOperationShared", "UninstallHandoffShared", "CSQLite"],
+            dependencies: ["StorageCleanerMac", "CombinedStatusIcon", "FanControlShared", "FileOperationShared", "UninstallHandoffShared", "CSQLite",
+                           "StorageCleanerTestDisplayBootstrap"],
             exclude: ["Fixtures"],
             swiftSettings: [
                 .define(

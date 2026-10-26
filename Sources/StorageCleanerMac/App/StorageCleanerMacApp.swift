@@ -46,10 +46,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 #else
         NSApp.setActivationPolicy(.regular)
 #endif
-        Task.detached(priority: .utility) {
-            SQLiteSnapshotService().cleanupOrphans()
+        // D106: an acceptance session deletes nothing on its own; the next
+        // normal launch removes what has expired by then.
+        if !AcceptanceLaunch.isActive {
+            Task.detached(priority: .utility) {
+                SQLiteSnapshotService().cleanupOrphans()
+            }
+            BrowserPrivacyRecoveryMaintenance.enableAndPurge()
         }
-        BrowserPrivacyRecoveryMaintenance.enableAndPurge()
         // BOARD N19: memory quit suggestions skip the app the user works in,
         // which is the one in front before this app's own window is used.
         UserFrontmostApplicationTracker.shared.start()
@@ -210,7 +214,9 @@ private struct MainWindowSidebarCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .sidebar) {
-            Button(L10n.text("显示或隐藏边栏", "Toggle Sidebar")) {
+            // D175: it folds the sidebar to icons and back (was “显示或隐藏边栏”,
+            // which hid the whole column).
+            Button(L10n.text("展开或收起侧栏", "Expand or Collapse Sidebar")) {
                 sidebarAction?()
             }
             .keyboardShortcut("s", modifiers: [.command, .control])
@@ -302,6 +308,11 @@ struct StorageCleanerMacApp: App {
     @AppStorage(L10n.appearanceDefaultsKey) private var appearanceRawValue = AppAppearance.system.rawValue
 
     init() {
+#if STORAGE_CLEANER_BETA
+        // D106: first, so a refused acceptance launch exits before any
+        // window, status item, store or helper connection exists.
+        AcceptanceLaunch.configureOrExit()
+#endif
         Self.terminateIfDuplicateInstance()
         let coordinator = HeavyWorkCoordinator(operationLockDirectory:
             AppDataDirectories.applicationSupportRoot.appendingPathComponent("OperationLocks"))
@@ -561,6 +572,7 @@ struct StorageCleanerMacApp: App {
                         store: store,
                         computerHealthStore: computerHealthStore
                     )
+                    AppLifecycleReminderCenter.shared.start(store: store)
                     store.prepareMenuBarLiveStatusOnLaunch()
                     Task {
 #if DEBUG || STORAGE_CLEANER_BETA
@@ -595,6 +607,9 @@ struct StorageCleanerMacApp: App {
                     Task {
                         await computerHealthStore.verifyBatterySettingsAfterReturn()
                     }
+                    // D100 G5: offer a rescan when access granted meanwhile
+                    // makes roots the last scan missed readable.
+                    store.checkAccessAfterReturn()
                     StartupApplicationUpdateScheduler.shared.scheduleIfDue(
                         shouldCheck: { ApplicationUpdateCheckSchedule.shouldCheck() },
                         executionAvailable: { store.canRefreshAppUpdates },
@@ -640,49 +655,23 @@ struct StorageCleanerMacApp: App {
             }
 
             CommandMenu(L10n.text("导航", "Navigate")) {
-                Button(ReviewFilter.overview.title) {
-                    store.showFilter(.overview)
+                // D154: CleanMyMac's View menu lists its modules in sidebar
+                // order; ⌘1–⌘8 open the eight above, ⌘9 My Tools.
+                ForEach(Array(CareStudioFamily.allCases.enumerated()), id: \.element) { index, family in
+                    if family == .myTools {
+                        Divider()
+                    }
+                    if index < 9 {
+                        Button(family.title) {
+                            store.showFilter(family.primaryRoute)
+                        }
+                        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.command])
+                    } else {
+                        Button(family.title) {
+                            store.showFilter(family.primaryRoute)
+                        }
+                    }
                 }
-                .keyboardShortcut("1", modifiers: [.command])
-
-                Button(ReviewFilter.healthHub.title) {
-                    store.showFilter(.healthHub)
-                }
-
-                Button(ReviewFilter.performance.title) {
-                    store.showFilter(.performance)
-                }
-
-                Divider()
-
-                Button(ReviewFilter.green.title) {
-                    store.showFilter(.green)
-                }
-                .keyboardShortcut("2", modifiers: [.command])
-
-                Button(ReviewFilter.privacy.title) {
-                    store.showFilter(.privacy)
-                }
-                .keyboardShortcut("3", modifiers: [.command])
-
-                Button(ReviewFilter.devCaches.title) {
-                    store.showFilter(.devCaches)
-                }
-                .keyboardShortcut("4", modifiers: [.command])
-
-                Button(ReviewFilter.largeFiles.title) {
-                    store.showFilter(.largeFiles)
-                }
-                .keyboardShortcut("5", modifiers: [.command])
-
-                Button(ReviewFilter.migration.title) {
-                    store.showFilter(.migration)
-                }
-
-                Button(ReviewFilter.duplicates.title) {
-                    store.showFilter(.duplicates)
-                }
-                .keyboardShortcut("6", modifiers: [.command])
             }
 
             CommandMenu(L10n.text("工具", "Tools")) {

@@ -61,7 +61,16 @@ final class CleanupJunkActionableTests: XCTestCase {
             session.candidates.count,
             "Listed but not actionable: \(unselectable.map { "\($0.ruleID):\($0.sourceURL.lastPathComponent):\($0.selectionEligibility.rawValue)" })"
         )
+        // D181: the volume Trash rule needs a mounted drive, so it is scanned
+        // on a fixture drive seen as /Volumes/Fake; its rows must be
+        // actionable too (was the home fixture alone).
+        let drive = try VolumeTrashFakeDrive(test: self, uid: getuid())
+        try drive.write(bytes: 8_192, to: "fixture-volume-trash.bin")
+        let (volumeSession, _) = try await drive.scan()
+        XCTAssertFalse(volumeSession.candidates.isEmpty)
+        XCTAssertTrue(volumeSession.candidates.allSatisfy(\.isSelectable))
         let listedRuleIDs = Set(session.candidates.map(\.ruleID))
+            .union(volumeSession.candidates.map(\.ruleID))
         XCTAssertEqual(
             Set(rules.rules.map(\.id)).subtracting(listedRuleIDs),
             [],
@@ -334,8 +343,8 @@ final class CleanupJunkActionableTests: XCTestCase {
         XCTAssertEqual(session.outcome, .partial)
     }
 
-    /// D19/D24/D25: personal data, agent sessions, mail library attachments
-    /// and app bundles are not junk and are never listed.
+    /// D19/D24/D25: personal data, agent sessions and app bundles stay out.
+    /// D183 supersedes D24 only for explicitly reviewed attachment folders.
     func testRemovedPersonalDataAndApplicationBundlesAreNotListed() async throws {
         let fixture = try makeFixtureHome()
         let home = fixture.home
@@ -371,7 +380,10 @@ final class CleanupJunkActionableTests: XCTestCase {
 
         let session = try await scan(home: home, applications: fixture.applications, rules: rules)
 
-        XCTAssertTrue(session.candidates.isEmpty, "\(session.candidates.map(\.snapshot.standardizedPath))")
+        // D183＋旧值：session.candidates.isEmpty。其他个人数据仍不能列出。
+        XCTAssertEqual(session.candidates.map { PathSafety.normalizedPath($0.sourceURL.path) }, [PathSafety.normalizedPath(
+            home.appendingPathComponent("Library/Mail/V10/account/Inbox.mbox/Data/1/Attachments").path)])
+        XCTAssertTrue(session.candidates.allSatisfy { $0.ruleID == "mail.library-attachment-folders" && !$0.isPreselectedByDefault })
     }
 
     /// D47 (replaces D22's owner rule): every green cache and log row is
@@ -1319,6 +1331,9 @@ final class CleanupJunkActionableTests: XCTestCase {
         case .descendantAggregate:
             let name = rule.include.nameMatcher.values.first ?? "Attachments"
             try write(bytes: bytes, to: root.appendingPathComponent("V10/fixture/\(name)/payload.bin"))
+        case .namedDescendantDirectories:
+            let name = rule.include.nameMatcher.values[0]
+            try write(bytes: bytes, to: root.appendingPathComponent("V10/fixture/INBOX.mbox/U/Data/1/\(name)/payload.bin"))
         case .immediateChildren:
             let matcher = rule.include.nameMatcher
             let name: String
@@ -1458,5 +1473,56 @@ private actor ProgressRecorder {
 private struct ThrowingDeleter: CleanupPermanentDeleting {
     func removeTrashEntry(_: CleanupTrashEntryDeletion) async throws {
         throw CocoaError(.fileWriteNoPermission)
+    }
+}
+
+extension CleanupJunkActionableTests {
+    /// D101 G4-2: under a rule's root, a location no flow may touch is
+    /// counted, not listed — here the integration identity's data among the
+    /// user caches, and Screen Time's and File Provider's stores under a
+    /// rule rooted at Application Support. The rules' other rows are listed.
+    func testLocationsNoFlowMayTouchAreCountedNotListed() async throws {
+        let fixture = try makeFixtureHome()
+        let home = fixture.home
+        let caches = home.appendingPathComponent("Library/Caches")
+        let support = home.appendingPathComponent("Library/Application Support")
+        for folder in [caches.appendingPathComponent("StorageCleanerIntegration-run"),
+                       caches.appendingPathComponent("com.example.plain")]
+            + ["Knowledge", "FileProvider", "com.example.vendor"].map(support.appendingPathComponent) {
+            try write(bytes: 8_192, to: folder.appendingPathComponent("data.bin"))
+        }
+        let bundled = try CleanupRuleSetLoader.loadBundled()
+        let userCaches = lowered(try XCTUnwrap(bundled.rules.first { $0.id == "system.user-caches" }))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(userCaches)) as? [String: Any])
+        object["id"] = "fixture.application-support"
+        object["root"] = ["kind": "homeRelative", "path": "Library/Application Support"]
+        // Application Support is not a safe root, so a rule there can only
+        // be a reviewed one, as the bundled iStat Menus rule is.
+        object["risk"] = "reviewOnly"
+        object["recommendation"] = "optional"
+        object["defaultSelection"] = "unselected"
+        object["executionEligibility"] = "eligibleAfterReview"
+        object["measurementRequirement"] = "complete"
+        object["allowsManualSelection"] = true
+        object["action"] = "moveToTrashAfterReview"
+        let applicationSupport = try JSONDecoder().decode(
+            CleanupRule.self, from: JSONSerialization.data(withJSONObject: object))
+        let rules = CleanupRuleSet(schemaVersion: bundled.schemaVersion, rulesVersion: bundled.rulesVersion,
+                                   rules: [userCaches, applicationSupport])
+
+        let session = try await scan(home: home, applications: fixture.applications, rules: rules)
+
+        XCTAssertEqual(Set(session.candidates.map { "\($0.ruleID):\($0.sourceURL.lastPathComponent)" }), [
+            "system.user-caches:com.example.plain",
+            "fixture.application-support:com.example.vendor",
+        ])
+        XCTAssertEqual(
+            Set(session.issues.filter { $0.kind == .candidateContainsProtectedData }.compactMap(\.path)),
+            Set([caches.appendingPathComponent("StorageCleanerIntegration-run"),
+                 support.appendingPathComponent("Knowledge"),
+                 support.appendingPathComponent("FileProvider")].map { PathSafety.lexicalPath($0.path) })
+        )
+        XCTAssertEqual(session.metrics.protectedDataCandidateCount, 3)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: support.appendingPathComponent("Knowledge").path))
     }
 }

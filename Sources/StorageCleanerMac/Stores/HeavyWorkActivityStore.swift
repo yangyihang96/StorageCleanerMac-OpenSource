@@ -134,3 +134,17 @@ final class HeavyWorkActivityStore: ObservableObject {
         }
     }
 }
+
+/// The lease's refusals in people's words wherever an error is shown (10-24:
+/// the Applications log read "未能完成操作。（StorageCleanerMac.HeavyWorkCoordinator.
+/// Error错误0。）"). Domain and code are unchanged; "Details" still name only those.
+extension HeavyWorkCoordinator.Error: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case let .busy(activeOwner):
+            HeavyWorkActivityStore.conflictMessage(activeOwner: activeOwner)
+        case .invalidLease:
+            L10n.text("操作安全凭证已失效，未继续执行。", "The operation safety token expired; no further work was performed.")
+        }
+    }
+}

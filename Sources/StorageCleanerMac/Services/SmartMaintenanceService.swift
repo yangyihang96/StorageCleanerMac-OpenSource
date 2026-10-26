@@ -66,7 +66,7 @@ enum SmartMaintenanceService {
                     id: "clean-green",
                     title: L10n.text("预览可安全清理项", "Preview Safe Cleanup"),
                     detail: L10n.text("仅移动到废纸篓，清空前可恢复；适合批量处理。", "Moves only safe items to Trash so they remain recoverable until Trash is emptied."),
-                    value: ByteFormat.string(result.greenBytes),
+                    value: ByteFormat.storageString(result.greenBytes),
                     systemImage: "sparkles",
                     priority: result.greenBytes > 1_000_000_000 ? .urgent : .recommended,
                     action: .cleanGreen
@@ -80,7 +80,7 @@ enum SmartMaintenanceService {
                     id: "review-careful",
                     title: L10n.text("复核谨慎处理项", "Review Careful Items"),
                     detail: L10n.text("这些通常是应用文件或高风险路径，不会自动删除。", "These are usually app bundles or risky paths and are never removed automatically."),
-                    value: ByteFormat.string(result.redBytes),
+                    value: ByteFormat.storageString(result.redBytes),
                     systemImage: "exclamationmark.triangle.fill",
                     priority: .recommended,
                     action: .review(.green)
@@ -92,7 +92,7 @@ enum SmartMaintenanceService {
                     id: "review-manual",
                     title: L10n.text("检查需确认项", "Review Manual Items"),
                     detail: L10n.text("通常是下载、离线内容或用户资料，先确认再处理。", "Usually downloads, offline content, or user data. Review before taking action."),
-                    value: ByteFormat.string(result.yellowBytes),
+                    value: ByteFormat.storageString(result.yellowBytes),
                     systemImage: "questionmark.circle.fill",
                     priority: .recommended,
                     action: .review(.green)

@@ -80,12 +80,12 @@ struct CleanupOperationOverlay: View {
     private var statusDetail: String {
         if !snapshot.isComplete {
             return L10n.text(
-                "正在处理 \(snapshot.requestedCount) 项，共 \(ByteFormat.string(snapshot.requestedBytes))。",
-                "Processing \(L10n.items(snapshot.requestedCount)), \(ByteFormat.string(snapshot.requestedBytes)) total."
+                "正在处理 \(ByteFormat.count(snapshot.requestedCount)) 项，共 \(ByteFormat.storageString(snapshot.requestedBytes))。",
+                "Processing \(L10n.items(snapshot.requestedCount)), \(ByteFormat.storageString(snapshot.requestedBytes)) total."
             )
         }
         return L10n.text(
-            "\(snapshot.movedCount) 项已移入废纸篓；清空废纸篓后才会真正释放空间。",
+            "\(ByteFormat.count(snapshot.movedCount)) 项已移入废纸篓；清空废纸篓后才会真正释放空间。",
             "\(L10n.items(snapshot.movedCount)) moved to Trash; space is freed only after Trash is emptied."
         )
     }
@@ -98,7 +98,7 @@ struct CleanupOperationOverlay: View {
             )
             completionMetric(
                 title: L10n.text("处理容量", "Processed"),
-                value: ByteFormat.string(snapshot.movedBytes)
+                value: ByteFormat.storageString(snapshot.movedBytes)
             )
             completionMetric(
                 title: L10n.text("耗时", "Duration"),

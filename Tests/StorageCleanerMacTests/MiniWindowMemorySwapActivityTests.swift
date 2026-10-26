@@ -44,8 +44,9 @@ final class MiniWindowMemorySwapActivityTests: XCTestCase {
         let chinese = MiniWindowLogicLanguageScope(.zhHans)
         var rows = GeekMemorySwapActivity.rows(swappedInBytes: swappedIn, swappedOutBytes: swappedOut)
         XCTAssertEqual(rows.map(\.title), ["换入（累计）", "换出（累计）"])
-        XCTAssertEqual(rows.map(\.value), [ByteFormat.string(swappedIn), ByteFormat.string(swappedOut)])
-        XCTAssertEqual(rows.map(\.value), ["1.0 GiB", "3.5 GiB"])
+        // D128 (2026-10-19): iStat's memory format (was ByteFormat's "1.0 GiB", "3.5 GiB").
+        XCTAssertEqual(rows.map(\.value), [IStatNumberFormat.memory(swappedIn), IStatNumberFormat.memory(swappedOut)])
+        XCTAssertEqual(rows.map(\.value), ["1.0 GB", "3.5 GB"])
         for row in rows {
             XCTAssertTrue(row.help.contains("交换文件"), row.help)
             XCTAssertTrue(row.help.contains("页大小"), "the page-size conversion is stated: \(row.help)")
@@ -55,7 +56,8 @@ final class MiniWindowMemorySwapActivityTests: XCTestCase {
         XCTAssertTrue(rows[1].help.contains("写入"))
 
         rows = GeekMemorySwapActivity.rows(swappedInBytes: 0, swappedOutBytes: nil)
-        XCTAssertEqual(rows.map(\.value), ["0 B", "—"], "zero is a reading; a missing reading is a dash")
+        // D128: iStat's memory format starts at KB (was "0 B").
+        XCTAssertEqual(rows.map(\.value), ["0 KB", "—"], "zero is a reading; a missing reading is a dash")
         XCTAssertTrue(rows[1].help.contains("未能读取"), rows[1].help)
         chinese.restore()
 

@@ -17,6 +17,13 @@ enum GeekHardwareDetailFocus: String, Equatable, Sendable {
     case power
 }
 
+/// An attached menu of the cascade, parents first (D123).
+enum GeekPanelColumn: Int, Equatable, Sendable {
+    case overview
+    case module
+    case history
+}
+
 @MainActor
 final class GeekPanelCoordinator: ObservableObject {
     struct HoverIntent: Equatable {
@@ -37,6 +44,52 @@ final class GeekPanelCoordinator: ObservableObject {
     private(set) var isControlPalettePresented = false
     private(set) var historyInteractionToken: UUID?
     var isInteractingWithHistory: Bool { historyInteractionToken != nil }
+    /// D123: the attached menu under the pointer at its last reading, nil
+    /// outside them. Over the overview it is nil while a history page is
+    /// open: iStat Menus 7.30 lets only the deepest menu and its parent react
+    /// to the pointer (`isPrimaryMenu`).
+    private(set) var pointerColumn: GeekPanelColumn?
+    /// D123: the last attached menu the pointer was in, and whether the last
+    /// reading was over a menu or a presented palette.
+    private var lastPointerMenu: GeekPanelColumn?
+    private var wasPointerOverHoverSurface = false
+    /// D123: the overview card under the pointer at its last reading, found
+    /// from the cards' screen anchors.
+    private var pointerOverviewCard: PanelSection?
+    /// D123: the level-two rows with a level-three page that are under the
+    /// pointer, as their hover callbacks report them.
+    private(set) var hoveredTertiaryTargets: Set<String> = []
+
+    private var isHistoryOpen: Bool {
+        if case .history = route { true } else { false }
+    }
+
+    /// D123: the item the arrow keys highlight in the deepest menu (iStat
+    /// Menus 7.30 `BBRMenu keyDown:`): an overview card, or a module-column
+    /// row with a history page. Pointer movement takes the highlight back.
+    enum KeyboardHighlight: Equatable, Sendable {
+        case card(PanelSection)
+        case row(String)
+    }
+
+    enum ArrowKey: Equatable, Sendable {
+        case left
+        case right
+        case up
+        case down
+    }
+
+    /// D123: → on a highlighted row asks that row to open its page.
+    struct RowOpenRequest: Equatable, Sendable {
+        let identifier: String
+        let serial: Int
+    }
+
+    @Published private(set) var keyboardHighlight: KeyboardHighlight?
+    @Published private(set) var rowOpenRequest: RowOpenRequest?
+    /// D123: each module-column row with a history page and its top in the
+    /// module column, for the arrow keys' order.
+    private var tertiaryTargetOffsets: [String: CGFloat] = [:]
 
     func beginHistoryInteraction() -> UUID? {
         guard case .history = route else { return nil }
@@ -129,6 +182,9 @@ final class GeekPanelCoordinator: ObservableObject {
         action: @escaping @MainActor () -> Void
     ) -> HoverIntent {
         guard !isInteractingWithHistory else { return expiredHoverIntent() }
+        // D123: with a history page open the overview is not a primary menu
+        // (iStat Menus 7.30 `isPrimaryMenu`) and ignores the pointer.
+        guard !isHistoryOpen else { return expiredHoverIntent() }
         guard !suppressesModuleAfterEscape else {
             return cancelledHoverIntent()
         }
@@ -220,6 +276,228 @@ final class GeekPanelCoordinator: ObservableObject {
         tertiaryEscapeAnchor = nil
     }
 
+    /// D123: a level-two row with a level-three page reports the pointer
+    /// entering or leaving it. An exit also ends Escape's suppression.
+    func tertiaryTargetHoverChanged(_ identifier: String, hovering: Bool) {
+        if hovering {
+            hoveredTertiaryTargets.insert(identifier)
+        } else {
+            hoveredTertiaryTargets.remove(identifier)
+            tertiaryHoverExited()
+        }
+    }
+
+    /// D123: whether leaving a row may close the open level-three page: no
+    /// row with a page is under the pointer, and the pointer is not on the
+    /// page. A row the pointer reached reports its own change of target.
+    var allowsTertiaryGapClose: Bool {
+        hoveredTertiaryTargets.isEmpty && pointerColumn != .history
+    }
+
+    /// D123: a click or VoiceOver press on a row with a level-three page
+    /// opens it as hover does, unpinned, even after Escape, during a reflow
+    /// or over a pinned page (iStat Menus 7.30's click opens nothing; its
+    /// hover already has).
+    func prepareExplicitTertiaryOpen() {
+        suppressesTertiaryAfterEscape = false
+        tertiaryEscapePointerLocation = nil
+        tertiaryEscapeAnchor = nil
+        stationaryReflow.reset()
+        isHistoryPinned = false
+    }
+
+    /// D123: applies iStat Menus 7.30's menu rules (`mouseExited:`,
+    /// `mouseMoved:`) to a pointer reading. `column` is the attached menu
+    /// containing the pointer and `isOverPalette` whether it is over a
+    /// presented control palette or the corridor to it. Only a pointer
+    /// movement (`isPointerEvent`) closes anything; a reading after a layout
+    /// change only updates the state.
+    func pointerMoved(
+        to column: GeekPanelColumn?,
+        at point: NSPoint,
+        isOverPalette: Bool,
+        isPointerEvent: Bool
+    ) {
+        let previous = pointerColumn
+        // Pointer movement takes the highlight back from the arrow keys.
+        if isPointerEvent, point != lastPointerPoint, keyboardHighlight != nil {
+            keyboardHighlight = nil
+        }
+        // `mouseExited:` of the module column: leaving it for anywhere but its
+        // history page closes the page at once, without a hold.
+        if isPointerEvent, previous == .module, column != .module, column != .history {
+            dismissUnpinnedHistory()
+        }
+        let current: GeekPanelColumn? = column == .overview && isHistoryOpen ? nil : column
+        let card = current == .overview ? overviewCard(at: point) : nil
+        let previousCard = pointerOverviewCard
+        pointerColumn = current
+        pointerOverviewCard = card
+        lastPointerPoint = point
+        if isPointerEvent {
+            switch current {
+            case .overview where card == nil && (previous != .overview || previousCard != nil):
+                // `mouseMoved:` of the overview: reaching a gap is a change of
+                // target to no item, which closes the open module.
+                scheduleModuleGapClose()
+            case .module where previous != .module && hoveredTertiaryTargets.isEmpty:
+                // Back in the module column over a gap or a row without a
+                // page; a row with one reports its own change of target.
+                scheduleHistoryGapClose()
+            default:
+                break
+            }
+        }
+        let isOverHoverSurface = current != nil || isOverPalette
+        if isOverHoverSurface {
+            setPointerWithinHoverEnvelope(true)
+        } else if wasPointerOverHoverSurface, lastPointerMenu == .overview {
+            // `mouseExited:` of the overview: leaving it for empty space closes
+            // the module column. Leaving the module column or the history page
+            // keeps them, as iStat keeps a submenu the pointer leaves.
+            setPointerWithinHoverEnvelope(false)
+        }
+        wasPointerOverHoverSurface = isOverHoverSurface
+        if let current {
+            lastPointerMenu = current
+        }
+    }
+
+    /// D123: a module-column row with a history page reports its top in the
+    /// module column (nil when it goes away), for the arrow keys' order.
+    func registerTertiaryTarget(_ identifier: String, offset: CGFloat?) {
+        tertiaryTargetOffsets[identifier] = offset
+        if offset == nil, keyboardHighlight == .row(identifier) {
+            keyboardHighlight = nil
+        }
+    }
+
+    /// D123 (iStat Menus 7.30 `BBRMenu keyDown:`): ← closes the deepest
+    /// menu and leaves its item highlighted in the parent; → opens the
+    /// highlighted item's menu; ↓ and ↑ move the highlight in the deepest
+    /// menu, starting from the first or last item, without wrapping or
+    /// opening. Only rows that open a history page take the highlight in the
+    /// module column. Returns whether the key was used.
+    @discardableResult
+    func handleArrowKey(_ key: ArrowKey) -> Bool {
+        switch key {
+        case .left:
+            let owner: KeyboardHighlight?
+            switch route {
+            case .summary:
+                return false
+            case let .module(section):
+                owner = .card(section)
+            case let .history(_, .inline(identifier)):
+                owner = .row(identifier.uuidString)
+            case .history:
+                owner = nil
+            }
+            // The same step back as Escape had, with its hover suppression,
+            // so the item under a resting pointer does not open again.
+            guard handleEscape() else { return false }
+            keyboardHighlight = owner
+            return true
+        case .right:
+            switch (route, keyboardHighlight) {
+            case let (.summary, .card(section)?):
+                openModule(section)
+                keyboardHighlight = .card(section)
+            case let (.module, .row(identifier)?):
+                rowOpenSerial &+= 1
+                rowOpenRequest = RowOpenRequest(identifier: identifier, serial: rowOpenSerial)
+            default:
+                return false
+            }
+            return true
+        case .down, .up:
+            let items: [KeyboardHighlight]
+            switch route {
+            case .summary:
+                items = overviewCardOrder.map(KeyboardHighlight.card)
+            case .module:
+                items = tertiaryTargetOffsets
+                    .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value < $1.value }
+                    .map { .row($0.key) }
+            case .history:
+                items = []
+            }
+            guard !items.isEmpty else { return false }
+            let next: Int
+            if let current = keyboardHighlight.flatMap(items.firstIndex(of:)) {
+                next = key == .down ? min(current + 1, items.count - 1) : max(current - 1, 0)
+            } else {
+                next = key == .down ? 0 : items.count - 1
+            }
+            keyboardHighlight = items[next]
+            return true
+        }
+    }
+
+    private var rowOpenSerial = 0
+
+    /// The overview cards top to bottom, then leading to trailing.
+    private var overviewCardOrder: [PanelSection] {
+        var cards: [(section: PanelSection, frame: NSRect)] = []
+        for section in PanelSection.allCases {
+            guard let anchor = anchorRegistry.snapshot(for: .module(section)) else { continue }
+            cards.append((section, anchor.screenRect))
+        }
+        cards.sort { first, second in
+            let sameRow = abs(first.frame.maxY - second.frame.maxY) <= 0.5
+            return sameRow ? first.frame.minX < second.frame.minX : first.frame.maxY > second.frame.maxY
+        }
+        return cards.map(\.section)
+    }
+
+    /// D123: forgets where the pointer was, for a newly shown panel.
+    func resetPointerTracking() {
+        pointerColumn = nil
+        lastPointerMenu = nil
+        wasPointerOverHoverSurface = false
+        pointerOverviewCard = nil
+        lastPointerPoint = nil
+    }
+
+    private var lastPointerPoint: NSPoint?
+
+    private func overviewCard(at point: NSPoint) -> PanelSection? {
+        PanelSection.allCases.first { section in
+            anchorRegistry.snapshot(for: .module(section))?.screenRect.contains(point) == true
+        }
+    }
+
+    private func scheduleModuleGapClose() {
+        // A card rebuilt in the attached shell registers its anchor a turn
+        // later. Until the open module's card is back, a reading over the
+        // cards cannot tell a gap from a card.
+        guard route != .summary, pinnedModule == nil, !isInteractingWithHistory,
+              anchorRegistry.snapshot(for: .module(selectedSection)) != nil else { return }
+        scheduleHoverDismissal(
+            condition: { [weak self] in
+                guard let self, let point = lastPointerPoint else { return false }
+                return pointerColumn == .overview && overviewCard(at: point) == nil
+                    && pinnedModule == nil && !isHistoryOpen
+            },
+            action: { [weak self] in
+                self?.dismissUnpinnedModule()
+            }
+        )
+    }
+
+    private func scheduleHistoryGapClose() {
+        guard isHistoryOpen, !isHistoryPinned, !isInteractingWithHistory else { return }
+        scheduleHoverDismissal(
+            condition: { [weak self] in
+                guard let self else { return false }
+                return isHistoryOpen && !isHistoryPinned && allowsTertiaryGapClose
+            },
+            action: { [weak self] in
+                self?.dismissUnpinnedHistory()
+            }
+        )
+    }
+
     @discardableResult
     func scheduleHoverDismissal(
         condition: @escaping @MainActor () -> Bool,
@@ -237,8 +515,8 @@ final class GeekPanelCoordinator: ObservableObject {
         releaseModuleHoverSuppression(afterMovingTo: point)
     }
 
-    func updateWindowGroupFrames(_ frames: [NSRect]) {
-        hoverIntentController.updateWindowGroupFrames(frames)
+    func updateWindowGroupFrames(_ frames: [NSRect], palette: NSRect? = nil) {
+        hoverIntentController.updateWindowGroupFrames(frames, palette: palette)
     }
 
     func registerAnchor(
@@ -316,6 +594,52 @@ final class GeekPanelCoordinator: ObservableObject {
         hoverIntentController.markOpen(anchorID: .module(.sensors), panelRole: .secondary)
     }
 
+    /// D123: a click or VoiceOver press on an overview card. iStat Menus
+    /// 7.30's click opens nothing (its hover already has), so this opens the
+    /// module as hover does, unpinned, and changes nothing when it is open.
+    /// Unlike hover it also opens after Escape or ←, and it keeps the module
+    /// until the pointer leaves the overview for empty space. `selectModule`
+    /// still pins, for the debug and latency routes.
+    func openModule(_ section: PanelSection) {
+        PerformanceTelemetry.panelInput("action", target: "module.\(section.rawValue)")
+        guard section != .overview else {
+            reset()
+            return
+        }
+        endModuleEscapeSuppression()
+        stationaryReflow.reset()
+        setPointerWithinHoverEnvelope(true)
+        guard selectedSection != section else { return }
+        openUnpinned(section, focus: .monitoring)
+    }
+
+    /// D123: `openModule` for the sensors card, which opens the hardware
+    /// page at `focus` (was `selectHardwareDetail`, which pinned and closed
+    /// on a second click).
+    func openHardwareDetail(_ focus: GeekHardwareDetailFocus) {
+        PerformanceTelemetry.panelInput("action", target: "hardware.\(focus.rawValue)")
+        endModuleEscapeSuppression()
+        stationaryReflow.reset()
+        setPointerWithinHoverEnvelope(true)
+        guard selectedSection != .sensors || hardwareDetailFocus != focus else { return }
+        openUnpinned(.sensors, focus: focus)
+    }
+
+    private func openUnpinned(_ section: PanelSection, focus: GeekHardwareDetailFocus) {
+        historyInteractionToken = nil
+        pinnedModule = nil
+        isHistoryPinned = false
+        hardwareDetailFocus = focus
+        route = .module(section)
+        hoverIntentController.markOpen(anchorID: .module(section), panelRole: .secondary)
+    }
+
+    private func endModuleEscapeSuppression() {
+        suppressesModuleAfterEscape = false
+        moduleEscapePointerLocation = nil
+        moduleEscapeAnchors = []
+    }
+
     @discardableResult
     func presentHistory(
         _ selection: GeekPanelHistorySelection,
@@ -373,6 +697,13 @@ final class GeekPanelCoordinator: ObservableObject {
         isHistoryPinned = false
         route = .module(section)
         hoverIntentController.markOpen(anchorID: .module(section), panelRole: .secondary)
+    }
+
+    /// D123: closes an unpinned history page, for the pointer leaving the
+    /// module column or reaching a gap in it.
+    func dismissUnpinnedHistory() {
+        guard isHistoryOpen, !isHistoryPinned, !isInteractingWithHistory else { return }
+        dismissHistory()
     }
 
     func dismissUnpinnedModule() {
@@ -441,6 +772,7 @@ final class GeekPanelCoordinator: ObservableObject {
         tertiaryEscapeAnchor = nil
         isPointerWithinHoverEnvelope = false
         hardwareDetailFocus = .monitoring
+        keyboardHighlight = nil
         route = .summary
         hoverIntentController.markClosed()
     }
@@ -484,7 +816,8 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     private(set) var density: PanelDensity
     private(set) var overviewSize = GeekPanelPresentationMetrics.overviewSize
     private(set) var geekSection: PanelSection = .overview
-    private(set) var cascadeDirection = MenuBarCascadeDirection.left
+    // D123: iStat opens a submenu on the right when it fits (was left).
+    private(set) var cascadeDirection = MenuBarCascadeDirection.right
     private(set) var secondaryPresentationMode = MenuBarSecondaryPresentationMode.adjacent
     private(set) var tertiaryPresentationMode = MenuBarTertiaryPresentationMode.column
     private(set) var detailColumnSize: CGSize?
@@ -504,7 +837,6 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     /// reordered or hidden at the same overview size move (review of phase
     /// 1, P2-2).
     private var anchoredDetailTopOffsetsLayout: GeekDashboardConfiguration?
-    private var hoverIntentAnchor: NSPoint?
     private var persistsGeometry = false
     private var isApplyingProgrammaticFrame = false
     private var isResolvingCascade = false
@@ -613,6 +945,10 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             guard let self else { return false }
             return self.handleEscape(sourceWindow: self.panel)
         }
+        panel.onArrowKey = { [weak self] event in
+            guard let self else { return false }
+            return self.handleArrowKey(event, sourceWindow: self.panel)
+        }
         panel.onPointerLocationChanged = { [weak self] point in
             self?.pointerLocationChanged(point)
         }
@@ -666,7 +1002,8 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         applicationDeactivationTask = nil
         controlPaletteCoordinator?.dismiss()
         panelCoordinator?.reset()
-        cascadeDirection = .left
+        panelCoordinator?.resetPointerTracking()
+        cascadeDirection = .right
         secondaryPresentationMode = .adjacent
         tertiaryPresentationMode = .column
         detailColumnSize = nil
@@ -674,7 +1011,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         tertiaryColumnSize = GeekPanelPresentationMetrics.tertiarySize
         tertiarySourceOffset = nil
         attachedCascadeLayout = nil
-        panelSettingsState?.setCascadeDirection(.left)
+        panelSettingsState?.setCascadeDirection(.right)
         panelSettingsState?.setSecondaryPresentationMode(.adjacent)
         panelSettingsState?.setTertiaryPresentationMode(.column)
         panelSettingsState?.setCascadeLayout(nil)
@@ -737,7 +1074,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         }
         self.density = density
         geekSection = .overview
-        cascadeDirection = .left
+        cascadeDirection = .right
         secondaryPresentationMode = .adjacent
         tertiaryPresentationMode = .column
         detailColumnSize = nil
@@ -745,7 +1082,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         tertiaryColumnSize = GeekPanelPresentationMetrics.tertiarySize
         tertiarySourceOffset = nil
         attachedCascadeLayout = nil
-        panelSettingsState?.setCascadeDirection(.left)
+        panelSettingsState?.setCascadeDirection(.right)
         panelSettingsState?.setSecondaryPresentationMode(.adjacent)
         panelSettingsState?.setTertiaryPresentationMode(.column)
         panelSettingsState?.setCascadeLayout(nil)
@@ -976,6 +1313,8 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             sourceOffset: tertiarySourceOffset,
             overviewSize: overviewSize
         )
+        // D76, D119: the power and sensors pages may exceed the screen; they
+        // scroll inside the clamped viewport.
         let secondaryCascade = MenuBarPanelPlacement.reflowingCascade(
             parentFrame: overviewFrame,
             childSizes: [detailSize],
@@ -985,7 +1324,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             childTopOffsets: [detailTopOffset],
             pointerLocation: pointerLocationProvider(),
             backingScaleFactor: resolvedScreen?.backingScaleFactor ?? 1,
-            scrollsTallDetails: section == .power
+            scrollsTallDetails: section == .power || section == .sensors
         )
         let completeCascade = MenuBarPanelPlacement.reflowingCascade(
             parentFrame: overviewFrame,
@@ -996,7 +1335,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             childTopOffsets: [detailTopOffset, tertiaryTopOffset],
             pointerLocation: pointerLocationProvider(),
             backingScaleFactor: resolvedScreen?.backingScaleFactor ?? 1,
-            scrollsTallDetails: section == .power
+            scrollsTallDetails: section == .power || section == .sensors
         )
         // Reserve all three levels even while only level 2 is visible. Opening
         // level 3 must not discover a new fixed-anchor constraint and erase it.
@@ -1025,7 +1364,14 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         attachedCascadeLayout = cascade.secondaryPresentationMode == .adjacent ? cascade : nil
         panelSettingsState?.setCascadeLayout(attachedCascadeLayout)
         panelCoordinator?.updateWindowGroupFrames(cascade.visibleFrames)
-        controlPaletteCoordinator?.updatePlacementAnchor(cascade.childFrames.first)
+        // D124 (R2h, D172): a control palette docks beside the open menus,
+        // left first, so it gets the overview and the module page together
+        // (was the module page alone: since D123 opens that page on the
+        // overview's right, its left side is the overview and the palette
+        // went to the right although the left had room).
+        controlPaletteCoordinator?.updatePlacementAnchor(
+            cascade.childFrames.first.map { $0.union(cascade.parentFrame) }
+        )
         PerformanceTelemetry.signposter.emitEvent("PlacementCalculated")
         if previousDirection != cascade.direction {
             PerformanceTelemetry.signposter.emitEvent("PlacementFlipped")
@@ -1188,9 +1534,39 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     }
 
     func handleKeyEvent(_ event: NSEvent, sourceWindow: NSWindow? = nil) -> NSEvent? {
-        guard event.keyCode == 53 else { return event }
         let eventWindow = sourceWindow ?? event.window
-        return handleEscape(sourceWindow: eventWindow) ? nil : event
+        switch event.keyCode {
+        case 53:
+            return handleEscape(sourceWindow: eventWindow) ? nil : event
+        case 123...126:
+            return handleArrowKey(event, sourceWindow: eventWindow) ? nil : event
+        default:
+            return event
+        }
+    }
+
+    /// D123 (iStat Menus 7.30 `BBRMenu keyDown:`): the arrow keys move
+    /// through the attached menus (`GeekPanelCoordinator.handleArrowKey`).
+    /// They stay with a text field, other windows and modified presses.
+    private func handleArrowKey(_ event: NSEvent, sourceWindow: NSWindow?) -> Bool {
+        guard trackingMenus.isEmpty, isPresented, sourceWindow === panel,
+              density.usesAttachedDetailPresentation,
+              event.modifierFlags.isDisjoint(with: [.command, .option, .control, .shift]),
+              !(panel.firstResponder is NSText),
+              let panelCoordinator else { return false }
+        let key: GeekPanelCoordinator.ArrowKey
+        switch event.keyCode {
+        case 123: key = .left
+        case 124: key = .right
+        case 125: key = .down
+        default: key = .up
+        }
+        // A presented control palette is the deepest surface.
+        if key == .left, let controlPaletteCoordinator, controlPaletteCoordinator.isPresented {
+            controlPaletteCoordinator.dismiss()
+            return true
+        }
+        return panelCoordinator.handleArrowKey(key)
     }
 
     @discardableResult
@@ -1206,12 +1582,17 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             return true
         }
         guard isPresented || sourceWindow === panel else { return false }
-        if panelCoordinator?.handleEscape() == true {
-            return true
+        // D123: Escape closes the whole menu, as in iStat Menus 7.30
+        // (`onShouldClose`); ← steps back one level (was one level per
+        // Escape, then the panel). A presented control palette still closes
+        // first.
+        hide(reason: "escape")
+        // The panel's own Escape while it is not shown still closes its menus.
+        if let panelCoordinator, panelCoordinator.route != .summary {
+            panelCoordinator.reset()
         }
-        hide(reason: "escape-summary")
 #if DEBUG || STORAGE_CLEANER_BETA
-        PerformanceTelemetry.logger.notice("MenuBar Escape: summary -> hidden")
+        PerformanceTelemetry.logger.notice("MenuBar Escape: hidden")
 #endif
         return true
     }
@@ -1340,6 +1721,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         }
         panel.delegate = nil
         panel.onPointerLocationChanged = nil
+        panel.onArrowKey = nil
         panelCoordinator?.anchorRegistry.didChange = nil
         panel.contentViewController = nil
         panel.contentView = nil
@@ -1381,11 +1763,16 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         // The card's offset inside the overview is the same wherever the
         // window is; a screen rect is only as current as the frame it was
         // measured in.
+        // D123: the page opens 8 pt above the card
+        // (`GeekPanelPresentationMetrics.submenuTopOffset`; was at its top).
+        let cardTop: CGFloat
         if let layoutOffset = snapshot.layoutOffset, layoutOffset.isFinite {
-            return Self.clampedDetailTopOffset(layoutOffset, overviewFrame.height, detailSize.height)
+            cardTop = layoutOffset
+        } else {
+            guard snapshot.screenRect.intersects(overviewFrame) else { return nil }
+            cardTop = overviewFrame.maxY - snapshot.screenRect.maxY
         }
-        guard snapshot.screenRect.intersects(overviewFrame) else { return nil }
-        return Self.clampedDetailTopOffset(overviewFrame.maxY - snapshot.screenRect.maxY,
+        return Self.clampedDetailTopOffset(GeekPanelPresentationMetrics.submenuTopOffset(forItemTop: cardTop),
                                            overviewFrame.height, detailSize.height)
     }
 
@@ -1428,7 +1815,9 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 
     private func configureSizeLimits(for density: PanelDensity, visibleFrame: NSRect?) {
         guard let visibleFrame else { return }
-        let visible = visibleFrame.insetBy(dx: 8, dy: 8)
+        // D123: the bounds `MenuBarPanelPlacement.frame` places the panel in,
+        // up to the menu bar (was 8 pt below it as well).
+        let visible = MenuBarPanelPlacement.menuBounds(visibleFrame, margin: 8)
         let requestedSize = activeContentSize(for: density)
         let fixedSize = NSSize(
             width: min(requestedSize.width, visible.width),
@@ -1799,7 +2188,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
 
     private func clampedExpandedAttachedFrame(_ frame: NSRect, screen: NSScreen?) -> NSRect {
         guard let visibleFrame = resolvedVisibleFrame(for: screen) else { return frame }
-        let visible = visibleFrame.insetBy(dx: 8, dy: 8)
+        let visible = MenuBarPanelPlacement.menuBounds(visibleFrame, margin: 8)
         let width = min(frame.width, visible.width)
         let height = min(frame.height, visible.height)
         return NSRect(
@@ -1863,7 +2252,9 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         return frames
     }
 
-    private func pointerLocationChanged(_ location: NSPoint) {
+    /// `isPointerEvent` is false for a reading after a layout change, which
+    /// updates the hover state but closes nothing (D123).
+    private func pointerLocationChanged(_ location: NSPoint, isPointerEvent: Bool = true) {
         guard !isTornDown, density.usesAttachedDetailPresentation else { return }
         // A native range menu occupies its own AppKit window. Treat the menu
         // as part of the hover session until its selection has been delivered.
@@ -1871,58 +2262,46 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
             panelCoordinator?.setPointerWithinHoverEnvelope(true)
             return
         }
-        let frames = attachedHoverFrames
+        let menus = attachedMenuChainFrames
+        let paletteFrame = presentedControlPaletteFrame
         panelCoordinator?.recordPointer(location)
-        panelCoordinator?.updateWindowGroupFrames(frames)
+        panelCoordinator?.updateWindowGroupFrames(menus, palette: paletteFrame)
         if panelCoordinator?.retainsPointerAfterReflow(location) == true {
             panelCoordinator?.setPointerWithinHoverEnvelope(true)
             return
         }
-        if frames.contains(where: { $0.contains(location) }) {
-            hoverIntentAnchor = location
-            panelCoordinator?.setPointerWithinHoverEnvelope(true)
-            return
+        var isOverPalette = false
+        if let paletteFrame {
+            isOverPalette = paletteFrame.contains(location)
+            // D123: the corridor to a presented control palette keeps the
+            // session (the palettes are ours); iStat's flush menus need none,
+            // so the corridors between columns and the hover triangle are gone.
+            if !isOverPalette, let source = menus.last,
+               HoverCorridor(
+                   source: source,
+                   destination: paletteFrame,
+                   padding: HoverIntentPolicy.menuBar.corridorPadding
+               ).contains(location) {
+                isOverPalette = true
+                PerformanceTelemetry.signposter.emitEvent("CorridorEntered")
+            }
         }
-
-        let isInsideCorridor = attachedHoverCorridors.contains { $0.contains(location) }
-        let isContained = isInsideCorridor
-            || isInsideHoverIntentTriangle(location, frames: frames)
-        if isInsideCorridor {
-            PerformanceTelemetry.signposter.emitEvent("CorridorEntered")
-        }
-        if !isContained {
-            hoverIntentAnchor = nil
-        }
-        panelCoordinator?.setPointerWithinHoverEnvelope(isContained)
+        panelCoordinator?.pointerMoved(
+            to: attachedMenuColumn(at: location, in: menus),
+            at: location,
+            isOverPalette: isOverPalette,
+            isPointerEvent: isPointerEvent
+        )
     }
 
-    private func isInsideHoverIntentTriangle(_ location: NSPoint, frames: [NSRect]) -> Bool {
-        guard
-            let origin = hoverIntentAnchor,
-            let source = frames.first(where: { $0.contains(origin) })
-        else { return false }
-
-        let destination: NSRect?
-        if location.x < origin.x {
-            destination = frames
-                .filter { $0.maxX <= source.minX }
-                .max(by: { $0.maxX < $1.maxX })
-        } else if location.x > origin.x {
-            destination = frames
-                .filter { $0.minX >= source.maxX }
-                .min(by: { $0.minX < $1.minX })
-        } else {
-            destination = nil
+    /// D123: the attached menu under the pointer. A compact cascade shows
+    /// one page at a time, the deepest open one.
+    private func attachedMenuColumn(at location: NSPoint, in menus: [NSRect]) -> GeekPanelColumn? {
+        if attachedCascadeLayout?.isCompact == true {
+            guard menus.first?.contains(location) == true else { return nil }
+            return GeekPanelColumn(rawValue: menus.count - 1)
         }
-        guard let destination else { return false }
-        let corridor = HoverCorridor(
-            source: source,
-            destination: destination,
-            padding: HoverIntentPolicy.menuBar.corridorPadding
-        )
-        guard corridor.contains(location) else { return false }
-        return panelCoordinator?.hoverIntentController.pointerDirection(toward: destination)
-            != .away
+        return menus.firstIndex { $0.contains(location) }.flatMap(GeekPanelColumn.init(rawValue:))
     }
 
     /// Frame changes can move the attached cascade around a stationary cursor.
@@ -1930,7 +2309,7 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     /// the current screen location immediately before a delayed hover-dismiss
     /// task can observe a stale envelope value.
     private func refreshPointerWithinHoverEnvelope() {
-        pointerLocationChanged(pointerLocationProvider())
+        pointerLocationChanged(pointerLocationProvider(), isPointerEvent: false)
     }
 
     /// The frames that keep the hover session alive. A presented control
@@ -1946,22 +2325,23 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
         return frames
     }
 
+    /// D123: the attached menus from the overview to the deepest page,
+    /// parents first (`visibleAttachedContentFrames` lists the module column
+    /// first).
+    private var attachedMenuChainFrames: [NSRect] {
+        if let attachedCascadeLayout {
+            return attachedCascadeLayout.visibleFrames
+        }
+        let frames = visibleAttachedContentFrames
+        guard frames.count >= 2 else { return frames }
+        return [frames[1], frames[0]] + frames.dropFirst(2)
+    }
+
     private var presentedControlPaletteFrame: NSRect? {
         guard let controlPaletteCoordinator,
               controlPaletteCoordinator.isPresented else { return nil }
         let frame = controlPaletteCoordinator.panel.frame
         return frame.isUsableWindowAnchor ? frame : nil
-    }
-
-    private var attachedHoverCorridors: [HoverCorridor] {
-        let frames = attachedHoverFrames
-        return zip(frames, frames.dropFirst()).map { first, second in
-            HoverCorridor(
-                source: first,
-                destination: second,
-                padding: HoverIntentPolicy.menuBar.corridorPadding
-            )
-        }
     }
 
     private func collapsedAttachedFrame(from frame: NSRect) -> NSRect {

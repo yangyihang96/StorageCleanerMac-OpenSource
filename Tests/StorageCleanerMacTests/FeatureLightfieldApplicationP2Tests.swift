@@ -112,15 +112,32 @@ final class FeatureLightfieldApplicationP2Tests: XCTestCase {
     }
 
     func testProductionUninstallResultIncludesApprovedHeaderBeforeRows() throws {
-        let source = try text("Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
-        let page = try r2SourceDeclaration("struct AppUninstallerView: View", in: source)
-        let result = try r2SourceDeclaration("private var resultContent", in: page)
-        let header = try XCTUnwrap(result.range(of: "LightfieldApplicationListHeader(kind: .uninstall)"))
-        XCTAssertEqual(result.components(separatedBy: "LightfieldApplicationListHeader(kind: .uninstall)").count - 1, 1)
-        let controls = try XCTUnwrap(result.range(of: "lightfieldResultControls"))
-        let rows = try XCTUnwrap(result.range(of: "lightfieldResultRows(presentation: presentation)"))
-        XCTAssertLessThan(controls.lowerBound, header.lowerBound)
-        XCTAssertLessThan(header.lowerBound, rows.lowerBound)
+        // D14x (2.0.1, CleanMyMac uninstaller): the result moved from
+        // `AppUninstallerView.resultContent` (controls `lightfieldResultControls`,
+        // rows `lightfieldResultRows(presentation:)`) to the manager page; the
+        // order toolbar → approved header → rows is unchanged.
+        // D154: the manager is CleanMyMac's light panel. Its header row holds
+        // the search and sort controls, the approved column header stays
+        // above the scrolling rows, so the order is still controls → header → rows.
+        let source = try text("Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift")
+        let page = try r2SourceDeclaration("struct ApplicationsManagerView: View", in: source)
+        let manager = try r2SourceDeclaration("private var manager", in: page)
+        XCTAssertTrue(manager.contains("CareStudioManagerChrome("))
+        XCTAssertTrue(manager.contains("query: $model.searchText"))
+        XCTAssertTrue(manager.contains("sortOptions: ApplicationSortMode.allCases"))
+        XCTAssertTrue(manager.contains("content: { managerList(entries) }"))
+        let list = try r2SourceDeclaration("private func managerList", in: page)
+        XCTAssertEqual(page.components(separatedBy: "LightfieldApplicationListHeader(kind: .uninstall)").count - 1, 1)
+        let header = try XCTUnwrap(list.range(of: "LightfieldApplicationListHeader(kind: .uninstall)"))
+        let scroll = try XCTUnwrap(list.range(of: "ScrollView(.vertical)", range: header.upperBound..<list.endIndex))
+        XCTAssertNotNil(list.range(of: "rows(entries)", range: scroll.upperBound..<list.endIndex))
+        // The lazy rows are the whole scroll document (their own estimate).
+        XCTAssertFalse(list.contains("pinnedViews"))
+        let chrome = try text("Sources/StorageCleanerMac/Views/CareStudio/CareStudioManagerChrome.swift")
+        let stack = try XCTUnwrap(chrome.range(of: "VStack(spacing: 0) {"))
+        let controls = try XCTUnwrap(chrome.range(of: "header", range: stack.upperBound..<chrome.endIndex))
+        let content = try XCTUnwrap(chrome.range(of: "content", range: controls.upperBound..<chrome.endIndex))
+        XCTAssertLessThan(controls.lowerBound, content.lowerBound)
         let component = try text("Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldApplicationRows.swift")
         for label in ["应用 / 版本", "应用路径", "可审阅大小", "App / Version", "Application Path", "Size to Review"] {
             XCTAssertTrue(component.contains("\"" + label + "\""))

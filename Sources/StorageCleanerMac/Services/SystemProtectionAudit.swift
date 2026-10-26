@@ -85,6 +85,17 @@ enum SystemProtectionEvidence: Codable, Sendable, Equatable {
         case .legacy(let text): return text
         }
     }
+
+    /// One line for a result row: a system-query confirmation without its
+    /// command line. `text(check:state:)` keeps the command for the expanded
+    /// detail and the event journal.
+    func rowText(check: SystemProtectionCheck, state: SystemProtectionState) -> String {
+        if case .systemQuery = self, check.queryDisplayName != nil,
+           [.enabled, .disabled, .transitioning].contains(state) {
+            return L10n.text("系统查询确认", "Confirmed by a System Query")
+        }
+        return text(check: check, state: state)
+    }
 }
 
 struct SystemProtectionFinding: Codable, Sendable, Equatable, Identifiable {
@@ -106,6 +117,7 @@ struct SystemProtectionFinding: Codable, Sendable, Equatable, Identifiable {
 
     var id: SystemProtectionCheck { check }
     var evidenceSummary: String { evidence.text(check: check, state: state) }
+    var evidenceRowSummary: String { evidence.rowText(check: check, state: state) }
 
     private enum CodingKeys: String, CodingKey { case check, state, evidence, evidenceSummary }
 

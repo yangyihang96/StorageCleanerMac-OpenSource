@@ -8,7 +8,7 @@ protocol MacBenchmarkLifecycleCleaning: Sendable {
 /// service. It only delegates to the kernel's existing bounded, app-private
 /// orphan cleanup primitive and never starts a measurement.
 struct SystemMacBenchmarkLifecycleCleaner: MacBenchmarkLifecycleCleaning {
-    private let diskKernel: DiskBenchmarkKernel
+    let diskKernel: DiskBenchmarkKernel
     private let orphanAge: TimeInterval
 
     init(

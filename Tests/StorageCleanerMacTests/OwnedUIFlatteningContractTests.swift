@@ -5,24 +5,18 @@ final class OwnedUIFlatteningContractTests: XCTestCase {
     func testManagementPagesKeepSelectionSeparateFromExecution() throws {
         let utilities = try sourceText("Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
         let uninstall = try sourceSegment(utilities, from: "struct AppUninstallerView", to: "struct RelatedAppFilesReviewSheet")
-        let dropStart = try XCTUnwrap(uninstall.range(of: ".dropDestination(for: URL.self)"))
-        let dropEnd = try XCTUnwrap(uninstall.range(of: ".sheet(isPresented: uninstallPreviewBinding)", range: dropStart.upperBound..<uninstall.endIndex))
-        let drop = uninstall[dropStart.lowerBound..<dropEnd.lowerBound]
-        XCTAssertTrue(drop.contains("presentation.apps.first"))
-        XCTAssertTrue(drop.contains("$0.isFileURL"))
-        XCTAssertTrue(drop.contains("PathSafety.lexicalPath(app.path)"))
-        XCTAssertTrue(drop.contains("selectedApplicationID = app.id"))
-        XCTAssertFalse(drop.contains("requestUninstall"))
-        XCTAssertFalse(drop.contains("confirmUninstall"))
-        // D67: stable lazy rows and singular selection replace the inset native List.
-        XCTAssertTrue(uninstall.contains("FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,"))
-        let rows = try sourceText("Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldUninstallList.swift")
-        XCTAssertTrue(rows.contains("id: \\.element.id"))
-        XCTAssertTrue(rows.contains(".onMoveCommand"))
-        XCTAssertTrue(uninstall.contains("if let app = store.pendingUninstallApp"))
-        XCTAssertTrue(uninstall.contains("UninstallPreviewSheet(store: store, app: app)"))
-        XCTAssertTrue(uninstall.contains("ForEach(AppUninstallListFilter.allCases)"))
+        // CleanMyMac Applications manager: checkboxes select, the primary
+        // action alone starts a removal, Finder hand-offs only select.
+        XCTAssertTrue(uninstall.contains("ApplicationsManagerView(store: store)"))
         XCTAssertFalse(uninstall.contains("!store.hasScannedInstalledApps || store.isLoadingInstalledApps"))
+        let applicationsManager = try sourceText("Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift")
+        XCTAssertEqual(applicationsManager.components(separatedBy: "model.requestRemoval()").count - 1, 1)
+        let finder = try sourceSegment(applicationsManager, from: "private func takeFinderRequest()", to: "private var terminatorBinding")
+        XCTAssertTrue(finder.contains("store.cancelUninstall()"))
+        XCTAssertTrue(finder.contains("model.toggle(entry)"))
+        XCTAssertFalse(finder.contains("requestRemoval"))
+        XCTAssertFalse(finder.contains("confirmUninstall"))
+        XCTAssertTrue(applicationsManager.contains("if let app = store.pendingUninstallApp { UninstallPreviewSheet(store: store, app: app) }"))
 
         let updates = try sourceText("Sources/StorageCleanerMac/Features/AppUpdates/Views/AppUpdatesView.swift")
         let manager = try sourceSegment(updates, from: "private struct AppUpdateManagerPage", to: "private struct AppUpdateCatalogRow")
@@ -47,8 +41,12 @@ final class OwnedUIFlatteningContractTests: XCTestCase {
         XCTAssertFalse(chrome.contains("退出存储清理助手"))
         XCTAssertFalse(chrome.contains("Color.gray"))
         let network = try D64MenuBarSource.source("MenuBarAdvanced/GeekNetworkView.swift")
-        XCTAssertTrue(network.contains("direction: \"↓\""))
-        XCTAssertTrue(network.contains("direction: \"↑\""))
+        // D146: iStat's peak row names each direction (were the arrows
+        // `direction: "↓"` and `direction: "↑"`).
+        XCTAssertTrue(network.contains("GeekIStatPeakValue(title: L10n.text(\"上传\", \"Upload\")"))
+        XCTAssertTrue(network.contains("GeekIStatPeakValue(title: L10n.text(\"下载\", \"Download\")"))
+        XCTAssertFalse(network.contains("direction: \"↓\""))
+        XCTAssertFalse(network.contains("direction: \"↑\""))
         XCTAssertTrue(network.contains("Download peak"))
         XCTAssertTrue(network.contains("Upload peak"))
         XCTAssertTrue(network.contains(".accessibilityLabel("))
@@ -65,9 +63,12 @@ final class OwnedUIFlatteningContractTests: XCTestCase {
         let memory = try D64MenuBarSource.source("MenuBarAdvanced/GeekMemoryView.swift")
         let result = try r2SourceDeclaration("private struct GeekMemoryQuitResultCard:", in: memory)
         XCTAssertFalse(result.contains("Capsule("))
-        XCTAssertTrue(result.contains("Image(systemName: \"arrow.right\")"))
-        XCTAssertTrue(result.contains("Button(L10n.text(\"完成\", \"Done\")"))
-        XCTAssertTrue(result.contains("Text(L10n.text(\"查看报告\", \"View Report\"))"))
+        // D126: iStat's text section and button items (was the arrow between
+        // two rings, `Button(L10n.text("完成", "Done")` and
+        // `Text(L10n.text("查看报告", "View Report"))` in bordered buttons).
+        XCTAssertFalse(result.contains("Image(systemName: \"arrow.right\")"))
+        XCTAssertTrue(result.contains("GeekIStatButtonItem(title: L10n.text(\"完成\", \"Done\"), kind: .standard"))
+        XCTAssertTrue(result.contains("GeekIStatButtonItem(title: L10n.text(\"查看报告\", \"View Report\"), kind: .standard"))
         let panel = try D64MenuBarSource.source("MenuBarAdvancedStatusView.swift")
         XCTAssertTrue(panel.contains("PanelShell("))
         XCTAssertFalse(panel.contains(".appGlassSegmentedControl()"))

@@ -63,7 +63,7 @@ struct StartupItemsDashboardView: View {
     @FocusState private var isSearchFocused: Bool
 
     private var primaryCategories: [StartupItemsCategory] {
-        [.all, .loginItems, .background]
+        [.all, .loginItems, .background, .otherBackground]
     }
 
     private var effectiveCategory: StartupItemsCategory {
@@ -128,8 +128,8 @@ struct StartupItemsDashboardView: View {
         FeatureLightfieldPage(module: .startup, phase: .result,
             title: L10n.text("登录项与后台任务", "Login Items & Background Tasks"),
             status: isLoading && items.isEmpty ? (progress?.title ?? L10n.text("正在读取启动项", "Reading Startup Items"))
-                : L10n.text("已读取 \(presentation.summary.total) 项 · 可直接管理 \(presentation.summary.manageable) 项",
-                    "\(presentation.summary.total) read · \(presentation.summary.manageable) directly manageable"),
+                : L10n.text("已读取 \(ByteFormat.count(presentation.summary.total)) 项 · 可直接管理 \(ByteFormat.count(presentation.summary.manageable)) 项",
+                    "\(ByteFormat.count(presentation.summary.total)) read · \(ByteFormat.count(presentation.summary.manageable)) directly manageable"),
             safety: L10n.text("受保护项目仅查看 · 管理前核对来源", "Protected items are read-only · Verify sources before changes"),
             actionTitle: isLoading ? L10n.text("取消读取", "Cancel Reading") : L10n.text("重新检查登录项", "Check Login Items Again"),
             actionEnabled: !isPerformingOperation, showsArtwork: false,
@@ -138,7 +138,7 @@ struct StartupItemsDashboardView: View {
                 LightfieldResultContent(listHeader: AnyView(tableHeader(presentation))) {
                     LightfieldSummary(module: .startup, label: L10n.text("已读取的登录项与后台任务", "Login items and background tasks read"),
                         value: isLoading && items.isEmpty ? "—" : "\(presentation.summary.total)", unit: L10n.text("项", "items"),
-                        note: L10n.text("· \(presentation.summary.manageable) 项可直接管理", "· \(presentation.summary.manageable) directly manageable"))
+                        note: L10n.text("· \(ByteFormat.count(presentation.summary.manageable)) 项可直接管理", "· \(ByteFormat.count(presentation.summary.manageable)) directly manageable"))
                 } rows: {
                     ForEach(presentation.visibleItems) { item in
                         StartupItemRow(item: item,
@@ -239,7 +239,7 @@ struct StartupItemsDashboardView: View {
             HStack(spacing: 16) {
                 categoryControl
                 Spacer(minLength: 0)
-                Text(L10n.text("\(presentation.visibleItems.count) / \(presentation.summary.total) 项", "Showing \(presentation.visibleItems.count) of \(presentation.summary.total)"))
+                Text(L10n.text("\(ByteFormat.count(presentation.visibleItems.count)) / \(ByteFormat.count(presentation.summary.total)) 项", "Showing \(ByteFormat.count(presentation.visibleItems.count)) of \(ByteFormat.count(presentation.summary.total))"))
                     .font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg3)
                     .lineLimit(1)
                 advancedFiltersMenu
@@ -432,7 +432,7 @@ struct StartupItemRow: View {
                     Button(L10n.text("查看详情", "Show Details"), action: onInspect)
 
                     if canReveal {
-                        Button(L10n.text("在 Finder 中显示", "Reveal in Finder")) {
+                        Button(L10n.text("在访达中显示", "Reveal in Finder")) {
                             onReveal?(item)
                         }
                     }

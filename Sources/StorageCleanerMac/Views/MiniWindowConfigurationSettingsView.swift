@@ -230,8 +230,7 @@ struct MiniWindowConfigurationPreviewCard: View {
                 GeekProcessorPresentation(cpuChartHistory: Self.history, cpuChartRange: .oneHour, samplingInterval: 1,
                     processorTint: metricColors.cpuUser, geekCPUUserBarColor: metricColors.cpuUser, geekCPUSystemBarColor: metricColors.cpuSystem,
                     // D43: the same title readout as the live card (simulated values).
-                    headerFrequencyText: "3.60 GHz", headerTemperatureText: "53°C",
-                    headerReadoutTint: metricColors.temperature(53, chartAccent: chartAccent))
+                    headerFrequencyText: "3.6 GHz", headerTemperatureText: "53°")
             case .coreMetrics:
                 GeekMemoryPresentation(memoryRingUsedPercentText: "81%", memoryRingUsedProgress: 0.81,
                     memoryRingSegments: [.init(id: "app", progress: 0.55, color: metricColors.memoryApp),
@@ -239,18 +238,22 @@ struct MiniWindowConfigurationPreviewCard: View {
                                          .init(id: "compressed", progress: 0.08, color: metricColors.memoryCompressed)],
                     pressure: 49, memoryTint: metricColors.memoryPressure(for: .normal))
             case .network:
-                GeekNetworkPresentation(networkUpText: "410 KiB/s", networkDownText: "3.6 MiB/s", networkChartHistory: Self.history,
+                GeekNetworkPresentation(networkUpText: "410 KB/s", networkDownText: "3.6 MB/s", networkChartHistory: Self.history,
                     networkChartRange: .oneHour, resolvedUploadTint: metricColors.networkUpload, resolvedDownloadTint: metricColors.networkDownload)
             case .disk:
                 GeekDiskPresentation(storageSnapshot: .init(totalBytes: 1_000_000_000_000, availableBytes: 560_000_000_000),
                     volumeName: "Macintosh HD", geekPrimaryDiskHealthText: "96%",
                     geekPrimaryDiskHealthTint: AppDesignTokens.Palette.success,
-                    healthHelp: L10n.text("仅为模拟数据", "Simulated data only"))
+                    healthHelp: L10n.text("仅为模拟数据", "Simulated data only"),
+                    // D118: a simulated read and write so both lights show.
+                    latestDiskIO: NativeDiskIOPoint(date: Self.history.last?.date ?? .distantPast,
+                        readBytesPerSecond: 4_000_000, writeBytesPerSecond: 2_000_000,
+                        readOperationsPerSecond: 40, writeOperationsPerSecond: 20))
             case .power:
                 GeekBatteryPresentation(percent: 76, geekOverviewPowerSourceAndModeTitle: L10n.text("电源适配器 · 已接通电源", "Power Adapter · Connected"),
                     geekOverviewBatteryHelpText: L10n.text("仅为模拟数据", "Simulated data only"))
             case .sensors:
-                GeekSensorsPresentation(geekCompactTemperatureText: "53°C", geekCompactFrequencyText: "3.60 GHz",
+                GeekSensorsPresentation(geekCompactTemperatureText: "53°", geekCompactFrequencyText: "3.6 GHz",
                     temperatureProgress: 0.53, temperatureTint: metricColors.temperature(53, chartAccent: chartAccent),
                     geekOverviewGPUTemperature: 49, gpuUsageText: "12%", gpuUsageProgress: 0.12,
                     resolvedGPUTint: metricColors.temperature(49, chartAccent: chartAccent),
@@ -278,7 +281,7 @@ private struct MiniWindowPreviewHistory: View {
     }
     private static let powerPoints = MiniWindowConfigurationPreviewCard.history.enumerated().map { index, point in
         MenuBarPowerHistoryPoint(date: point.date, chargePercent: 85 - Double(index) * 5 / 119,
-                                 batteryPowerWatts: -8, isCharging: false)
+                                 batteryPowerWatts: -8, isCharging: false, powerSource: .batteryPower)
     }
     var body: some View {
         Group {
@@ -287,8 +290,9 @@ private struct MiniWindowPreviewHistory: View {
                 GeekProcessorActivityHoverDetail(points: MiniWindowConfigurationPreviewCard.history,
                     duration: range.duration, userValue: "22%", systemValue: "12%")
             case .network:
+                // D178: as the panel writes rates (was "410 KiB/s", "3.6 MiB/s").
                 GeekNetworkHistoryHoverDetail(points: MiniWindowConfigurationPreviewCard.history,
-                    duration: range.duration, uploadValue: "410 KiB/s", downloadValue: "3.6 MiB/s")
+                    duration: range.duration, uploadValue: "410 KB/s", downloadValue: "3.6 MB/s")
             case .coreMetrics:
                 GeekMemoryHistoryHoverDetail(points: MiniWindowConfigurationPreviewCard.history,
                     duration: range.duration, currentValue: "81%", pressure: "49%", snapshot: nil)
@@ -301,12 +305,18 @@ private struct MiniWindowPreviewHistory: View {
                 GeekDiskThroughputHoverDetail(points: Self.diskPoints, counters: nil,
                     duration: range.duration, mode: .write)
             case .power:
+                // The power page's colors (GeekPowerView): on external
+                // power the charging color, on battery the draining color.
                 GeekBatteryHistoryHoverDetail(points: Self.powerPoints,
-                    tint: metricColors.battery, chargingTint: metricColors.batteryCharging)
+                    tint: metricColors.batteryCharging, chargingTint: metricColors.batteryDraining)
             default:
                 Text(L10n.text("该模块暂未提供历史预览。", "History preview is not available for this module yet."))
             }
         }
+        // D121: the level-three window's width (8 + 375 + 8), so the
+        // preview draws the same 120 bars; the page adds its own inset.
+        // D132: the battery history's own 319 (its 96 bars).
+        .frame(width: module == .power ? GeekIStatHistoryGeometry.batteryPageWidth : MiniWindowStyleTokens.historyWidth)
         .metricPanelShell()
     }
 }

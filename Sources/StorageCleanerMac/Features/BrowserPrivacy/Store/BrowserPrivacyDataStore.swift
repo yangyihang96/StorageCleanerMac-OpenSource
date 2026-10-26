@@ -100,7 +100,7 @@ final class BrowserPrivacyDataStore: ObservableObject {
         let result = await Task.detached(priority: .utility) {
             do {
                 let count = try await service.deleteRun(selected, keeping: sites)
-                return [L10n.text("已回读确认删除 \(count) 条，可在操作记录中恢复。", "Confirmed deletion of \(count) records; restore from operation records.")]
+                return [L10n.text("已回读确认删除 \(ByteFormat.count(count)) 条，可在操作记录中恢复。", "Confirmed deletion of \(ByteFormat.count(count)) records; restore from operation records.")]
             } catch { return [BrowserPrivacyDataFailure.describe(error)] }
         }.value
         messages = result

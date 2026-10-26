@@ -489,7 +489,11 @@ enum HomebrewInventoryParser {
             let installedVersions = dictionaries(dictionary["installed"])
                 .compactMap { string($0["version"]) }
             let versions = dictionary["versions"] as? [String: Any]
-            let currentVersion = string(versions?["stable"])
+            // Homebrew's stable version omits the formula revision; its
+            // package version (and installed[].version) uses `_N` for it.
+            let stable = string(versions?["stable"])
+            let revision = (dictionary["revision"] as? NSNumber)?.intValue ?? 0
+            let currentVersion = stable.map { revision > 0 ? "\($0)_\(revision)" : $0 }
                 ?? string(versions?["head"])
             let isOutdated = hasPlainFormulaList && outdatedFormulae.contains(token)
             let metadata = HomebrewPackageMetadata(

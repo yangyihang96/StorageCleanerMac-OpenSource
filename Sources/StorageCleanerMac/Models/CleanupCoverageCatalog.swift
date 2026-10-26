@@ -353,7 +353,7 @@ enum CleanupCoverageCatalog {
 
     /// D24: "Mail Downloads" holds copies the system saved when attachments
     /// were opened. Yellow, selectable, never preselected; Mail must be
-    /// closed. Attachments inside the mail library are not listed.
+    /// closed. D183 lists the mail library's attachment folders separately.
     static let mailDownloadedAttachmentsRule = CleanupRule(
         id: "mail.downloaded-attachments",
         selectionPolicyVersion: 2,
@@ -391,6 +391,41 @@ enum CleanupCoverageCatalog {
             checkedAt: "2026-10-12", impact: "已打开附件的下载副本将移入废纸篓，邮件原件不受影响")
     )
 
+    /// D183: actual local Mail attachment folders, individually reviewable.
+    static let mailLibraryAttachmentFoldersRule = CleanupRule(
+        id: "mail.library-attachment-folders",
+        selectionPolicyVersion: 2,
+        categoryID: "mail",
+        categoryTitleKey: "cleanup.category.mail",
+        titleKey: "cleanup.rule.mailLibraryAttachments.title",
+        root: CleanupRuleRoot(kind: .homeRelative, path: "Library/Mail"),
+        candidateScope: .namedDescendantDirectories,
+        maximumCandidates: 400,
+        maximumDepth: 16,
+        minimumAgeDays: 0,
+        minimumBytes: 1_000_000,
+        include: CleanupRuleMatch(
+            entryKinds: [.directory],
+            extensions: [],
+            nameMatcher: CleanupNameMatcher(mode: .exact, values: ["Attachments"])
+        ),
+        exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
+        cloudPolicy: .skipPlaceholder,
+        risk: .reviewOnly,
+        recommendation: .optional,
+        defaultSelection: .unselected,
+        executionEligibility: .eligibleAfterReview,
+        measurementRequirement: .complete,
+        allowsManualSelection: true,
+        action: .moveToTrashAfterReview,
+        requiredClosedBundleIDs: ["com.apple.mail"],
+        reasonKey: "cleanup.reason.mailLibraryAttachments",
+        ownerDisplayName: "Apple Mail",
+        maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: 1,
+            checkedAt: "2026-10-23",
+            impact: "附件将移入废纸篓，可放回。IMAP 等服务器邮件打开时会重新下载附件；仅存本机的邮件（如 POP 或“我的 Mac 上”邮箱）需从废纸篓放回附件后才能再查看")
+    )
+
     /// D23: one separate item that permanently deletes the top-level entries
     /// that were in the Trash when the scan ran. Never preselected.
     static let userTrashRule = CleanupRule(
@@ -424,13 +459,122 @@ enum CleanupCoverageCatalog {
             checkedAt: "2026-10-12", impact: "将永久删除扫描时已有的废纸篓项目，无法通过本应用恢复")
     )
 
+    /// D-FP6 (竞品对比 2026-10-20): preference files macOS cannot read,
+    /// listed one by one under System Junk (CleanMyMac's and Tencent Lemon's
+    /// "broken preferences"). Yellow, never preselected: a few apps store
+    /// other formats under the `.plist` extension. Only the files directly
+    /// in `~/Library/Preferences`; `ByHost` and folders are not read.
+    static let brokenPreferencesRule = CleanupRule(
+        id: "system.broken-preferences",
+        selectionPolicyVersion: 2,
+        categoryID: "system",
+        categoryTitleKey: "cleanup.category.system",
+        titleKey: "cleanup.rule.brokenPreferences.title",
+        root: CleanupRuleRoot(kind: .homeRelative, path: "Library/Preferences"),
+        maximumDepth: 1,
+        minimumAgeDays: 0,
+        minimumBytes: 0,
+        include: CleanupRuleMatch(
+            entryKinds: [.regularFile],
+            extensions: ["plist"],
+            nameMatcher: CleanupNameMatcher(mode: .any, values: [])
+        ),
+        exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
+        cloudPolicy: .excludeCloudRoots,
+        risk: .reviewOnly,
+        recommendation: .optional,
+        defaultSelection: .unselected,
+        executionEligibility: .eligibleAfterReview,
+        measurementRequirement: .complete,
+        allowsManualSelection: true,
+        action: .moveToTrashAfterReview,
+        requiredClosedBundleIDs: [],
+        reasonKey: "cleanup.reason.brokenPreferences",
+        ownerInference: .candidateName,
+        maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: 1,
+            checkedAt: "2026-10-20", impact: "应用会恢复默认设置并按需重新生成设置文件"),
+        contentRequirement: .unreadablePropertyList
+    )
+
+    /// D181: the same one-item emptying as D23, for the user's Trash folder
+    /// on each other mounted volume (`/Volumes/<name>/.Trashes/<uid>`), one
+    /// row per volume. Never preselected; deletes only the entries frozen at
+    /// scan time, each re-verified before deletion.
+    static let volumeTrashRule = CleanupRule(
+        id: "trash.volume-trashes",
+        selectionPolicyVersion: 2,
+        categoryID: "trash",
+        categoryTitleKey: "cleanup.category.trash",
+        titleKey: "cleanup.rule.volumeTrash.title",
+        root: CleanupRuleRoot(kind: .mountedVolumeTrashes, path: VolumeTrashLocator.volumesPath),
+        candidateScope: .root,
+        maximumDepth: 32,
+        minimumAgeDays: 0,
+        minimumBytes: 1,
+        include: CleanupRuleMatch(
+            entryKinds: [.directory],
+            extensions: [],
+            nameMatcher: CleanupNameMatcher(mode: .any, values: [])
+        ),
+        exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
+        cloudPolicy: .skipPlaceholder,
+        risk: .protected,
+        recommendation: .notRecommended,
+        defaultSelection: .unselected,
+        executionEligibility: .eligibleAfterProtectedReview,
+        measurementRequirement: .complete,
+        allowsManualSelection: true,
+        action: .emptyTrash,
+        requiredClosedBundleIDs: [],
+        reasonKey: "cleanup.reason.volumeTrash",
+        maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: 1,
+            checkedAt: "2026-10-23", impact: "将永久删除扫描时外接硬盘废纸篓里已有的项目，无法通过本应用恢复")
+    )
+
+    /// D192: iCloud Drive's Trash includes cloud-only entries. Metadata-only
+    /// measurement and descriptor-relative unlinking must never download them.
+    static let iCloudDriveTrashRule = CleanupRule(
+        id: "trash.icloud-drive",
+        selectionPolicyVersion: 2,
+        categoryID: "trash",
+        categoryTitleKey: "cleanup.category.trash",
+        titleKey: "cleanup.rule.iCloudDriveTrash.title",
+        root: CleanupRuleRoot(kind: .homeRelative, path: "Library/Mobile Documents/.Trash"),
+        candidateScope: .root,
+        maximumDepth: 32,
+        minimumAgeDays: 0,
+        minimumBytes: 1,
+        include: CleanupRuleMatch(
+            entryKinds: [.directory],
+            extensions: [],
+            nameMatcher: CleanupNameMatcher(mode: .any, values: [])
+        ),
+        exclude: CleanupRuleExclusion(relativePrefixes: [], extensions: []),
+        cloudPolicy: .metadataOnly,
+        risk: .protected,
+        recommendation: .notRecommended,
+        defaultSelection: .unselected,
+        executionEligibility: .eligibleAfterProtectedReview,
+        measurementRequirement: .complete,
+        allowsManualSelection: true,
+        action: .emptyTrash,
+        requiredClosedBundleIDs: [],
+        reasonKey: "cleanup.reason.iCloudDriveTrash",
+        maintenance: CleanupRuleMaintenance(source: .coverageCatalog, revision: 1,
+            checkedAt: "2026-10-23", impact: "会从你所有设备上的 iCloud 云盘永久删除，不能撤销")
+    )
+
     static var cleanupRules: [CleanupRule] {
         regenerableCacheDefinitions.map(\.cleanupRule)
             + logDefinitions.map(\.cleanupRule)
             + [
                 cloudKitCacheRule,
                 mailDownloadedAttachmentsRule,
+                mailLibraryAttachmentFoldersRule,
+                brokenPreferencesRule,
                 userTrashRule,
+                volumeTrashRule,
+                iCloudDriveTrashRule,
             ]
     }
 

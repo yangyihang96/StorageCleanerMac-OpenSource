@@ -1,17 +1,12 @@
 import Foundation
 
-/// D84：容量口径。只加说明，不改测量算法：空间分析对 /Applications 中
-/// 应用包里的内容优先取逻辑大小，其他位置优先取本地占用（分配大小）；
-/// 包含应用包的上层文件夹（/、/Applications 等）因此是两种口径的混合。
-/// 大文件清单一律按本地占用。
+/// D84：容量口径说明。D193（用户 10-23 选“改成实际占用”）起空间分析
+/// 一律按本地占用（分配大小），/Applications 的应用包也一样，不再有
+/// “逻辑大小”和“应用包按逻辑大小的混合”两种口径。大文件清单一律按
+/// 本地占用。
 enum StorageCapacityBasis: String, CaseIterable, Sendable {
     /// 本地占用（分配大小）：文件在这块磁盘上实际占用的块。
     case allocated
-    /// 逻辑大小：文件内容的长度，与是否压缩、稀疏或共享无关。
-    case logical
-    /// 混合：包含 /Applications 应用包的文件夹，应用包内容按逻辑大小，
-    /// 其余按本地占用。
-    case mixedWithAppBundles
     /// 本轮量到的下限：扫描不完整、超时或权限不足，真实值可能更大。
     case measuredLowerBound
     /// 云端占位：文件只在云端，没有下载，不占本地空间。
@@ -20,8 +15,6 @@ enum StorageCapacityBasis: String, CaseIterable, Sendable {
     var title: String {
         switch self {
         case .allocated: L10n.text("本地占用（分配大小）", "Local Usage (Allocated Size)")
-        case .logical: L10n.text("逻辑大小", "Logical Size")
-        case .mixedWithAppBundles: L10n.text("本地占用（应用包按逻辑大小）", "Local Usage (App Bundles by Logical Size)")
         case .measuredLowerBound: L10n.text("本轮量到的下限", "Lower Bound Measured This Run")
         case .cloudPlaceholder: L10n.text("云端占位（未下载，不占本地）", "Cloud Placeholder (Not Downloaded, No Local Usage)")
         }
@@ -33,16 +26,6 @@ enum StorageCapacityBasis: String, CaseIterable, Sendable {
             L10n.text(
                 "文件在这块磁盘上实际占用的空间。稀疏文件只计已写入的块，因此可能小于逻辑大小。",
                 "The space the file actually takes on this disk. Sparse files count only written blocks, so this can be smaller than the logical size."
-            )
-        case .logical:
-            L10n.text(
-                "文件内容的长度。/Applications 中的应用包内容按逻辑大小显示，与访达“简介”中的大小一致。",
-                "The length of the file's content. App bundle contents in /Applications are shown by logical size, as Finder's Get Info does."
-            )
-        case .mixedWithAppBundles:
-            L10n.text(
-                "包含 /Applications 应用包的文件夹（例如 / 与 /Applications）：应用包内容按逻辑大小计，其余按本地占用计，合计是两种口径相加。",
-                "Folders that contain app bundles in /Applications (such as / and /Applications): app bundle contents count by logical size and everything else by local usage, so the total mixes both."
             )
         case .measuredLowerBound:
             L10n.text(
@@ -70,21 +53,14 @@ enum StorageCapacityPresentation {
         return basis(forMeasuredPath: entry.path, isDirectory: entry.isDirectory)
     }
 
-    /// 测量口径：应用包（/Applications/X.app）本身与其内容按逻辑大小；
-    /// 可能包含应用包的上层文件夹（/、/Applications 及其中非应用包的
-    /// 文件夹）为混合口径；其余按本地占用。与
+    /// 测量口径：D193 起一律按本地占用，应用包与包含它的文件夹也一样
+    /// （D84 时应用包按逻辑大小、上层文件夹为混合口径）。与
     /// `DiskScanner.storageMapPreferredSize` 同源。
     static func basis(forMeasuredPath path: String, isDirectory: Bool) -> StorageCapacityBasis {
-        let measured = DiskScanner.storageMapSizeBasis(path: path)
-        guard isDirectory, measured != .logical else { return measured }
-        let path = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
-        if path.hasPrefix("/Applications/"), path.lowercased().hasSuffix(".app") { return .logical }
-        if path == "/" || path == "/Applications" || path.hasPrefix("/Applications/") { return .mixedWithAppBundles }
-        return measured
+        DiskScanner.storageMapSizeBasis(path: path)
     }
 
-    /// 一个目录汇总的口径：不完整时为本轮量到的下限，否则按这个目录的
-    /// 测量口径（本地占用、应用包的逻辑大小或两者混合）。
+    /// 一个目录汇总的口径：不完整时为本轮量到的下限，否则按本地占用。
     static func summaryBasis(isComplete: Bool, path: String) -> StorageCapacityBasis {
         isComplete ? basis(forMeasuredPath: path, isDirectory: true) : .measuredLowerBound
     }
@@ -92,8 +68,6 @@ enum StorageCapacityPresentation {
     /// 结果页摘要的短标签。
     static func summaryLabel(isComplete: Bool, path: String) -> String {
         switch summaryBasis(isComplete: isComplete, path: path) {
-        case .logical: L10n.text("已分析 · 逻辑大小", "Analyzed · Logical Size")
-        case .mixedWithAppBundles: L10n.text("已分析 · 本地占用（应用包按逻辑大小）", "Analyzed · Local Usage (App Bundles by Logical Size)")
         case .measuredLowerBound: L10n.text("本轮量到的下限", "Lower Bound This Run")
         case .allocated, .cloudPlaceholder: L10n.text("已分析 · 本地占用", "Analyzed · Local Usage")
         }
@@ -102,8 +76,6 @@ enum StorageCapacityPresentation {
     /// 面包屑右侧说明。
     static func snapshotNote(isComplete: Bool, path: String) -> String {
         switch summaryBasis(isComplete: isComplete, path: path) {
-        case .logical: L10n.text("按逻辑大小（应用包）", "By logical size (app bundle)")
-        case .mixedWithAppBundles: L10n.text("按本地占用（应用包按逻辑大小）", "By local usage (app bundles by logical size)")
         case .measuredLowerBound: L10n.text("部分索引 · 本轮量到的下限", "Partial index · Lower bound this run")
         case .allocated, .cloudPlaceholder: L10n.text("按本地占用（分配大小）", "By local usage (allocated size)")
         }
@@ -145,7 +117,7 @@ enum StorageCapacityPresentation {
     /// D84：移到废纸篓后的完成摘要。容量描述为“已移到废纸篓”，并写明尚未释放。
     static func movedToTrashSummary(count: Int, bytes: Int64) -> String {
         L10n.text(
-            "已移到废纸篓 \(count) 项 · \(ByteFormat.storageString(bytes))（清空废纸篓后才释放）",
+            "已移到废纸篓 \(ByteFormat.count(count)) 项 · \(ByteFormat.storageString(bytes))（清空废纸篓后才释放）",
             "Moved \(L10n.items(count)) to the Trash · \(ByteFormat.storageString(bytes)) (freed when the Trash is emptied)"
         )
     }

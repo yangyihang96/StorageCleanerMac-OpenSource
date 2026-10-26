@@ -44,8 +44,10 @@ final class PanelChartNormalizationTests: XCTestCase {
                     if let expected { XCTAssertEqual(frame.marks.map(\.rect), expected) }
                     expected = frame.marks.map(\.rect)
                     XCTAssertTrue(frame.marks.allSatisfy { abs(($0.mean.cpuTotal ?? 0) - 25) < 0.000_001 })
+                    // D120 (2026-10-18): iStat's 1 pt gap at 1x and 2x (was one
+                    // physical pixel, `1 / scale`).
                     for (left, right) in zip(frame.marks, frame.marks.dropFirst()) {
-                        XCTAssertEqual((right.rect.minX - left.rect.maxX) * scale, 1, accuracy: 0.000_001)
+                        XCTAssertEqual(right.rect.minX - left.rect.maxX, 1, accuracy: 0.000_001)
                     }
                 }
             }
@@ -821,7 +823,10 @@ final class PanelChartNormalizationTests: XCTestCase {
             XCTAssertEqual((aligned * scale).rounded(), aligned * scale, accuracy: 0.000_001)
 
             let metrics = GeekChartWindow.barMetrics(displayScale: scale)
-            XCTAssertEqual(metrics.spacing * scale, 1, accuracy: 0.000_001)
+            // D120 (2026-10-18): iStat's 1 pt gap snapped to whole pixels
+            // (1, 2 and 2 px); D76 kept one physical pixel at every scale.
+            XCTAssertEqual(metrics.spacing * scale, (GeekChartWindow.barSpacing * scale).rounded(), accuracy: 0.000_001)
+            XCTAssertEqual(metrics.width + metrics.spacing, metrics.pitch, accuracy: 0.000_001)
             XCTAssertEqual((metrics.width * scale).rounded(), metrics.width * scale, accuracy: 0.000_001)
             XCTAssertEqual((metrics.spacing * scale).rounded(), metrics.spacing * scale, accuracy: 0.000_001)
             let x = try XCTUnwrap(
@@ -854,10 +859,14 @@ final class PanelChartNormalizationTests: XCTestCase {
 
     func testActiveMiniWindowCardBorderKeepsTheHairlineAtOneAndTwoTimesScale() throws {
         for scale in [CGFloat(1), CGFloat(2)] {
+            // D118 (2026-10-18): iStat highlights a card with a 1 pt accent
+            // line inset by 1 at every scale (spec §3.3); the resting border
+            // keeps the one-pixel hairline. Was `1 / scale` when active.
             XCTAssertEqual(
                 GeekVisualTokens.cardBorderLineWidth(isActive: true, displayScale: scale),
-                1 / scale
+                GeekVisualTokens.cardHighlightLineWidth
             )
+            XCTAssertEqual(GeekVisualTokens.cardHighlightLineWidth, 1)
             XCTAssertEqual(
                 GeekVisualTokens.cardBorderLineWidth(isActive: false, displayScale: scale),
                 1 / scale
@@ -867,9 +876,11 @@ final class PanelChartNormalizationTests: XCTestCase {
         let components = try source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPanelComponents.swift"
         )
+        // D123 (2026-10-19): the arrow keys' highlight lights the card the
+        // same way as the pointer (was `isHovering` alone).
         XCTAssertTrue(
             components.contains(
-                ".environment(\\.geekCombinedCardIsActive, isHovering)"
+                ".environment(\\.geekCombinedCardIsActive, isHovering || keyboardHighlight == .card(destination))"
             )
         )
         XCTAssertTrue(components.contains(".environment(\\.geekCombinedCardIsSelected, isSelected)"))
@@ -994,12 +1005,14 @@ final class PanelChartNormalizationTests: XCTestCase {
     func testReferencePlotWidthsProduceMeasuredStandardAndBatteryBucketDurations() {
         let standardPlot = CGRect(x: 0, y: 0, width: 359, height: 120)
         let batteryPlot = CGRect(x: 0, y: 0, width: 287, height: 90)
+        // D121 (2026-10-18): the history chart keeps the card's 8 pt inset
+        // (iStat's 8 + 359 + 8; was a 2 pt inset in a 380 pt window).
         let historyPlot = CGRect(
-            x: 2,
+            x: MiniWindowStyleTokens.historyChartInset,
             y: 0,
             width: MiniWindowStyleTokens.historyWidth
                 - MiniWindowStyleTokens.contentInset * 2
-                - 4,
+                - MiniWindowStyleTokens.historyChartInset * 2,
             height: 120
         )
 
@@ -1544,18 +1557,30 @@ final class PanelChartNormalizationTests: XCTestCase {
         let powerSource = try source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsPowerHoverDetails.swift"
         )
-        XCTAssertTrue(powerSource.contains("let shouldShowTimelineLabels = showsTimelineLabels"))
-        XCTAssertTrue(powerSource.contains("- (shouldShowTimelineLabels ? 20 : 4)"))
+        // D132 (2026-10-19): one `plotGeometry(in:)` lays out the plot for both
+        // the preparation and the drawing (was
+        // `let shouldShowTimelineLabels = showsTimelineLabels` and
+        // `- (shouldShowTimelineLabels ? 20 : 4)` in each).
+        XCTAssertTrue(powerSource.contains("let timeline = showsTimelineLabels && metric == .batteryPower && size.height >= 70"))
+        XCTAssertTrue(powerSource.contains("height: max(1, size.height - (timeline ? 20 : 4) - railHeight - railGap))"))
+        XCTAssertTrue(powerSource.contains("let shouldShowTimelineLabels = geometry.showsTimelineLabels"))
+        XCTAssertEqual(powerSource.components(separatedBy: "plotGeometry(in: proxy.size)").count - 1, 2)
     }
 
     func testGeekThroughputScaleContainsEveryDisplayedPeak() {
-        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: []), 1)
-        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [100, 200]), 250)
+        // D117: one direction's scale never drops below 1 KiB/s, so idle
+        // traffic of a few bytes stays a sliver instead of filling its half.
+        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: []), 1_024)
+        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [100, 200]), 1_024)
+        // D120 (2026-10-18): the scale is the visible peak itself, as iStat
+        // Menus 7.30 draws it; D117 rounded it up to a tier (2 000 → 2 500).
+        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [1_000, 2_000]), 2_000)
+        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [1_500]), 1_500)
 
         let traffic = Array(repeating: 1_000.0, count: 10) + [1_000_000]
-        XCTAssertGreaterThanOrEqual(GeekBarChartScale.throughputUpperBound(for: traffic), 1_000_000)
-        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [.nan, .infinity, -1, 0]), 1)
-        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [.nan, .infinity, 100, 200]), 250)
+        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: traffic), 1_000_000)
+        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [.nan, .infinity, -1, 0]), 1_024)
+        XCTAssertEqual(GeekBarChartScale.throughputUpperBound(for: [.nan, .infinity, 1_000, 2_000]), 2_000)
     }
 
     func testDynamicChartAxisExpandsImmediatelyAndDecaysToTheExistingTier() {
@@ -1682,8 +1707,10 @@ final class PanelChartNormalizationTests: XCTestCase {
             components.components(separatedBy: "current: currentReading(of: networkDisplayedHistory)").count - 1,
             1
         )
-        XCTAssertTrue(components.contains("rateText(networkCurrentRates.down)"))
-        XCTAssertTrue(components.contains("rateText(networkCurrentRates.up)"))
+        // D128 (2026-10-19): iStat's large bandwidth values (was
+        // `rateText(networkCurrentRates.down)` / `.up`).
+        XCTAssertTrue(components.contains("rateText(networkCurrentRates.down, style: .large)"))
+        XCTAssertTrue(components.contains("rateText(networkCurrentRates.up, style: .large)"))
         XCTAssertFalse(components.contains("if let latest = currentReading(of: selectedDisplayedHistory)"))
         XCTAssertTrue(charts.contains("struct GeekPreparedNetworkFrame"))
         XCTAssertTrue(charts.contains("TimeBucketAggregator.lastValid("))
@@ -1737,7 +1764,9 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(frame.buckets.dropLast().allSatisfy { $0.download == nil && !$0.downloadIsEstimated })
         XCTAssertFalse(bucket.uploadIsEstimated)
         XCTAssertFalse(bucket.downloadIsEstimated)
-        XCTAssertEqual(frame.maximum, 200)
+        // Each half has its own scale with the 1 KiB/s floor (D117).
+        XCTAssertEqual(frame.uploadMaximum, 1_024)
+        XCTAssertEqual(frame.downloadMaximum, 1_024)
 
         let charts = try source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekCharts.swift"
@@ -1784,7 +1813,8 @@ final class PanelChartNormalizationTests: XCTestCase {
             XCTAssertTrue(frame.downloadMarks.allSatisfy { $0.value == 0 }, "width=\(width)")
             XCTAssertTrue(frame.uploadMarks.allSatisfy { !$0.isEstimated }, "width=\(width)")
             XCTAssertTrue(frame.downloadMarks.allSatisfy { !$0.isEstimated }, "width=\(width)")
-            XCTAssertEqual(frame.maximum, 1, accuracy: 0.000_001, "width=\(width)")
+            XCTAssertEqual(frame.uploadMaximum, GeekBarChartScale.throughputFloor, "width=\(width)")
+            XCTAssertEqual(frame.downloadMaximum, GeekBarChartScale.throughputFloor, "width=\(width)")
 
             let expectedPitch = GeekChartWindow.barMetrics(displayScale: 1).pitch
             for (left, right) in zip(frame.uploadMarks, frame.uploadMarks.dropFirst()) {
@@ -1867,7 +1897,9 @@ final class PanelChartNormalizationTests: XCTestCase {
 
         XCTAssertTrue(source.contains("let visibleSeries = series.filter { summary.channels.contains($0.channel) }"))
         XCTAssertTrue(source.contains("let visibleValueRange = resolvedValueRange"))
-        XCTAssertTrue(source.contains("case .percent:\n            return .fixed(min: 0, max: 100)"))
+        // D128 (2026-10-19): the benchmark's percent shares the fixed range
+        // (was `case .percent:` alone).
+        XCTAssertTrue(source.contains("case .percent, .percentWithTenths:\n            return .fixed(min: 0, max: 100)"))
         XCTAssertTrue(stackedBars.contains("Canvas"))
         XCTAssertTrue(stackedBars.contains("valueRange: ClosedRange<Double>"))
         XCTAssertTrue(stackedBars.contains("prepared?.values"))
@@ -1933,10 +1965,18 @@ final class PanelChartNormalizationTests: XCTestCase {
         )
 
         XCTAssertFalse(settings.contains("Show Fans in Panel Overview"))
-        XCTAssertTrue(settings.contains("Chart Colors"))
-        XCTAssertTrue(settings.contains("items: PanelColorTheme.allCases, selection: selectedPanelColorTheme"))
-        XCTAssertTrue(settings.contains("Panel Background Color"))
-        XCTAssertTrue(settings.contains("Bar Chart Color"))
+        // D135 (R9a): the panel draws iStat's theme pair; the chart color
+        // theme and its custom background and bar colors are no longer
+        // offered. Were XCTAssertTrue for "Chart Colors",
+        // "items: PanelColorTheme.allCases, selection: selectedPanelColorTheme",
+        // "Panel Background Color" and "Bar Chart Color".
+        XCTAssertFalse(settings.contains("Chart Colors"))
+        XCTAssertFalse(settings.contains("items: PanelColorTheme.allCases, selection: selectedPanelColorTheme"))
+        XCTAssertFalse(settings.contains("Panel Background Color"))
+        XCTAssertFalse(settings.contains("Bar Chart Color"))
+        XCTAssertTrue(settings.contains("Dark Appearance Theme"))
+        XCTAssertTrue(settings.contains("Light Appearance Theme"))
+        // The menu bar item colors keep their custom pickers.
         XCTAssertTrue(settings.contains("ColorPicker("))
         let sensors = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift")
         XCTAssertTrue(sensors.contains("geekFanTelemetry.readings"))
@@ -1949,8 +1989,10 @@ final class PanelChartNormalizationTests: XCTestCase {
     func testPanelAccentThemePreservesSemanticContrastForPairedSeries() throws {
         let root = try source("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift")
         let charts = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekCharts.swift")
+        // D133: the swap share joined the list (was `[.cpuUser, .cpuSystem,
+        // .compressedMemoryBytes, .swapUsedBytes]`).
         let cpuColorRule = try XCTUnwrap(charts.range(of:
-            "if [.cpuUser, .cpuSystem, .compressedMemoryBytes, .swapUsedBytes].contains(item.channel) {\n            return item.color"
+            "if [.cpuUser, .cpuSystem, .compressedMemoryBytes, .swapUsedBytes, .swapUsedPercent].contains(item.channel) {\n            return item.color"
         ))
         let accentColorRule = try XCTUnwrap(charts.range(of:
             "if style == .stackedBars, let panelChartAccentColor"
@@ -2040,9 +2082,21 @@ final class PanelChartNormalizationTests: XCTestCase {
 
         XCTAssertTrue(geek.contains("PanelChartSamplingPlaceholder()"))
         XCTAssertTrue(geek.contains("case .percent:"))
-        XCTAssertTrue(geek.contains("MenuBarChartGeometry.niceCeiling"))
-        XCTAssertTrue(geek.contains("let targetMaximum = mode.maximum(for: prepared)"))
-        XCTAssertTrue(geek.contains("@StateObject private var dynamicAxisScale"))
+        // D120 (2026-10-18): a throughput direction scales to its visible peak
+        // (was `MenuBarChartGeometry.niceCeiling` here); the fan chart keeps
+        // the nice tier.
+        let throughputScale = try XCTUnwrap(geek
+            .components(separatedBy: "static func throughputUpperBound(for values: [Double]) -> Double {").dropFirst().first?
+            .components(separatedBy: "\n    }\n").first)
+        XCTAssertTrue(throughputScale.contains("return max(throughputFloor, peak)"))
+        XCTAssertFalse(throughputScale.contains("niceCeiling"))
+        let windowSummary = try source("Sources/StorageCleanerMac/Support/MenuBarTelemetryWindowSummary.swift")
+        XCTAssertTrue(windowSummary.contains("MenuBarChartGeometry.niceCeiling(for: fanMaximum"))
+        // Each throughput direction keeps its own scale and decay (D117).
+        XCTAssertTrue(geek.contains("let readTarget = prepared.readMaximum"))
+        XCTAssertTrue(geek.contains("let downloadTarget = preparedFrame.downloadMaximum"))
+        XCTAssertTrue(geek.contains("@StateObject private var writeAxisScale"))
+        XCTAssertTrue(geek.contains("@StateObject private var uploadAxisScale"))
         XCTAssertTrue(geek.contains("GeekChartWindow.barBucketSnapshots("))
         XCTAssertTrue(geek.contains("TimeBucketAggregator.nearestFilled("))
 
@@ -2102,10 +2156,10 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(components.contains("all explanatory text inside the ring"))
         XCTAssertEqual(GeekCombinedRing.contentDiameter(size: 30, lineWidth: 2), 22)
         XCTAssertEqual(GeekCombinedRing.contentDiameter(size: 96, lineWidth: 6), 80)
-        XCTAssertGreaterThanOrEqual(
-            geekPanelSource.components(separatedBy: ".frame(height: 72)").count - 1,
-            1
-        )
+        // D119 (2026-10-18): the network page's plot is iStat's H − 74 of
+        // its 150 pt bandwidth section, 76 pt (was `.frame(height: 72)`).
+        XCTAssertTrue(geekPanelSource.contains("height: GeekNetworkBandwidthLayout.chartHeight"))
+        XCTAssertEqual(GeekNetworkBandwidthLayout.chartHeight, 76)
         XCTAssertFalse(processor.contains(".frame(height: 72)"))
         XCTAssertFalse(memory.contains(".frame(height: 72)"))
         XCTAssertFalse(memory.contains("Grid(horizontalSpacing: 12, verticalSpacing: 2)"))
@@ -2175,13 +2229,20 @@ final class PanelChartNormalizationTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarStatusPanelRoot.swift"
         )
 
-        XCTAssertTrue(panel.contains("L10n.text(\"网络\", \"Network\")"))
-        XCTAssertTrue(panel.contains("L10n.text(\"传感器\", \"Sensors\")"))
+        // D118 (2026-10-18): iStat draws no title on the network and sensors
+        // cards. The network card is named by its module button
+        // (`destination.title`, "网络"); the sensors card, three ring buttons
+        // and the fan entry, is a container VoiceOver names "传感器". Were
+        // the titles `L10n.text("网络", "Network")` / `("传感器", "Sensors")`.
+        XCTAssertTrue(panel.contains("GeekOverviewModuleButton(destination: .network"))
+        XCTAssertEqual(PanelSection.network.title, L10n.text("网络", "Network"))
+        XCTAssertTrue(panel.contains(".accessibilityLabel(L10n.text(\"传感器\", \"Sensors\"))"))
         XCTAssertTrue(panel.contains("storageSnapshot.totalBytes"))
-        // Batch 2b review: the battery card uses the shared module header,
-        // whose icon takes the section-header color like every overview card.
+        // Batch 2b review: the battery card uses the shared module header.
+        // D118: the header is text only (iStat); it was
+        // `GeekModuleHeader(systemImage: AppSymbols.Monitor.battery, …)`.
         XCTAssertTrue(panel.contains(
-            "GeekModuleHeader(systemImage: AppSymbols.Monitor.battery, title: L10n.text(\"电池\", \"Battery\"))"
+            "GeekModuleHeader(title: L10n.text(\"电池\", \"Battery\"))"
         ))
         XCTAssertTrue(panel.contains("percent: batterySnapshot?.chargePercent"))
         XCTAssertTrue(panel.contains("value: geekCompactTemperatureText"))
@@ -2189,8 +2250,11 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertFalse(scene.contains("if MiniWindowDemoData.isEnabled { return nil }"))
         let appearance = try source("Sources/StorageCleanerMac/Support/PanelAppearanceEnvironment.swift")
         XCTAssertTrue(scene.contains("PanelAppearanceEnvironment(forcedVisualMode: captureVisualMode)"))
-        XCTAssertTrue(appearance.contains("PanelColorTheme.backgroundTint("))
-        XCTAssertTrue(appearance.contains("PanelColorTheme.chartColor("))
+        // D135: a capture pins iStat's default theme and the fixture accent
+        // (were `PanelColorTheme.backgroundTint(` and `PanelColorTheme.chartColor(`,
+        // the chart color theme's tints).
+        XCTAssertTrue(appearance.contains("let id = forcedThemeID ?? IStatMenuTheme.defaultID"))
+        XCTAssertTrue(appearance.contains("IStatAccentPalette.colors(systemAccent: IStatAccentPalette.fixtureAccent"))
     }
 
     func testMemoryRingsUseMeasuredCompositionAndThreeStableSemanticColors() throws {
@@ -2548,12 +2612,12 @@ final class PanelChartNormalizationTests: XCTestCase {
             sensorSource.components(separatedBy: "GeekPrecisionLineChart(").count - 1,
             0
         )
-        XCTAssertEqual(
-            GeekSensorTemperatureLayout.temperatureCardHeight(itemCount: 10),
-            116
-        )
+        // D119 (2026-10-18): ten zones are iStat's single column of 15 pt
+        // rows under a title, 24 + 17n (was a two-column grid, 116 pt), with
+        // no disclosure chevron: a row opens its history like iStat's.
+        XCTAssertEqual(GeekSensorReadoutLayout.cardHeight(rowCount: 10), 194)
         XCTAssertFalse(sensorSource.contains("GeekTemperatureMiniRing("))
-        XCTAssertTrue(sensorSource.contains("GeekDisclosureIcon()"))
+        XCTAssertFalse(sensorSource.contains("GeekDisclosureIcon()"))
         XCTAssertTrue(disclosureIcon.contains("var systemImage = AppSymbols.Panel.disclosure"))
         XCTAssertTrue(disclosureIcon.contains(
             "AppSymbolGlyph(systemImage: systemImage, size: MiniWindowStyleTokens.disclosureGlyphSize"
@@ -2561,10 +2625,11 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(disclosureIcon.contains(
             ".frame(width: MiniWindowStyleTokens.disclosureIconSlotSize"
         ))
-        XCTAssertTrue(sensorSource.contains(
-            "minHeight: GeekSensorTemperatureLayout.gridRowHeight"
-        ))
-        XCTAssertTrue(sensorSource.contains("LazyVGrid("))
+        // D119: the temperature group's rows are 15 pt iStat rows; only the
+        // level-three probe list keeps the two-column grid.
+        XCTAssertFalse(sensorSource.contains("GeekSensorTemperatureLayout.gridRowHeight"))
+        XCTAssertTrue(sensorSource.contains("GeekIStatRowsCard("))
+        XCTAssertEqual(sensorSource.components(separatedBy: "LazyVGrid(").count - 1, 1)
         XCTAssertFalse(sensorSource.contains("GeekHardwareAuthorizationCard("))
         XCTAssertFalse(sensorSource.contains("GeekFanControlCard("))
         XCTAssertFalse(sensorSource.contains("GeekPowerModeControlCard("))
@@ -2579,12 +2644,15 @@ final class PanelChartNormalizationTests: XCTestCase {
             ).count - 1,
             0
         )
+        // D119: the regional zones are a rows group; individual probes still
+        // open a snapshot-only inspector from the Hardware Probes row.
         XCTAssertEqual(
             sensorSource.components(
                 separatedBy: "GeekSensorTemperatureLayout.temperatureCardHeight("
             ).count - 1,
-            1 // regional history; individual probes open a snapshot-only inspector
+            0
         )
+        XCTAssertTrue(sensorSource.contains("GeekDetailedTemperaturesDetail("))
         XCTAssertFalse(sensorSource.contains("GeekCombinedCard(height: 59)"))
         XCTAssertFalse(sensorSource.contains("GeekCombinedCard(height: 76)"))
         XCTAssertFalse(sensorSource.contains("GeekCombinedCard(height: 93)"))
@@ -2598,7 +2666,12 @@ final class PanelChartNormalizationTests: XCTestCase {
             max(0, GeekPanelPresentationMetrics.overviewSize.height
                 - GeekPanelPresentationMetrics.sensorsDetailHeight)
         )
+        // D119: iStat's sensors menu lists current, power, voltage and
+        // frequency below the fans, so the groups moved here from the power
+        // page (they are built in GeekHelperPowerMetricsCards.swift).
         XCTAssertFalse(sensorSource.contains("geekFrequencyCard"))
+        XCTAssertTrue(sensorSource.contains("liveCard(.battery) { geekHelperPowerMetricsCards }"))
+        XCTAssertTrue(sensorSource.contains("liveCard(.sensors) { geekSensorFrequencyGroup }"))
         XCTAssertTrue(sensorSource.contains("compactFanHistoryRow"))
         XCTAssertTrue(sensorSource.contains("GeekFanHoverDetail("))
         XCTAssertFalse(sensorSource.contains("geekSensorPowerCard"))
@@ -2624,7 +2697,11 @@ final class PanelChartNormalizationTests: XCTestCase {
         XCTAssertTrue(diskPresentation.contains("if let health = geekPrimaryDiskHealthText"))
         XCTAssertTrue(diskCard.contains("GeekDiskHealthTimestamp.checkedAt("))
         XCTAssertTrue(diskCard.contains("fallbackRemainingLifePercent: healthSummary?.diskRemainingLifePercent"))
-        XCTAssertTrue(diskPresentation.contains("AppSymbols.Monitor.storage"))
+        // D118 (2026-10-18): iStat names the volume beside a 26 pt capacity
+        // ring instead of a titled header with the storage icon (was
+        // `AppSymbols.Monitor.storage`).
+        XCTAssertTrue(diskPresentation.contains("size: IStat.diskRingSize"))
+        XCTAssertFalse(diskPresentation.contains("GeekModuleHeader("))
     }
 
     func testGeekDiskChartUsesTimestampedSamplesForRenderability() throws {

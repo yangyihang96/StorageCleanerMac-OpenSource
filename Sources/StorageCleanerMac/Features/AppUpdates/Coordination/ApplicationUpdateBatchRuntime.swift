@@ -69,11 +69,11 @@ struct AppUpdateBatchPresentation: Equatable, Sendable {
         runningCount = Set(applications.filter { ids.contains($0.id) && $0.isRunning }.map(\.id)).count
         needsAuthorization = applications.contains { ids.contains($0.id) && $0.requiresAdministratorAuthorization }
     }
-    var title: String { L10n.text("全部更新 · \(count) 个", "Update All · \(count)") }
+    var title: String { L10n.text("全部更新 · \(ByteFormat.count(count)) 个", "Update All · \(ByteFormat.count(count))") }
     var detail: String {
         var parts = [String]()
         if runningCount > 0 {
-            parts.append(L10n.text("将退出并重新打开 \(runningCount) 个正在运行的应用", "Quit and reopen \(runningCount) running apps"))
+            parts.append(L10n.text("将退出并重新打开 \(ByteFormat.count(runningCount)) 个正在运行的应用", "Quit and reopen \(ByteFormat.count(runningCount)) running apps"))
         }
         if needsAuthorization { parts.append(L10n.text("需要一次管理员授权", "One administrator authorization required")) }
         return parts.joined(separator: " · ")

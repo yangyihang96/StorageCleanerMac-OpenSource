@@ -196,6 +196,45 @@ final class ProjectArtifactTests: XCTestCase {
         XCTAssertEqual(result.scopeWarnings.count, 1)
         XCTAssertTrue(result.scopeWarnings[0].contains("未遍历"))
     }
+    /// D104 G1: each regular file of a listed artifact is read for sharing
+    /// once, while the artifact is measured, and the row keeps what emptying
+    /// the Trash frees; the check before the move reads nothing extra, and a
+    /// row that is only shown keeps no estimate.
+    func testListedRowsReadSharingAndTheMoveCheckDoesNot() throws {
+        let (home, project) = try fixture()
+        try write("Cargo.toml", in: project); try artifact("target", in: project)
+        try write("target/debug/app.rlib", in: project, text: String(repeating: "x", count: 8_192))
+        let rlib = project.appendingPathComponent("target/debug/app.rlib")
+        let rlibBytes = Int64(try XCTUnwrap(rlib.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize))
+        let reader = ArtifactSharingOverride(base: RuleTestReadOnlyFileSystem(root: home), sharing: [
+            rlib.resolvingSymlinksInPath().path: .known(FileStorageSharing(
+                privateBytes: 0, allocatedDataBytes: rlibBytes, cloneID: 7, cloneReferenceCount: 2, mayShareBlocks: true)),
+        ])
+        let scanner = ProjectArtifactScanner(fileSystem: reader, home: home)
+        let row = try XCTUnwrap(scanner.scanSynchronously(roots: [project]).rows.first)
+        XCTAssertNil(row.blockedReason)
+        XCTAssertEqual(reader.reads.sorted(), ["target/CACHEDIR.TAG", "target/debug/app.rlib", "target/generated.bin"]
+            .map { project.appendingPathComponent($0).resolvingSymlinksInPath().path }.sorted(),
+            "Regular files only, each once")
+        let estimate = try XCTUnwrap(row.candidate.reclaimableEstimate)
+        XCTAssertEqual(estimate.cloneSharedBytes, rlibBytes)
+        XCTAssertEqual(estimate.cloneGroupsReachingOutside.map(\.members), [1])
+        XCTAssertEqual(estimate.reclaimableBytes(ofAllocated: row.candidate.estimatedSizeBytes),
+                       row.candidate.estimatedSizeBytes - rlibBytes)
+
+        reader.forgetReads()
+        let requirement = ProjectArtifactRequirement.catalog.first { $0.ecosystem == "Cargo" }!
+        XCTAssertNil(scanner.assess(artifact: project.appendingPathComponent("target"), project: project,
+                                    requirement: requirement).reason)
+        XCTAssertEqual(reader.reads, [], "The check before the move reads sizes, not sharing")
+
+        try write("target/Cargo.lock", in: project)
+        let blocked = try XCTUnwrap(scanner.scanSynchronously(roots: [project]).rows.first)
+        XCTAssertNotNil(blocked.blockedReason)
+        XCTAssertNil(blocked.candidate.reclaimableEstimate, "A row that is only shown frees nothing")
+        let view = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/ProjectArtifactView.swift")
+        XCTAssertTrue(view.contains("if let reclaimable = CleanupCandidateRowHint.reclaimable(for: row.candidate) {"))
+    }
     func testCrossVolumeOnlyDisplays() throws {
         let (home, project) = try fixture()
         try write("Cargo.toml", in: project); try artifact("target", in: project)
@@ -267,7 +306,9 @@ final class ProjectArtifactTests: XCTestCase {
         let scanner = ProjectArtifactScanner(fileSystem: RuleTestReadOnlyFileSystem(root: home), home: home, excludedURLs: [project.appendingPathComponent("target")])
         XCTAssertTrue(try scanner.scanSynchronously(roots: []).rows.isEmpty)
         XCTAssertTrue(try scanner.scanSynchronously(roots: [home]).rows.isEmpty)
-        XCTAssertFalse(try XCTUnwrap(scanner.scanSynchronously(roots: [project]).rows.first).candidate.isSelectable)
+        let ignored = try scanner.scanSynchronously(roots: [project])
+        XCTAssertTrue(ignored.rows.isEmpty, "D207＋旧值：排除项仍列成不可选行；现在不列出")
+        XCTAssertEqual(ignored.session.metrics.ignoredItemCount, 1)
     }
     func testFingerprintIncludesRebuildRequirementAndReceiptRevision() async throws {
         let (home, project) = try fixture()
@@ -749,6 +790,29 @@ final class ProjectArtifactTests: XCTestCase {
     }
 }
 
+/// D104 G1: answers sharing for chosen paths and counts every read.
+private final class ArtifactSharingOverride: ReadOnlyFileSystem, @unchecked Sendable {
+    let base: any ReadOnlyFileSystem
+    let sharing: [String: FileStorageSharing.Reading]
+    private let lock = NSLock()
+    private var readPaths: [String] = []
+    init(base: any ReadOnlyFileSystem, sharing: [String: FileStorageSharing.Reading]) {
+        self.base = base
+        self.sharing = sharing
+    }
+    var reads: [String] { lock.withLock { readPaths } }
+    func forgetReads() { lock.withLock { readPaths = [] } }
+    func snapshot(at url: URL) throws -> FileSnapshot { try base.snapshot(at: url) }
+    func aggregateSnapshot(at url: URL) throws -> FileSnapshot { try base.aggregateSnapshot(at: url) }
+    func children(of directory: URL) throws -> [URL] { try base.children(of: directory) }
+    /// Paths compare resolved: the temporary home is /var/… and the scanner
+    /// reads what it lists under /private/var/….
+    func storageSharing(at url: URL) -> FileStorageSharing.Reading {
+        let path = url.resolvingSymlinksInPath().path
+        lock.withLock { readPaths.append(path) }
+        return sharing[path] ?? .notReported
+    }
+}
 private struct ArtifactMetadataOverride: ReadOnlyFileSystem {
     let base: any ReadOnlyFileSystem
     let overrideVolumeAt: URL?

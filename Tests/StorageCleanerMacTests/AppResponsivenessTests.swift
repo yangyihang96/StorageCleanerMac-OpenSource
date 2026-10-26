@@ -55,7 +55,9 @@ final class AppResponsivenessTests: XCTestCase {
         )
 
         XCTAssertTrue(settings.contains("settingsPane(for: selectedCategory)"))
-        XCTAssertTrue(settings.contains("private var settingsSidebar: some View"))
+        // D154 batch 3I: the top tabs replace the sidebar (was
+        // `private var settingsSidebar: some View`).
+        XCTAssertTrue(settings.contains("private var settingsTabBar: some View"))
         XCTAssertTrue(settings.contains("settingsSections(for: category)"))
         XCTAssertTrue(settings.contains("refresh(category: selectedCategory)"))
         XCTAssertTrue(settings.contains("ScanHistorySummary(entries: [])"))

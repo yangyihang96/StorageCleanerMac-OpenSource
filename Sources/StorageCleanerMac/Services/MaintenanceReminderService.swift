@@ -1,9 +1,13 @@
 import Foundation
 
+/// D219: CleanMyMac's “Remind to run regular Smart Care” choices — every 3
+/// days, weekly, every 2 weeks, monthly — plus Off (was off, daily, weekly,
+/// monthly; a stored daily choice reads as every 3 days).
 enum MaintenanceReminderCadence: String, CaseIterable, Identifiable, Sendable {
     case off
-    case daily
+    case every3Days
     case weekly
+    case biweekly
     case monthly
 
     var id: String { rawValue }
@@ -12,10 +16,12 @@ enum MaintenanceReminderCadence: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .off:
             L10n.text("关闭", "Off")
-        case .daily:
-            L10n.text("每日", "Daily")
+        case .every3Days:
+            L10n.text("每 3 天", "Every 3 Days")
         case .weekly:
             L10n.text("每周", "Weekly")
+        case .biweekly:
+            L10n.text("每两周", "Every 2 Weeks")
         case .monthly:
             L10n.text("每月", "Monthly")
         }
@@ -25,10 +31,12 @@ enum MaintenanceReminderCadence: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .off:
             L10n.text("只在结果明显过期时提示。", "Only prompt when results are clearly stale.")
-        case .daily:
+        case .every3Days:
             L10n.text("适合频繁下载、安装和开发测试。", "Best for frequent downloads, installs, and dev work.")
         case .weekly:
             L10n.text("适合大多数日常使用。", "Good for most everyday use.")
+        case .biweekly:
+            L10n.text("适合安装不多、空间较宽裕的设备。", "Good for devices with few installs and room to spare.")
         case .monthly:
             L10n.text("适合空间稳定、少安装软件的设备。", "Best for stable devices with few installs.")
         }
@@ -38,10 +46,12 @@ enum MaintenanceReminderCadence: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .off:
             nil
-        case .daily:
-            24 * 60 * 60
+        case .every3Days:
+            3 * 24 * 60 * 60
         case .weekly:
             7 * 24 * 60 * 60
+        case .biweekly:
+            14 * 24 * 60 * 60
         case .monthly:
             30 * 24 * 60 * 60
         }
@@ -104,8 +114,17 @@ enum MaintenanceReminderService {
     static let defaultsKey = "maintenance.reminder.cadence"
     static let defaultCadence: MaintenanceReminderCadence = .weekly
 
+    /// The raw value written before D219 for “Daily”.
+    static let retiredDailyRawValue = "daily"
+
     static func cadence(from rawValue: String) -> MaintenanceReminderCadence {
-        MaintenanceReminderCadence(rawValue: rawValue) ?? defaultCadence
+        if rawValue == retiredDailyRawValue { return .every3Days }
+        return MaintenanceReminderCadence(rawValue: rawValue) ?? defaultCadence
+    }
+
+    /// The choice saved by Settings (`@AppStorage(defaultsKey)`).
+    static func cadence(defaults: UserDefaults) -> MaintenanceReminderCadence {
+        cadence(from: defaults.string(forKey: defaultsKey) ?? defaultCadence.rawValue)
     }
 
     static func summary(

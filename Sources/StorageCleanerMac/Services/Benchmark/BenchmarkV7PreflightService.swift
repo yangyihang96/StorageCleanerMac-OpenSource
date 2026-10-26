@@ -185,7 +185,7 @@ struct BenchmarkV7PreflightService: BenchmarkV7Preflighting, Sendable {
         }
         if let availableMemoryBytes,
            availableMemoryBytes < Self.minimumAvailableMemoryBytes {
-            checks.append(check(.lowAvailableMemory, .warning, "Available memory is below 1 GiB."))
+            checks.append(check(.lowAvailableMemory, .warning, "Available memory is below 1 GB."))
         }
         if categories.contains(.storage) {
             if target.isReadOnly {

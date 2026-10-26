@@ -55,7 +55,8 @@ struct SystemUtilitiesHubView: View {
             AppUninstallerView(store: store)
         case .updater:
             AppUpdaterView(store: store)
-        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub:
+        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub,
+             .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             MemoryOptimizerView(store: store)
         }
     }
@@ -74,7 +75,8 @@ private extension ReviewFilter {
             L10n.text("卸载", "Uninstall")
         case .updater:
             L10n.text("更新", "Updates")
-        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub:
+        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub,
+             .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             title
         }
     }
@@ -82,16 +84,55 @@ private extension ReviewFilter {
 
 struct StartupItemsView: View {
     @ObservedObject var store: ScanStore
+    /// D202: Smart Care's Review shows its result here.
+    @ObservedObject private var navigation: AppNavigationState
+    /// D154 batch 2: the Maintenance tile on the Performance results (D161).
+    @ObservedObject private var maintenance: SystemMaintenanceStore
+    /// D143: the classic console, opened from the studio manager; tests of
+    /// the D70 console set `careStudioClassicResults`.
+    @Environment(\.careStudioClassicResults) private var usesClassicConsole
+#if DEBUG
+    @Environment(\.featurePresentationIsFixture) private var isFixture
+#else
+    /// Release builds have no presentation fixtures (the key is DEBUG-only).
+    private let isFixture = false
+#endif
+    @State private var showsClassicConsole = false
+    /// Report §4 item 13: the recommended tasks the tile's Run Tasks asks
+    /// about; these, as listed, are the ones that run (D168).
+    @State private var maintenanceRunTasks: [SystemMaintenanceTaskID] = []
+    @State private var confirmsMaintenanceRun = false
+
+    init(store: ScanStore) {
+        self.store = store
+        _navigation = ObservedObject(wrappedValue: store.navigationState)
+        _maintenance = ObservedObject(wrappedValue: ToolboxStores.of(store).maintenance)
+    }
+
+    /// D202: Smart Care's scan and result stay on Smart Care; this page keeps
+    /// its landing for them (its Review excepted).
+    private var showsOwnResult: Bool { store.moduleShowsResult(.performance) }
 
     var body: some View {
         Group {
-            if store.isLoadingStartupItems {
+            if store.isLoadingStartupItems && showsOwnResult {
                 StartupItemsRunningPage(
                     title: store.startupScanProgress?.title ?? L10n.text("正在读取启动项", "Reading Startup Items"),
                     discoveredCount: store.startupScanProgress?.discoveredCount ?? store.startupDomainItems.count,
                     onCancel: store.cancelStartupScan)
-            } else if !store.hasScannedStartupItems {
+            } else if !store.hasScannedStartupItems || !showsOwnResult {
                 startupLanding
+            } else if !showsClassicConsole && !usesClassicConsole {
+                CareStudioStartupResultsPage(
+                    items: store.startupDomainItems,
+                    activeOperationCandidateID: store.isPerformingStartupOperation
+                        ? store.pendingStartupOperationCandidate?.id
+                        : nil,
+                    isPerformingOperation: store.isPerformingStartupOperation,
+                    coverageAction: AnyView(startupCoverageAction),
+                    actions: studioActions,
+                    onShowClassicList: { showsClassicConsole = true },
+                    leadingTiles: [maintenanceTile], coverage: store.startupCoverage)
             } else {
                 StartupItemsDashboardView(
                     items: store.startupDomainItems,
@@ -137,26 +178,78 @@ struct StartupItemsView: View {
                     onOpenSystemSettings: { SMAppService.openSystemSettingsLoginItems() },
                     onUndo: store.canUndoLastStartupOperation ? { store.undoLastStartupOperation() } : nil
                 )
-            }
-        }
-        .featureFlowTransition(value: store.isLoadingStartupItems)
-        .toolbar {
-            if store.canUndoLastStartupOperation {
-                ToolbarItem {
-                    Button {
-                        store.undoLastStartupOperation()
-                    } label: {
-                        Label(L10n.text("撤销启动项操作", "Undo Startup Item Change"), systemImage: "arrow.uturn.backward")
+                .overlay(alignment: .topTrailing) {
+                    // Back to the studio cards (D143), placed as on the
+                    // classic cleanup list.
+                    if showsClassicConsole {
+                        Button(L10n.text("返回卡片视图", "Back to Cards")) { showsClassicConsole = false }
+                            .buttonStyle(.link)
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.top, 14)
+                            .padding(.trailing, 18)
                     }
-                    .help(L10n.text("恢复上一次已验证的启用或停用操作", "Restore the last verified enable or disable operation"))
                 }
             }
+        }
+        // D154 batch 2: the maintenance states (read-only probes, D161) are
+        // read with the scan the user starts, as CleanMyMac's Performance scan does.
+        .onChange(of: store.isLoadingStartupItems) { _, loading in
+            if loading, !isFixture, !maintenance.isRefreshing { maintenance.refresh() }
+        }
+        .featureFlowTransition(value: store.isLoadingStartupItems)
+        .maintenanceRunConfirmation(maintenance, tasks: maintenanceRunTasks, isPresented: $confirmsMaintenanceRun) {
+            maintenance.run(maintenanceRunTasks)
+        }
+        // D94: Undo is in the result controls only. A toolbar item here
+        // would add a window toolbar to this page alone and move the
+        // window buttons.
+    }
+
+    /// CleanMyMac's Performance results open with the maintenance tasks.
+    private var maintenanceTile: CareStudioTileModel {
+        .maintenance(maintenance, onReview: { store.showFilter(.maintenance) }) { tasks in
+            maintenanceRunTasks = tasks
+            confirmsMaintenanceRun = true
         }
     }
 
     private var startupLanding: some View {
         LightfieldStartupLandingView(items: store.startupDomainItems, canRefresh: store.canRefreshStartupItems,
             onStart: { store.refreshStartupItems() })
+    }
+
+    /// The same actions the classic console wires, for the studio manager.
+    private var studioActions: CareStudioStartupActions {
+        CareStudioStartupActions(
+            onRefresh: { store.refreshStartupItems() },
+            onEnable: { store.requestStartupOperation(.enable, candidate: $0) },
+            onDisable: { store.requestStartupOperation(.disable, candidate: $0) },
+            onStop: { store.requestStartupOperation(.stopCurrentSession, candidate: $0) },
+            onReveal: { item in
+                let locations = item.components
+                    .filter { $0.actionCapability.canRevealInFinder }
+                    .compactMap { candidate in
+                        candidate.plistURL ?? candidate.executableURL ?? candidate.applicationURL
+                            ?? candidate.attribution?.applicationURL
+                    }
+                guard !locations.isEmpty else { return }
+                NSWorkspace.shared.activateFileViewerSelecting(locations)
+            },
+            onOpenParentApplication: { item in
+                guard let applicationURL = item.components.first(where: {
+                    $0.actionCapability.canOpenParentApp
+                }).flatMap({ $0.attribution?.applicationURL ?? $0.applicationURL }) else { return }
+                NSWorkspace.shared.open(applicationURL)
+            },
+            onCopyText: { text in
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+            },
+            onOpenSystemSettings: { SMAppService.openSystemSettingsLoginItems() },
+            onUndo: store.canUndoLastStartupOperation ? { store.undoLastStartupOperation() } : nil,
+            onStartOver: { store.startOverStartupItems() },
+            startOverActivity: store.heavyWorkActivityStore)
     }
 
     private var startupCoverageAction: some View {
@@ -191,12 +284,8 @@ struct StartupItemsView: View {
                 "System background-item read diagnostic: \(failure)"
             )
         }
-        if store.startupCoverage.managedItemCoverageAvailable {
-            let count = store.startupCoverage.managedItemCount ?? 0
-            return L10n.text(
-                "已读取 \(count) 个系统后台项；点击可重新完整扫描",
-                "\(count) system background items read; click to run the full scan again"
-            )
+        if let help = StartupReadPresentation(coverage: store.startupCoverage).databaseReadHelp {
+            return help
         }
         return L10n.text(
             "额外读取 macOS 登录项与后台任务数据库；系统可能要求管理员确认",
@@ -213,17 +302,70 @@ struct StartupItemsView: View {
     }
 }
 
+extension CareStudioTileModel {
+    /// Report §4 item 13 (`cmm/24` against `ours/04`): the Performance
+    /// results' maintenance tile, "N maintenance tasks recommended" with
+    /// Review and Run Tasks; the count is Smart Care's. Run Tasks hands over
+    /// the recommended tasks that can run now, to be confirmed first
+    /// (D154⑮); what is ticked on the maintenance page is not added.
+    @MainActor
+    static func maintenance(_ store: SystemMaintenanceStore, onReview: @escaping () -> Void,
+                            onRun: @escaping ([SystemMaintenanceTaskID]) -> Void) -> CareStudioTileModel {
+        let count = store.summary.recommendedCount
+        return CareStudioTileModel(
+            id: "maintenance", module: .startup,
+            title: count > 0
+                ? L10n.text("\(ByteFormat.count(count)) 个维护任务推荐",
+                            count == 1 ? "1 Maintenance Task Recommended" : "\(ByteFormat.count(count)) Maintenance Tasks Recommended")
+                : L10n.text("维护任务", "Maintenance Tasks"),
+            detail: L10n.text("重建邮件索引、刷新“打开方式”等系统维护，逐项确认后才运行。",
+                              "System upkeep such as reindexing Mail and refreshing “Open With”; each task runs only after you confirm."),
+            note: lastRunNote(store),
+            systemImage: "wrench.adjustable",
+            reviewTitle: L10n.text("查看", "Review"), onReview: onReview,
+            cleanTitle: store.isRunning ? L10n.text("正在运行…", "Running…")
+                : (count > 0 ? L10n.text("运行任务", "Run Tasks") : nil),
+            cleanEnabled: !store.isRunning && !store.recommendedTasks.isEmpty,
+            onClean: {
+                let tasks = store.recommendedTasks
+                if !tasks.isEmpty { onRun(tasks) }
+            },
+            art: .tileMaintenance)
+    }
+
+    /// What the last run did, until its results are dismissed on the page.
+    @MainActor
+    private static func lastRunNote(_ store: SystemMaintenanceStore) -> String? {
+        guard !store.isRunning, !store.results.isEmpty else { return nil }
+        let ran = store.results.count
+        let unfinished = store.results.values.filter { $0.outcome != .succeeded }.count
+        return unfinished == 0
+            ? L10n.text("已运行 \(ByteFormat.count(ran)) 项，结果在“查看”里",
+                        ran == 1 ? "1 task ran; see Review for the result" : "\(ByteFormat.count(ran)) tasks ran; see Review for the results")
+            : L10n.text("\(ByteFormat.count(unfinished)) 项没有完成，原因在“查看”里",
+                        unfinished == 1 ? "1 task did not finish; see Review for why"
+                            : "\(ByteFormat.count(unfinished)) tasks did not finish; see Review for why")
+    }
+}
+
 /// Value-driven production presentation, also used by Debug captures.
 struct StartupItemsRunningPage: View {
+    @Environment(\.careStudioClassicResults) private var usesClassicPage
     let title: String
     let discoveredCount: Int
     let onCancel: () -> Void
+    /// D143: the CleanMyMac running page (still read-only: nothing changes);
+    /// the D70 template stays as the classic view.
     var body: some View {
-        FeatureRunningTemplate(module: .startup, title: title,
-            metrics: [.init(title: L10n.text("已发现", "Items Found"), value: String(discoveredCount))],
-            trustText: L10n.text("只读检查 · 更改前逐项确认并保留撤销记录", "Read-only check · Changes require confirmation and keep an undo record"),
-            canCancel: true, cancelTitle: L10n.text("取消读取", "Cancel Reading"), onCancel: onCancel
-        ) { EmptyView() } actions: { EmptyView() }
+        if usesClassicPage {
+            FeatureRunningTemplate(module: .startup, title: title,
+                metrics: [.init(title: L10n.text("已发现", "Items Found"), value: String(discoveredCount))],
+                trustText: L10n.text("只读检查 · 更改前逐项确认并保留撤销记录", "Read-only check · Changes require confirmation and keep an undo record"),
+                canCancel: true, cancelTitle: L10n.text("取消读取", "Cancel Reading"), onCancel: onCancel
+            ) { EmptyView() } actions: { EmptyView() }
+        } else {
+            CareStudioStartupRunning(title: title, discoveredCount: discoveredCount, onCancel: onCancel)
+        }
     }
 }
 
@@ -238,6 +380,11 @@ struct MemoryOptimizerView: View {
     @ObservedObject var store: ScanStore
     @ObservedObject private var monitorState: MenuBarMonitorState
     @State private var showsMemoryProcesses = false
+    /// D144: the app list and quit flow live on the classic page; tests of
+    /// that page set `careStudioClassicResults`.
+    @Environment(\.careStudioClassicResults) private var usesClassicMemory
+    @State private var showsClassicMemory = false
+    @State private var dismissedReclaimAt: Date?
 
     init(store: ScanStore) {
         self.store = store
@@ -255,16 +402,36 @@ struct MemoryOptimizerView: View {
         pageLayout ?? PageLayout.approximated(from: layout)
     }
 
-    /// D70 separates the live pressure preview and the grouped process result.
+    /// D144: a reclaim result not yet dismissed with "完成".
+    private var pendingReclaim: (MemoryOptimizationResult, MemoryReclaimer.Outcome)? {
+        guard let result = store.memoryOptimizationResult, let reclaim = result.reclaim,
+              result.snapshot.generatedAt != dismissedReclaimAt else { return nil }
+        return (result, reclaim)
+    }
+
+    /// D144: CleanMyMac's memory page (pressure, use, cache; "释放"); the
+    /// D70 page stays as the classic view with the app list and quit flow.
     var body: some View {
         Group {
-            if store.isOptimizingMemory || store.isLoadingMemory {
-                memoryRunningPage
+            if usesClassicMemory {
+                classicBody()
+            } else if store.isReclaimingMemory {
+                CareStudioMemoryRunning(onStop: { store.cancelMemoryOptimization() })
+            } else if showsClassicMemory || (store.isOptimizingMemory && !store.isReclaimingMemory) {
+                // Back to the studio page from the classic page's status line.
+                classicBody(backToFreeUp: store.isOptimizingMemory ? nil : { showsClassicMemory = false })
+            } else if case let (result, reclaim)? = pendingReclaim {
+                CareStudioMemoryResultPage(result: result, reclaim: reclaim,
+                    onDone: { dismissedReclaimAt = result.snapshot.generatedAt },
+                    onShowApps: {
+                        dismissedReclaimAt = result.snapshot.generatedAt
+                        showsClassicMemory = true
+                    })
             } else {
-                LightfieldMemoryPage(store: store, snapshot: processSnapshot,
-                    displaySnapshot: store.menuBarDisplayMemorySnapshot,
-                    trendPoints: monitorState.memoryHistory(within: 120), showsResultsWhenSampled: true,
-                    showsProcesses: $showsMemoryProcesses)
+                CareStudioMemoryLanding(snapshot: processSnapshot, isLoading: store.isLoadingMemory,
+                                        canFreeUp: store.canOptimizeMemory,
+                                        onFreeUp: { store.optimizeMemory() },
+                                        onShowApps: { showsClassicMemory = true })
             }
         }
         .featureFlowTransition(value: store.isOptimizingMemory || store.isLoadingMemory)
@@ -285,6 +452,20 @@ struct MemoryOptimizerView: View {
                   store.selectedMemoryAppEstimatedBytes == 0,
                   store.memorySnapshot.map({ Date().timeIntervalSince($0.generatedAt) > 30 }) ?? true else { return }
             store.refreshMemory(priority: .utility)
+        }
+    }
+
+    /// D70 separates the live pressure preview and the grouped process result.
+    private func classicBody(backToFreeUp: (() -> Void)? = nil) -> some View {
+        Group {
+            if store.isOptimizingMemory || store.isLoadingMemory {
+                memoryRunningPage
+            } else {
+                LightfieldMemoryPage(store: store, snapshot: processSnapshot,
+                    displaySnapshot: store.menuBarDisplayMemorySnapshot,
+                    trendPoints: monitorState.memoryHistory(within: 120), showsResultsWhenSampled: true,
+                    showsProcesses: $showsMemoryProcesses, backToFreeUp: backToFreeUp)
+            }
         }
     }
 
@@ -557,8 +738,8 @@ private struct EnergyImpactControlsBar: View {
     var body: some View {
         HStack(spacing: 12) {
             Text(L10n.text(
-                "\(visibleCount) 个应用 · 合并统计 \(snapshot.processCount) 个进程",
-                "\(visibleCount) apps · \(snapshot.processCount) processes grouped"
+                "\(ByteFormat.count(visibleCount)) 个应用 · 合并统计 \(ByteFormat.count(snapshot.processCount)) 个进程",
+                "\(ByteFormat.count(visibleCount)) apps · \(ByteFormat.count(snapshot.processCount)) processes grouped"
             ))
                 .font(AppDesignTokens.Typography.secondary)
                 .foregroundStyle(.secondary)
@@ -774,7 +955,7 @@ private struct EnergyImpactAppRow: View {
         HStack(spacing: AppDesignTokens.Spacing.small) {
             if app.processCount > 1 {
                 MetadataPill(
-                    text: L10n.text("\(app.processCount) 进程", "\(app.processCount) processes"),
+                    text: L10n.text("\(ByteFormat.count(app.processCount)) 进程", "\(ByteFormat.count(app.processCount)) processes"),
                     systemImage: "square.stack.3d.up.fill",
                     tint: AppDesignTokens.Palette.diagnostic
                 )
@@ -851,199 +1032,27 @@ private struct EnergyImpactUsageBar: View {
     }
 }
 
+/// The uninstall page: the inventory scan first, then CleanMyMac's
+/// Applications manager (`ApplicationsManagerView`). A rescan keeps the
+/// manager on screen; only the very first scan shows the landing page.
 struct AppUninstallerView: View {
-    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var store: ScanStore
-    @State private var searchText = ""
-    @State private var listFilter: AppUninstallListFilter = .all
-    @State private var sortMode: AppUninstallSortMode = .recommendation
-    @State private var selectedApplicationID: String?
-    @State private var showsResidualFileEvidence = false
-    @State private var showsUninstallHistory = false
+    @ObservedObject private var manager: ApplicationsManagerModel
 
-    private let sortModes: [AppUninstallSortMode] = [.recommendation, .bundleSize, .lastUsed, .modified, .name]
-
-    private func listSummaryText(for presentation: AppUninstallListPresentation) -> String {
-        return L10n.text(
-            "显示 \(presentation.count) 个应用 · 按\(sortMode.title)排序",
-            "\(presentation.count) apps shown · sorted by \(sortMode.title.lowercased())"
-        )
-    }
-
-    private func shouldShowListControls(hasManageableApps: Bool) -> Bool {
-        hasManageableApps || !searchText.trimmed.isEmpty
-    }
-
-    private var emptyTitle: String {
-        if !searchText.trimmed.isEmpty || listFilter != .all {
-            return L10n.text("当前筛选没有匹配应用", "No apps match the current filters")
-        }
-        return L10n.text("没有可管理应用", "No apps to manage")
-    }
-
-    private func incompleteScanText(_ coverage: AppUninstallScanCoverage) -> String {
-        if coverage.didReachTimeLimit || coverage.didReachCandidateLimit {
-            return L10n.text(
-                "已检查 \(coverage.examinedCandidateCount)/\(coverage.discoveredCandidateCount) 个候选。为避免应用卡住，本次先保留已完成结果，可稍后重新扫描。",
-                "Checked \(coverage.examinedCandidateCount) of \(coverage.discoveredCandidateCount) candidates. Completed results were kept to avoid stalling the app; retry later to continue."
-            )
-        }
-        return L10n.text(
-            "检测到的应用超过当前显示上限，本页优先保留占用空间最大的应用。",
-            "The detected app count exceeds the display limit, so the largest apps are shown first."
-        )
+    init(store: ScanStore) {
+        self.store = store
+        manager = ApplicationsManagerModel.of(store)
     }
 
     var body: some View {
         Group {
-            if store.isLoadingInstalledApps {
-                AppUninstallScanLandingView(store: store)
-            } else if !store.hasScannedInstalledApps {
-                AppUninstallScanLandingView(store: store)
+            if !store.hasScannedInstalledApps || (store.isLoadingInstalledApps && manager.entries.isEmpty) {
+                // D154: CleanMyMac's Applications landing and reading page.
+                CareStudioApplicationsStart(store: store)
             } else {
-                resultContent
+                ApplicationsManagerView(store: store)
             }
         }
-        .sheet(isPresented: $showsUninstallHistory) {
-            ReversibleOperationsView(store: store, resumeUninstall: { store.prepareResidualUninstall($0) })
-        }
-        .sheet(isPresented: $showsResidualFileEvidence) {
-            ResidualFileEvidenceView(
-                installedBundleIdentifiers: Set(store.installedApps.map(\.bundleIdentifier)),
-                inventoryComplete: store.installedAppsScanCoverage?.isComplete == true
-            )
-        }
-    }
-
-    private var resultContent: some View {
-        let manageableApps: [InstalledAppItem] = store.installedApps.filter(\.canMoveToTrash)
-        let presentation: AppUninstallListPresentation = AppUninstallListPresentation.make(
-            apps: manageableApps,
-            query: searchText,
-            filter: listFilter,
-            sortMode: sortMode
-        )
-        let totalBytes: Int64 = presentation.apps.reduce(Int64(0)) {
-            CleanupByteCount.adding($1.sizeBytes, to: $0)
-        }
-        let amount: FeatureLightfieldAmount = FeatureLightfieldAmount.parse(ByteFormat.storageString(totalBytes))
-        let status: String = store.isLoadingInstalledApps
-            ? L10n.text("正在刷新应用列表 · 保留上次结果", "Refreshing App List · Previous results retained")
-            : listSummaryText(for: presentation)
-        return FeatureLightfieldPage(module: .uninstall, phase: .result,
-            title: L10n.text("卸载", "Uninstall"), status: status,
-            safety: L10n.text("移到废纸篓 · 默认只选应用，确认后执行", "Move to Trash · App only by default; confirm before proceeding"),
-            actionTitle: L10n.text("卸载所选", "Uninstall Selected"),
-            actionEnabled: selectedApplicationID != nil && !store.isUninstallingApp && !store.isRestoringRecordedOperation,
-            action: {
-                if let app = presentation.apps.first(where: { $0.id == selectedApplicationID }) { store.requestUninstall(app) }
-            }) {
-            FeatureLightfieldResults(module: .uninstall, label: L10n.text("可审阅总量", "Total to Review"),
-                value: amount.value, unit: amount.unit, precision: amount.precision,
-                secondary: [.init(id: "apps", label: L10n.text("应用与相关文件", "Apps and Related Files"),
-                    value: String(presentation.count), unit: L10n.text("个应用", "apps"))]) {
-                lightfieldResultControls
-                LightfieldApplicationListHeader(kind: .uninstall)
-                lightfieldResultRows(presentation: presentation)
-            }
-        }
-        .dropDestination(for: URL.self) { urls, _ in
-            guard let app = presentation.apps.first(where: { app in
-                urls.contains { $0.isFileURL && PathSafety.lexicalPath($0.path) == PathSafety.lexicalPath(app.path) }
-            }) else { return false }
-            selectedApplicationID = app.id
-            return true
-        }
-        .sheet(isPresented: uninstallPreviewBinding) {
-            if let app = store.pendingUninstallApp {
-                UninstallPreviewSheet(store: store, app: app)
-            }
-        }
-        // D67 review (round 6): clicking a row or moving with the arrow keys
-        // only changes the selection; the primary action opens the preview,
-        // and closing the preview keeps the selection.
-        .onChange(of: presentation.apps.map(\.id)) { _, ids in
-            if let selectedApplicationID, !ids.contains(selectedApplicationID) { self.selectedApplicationID = nil }
-        }
-    }
-
-    private var lightfieldResultControls: some View {
-        HStack(spacing: 12) {
-            TextField(L10n.text("搜索应用名称或路径", "Search App Name or Path"), text: $searchText)
-                .textFieldStyle(.plain).frame(maxWidth: 220)
-            Picker(L10n.text("筛选", "Filter"), selection: $listFilter) {
-                ForEach(AppUninstallListFilter.allCases) { filter in Text(filter.title).tag(filter) }
-            }.pickerStyle(.menu)
-            uninstallSortMenu
-            Menu(L10n.text("更多", "More")) {
-                Button(L10n.text("刷新", "Refresh")) { store.refreshInstalledApps() }.disabled(!store.canRefreshInstalledApps)
-                Button(L10n.text("卸载记录", "Uninstall History")) { showsUninstallHistory = true }
-                Button(L10n.text("查找残留", "Find Leftovers")) { showsResidualFileEvidence = true }
-            }
-        }
-        .font(.system(size: 13))
-        .padding(.vertical, 6)
-#if DEBUG
-        .layoutProbe("lightfield.results.toolbar")
-#endif
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .buttonStyle(FeatureLightfieldRowButtonStyle())
-    }
-
-    @ViewBuilder
-    private func lightfieldResultRows(presentation: AppUninstallListPresentation) -> some View {
-        if store.isLoadingInstalledApps {
-            Text(L10n.text("正在刷新应用列表 · 当前保留上次扫描结果", "Refreshing App List · Previous scan results remain visible"))
-        }
-        if let coverage = store.installedAppsScanCoverage, !coverage.isComplete {
-            Text(incompleteScanText(coverage)).font(.system(size: 13))
-                .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).warningColor)
-        }
-        if store.isPreparingUninstall && store.pendingUninstallApp == nil {
-            Text(L10n.text("正在检查残留文件", "Checking Leftover Files"))
-        } else if presentation.apps.isEmpty {
-            Text(emptyTitle).frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,
-                select: { selectedApplicationID = $0.id },
-                review: { app in
-                    selectedApplicationID = app.id
-                    guard !store.isUninstallingApp, !store.isRestoringRecordedOperation else { return }
-                    store.requestUninstall(app)
-                }, copyPath: { store.copyPath($0.path) }, reveal: { store.reveal($0.path) })
-                .disabled(store.isUninstallingApp || store.isRestoringRecordedOperation)
-        }
-    }
-
-    private var uninstallPreviewBinding: Binding<Bool> {
-        Binding(get: { store.pendingUninstallApp != nil }, set: { shown in
-            if !shown && !store.isUninstallingApp && !store.isRestoringRecordedOperation {
-                store.cancelUninstall()
-            }
-        })
-    }
-
-    private var uninstallSortMenu: some View {
-        Menu {
-            ForEach(sortModes) { mode in
-                Button {
-                    sortMode = mode
-                } label: {
-                    if sortMode == mode {
-                        Label(mode.title, systemImage: "checkmark")
-                    } else {
-                        Text(mode.title)
-                    }
-                }
-            }
-        } label: {
-            Text(L10n.text("排序 \(sortMode.title)", "Sort \(sortMode.title)"))
-            .foregroundStyle(AppDesignTokens.Palette.information)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .menuStyle(.borderlessButton)
-        .controlSize(.regular)
-        .fixedSize()
     }
 }
 
@@ -1109,7 +1118,7 @@ struct RelatedAppFilesReviewSheet: View {
                                     .font(AppDesignTokens.Typography.secondary.weight(.medium))
                                     .lineLimit(1)
                                 Spacer(minLength: 8)
-                                Text(ByteFormat.string(item.sizeBytes))
+                                Text(ByteFormat.storageString(item.sizeBytes))
                                     .font(AppDesignTokens.Typography.metadata.monospacedDigit())
                                     .foregroundStyle(AppAppearanceColors.secondaryText)
                             }
@@ -1139,7 +1148,7 @@ struct RelatedAppFilesReviewSheet: View {
                     if isProcessing {
                         Label(L10n.text("正在移动…", "Moving…"), systemImage: "hourglass")
                     } else {
-                        Label(L10n.text("将所选 \(selectedPaths.count) 项移入废纸篓", "Move \(selectedPaths.count) to Trash"), systemImage: "trash")
+                        Label(L10n.text("将所选 \(ByteFormat.count(selectedPaths.count)) 项移入废纸篓", "Move \(ByteFormat.count(selectedPaths.count)) to Trash"), systemImage: "trash")
                     }
                 }
                 .appButtonChrome(.primary)
@@ -1208,14 +1217,14 @@ struct OneClickUpdatePreviewSheet: View {
             HStack(spacing: 10) {
                 OneClickPlanMetric(
                     title: L10n.text("自动更新", "Automatic"),
-                    value: "\(plan.automaticApps.count)",
+                    value: ByteFormat.count(plan.automaticApps.count),
                     systemImage: "bolt.fill",
                     tint: AppDesignTokens.Palette.information
                 )
                 if plan.authorizationApps.count > 0 {
                     OneClickPlanMetric(
                         title: L10n.text("需要授权", "Authorization"),
-                        value: "\(plan.authorizationApps.count)",
+                        value: ByteFormat.count(plan.authorizationApps.count),
                         systemImage: "lock.shield",
                         tint: .secondary
                     )
@@ -1223,7 +1232,7 @@ struct OneClickUpdatePreviewSheet: View {
                 if plan.appStoreApps.count > 0 {
                     OneClickPlanMetric(
                         title: "App Store",
-                        value: "\(plan.appStoreApps.count)",
+                        value: ByteFormat.count(plan.appStoreApps.count),
                         systemImage: "bag.fill",
                         tint: .secondary
                     )
@@ -1231,7 +1240,7 @@ struct OneClickUpdatePreviewSheet: View {
                 if plan.manualReviewCount > 0 {
                     OneClickPlanMetric(
                         title: L10n.text("需要手动", "Manual"),
-                        value: "\(plan.manualReviewCount)",
+                        value: ByteFormat.count(plan.manualReviewCount),
                         systemImage: "hand.raised.fill",
                         tint: .secondary
                     )
@@ -1418,10 +1427,20 @@ private struct OneClickUpdatePreviewRow: View {
 struct DuplicateFilesView: View {
     @Environment(\.moduleTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// D154 batch 2: tests of the D67 result list keep it as the result.
+    @Environment(\.careStudioClassicResults) private var usesClassicPages
     @ObservedObject var store: ScanStore
     @ObservedObject private var workspace: DuplicateFilesStore
+    /// D202: Smart Care's Review shows its result here.
+    @ObservedObject private var navigation: AppNavigationState
     private let presentationFilter: DuplicateResultFilter?
     @State private var usesSystemPhotoLibrary = false
+    /// D154 batch 2: the review list was opened from the My Clutter tiles.
+    @State private var showsList = false
+    /// D221: the manager shows Large & Old Files.
+    @State private var showsLargeOld = false
+    /// D226: the manager shows Downloads.
+    @State private var showsDownloads = false
     @StateObject private var photoLibrary = PhotoLibraryStore.live()
     @AppSurfaces private var surfaces
 
@@ -1429,7 +1448,12 @@ struct DuplicateFilesView: View {
         self.presentationFilter = presentationFilter
         self.store = store
         _workspace = ObservedObject(wrappedValue: store.duplicateFilesWorkspace)
+        _navigation = ObservedObject(wrappedValue: store.navigationState)
     }
+
+    /// D202: Smart Care's scan and result stay on Smart Care; this page keeps
+    /// its landing for them (its Review excepted).
+    private var showsOwnResult: Bool { store.moduleShowsResult(.clutter) }
 
     private var effectiveResultFilter: DuplicateResultFilter { presentationFilter ?? workspace.resultFilter }
     private var resultFilterBinding: Binding<DuplicateResultFilter> {
@@ -1492,16 +1516,26 @@ struct DuplicateFilesView: View {
         Group {
             if isSimilarPhotosRoute && usesSystemPhotoLibrary && PhotoLibraryAvailability.isEnabledInMainBundle {
                 PhotoLibraryLightfieldView(model: photoLibrary) { usesSystemPhotoLibrary = false }
-            } else if workspace.isScanning {
+            } else if workspace.isScanning && showsOwnResult {
                 duplicateRuntimePage
-            } else if !workspace.hasScanned {
+            } else if !workspace.hasScanned || !showsOwnResult {
                 duplicateScanHero
+            } else if showsClutterResults {
+                clutterResults
+            } else if showsClutterManager {
+                clutterManager
             } else {
                 duplicateDataPage
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .id(workspace.hasScanned)
+        // A new scan opens on its results again.
+        .onChange(of: workspace.lastScanAt) { _, _ in
+            showsList = false
+            showsLargeOld = false
+            showsDownloads = false
+        }
         .featureFlowTransition(value: workspace.isScanning)
         .transition(AppMotionTokens.pageTransition(reduceMotion: reduceMotion))
         .animation(
@@ -1587,18 +1621,32 @@ struct DuplicateFilesView: View {
                     metadata: workspace.scanScope == .selectedLocations ? L10n.text("仅所选位置", "Selected only") : L10n.text("随用户文件范围", "User-files scope"))
                 LightfieldOptionRow(title: L10n.text("下载", "Downloads"), icon: .migrationSourceFolder, module: .duplicates,
                     metadata: workspace.scanScope == .selectedLocations ? L10n.text("仅所选位置", "Selected only") : L10n.text("随用户文件范围", "User-files scope"))
-                Menu {
-                    ForEach(DuplicateFileScanScope.allCases) { scope in
-                        Button(scope.title) { workspace.scanScope = scope }.disabled(workspace.scopeUnavailableReason(scope) != nil)
-                    }
-                } label: { Text(workspace.scanScope.title).font(.system(size: 13)) }
-                    .menuStyle(.borderlessButton).frame(height: 40)
+                // A titled row like the two above, not a bare menu below them.
+                HStack(spacing: 14) {
+                    LightfieldOptionIconView(icon: duplicateScopeIcon(workspace.scanScope))
+                    Text(L10n.text("扫描范围", "Scan Scope")).font(.system(size: 16))
+                        .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                    Menu {
+                        ForEach(DuplicateFileScanScope.allCases) { scope in
+                            Button(scope.title) { workspace.scanScope = scope }.disabled(workspace.scopeUnavailableReason(scope) != nil)
+                        }
+                    } label: { Text(workspace.scanScope.title).font(.system(size: 13)) }
+                        .menuStyle(.borderlessButton).fixedSize()
+                        .accessibilityLabel(L10n.text("扫描范围", "Scan Scope"))
+                }
+                .padding(.trailing, 6).frame(height: FeatureLightfield.optionHeight)
+                .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+                .lightfieldComponentProbe("lightfield.similarPhotos.scope")
             } else {
                 ForEach(DuplicateFileScanScope.allCases) { scope in
+                    let unavailableReason = workspace.scopeUnavailableReason(scope)
+                    // The note is one line, so the full reason was cut in the
+                    // middle; the note stays short and the help gives the reason.
                     LightfieldOptionRow(title: scope.title, icon: duplicateScopeIcon(scope), module: .duplicates,
                         selection: Binding(get: { workspace.scanScope == scope }, set: { if $0 { workspace.scanScope = scope } }),
-                        metadata: workspace.scopeUnavailableReason(scope) ?? "", probeID: "lightfield.duplicates.scope." + scope.rawValue)
-                        .disabled(workspace.scopeUnavailableReason(scope) != nil).help(scopeDetail(scope))
+                        metadata: unavailableReason == nil ? "" : L10n.text("需先添加位置", "Add a location first"),
+                        probeID: "lightfield.duplicates.scope." + scope.rawValue)
+                        .disabled(unavailableReason != nil).help(unavailableReason ?? scopeDetail(scope))
                 }
             }
             Button { chooseDuplicateRoot(externalVolume: false) } label: {
@@ -1616,7 +1664,7 @@ struct DuplicateFilesView: View {
                 ForEach(workspace.externalRootPaths, id: \.self) { path in
                     Button(L10n.text("移除：", "Remove: ") + path) { workspace.removeExternalRoot(path) }
                 }
-            } label: { Text(L10n.text("已添加 \(workspace.configuredAdditionalRoots.count) 个位置", "\(workspace.configuredAdditionalRoots.count) added locations")).font(.system(size: 13)) }
+            } label: { Text(L10n.text("已添加 \(ByteFormat.count(workspace.configuredAdditionalRoots.count)) 个位置", "\(ByteFormat.count(workspace.configuredAdditionalRoots.count)) added locations")).font(.system(size: 13)) }
                 .menuStyle(.borderlessButton).frame(height: 40)
         }
     }
@@ -1634,6 +1682,65 @@ struct DuplicateFilesView: View {
             allItems: allItems, isSimilarPhotos: isSimilarPhotosRoute, title: pageTitle, resultFilter: resultFilterBinding,
             details: AnyView(VStack(alignment: .leading, spacing: 16) { duplicateCoveragePanel; duplicateCleanupReportPanel }),
             onUseSystemPhotoLibrary: systemPhotoLibraryAction)
+    }
+
+    /// D154 batch 3B: the review is CleanMyMac's light manager; the D67 list
+    /// stays for its tests (classic layout) and the presentation demo.
+    private var showsClutterManager: Bool {
+        !usesClassicPages && presentationFilter == nil
+    }
+
+    private var clutterManager: some View {
+        CareStudioClutterManager(
+            store: store, workspace: workspace, allItems: allItems, groups: groups, filter: effectiveResultFilter,
+            details: AnyView(VStack(alignment: .leading, spacing: 16) { duplicateCoveragePanel; duplicateCleanupReportPanel }),
+            onUseSystemPhotoLibrary: systemPhotoLibraryAction,
+            onFilter: {
+                workspace.resultFilter = $0
+                showsLargeOld = false
+                showsDownloads = false
+            },
+            onBack: {
+                workspace.resultFilter = .all
+                showsLargeOld = false
+                showsDownloads = false
+                showsList = false
+            },
+            showsLargeOld: showsLargeOld,
+            onLargeOld: {
+                showsLargeOld = true
+                showsDownloads = false
+            },
+            showsDownloads: showsDownloads,
+            onDownloads: {
+                showsDownloads = true
+                showsLargeOld = false
+            })
+    }
+
+    /// D154 batch 2: CleanMyMac's My Clutter results come first; Similar
+    /// Photos opened from My Tools goes straight to its review.
+    private var showsClutterResults: Bool {
+        !usesClassicPages && presentationFilter == nil && !showsList && !isSimilarPhotosRoute
+    }
+
+    private var clutterResults: some View {
+        CareStudioClutterResults(
+            store: store,
+            confirmedGroups: allGroups.filter(\.isContentConfirmed).count,
+            confirmedFiles: confirmedFileCount,
+            logicalBytes: logicalDuplicateBytes,
+            physicalBytes: physicalReclaimableBytes,
+            candidateGroups: DuplicateFilesPresenter.groups(from: allItems, matching: "", filter: .candidates,
+                                                            sort: workspace.resultSort).count,
+            startOverEnabled: !workspace.isScanning,
+            onReview: { filter in
+                workspace.resultFilter = filter
+                showsLargeOld = false
+                showsDownloads = false
+                showsList = true
+            },
+            onStartOver: workspace.startOver)
     }
 
     /// Only the similar-photos route of a bundle that declares Photos access
@@ -1879,8 +1986,8 @@ struct DuplicateFilesView: View {
         VStack(alignment: .leading, spacing: 6) {
             Label(
                 L10n.text(
-                    "额外位置 \(workspace.configuredAdditionalRoots.count) 个",
-                    "\(workspace.configuredAdditionalRoots.count) additional locations"
+                    "额外位置 \(ByteFormat.count(workspace.configuredAdditionalRoots.count)) 个",
+                    "\(ByteFormat.count(workspace.configuredAdditionalRoots.count)) additional locations"
                 ),
                 systemImage: workspace.configuredAdditionalRoots.isEmpty
                     ? "folder"
@@ -1968,7 +2075,7 @@ struct DuplicateFilesView: View {
                     }
                 } label: {
                     Label(
-                        L10n.text("查看清理计划 · \(selectedItems.count) 个", "Review Cleanup Plan · \(selectedItems.count)"),
+                        L10n.text("查看清理计划 · \(ByteFormat.count(selectedItems.count)) 个", "Review Cleanup Plan · \(ByteFormat.count(selectedItems.count))"),
                         systemImage: "checkmark.shield"
                     )
                 }
@@ -1981,8 +2088,8 @@ struct DuplicateFilesView: View {
     private var duplicateProgressLabel: some View {
         let progress = workspace.scanProgress ?? .initial
         return Text(L10n.text(
-            "已扫描 \(progress.scannedDirectories) 个目录、\(progress.scannedFiles) 个文件；完整哈希 \(progress.hashedFiles) 个（\(ByteFormat.string(progress.hashedBytes))）",
-            "\(progress.scannedDirectories) folders and \(progress.scannedFiles) files scanned; \(progress.hashedFiles) fully hashed (\(ByteFormat.string(progress.hashedBytes)))"
+            "已扫描 \(ByteFormat.count(progress.scannedDirectories)) 个目录、\(ByteFormat.count(progress.scannedFiles)) 个文件；完整哈希 \(ByteFormat.count(progress.hashedFiles)) 个（\(ByteFormat.storageString(progress.hashedBytes))）",
+            "\(ByteFormat.count(progress.scannedDirectories)) folders and \(ByteFormat.count(progress.scannedFiles)) files scanned; \(ByteFormat.count(progress.hashedFiles)) fully hashed (\(ByteFormat.storageString(progress.hashedBytes)))"
         ))
         .font(AppDesignTokens.Typography.secondary)
         .foregroundStyle(.secondary)
@@ -2052,7 +2159,7 @@ struct DuplicateFilesView: View {
                         EmptyUtilityPanel(systemImage: "magnifyingglass", title: emptyTitle)
                     } else {
                         LazyVStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-                            Text(L10n.text("显示 \(groups.count) 组结果", "Showing \(groups.count) result groups"))
+                            Text(L10n.text("显示 \(ByteFormat.count(groups.count)) 组结果", "Showing \(ByteFormat.count(groups.count)) result groups"))
                                 .font(AppDesignTokens.Typography.secondary)
                                 .foregroundStyle(.secondary)
 
@@ -2080,7 +2187,7 @@ struct DuplicateFilesView: View {
                     Text(L10n.text("相似照片候选", "Similar Photo Candidates"))
                         .font(AppDesignTokens.Typography.compactLabel)
                         .foregroundStyle(.secondary)
-                    Text(L10n.text("\(groups.count) 组", "\(groups.count) groups"))
+                    Text(L10n.text("\(ByteFormat.count(groups.count)) 组", "\(ByteFormat.count(groups.count)) groups"))
                         .font(AppDesignTokens.Typography.metricValue)
                         .monospacedDigit()
                     Text(L10n.text(
@@ -2116,7 +2223,7 @@ struct DuplicateFilesView: View {
             Text(L10n.text("扫描结果", "Scan Result"))
                 .font(AppDesignTokens.Typography.compactLabel)
                 .foregroundStyle(.secondary)
-            Text(L10n.text("\(allGroups.count) 组", "\(allGroups.count) groups"))
+            Text(L10n.text("\(ByteFormat.count(allGroups.count)) 组", "\(ByteFormat.count(allGroups.count)) groups"))
                 .font(AppDesignTokens.Typography.metricValue)
                 .monospacedDigit()
             Text(scanTimeText)
@@ -2136,13 +2243,13 @@ struct DuplicateFilesView: View {
             )
             SmartCareMetric(
                 title: L10n.text("逻辑重复数据", "Logical Duplicate Data"),
-                value: ByteFormat.string(logicalDuplicateBytes),
+                value: ByteFormat.storageString(logicalDuplicateBytes),
                 systemImage: "internaldrive.fill",
                 tint: AppDesignTokens.Palette.storage
             )
             SmartCareMetric(
                 title: L10n.text("物理可释放", "Physical Reclaimable"),
-                value: physicalReclaimableBytes.map(ByteFormat.string)
+                value: physicalReclaimableBytes.map { ByteFormat.storageString($0) }
                     ?? L10n.text("待确认", "Unknown"),
                 systemImage: "questionmark.circle",
                 tint: AppDesignTokens.Palette.warning
@@ -2245,16 +2352,16 @@ struct DuplicateFilesView: View {
                                 }
                                 Text(root.status == .scanned
                                     ? L10n.text(
-                                        "扫描 \(root.scannedDirectories) 个目录、\(root.scannedFiles) 个文件（\(ByteFormat.string(root.scannedBytes))）",
-                                        "\(root.scannedDirectories) folders and \(root.scannedFiles) files scanned (\(ByteFormat.string(root.scannedBytes)))"
+                                        "扫描 \(ByteFormat.count(root.scannedDirectories)) 个目录、\(ByteFormat.count(root.scannedFiles)) 个文件（\(ByteFormat.storageString(root.scannedBytes))）",
+                                        "\(ByteFormat.count(root.scannedDirectories)) folders and \(ByteFormat.count(root.scannedFiles)) files scanned (\(ByteFormat.storageString(root.scannedBytes)))"
                                     )
                                     : duplicateSkipReasonTitle(root.skipReason))
                                     .font(AppDesignTokens.Typography.compactLabel)
                                     .foregroundStyle(.secondary)
                                 if let cloudOnly = root.cloudOnlyFiles, cloudOnly > 0 {
                                     Text(L10n.text(
-                                        "其中 \(cloudOnly) 个文件仅在云端，未下载比对",
-                                        "\(cloudOnly) of them are cloud-only and were not compared"
+                                        "其中 \(ByteFormat.count(cloudOnly)) 个文件仅在云端，未下载比对",
+                                        "\(ByteFormat.count(cloudOnly)) of them are cloud-only and were not compared"
                                     ))
                                     .font(AppDesignTokens.Typography.compactLabel)
                                     .foregroundStyle(.secondary)
@@ -2323,12 +2430,33 @@ struct DuplicateFilesView: View {
                     total: Double(max(1, progress.totalItemCount))
                 )
                 Text(L10n.text(
-                    "已处理 \(progress.processedItemCount)/\(progress.totalItemCount)，移动 \(progress.movedItemCount)，跳过 \(progress.skippedItemCount)，失败 \(progress.failedItemCount)",
-                    "Processed \(progress.processedItemCount)/\(progress.totalItemCount); moved \(progress.movedItemCount), skipped \(progress.skippedItemCount), failed \(progress.failedItemCount)"
+                    "已处理 \(ByteFormat.count(progress.processedItemCount))/\(ByteFormat.count(progress.totalItemCount))，移动 \(ByteFormat.count(progress.movedItemCount))，跳过 \(ByteFormat.count(progress.skippedItemCount))，失败 \(ByteFormat.count(progress.failedItemCount))",
+                    "Processed \(ByteFormat.count(progress.processedItemCount))/\(ByteFormat.count(progress.totalItemCount)); moved \(ByteFormat.count(progress.movedItemCount)), skipped \(ByteFormat.count(progress.skippedItemCount)), failed \(ByteFormat.count(progress.failedItemCount))"
                 ))
                 .font(AppDesignTokens.Typography.secondary)
                 Button(L10n.text("取消剩余项目", "Cancel Remaining Items"), role: .cancel) {
                     store.cancelVerifiedDuplicateCleanupExecution()
+                }
+                .appButtonChrome(.secondary)
+            }
+            .padding(AppDesignTokens.Spacing.large)
+            .fullBleedSection()
+        } else if let report = store.duplicateCleanupReport, let refusal = report.startRefusal {
+            // D214: nothing was tried; why, and that nothing moved.
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(AppDesignTokens.Palette.warning)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(CleanStartRefusalPresentation.title)
+                        .font(AppDesignTokens.Typography.inlineTitle)
+                    Text(CleanStartRefusalPresentation.message(refusal))
+                        .font(AppDesignTokens.Typography.secondary)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button(L10n.text("关闭", "Dismiss")) {
+                    store.dismissVerifiedDuplicateCleanupReport()
                 }
                 .appButtonChrome(.secondary)
             }
@@ -2344,8 +2472,8 @@ struct DuplicateFilesView: View {
                     Text(L10n.text("安全处理报告", "Safe Handling Report"))
                         .font(AppDesignTokens.Typography.inlineTitle)
                     Text(L10n.text(
-                        "移动 \(report.summary.movedItemCount)，跳过 \(report.summary.skippedItemCount)，失败 \(report.summary.failedItemCount)。尚未永久删除。",
-                        "Moved \(report.summary.movedItemCount), skipped \(report.summary.skippedItemCount), failed \(report.summary.failedItemCount). Nothing was permanently deleted."
+                        "移动 \(ByteFormat.count(report.summary.movedItemCount))，跳过 \(ByteFormat.count(report.summary.skippedItemCount))，失败 \(ByteFormat.count(report.summary.failedItemCount))。尚未永久删除。",
+                        "Moved \(ByteFormat.count(report.summary.movedItemCount)), skipped \(ByteFormat.count(report.summary.skippedItemCount)), failed \(ByteFormat.count(report.summary.failedItemCount)). Nothing was permanently deleted."
                     ))
                     .font(AppDesignTokens.Typography.secondary)
                     .foregroundStyle(.secondary)
@@ -2587,12 +2715,12 @@ private struct DuplicateCleanupConfirmationSheet: View {
                 }
                 HStack(spacing: AppDesignTokens.Spacing.medium) {
                     Label(
-                        L10n.text("可执行 \(presentation.readyCount) 个", "\(presentation.readyCount) ready"),
+                        L10n.text("可执行 \(ByteFormat.count(presentation.readyCount)) 个", "\(ByteFormat.count(presentation.readyCount)) ready"),
                         systemImage: "checkmark.circle.fill"
                     )
                     .foregroundStyle(AppDesignTokens.Palette.success)
                     Label(
-                        L10n.text("跳过 \(presentation.skippedCount) 个", "\(presentation.skippedCount) skipped"),
+                        L10n.text("跳过 \(ByteFormat.count(presentation.skippedCount)) 个", "\(ByteFormat.count(presentation.skippedCount)) skipped"),
                         systemImage: "minus.circle"
                     )
                     .foregroundStyle(presentation.skippedCount == 0 ? .secondary : AppDesignTokens.Palette.warning)
@@ -2807,7 +2935,7 @@ private struct DuplicateGroupCard: View {
                     HStack(spacing: 7) {
                         MetadataPill(text: L10n.items(group.items.count), systemImage: "number", tint: AppDesignTokens.Palette.tertiary)
                         MetadataPill(
-                            text: ByteFormat.string(group.candidateRule == .similarImage
+                            text: ByteFormat.storageString(group.candidateRule == .similarImage
                                 ? group.items.reduce(Int64(0)) { $0 + max(0, $1.sizeBytes) }
                                 : group.sizeBytes),
                             systemImage: "doc", tint: .secondary
@@ -2825,10 +2953,11 @@ private struct DuplicateGroupCard: View {
                         )
                         if group.isContentConfirmed {
                             MetadataPill(
+                            // D100 G1: copies with one clone ID share all of their blocks.
                             text: group.relationship == .apfsClone
-                                ? L10n.text("物理释放空间待删除后确认", "Physical reclaimable space confirmed after deletion")
+                                ? L10n.text("已是克隆，删除几乎不释放空间", "Already clones; deleting frees almost no space")
                                 : group.physicalReclaimableBytes.map {
-                                    L10n.text("物理可释放 \(ByteFormat.string($0))", "Physical \(ByteFormat.string($0))")
+                                    L10n.text("物理可释放 \(ByteFormat.storageString($0))", "Physical \(ByteFormat.storageString($0))")
                                 } ?? L10n.text("物理可释放待确认", "Physical savings unknown"),
                             systemImage: "internaldrive",
                             tint: AppDesignTokens.Palette.warning
@@ -2925,7 +3054,7 @@ private struct SimilarImageReviewTile: View {
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .help(item.path)
-            Text(ByteFormat.string(item.sizeBytes))
+            Text(ByteFormat.storageString(item.sizeBytes))
                 .font(AppDesignTokens.Typography.metadata)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -3038,7 +3167,7 @@ private struct DuplicateFileRow: View {
 
             Spacer(minLength: 10)
 
-            Text(ByteFormat.string(item.sizeBytes))
+            Text(ByteFormat.storageString(item.sizeBytes))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -3336,8 +3465,8 @@ private struct MemoryOptimizationResultPanel: View {
             return L10n.text("未执行应用退出", "No app quit performed")
         }
         return L10n.text(
-            "预计应用减少 \(ByteFormat.string(Int64(clamping: execution.estimatedApplicationReductionBytes)))",
-            "Estimated app reduction \(ByteFormat.string(Int64(clamping: execution.estimatedApplicationReductionBytes)))"
+            "预计应用减少 \(ByteFormat.memoryString(Int64(clamping: execution.estimatedApplicationReductionBytes)))",
+            "Estimated app reduction \(ByteFormat.memoryString(Int64(clamping: execution.estimatedApplicationReductionBytes)))"
         )
     }
 
@@ -3345,7 +3474,7 @@ private struct MemoryOptimizationResultPanel: View {
         guard let delta = result.executionResult?.observedApplicationMemoryDeltaBytes else {
             return L10n.text("应用变化不可用", "App change unavailable")
         }
-        let value = ByteFormat.string(magnitude(delta))
+        let value = ByteFormat.memoryString(magnitude(delta))
         if delta > 0 {
             return L10n.text("应用实测减少 \(value)", "Observed app reduction \(value)")
         }
@@ -3358,7 +3487,7 @@ private struct MemoryOptimizationResultPanel: View {
     private var availableDeltaText: String {
         let delta = result.executionResult?.observedAvailableMemoryDeltaBytes
             ?? result.availableDeltaBytes
-        let value = ByteFormat.string(magnitude(delta))
+        let value = ByteFormat.memoryString(magnitude(delta))
         if delta > 0 {
             return L10n.text("可用增加 \(value)", "\(value) more available")
         }
@@ -3469,7 +3598,7 @@ private struct MemoryReleasePanel: View {
     }
 
     private func byteText(_ measurement: MemoryMeasurement<UInt64>) -> String {
-        measurement.value.map { ByteFormat.string(Int64(clamping: $0)) } ?? "—"
+        measurement.value.map { ByteFormat.memoryString(Int64(clamping: $0)) } ?? "—"
     }
 
     private var releaseTint: Color {
@@ -3502,7 +3631,7 @@ private struct MemoryReleasePanel: View {
     private var summaryValue: String {
         isObserving
             ? byteText(snapshot.measurements.availableBytes)
-            : ByteFormat.string(cleanupPlan.estimatedRecoverableBytes)
+            : ByteFormat.memoryString(cleanupPlan.estimatedRecoverableBytes)
     }
 
     private var summaryCaption: String {
@@ -3779,12 +3908,10 @@ private struct MemoryReleasePanel: View {
     }
 
     private func recommendationSummary(includesAction: Bool) -> some View {
-        let usedGiB = snapshot.measuredUsedBytes.map {
-            String(format: "%.1f", Double($0) / 1_073_741_824)
-        } ?? "—"
-        let totalGiB = snapshot.measurements.physicalBytes.value.map {
-            String(format: "%.1f", Double($0) / 1_073_741_824)
-        } ?? "—"
+        // D178: memory as Activity Monitor writes it, "41.3 GB / 48 GB"
+        // (was "41.3 / 48.0 GiB").
+        let used = snapshot.measuredUsedBytes.map { ByteFormat.memoryString(Int64(clamping: $0)) } ?? "—"
+        let total = snapshot.measurements.physicalBytes.value.map { ByteFormat.memoryString(Int64(clamping: $0)) } ?? "—"
         return VStack(alignment: .leading, spacing: isShort || isLandingSummary ? 4 : 8) {
             HStack(spacing: 8) {
                 Text(summaryTitle)
@@ -3814,7 +3941,7 @@ private struct MemoryReleasePanel: View {
             HStack(spacing: 12) {
                 MemoryInlineMetric(
                     title: L10n.text("已用 / 总量", "Used / Total"),
-                    value: "\(usedGiB) / \(totalGiB) GiB"
+                    value: "\(used) / \(total)"
                 )
                 Divider().frame(height: 26)
                 MemoryInlineMetric(
@@ -4004,7 +4131,7 @@ struct MemoryProcessSelectionPanel: View {
     }
 
     private var selectedBytesText: String {
-        ByteFormat.string(store.selectedMemoryAppEstimatedBytes)
+        ByteFormat.memoryString(store.selectedMemoryAppEstimatedBytes)
     }
 
     private var isShortHeight: Bool {
@@ -4042,8 +4169,8 @@ struct MemoryProcessSelectionPanel: View {
                     options: [true, false],
                     title: { showsAll in
                         showsAll
-                            ? L10n.text("已采样进程 (\(sampledProcesses.count))", "Sampled Processes (\(sampledProcesses.count))")
-                            : L10n.text("可退出应用 (\(apps.count))", "Quittable Apps (\(apps.count))")
+                            ? L10n.text("已采样进程 (\(ByteFormat.count(sampledProcesses.count)))", "Sampled Processes (\(ByteFormat.count(sampledProcesses.count)))")
+                            : L10n.text("可退出应用 (\(ByteFormat.count(apps.count)))", "Quittable Apps (\(ByteFormat.count(apps.count)))")
                     },
                     label: L10n.text("进程列表范围", "Process list scope")
                 )
@@ -4252,7 +4379,7 @@ struct MemoryProcessSelectionPanel: View {
             Text(
                 selectedAppCount == 0
                     ? L10n.text("未选择", "None selected")
-                    : L10n.text("已选 \(selectedAppCount) 个应用", "\(selectedAppCount) apps selected")
+                    : L10n.text("已选 \(ByteFormat.count(selectedAppCount)) 个应用", "\(ByteFormat.count(selectedAppCount)) apps selected")
             )
             .font(AppDesignTokens.TypeScale.bodyEmphasis)
             .monospacedDigit()
@@ -4367,8 +4494,8 @@ struct MemoryProcessSelectionPanel: View {
         } label: {
             Label(
                 L10n.text(
-                    "退出 \(selectedAppCount) 个应用",
-                    "Quit \(selectedAppCount) Apps"
+                    "退出 \(ByteFormat.count(selectedAppCount)) 个应用",
+                    "Quit \(ByteFormat.count(selectedAppCount)) Apps"
                 ),
                 systemImage: "xmark.circle.fill"
             )
@@ -4376,7 +4503,7 @@ struct MemoryProcessSelectionPanel: View {
         // N19 / D49: quitting is destructive and always asks first.
         .buttonStyle(GradientButtonStyle(kind: .destructive, size: .medium))
         .help(L10n.text("退出前会列出这些应用并请你确认", "Lists these apps and asks before quitting"))
-        .accessibilityLabel(L10n.text("退出 \(selectedAppCount) 个应用", "Quit \(selectedAppCount) Apps"))
+        .accessibilityLabel(L10n.text("退出 \(ByteFormat.count(selectedAppCount)) 个应用", "Quit \(ByteFormat.count(selectedAppCount)) Apps"))
         .disabled(!store.canRequestMemoryQuitActions)
 #if DEBUG
         .layoutProbe("memory.command.quit")
@@ -4404,7 +4531,7 @@ private struct MemoryReadOnlyProcessRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 60, alignment: .trailing)
                 .listColumn(.p2)
-            Text(process.availability == .available ? ByteFormat.string(process.residentBytes) : process.availability.title)
+            Text(process.availability == .available ? ByteFormat.memoryString(process.residentBytes) : process.availability.title)
                 .monospacedDigit()
                 .lineLimit(1)
                 .frame(width: 110, alignment: .trailing)
@@ -4499,7 +4626,7 @@ private struct MemorySelectableAppRow: View {
                             .foregroundStyle(AppDesignTokens.Palette.information)
                     }
                     if app.processCount > 1 {
-                        Label("x\(app.processCount)", systemImage: "square.stack.3d.up")
+                        Label("x\(ByteFormat.count(app.processCount))", systemImage: "square.stack.3d.up")
                             .font(AppDesignTokens.TypeScale.caption)
                             .foregroundStyle(.secondary)
                             .listColumn(.p2)
@@ -4513,7 +4640,7 @@ private struct MemorySelectableAppRow: View {
             Spacer(minLength: 10)
 
             VStack(alignment: .trailing, spacing: 3) {
-                Text(ByteFormat.string(app.bytes))
+                Text(ByteFormat.memoryString(app.bytes))
                     .font(AppDesignTokens.TypeScale.bodyEmphasis)
                     .monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
@@ -4597,14 +4724,14 @@ private struct InstalledAppRow: View {
                     .foregroundStyle(AppAppearanceColors.tertiaryText)
                     .lineLimit(1).truncationMode(.middle).help(app.path)
             }.frame(maxWidth: .infinity, alignment: .leading)
-            Text(ByteFormat.string(app.sizeBytes)).font(AppDesignTokens.Typography.metadata)
+            Text(ByteFormat.storageString(app.sizeBytes)).font(AppDesignTokens.Typography.metadata)
                 .monospacedDigit().foregroundStyle(.secondary).fixedSize()
         }
         .padding(.vertical, 8).padding(.horizontal, 4)
         .contentShape(Rectangle()).help(app.path)
         }
         .appButtonChrome(.selectionRow)
-        .accessibilityLabel("\(app.name), \(ByteFormat.string(app.sizeBytes))")
+        .accessibilityLabel("\(app.name), \(ByteFormat.storageString(app.sizeBytes))")
         .accessibilityHint(L10n.text("选择应用并查看关联文件", "Select application and review related files"))
         .contextMenu {
             Button(L10n.text("在访达中显示", "Show in Finder")) { store.reveal(app.path) }
@@ -4673,7 +4800,7 @@ struct DuplicateFilesRunningPage: View {
             metrics: [
                 .init(title: L10n.text("已扫描文件", "Files Scanned"), value: String(progress.scannedFiles)),
                 .init(title: L10n.text("已完整比对", "Fully Verified"), value: String(progress.hashedFiles)),
-                .init(title: L10n.text("已读取内容", "Content Read"), value: ByteFormat.string(progress.hashedBytes))
+                .init(title: L10n.text("已读取内容", "Content Read"), value: ByteFormat.storageString(progress.hashedBytes))
             ], currentItem: progress.currentPath,
             pageTitle: pageTitle,
             pageSystemImage: isSimilarPhotos ? GeneratedArt.similarPhotosSystemImage : ReviewFilter.duplicates.systemImage,

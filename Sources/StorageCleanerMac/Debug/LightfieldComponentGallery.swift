@@ -93,7 +93,7 @@ struct LightfieldComponentGallery: View {
                     valueFormat: .scaledWithPercent(maximum: 32, unit: "GB"),
                     onHoverIndex: { hoverIndex = $0 }, onSelection: { range = $0 }).frame(width: 520)
                 Text(hoverIndex.map { "该时刻占用最多 · 示例进程 \($0 + 1)" } ?? "悬停选择时刻")
-                if let range { Text("选中 \(range.range.count) 个时刻 · 有测量 \(range.measuredCount) 个") }
+                if let range { Text("选中 \(ByteFormat.count(range.range.count)) 个时刻 · 有测量 \(ByteFormat.count(range.measuredCount)) 个") }
                 // Approved performance run monitor: CPU / GPU, no bands, no axis.
                 LightfieldTrendChart(samples: Self.cpuSamples, module: .performance, height: 48,
                     title: "2 分钟 CPU / GPU 负载", primaryName: "CPU",

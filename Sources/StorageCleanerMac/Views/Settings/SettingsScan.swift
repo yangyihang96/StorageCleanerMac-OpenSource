@@ -8,6 +8,8 @@ extension SettingsView {
             MaintenanceReminderService.cadence(from: maintenanceCadenceRawValue)
         } set: { newValue in
             maintenanceCadenceRawValue = newValue.rawValue
+            // D219: the reminder card reads the interval when it decides.
+            NotificationCenter.default.post(name: AppLifecycleReminderPreferences.didChangeNotification, object: nil)
         }
     }
 
@@ -35,41 +37,23 @@ extension SettingsView {
             }
         } header: {
             Text(L10n.text("扫描提醒", "Scan Reminder"))
+        } footer: {
+            Text(L10n.text("到期时，菜单栏图标下方会出现提醒；点“现在扫描”只做只读扫描，不会清理。",
+                           "When a scan is due, a reminder appears under the menu-bar icon; Scan Now only runs a read-only scan and cleans nothing."))
         }
     }
 
     var exclusionSection: some View {
         LightfieldSettingsSection {
-            LabeledContent(L10n.text("已排除", "Excluded"), value: L10n.items(excludedPaths.count))
-            LabeledContent(
-                L10n.text("适用范围", "Applies To"),
-                value: L10n.text("智能扫描与重复文件", "Smart Scan & Duplicates")
-            )
-
-            if let exclusionNotice {
-                SettingsNoticeView(notice: exclusionNotice)
+            Button {
+                ignoreListModel.category = .other
+                selectedCategory = .ignoreList
+            } label: {
+                Text(L10n.text("忽略列表 → 其他", "Ignore List → Other"))
             }
-
-            if excludedPaths.isEmpty {
-                Text(L10n.text("暂无排除项", "No Exclusions"))
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(excludedPaths, id: \.self) { path in
-                    ExclusionPathRow(path: path) {
-                        removeExclusion(path)
-                    }
-                    .transition(AppMotionTokens.listTransition(reduceMotion: reduceMotion))
-                }
-            }
-
-            exclusionActionButtons
-                .animation(
-                    AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
-                    value: excludedPaths
-                )
-        } header: {
-            exclusionTitle
-        }
+            Text(L10n.text("原扫描排除项已归入“其他”，在忽略列表中统一管理；下次扫描起生效。", "Scan exclusions are managed under Other in the Ignore List, starting with the next scan."))
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+        } header: { exclusionTitle }
     }
 
     var exclusionTitle: some View {
@@ -199,8 +183,8 @@ extension SettingsView {
         if addedCount > 0 {
             return SettingsNotice(
                 text: L10n.text(
-                    "已添加 \(addedCount) 个排除项。",
-                    "Added \(addedCount) exclusions."
+                    "已添加 \(ByteFormat.count(addedCount)) 个排除项。",
+                    "Added \(ByteFormat.count(addedCount)) exclusions."
                 ),
                 systemImage: "checkmark.circle.fill",
                 tint: AppDesignTokens.Palette.success,

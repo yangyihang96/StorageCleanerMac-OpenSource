@@ -179,4 +179,46 @@ final class HelperUpgradeLedgerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: path), content)
         XCTAssertEqual(chmod(path.path, 0o600), 0)
     }
+
+    /// D97: macOS keeps `/var/run` as root:daemon 0775, and the old rule
+    /// (no group write at all) refused it, so the production helper could
+    /// never record a handover and kept running after every replacement.
+    /// Group write is accepted only from a trusted system group; world write
+    /// and any other group still fail closed.
+    func testGroupWritableParentIsTrustedOnlyForATrustedSystemGroup() throws {
+        let (root, strict) = try fixture()
+        var info = stat()
+        XCTAssertEqual(lstat(root.path, &info), 0)
+        let trusted = HelperUpgradeLedger(directory: root, filename: "test.handoff", owner: geteuid(),
+                                          trustedWriterGroups: [info.st_gid], wallClock: { 1_000_000 })
+        let otherGroup = HelperUpgradeLedger(directory: root, filename: "test.handoff", owner: geteuid(),
+                                             trustedWriterGroups: [info.st_gid &+ 1], wallClock: { 1_000_000 })
+        XCTAssertEqual(chmod(root.path, 0o775), 0)
+        defer { chmod(root.path, 0o700) }
+        XCTAssertFalse(strict.permits(target: version("21"), running: version("20"), at: 1_000))
+        XCTAssertFalse(otherGroup.permits(target: version("21"), running: version("20"), at: 1_000))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("test.handoff").path))
+        XCTAssertTrue(trusted.commitIfPermitted(target: version("21"), running: version("20"), at: 1_000, validate: { true }))
+        XCTAssertFalse(trusted.permits(target: version("22"), running: version("20"), at: 1_001), "Cooldown still holds")
+        for mode: mode_t in [0o777, 0o757, 0o707] {
+            XCTAssertEqual(chmod(root.path, mode), 0)
+            XCTAssertFalse(trusted.permits(target: version("22"), running: version("20"), at: 5_000),
+                           "World write is never trusted (\(String(mode, radix: 8)))")
+        }
+        XCTAssertEqual(chmod(root.path, 0o775), 0)
+        XCTAssertTrue(trusted.permits(target: version("22"), running: version("20"), at: 5_000))
+    }
+
+    /// The production location as this macOS has it: root-owned, no world
+    /// write, and group write (if any) only for a group the ledger trusts.
+    func testProductionLedgerDirectoryIsOneTheLedgerAccepts() throws {
+        var info = stat()
+        XCTAssertEqual(lstat("/private/var/run", &info), 0)
+        XCTAssertEqual(info.st_uid, 0)
+        XCTAssertEqual(info.st_mode & 0o002, 0)
+        if info.st_mode & 0o020 != 0 {
+            XCTAssertTrue(HelperUpgradeLedger.productionTrustedWriterGroups.contains(info.st_gid),
+                          "/var/run group \(info.st_gid) must be trusted, or the helper never hands over")
+        }
+    }
 }

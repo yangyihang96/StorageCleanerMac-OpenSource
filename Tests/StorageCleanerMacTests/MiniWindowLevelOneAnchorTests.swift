@@ -8,8 +8,10 @@ import XCTest
 /// level-one card must be that card's frame, also after the card moved.
 @MainActor
 final class MiniWindowLevelOneAnchorTests: XCTestCase {
+    // D118 (old values: 8, 120, 248, 332, 419, 533): the 8 pt inset, then
+    // iStat's cards of 120, 112, 42, 100 and 88 pt, 7 pt apart.
     private static let cardTops: [(PanelSection, CGFloat)] = [
-        (.processor, 8), (.memory, 120), (.disk, 248), (.network, 332), (.sensors, 419), (.power, 533),
+        (.processor, 8), (.memory, 135), (.disk, 254), (.network, 303), (.sensors, 410), (.power, 505),
     ]
 
     func testCardAnchorsFollowAMoveInsideTheWindow() async throws {
@@ -27,13 +29,18 @@ final class MiniWindowLevelOneAnchorTests: XCTestCase {
             model.top = top
             let processorTop = window.frame.maxY - top - 8
             let sensorsTop = window.frame.maxY - top - 8 - 106 - 6
+            // Layout lands on whole device pixels: the 38.5 pt move is exact
+            // on a 2x screen and half a point off on a 1x screen. Allow less
+            // than one pixel, which is the original 0.5 pt on 2x.
             let settled = await eventually {
-                self.top(of: .processor, in: coordinator).map { abs($0 - processorTop) < 0.5 } == true
-                    && self.top(of: .sensors, in: coordinator).map { abs($0 - sensorsTop) < 0.5 } == true
+                let pixel = self.devicePixel(of: window)
+                return self.top(of: .processor, in: coordinator).map { abs($0 - processorTop) < pixel } == true
+                    && self.top(of: .sensors, in: coordinator).map { abs($0 - sensorsTop) < pixel } == true
             }
             XCTAssertTrue(settled, "Anchors must follow the cards to top \(top): "
                 + "CPU \(String(describing: self.top(of: .processor, in: coordinator))) expected \(processorTop), "
-                + "sensors \(String(describing: self.top(of: .sensors, in: coordinator))) expected \(sensorsTop)")
+                + "sensors \(String(describing: self.top(of: .sensors, in: coordinator))) expected \(sensorsTop), "
+                + "pixel \(devicePixel(of: window)) pt")
         }
     }
 
@@ -84,8 +91,11 @@ final class MiniWindowLevelOneAnchorTests: XCTestCase {
     /// End to end with the real session and attached shell. The cascade
     /// layout reaches the view after the session has placed the window (late
     /// delivery stands in for the slower Debug build the P1 was captured
-    /// with); the CPU secondary must still open at its card's top.
-    func testProcessorSecondaryOpensAtItsCardTopWhenTheCascadeArrivesLate() async throws {
+    /// with); the CPU secondary must still line up with its card.
+    /// D123 (2026-10-19): renamed from
+    /// `testProcessorSecondaryOpensAtItsCardTopWhenTheCascadeArrivesLate`;
+    /// the page now opens 8 pt above the card so their first cards line up.
+    func testProcessorSecondaryLinesUpWithItsCardWhenTheCascadeArrivesLate() async throws {
         for delay: Duration in [.zero, .milliseconds(150)] {
             try await assertProcessorSecondaryAlignment(cascadeDelay: delay)
         }
@@ -137,15 +147,17 @@ final class MiniWindowLevelOneAnchorTests: XCTestCase {
             let frames = session.visibleAttachedContentFramesForTesting
             lastFrames = frames
             guard frames.count >= 2 else { return false }
-            return abs(frames[1].maxY - frames[0].maxY - 8) < 0.5
+            // D123 (2026-10-19): 8 pt above the CPU card's top, level with
+            // the overview top (was the card's top, 8 pt below it).
+            return abs(frames[1].maxY - frames[0].maxY) < 0.5
         }
-        XCTAssertTrue(aligned, "delay \(cascadeDelay): CPU secondary top must be the CPU card's top "
-            + "(8 pt below the overview top); frames \(lastFrames)")
+        XCTAssertTrue(aligned, "delay \(cascadeDelay): CPU secondary top must be 8 pt above the CPU card's top "
+            + "(level with the overview top); frames \(lastFrames)")
         try await Task.sleep(for: .milliseconds(300))
         let frames = session.visibleAttachedContentFramesForTesting
         guard frames.count >= 2 else { return }
-        XCTAssertEqual(frames[1].maxY - frames[0].maxY, 8, accuracy: 0.5,
-                       "delay \(cascadeDelay): the aligned cascade must stay aligned")
+        XCTAssertEqual(frames[1].maxY - frames[0].maxY, 0, accuracy: 0.5,
+                       "delay \(cascadeDelay): the aligned cascade must stay aligned (D123: was 8)")
         let overview = frames[1]
         for (section, cardTop) in Self.cardTops {
             let registered = try XCTUnwrap(
@@ -158,6 +170,10 @@ final class MiniWindowLevelOneAnchorTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func devicePixel(of window: NSWindow) -> CGFloat {
+        1 / max(1, window.backingScaleFactor)
+    }
 
     private func top(of section: PanelSection, in coordinator: GeekPanelCoordinator) -> CGFloat? {
         rect(of: section, in: coordinator)?.maxY

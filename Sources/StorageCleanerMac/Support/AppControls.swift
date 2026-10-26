@@ -366,7 +366,7 @@ struct AppFilterButton: View {
         .appButtonChrome(.glass, isSelected: isSelected)
         .controlSize(.regular)
         .tint(isSelected ? AppDesignTokens.Palette.accent : nil)
-        .accessibilityLabel(L10n.text("\(title)，\(count) 项", "\(title), \(count) items"))
+        .accessibilityLabel(L10n.text("\(title)，\(ByteFormat.count(count)) 项", "\(title), \(ByteFormat.count(count)) items"))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 

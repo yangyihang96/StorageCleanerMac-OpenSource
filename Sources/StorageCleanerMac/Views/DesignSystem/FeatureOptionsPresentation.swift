@@ -20,7 +20,8 @@ extension EnvironmentValues {
 
 /// Natural document geometry is measured before centering. Every scroller
 /// has its own key, including nested memory lists; siblings cannot overwrite it.
-private struct FeatureScrollFrameKey: PreferenceKey {
+/// D154: the studio landing reads the `.natural` heights to size its options.
+struct FeatureScrollFrameKey: PreferenceKey {
     static let defaultValue: [String: CGRect] = [:]
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })

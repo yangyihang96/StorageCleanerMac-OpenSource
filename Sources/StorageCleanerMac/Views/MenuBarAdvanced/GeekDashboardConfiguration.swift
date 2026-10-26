@@ -110,12 +110,15 @@ enum GeekSummaryMetric: String, CaseIterable, Identifiable, Codable, Sendable {
 }
 
 enum GeekChartRange: Int, CaseIterable, Identifiable, Codable, Sendable {
+    // D130: retained for decoding older preferences (read as 10 minutes).
     case thirtySeconds = 30
     case oneMinute = 60
     // Retained for decoding older preferences.
     case twoMinutes = 120
+    // D130: retained for decoding older preferences (read as 10 minutes).
     case fiveMinutes = 300
     case tenMinutes = 600
+    // D121: retained for decoding older preferences (not an iStat interval).
     case fifteenMinutes = 900
     case oneHour = 3_600
     case threeHours = 10_800
@@ -127,12 +130,11 @@ enum GeekChartRange: Int, CaseIterable, Identifiable, Codable, Sendable {
     case fourteenDays = 1_209_600
     case twentyEightDays = 2_419_200
 
+    /// D121: iStat's ten intervals (10 minutes to 28 days, default 1 hour).
+    /// D130: only those, as the menu graphs above the histories draw the
+    /// recent samples themselves (was 30 s, 60 s and 5 minutes first).
     static let allCases: [Self] = [
-        .thirtySeconds,
-        .oneMinute,
-        .fiveMinutes,
         .tenMinutes,
-        .fifteenMinutes,
         .oneHour,
         .threeHours,
         .sixHours,
@@ -170,6 +172,8 @@ enum GeekChartRange: Int, CaseIterable, Identifiable, Codable, Sendable {
     var normalized: Self {
         switch self {
         case .twoMinutes: .oneHour
+        // D130: the short windows are gone; the nearest iStat one.
+        case .thirtySeconds, .oneMinute, .fiveMinutes, .fifteenMinutes: .tenMinutes
         default: self
         }
     }

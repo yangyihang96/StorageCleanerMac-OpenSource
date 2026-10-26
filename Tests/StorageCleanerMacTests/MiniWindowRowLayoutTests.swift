@@ -17,13 +17,25 @@ final class MiniWindowRowLayoutTests: XCTestCase {
     func testProcessHeadersShowCompleteTitlesAndColumnLabels() async throws {
         let detail = cardContentWidth(page: MiniWindowStyleTokens.detailWidth)
         let power = cardContentWidth(page: MiniWindowStyleTokens.powerDetailWidth)
+        // D119: the production power card has no column label (it truncated
+        // the title at 240 pt), which is what the "power" case renders.
+        let powerCard = try MiniWindowLogicFixtures.section(
+            try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift"),
+            from: "private var geekSignificantEnergyCard: some View {", to: "private var geekDisplayedEnergyApps")
+        XCTAssertTrue(powerCard.contains("GeekIStatProcessCard("))
+        XCTAssertFalse(powerCard.contains("columns:"), "the power page's process card lists its apps under the title alone")
         for language in [AppLanguage.english, .zhHans] {
             let scope = RowLayoutLanguageScope(language)
             defer { scope.restore() }
             let cases: [(name: String, width: CGFloat, title: String, status: String?,
                          columns: [GeekProcessListColumn], loading: Bool)] = [
-                ("power", power, L10n.text("使用显著能耗", "Using Significant Energy").uppercased(), nil,
-                 [GeekProcessListColumn(id: "power", title: L10n.text("功率", "Power"))], true),
+                // D138: the production title, iStat's 'Power.Using Significant
+                // Energy' (was 使用显著能耗). D119 (old value: one "功率" /
+                // "Power" column): the 240 pt power page lists its apps under
+                // the title alone, without the column label that truncated
+                // the title (`GeekPowerView.geekSignificantEnergyCard`).
+                ("power", power, L10n.text("使用大量能耗", "Using Significant Energy").uppercased(), nil,
+                 [], true),
                 ("network", detail, L10n.text("进程", "PROCESSES"), nil,
                  [GeekProcessListColumn(id: "upload", title: L10n.text("上传", "Upload"), tint: .pink),
                   GeekProcessListColumn(id: "download", title: L10n.text("下载", "Download"), tint: .blue)], false),
@@ -46,13 +58,16 @@ final class MiniWindowRowLayoutTests: XCTestCase {
                 let row = try XCTUnwrap(frames["process-header.row"])
                 let title = try XCTUnwrap(frames["process-header.title"])
                 let context = "\(language.rawValue) \(item.name)"
-                XCTAssertGreaterThanOrEqual(title.width, natural(item.title, weight: .semibold) - 0.5,
+                // D118/D119 (old value: 11 pt, the title semibold): titles and
+                // column labels are iStat's 12 pt regular text.
+                XCTAssertGreaterThanOrEqual(title.width, natural(item.title, size: GeekIStatCardGeometry.textFontSize) - 0.5,
                                             "\(context): the title must not truncate")
                 for (index, column) in item.columns.enumerated() {
                     let label = try XCTUnwrap(frames["process-header.column.\(column.id)"])
-                    XCTAssertGreaterThanOrEqual(label.width, natural(column.title) - 0.5,
+                    XCTAssertGreaterThanOrEqual(label.width, natural(column.title, size: GeekIStatCardGeometry.textFontSize) - 0.5,
                                                 "\(context): \(column.title) must not truncate")
-                    // Right-aligned on the rows' value columns (60 pt slots, 6 pt apart).
+                    // Right-aligned on the rows' value columns (64 pt slots, 6 pt
+                    // apart; D119, was 60).
                     let fromEnd = CGFloat(item.columns.count - 1 - index)
                         * (GeekSecondaryTransferLayout.processValueColumnWidth + MiniWindowStyleTokens.inlineSpacing)
                     XCTAssertEqual(label.maxX, row.maxX - fromEnd, accuracy: 0.5, "\(context): \(column.title) alignment")
@@ -79,23 +94,33 @@ final class MiniWindowRowLayoutTests: XCTestCase {
                     available: ByteFormat.storageString(capacity.userAvailableBytes)
                 )
                 XCTAssertTrue(summary.contains("999.99"), summary)
+                // D119 (2026-10-18): the second row is iStat's available
+                // space at 12 pt ("999.99 GB 可用"); the ring carries the used
+                // share and VoiceOver the whole sentence (was the sentence at
+                // 11 pt).
+                let available = GeekDiskPresentation.availableText(capacity)
+                // D128 (old value: "999.99"): iStat's disk space keeps at most
+                // one GB decimal and drops trailing zeros, so 999.99 GB is
+                // "1,000 GB".
+                XCTAssertTrue(available.contains("1,000 GB"), available)
                 let host = RowLayoutHost(content: GeekDiskVolumeSummary(volume: volume).frame(width: width),
                                          size: CGSize(width: width, height: 60))
                 defer { host.close() }
                 let frames = try await host.frames(required: ["disk-volume.summary"])
                 let frame = try XCTUnwrap(frames["disk-volume.summary"])
-                XCTAssertGreaterThanOrEqual(frame.width, natural(summary, monospacedDigits: true) - 0.5,
-                                            "\(language.rawValue): \(summary) must render complete at 11 pt")
+                XCTAssertGreaterThanOrEqual(frame.width, natural(available, size: 12, monospacedDigits: true) - 0.5,
+                                            "\(language.rawValue): \(available) must render complete at 12 pt")
                 XCTAssertEqual(host.fittingHeight, GeekDiskVolumeLayout.cardHeight, accuracy: 0.5,
                                "The row keeps the height its tertiary offsets are computed with")
             }
         }
     }
 
-    private func natural(_ text: String, weight: NSFont.Weight = .regular, monospacedDigits: Bool = false) -> CGFloat {
+    private func natural(_ text: String, size: CGFloat = 11, weight: NSFont.Weight = .regular,
+                         monospacedDigits: Bool = false) -> CGFloat {
         let font = monospacedDigits
-            ? NSFont.monospacedDigitSystemFont(ofSize: 11, weight: weight)
-            : NSFont.systemFont(ofSize: 11, weight: weight)
+            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+            : NSFont.systemFont(ofSize: size, weight: weight)
         return ceil((text as NSString).size(withAttributes: [.font: font]).width)
     }
 }

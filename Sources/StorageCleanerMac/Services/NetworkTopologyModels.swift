@@ -60,12 +60,14 @@ struct WiFiConnectionDetails: Equatable, Sendable {
     let countryCode: String?
 }
 
+/// D134: the wired link; its media is the connection's (`mediaSubType`,
+/// `mediaOptions`), read for any interface as iStat does. Before D134 it
+/// carried a duplex that was never read and the transport's name as its
+/// "media subtype".
 struct EthernetConnectionDetails: Equatable, Sendable {
     let linkActive: Bool
     let linkSpeedMbps: Int?
-    let duplex: String?
     let mtu: Int?
-    let mediaSubtype: String?
 }
 
 struct IPConfigurationDetails: Equatable, Sendable {
@@ -75,6 +77,9 @@ struct IPConfigurationDetails: Equatable, Sendable {
     let ipv4Router: String?
     let ipv6Router: String?
     let dnsServers: [String]
+    /// D140: the addresses iStat lists for the interface
+    /// (`NetworkAddressListing`); nil when the interface was not read.
+    var listedAddresses: [String]? = nil
 }
 
 struct NetworkConnectionSnapshot: Equatable, Sendable {
@@ -86,6 +91,10 @@ struct NetworkConnectionSnapshot: Equatable, Sendable {
     let ethernet: EthernetConnectionDetails?
     let ipConfiguration: IPConfigurationDetails
     let isVPNActive: Bool
+    /// D134: the active interface's media (iStat's `state.media`), from the
+    /// native reading when it is the transport's interface.
+    let mediaSubType: String?
+    let mediaOptions: [String]
 
     static func resolve(
         native: NativeNetworkInterfaceSnapshot?,
@@ -158,12 +167,16 @@ struct NetworkConnectionSnapshot: Equatable, Sendable {
             ? EthernetConnectionDetails(
                 linkActive: isConnected,
                 linkSpeedMbps: nativeMatchesTransport ? native?.linkSpeedMbps : nil,
-                duplex: nil,
-                mtu: nativeMatchesTransport ? native?.interfaceMTU : nil,
-                mediaSubtype: transport?.kind.displayName
+                mtu: nativeMatchesTransport ? native?.interfaceMTU : nil
             )
             : nil
+        let nativeIsTheInterface = nativeMatchesTransport || transport == nil
         let dns = nonEmpty(transport?.dnsServers, fallback: native?.dnsServers)
+        // D140: the listed addresses come with the addresses they filter: the
+        // transport's, or the native reading's where it is the interface.
+        let nativeListed = nativeIsTheInterface ? native?.listedAddresses : nil
+        let listedAddresses = transport?.listedAddresses.flatMap { $0.isEmpty ? nil : $0 }
+            ?? nativeListed ?? transport?.listedAddresses
         let vpnIsActive = topology?.activeVPNTunnel.map {
             $0.status == .connected || $0.status == .connecting || $0.status == .reconnecting
         } ?? false
@@ -183,9 +196,12 @@ struct NetworkConnectionSnapshot: Equatable, Sendable {
                     : [],
                 ipv4Router: transport?.gateway ?? native?.ipv4Router,
                 ipv6Router: native?.ipv6Router,
-                dnsServers: dns
+                dnsServers: dns,
+                listedAddresses: listedAddresses
             ),
-            isVPNActive: vpnIsActive
+            isVPNActive: vpnIsActive,
+            mediaSubType: nativeIsTheInterface ? native?.mediaSubType : nil,
+            mediaOptions: nativeIsTheInterface ? native?.mediaOptions ?? [] : []
         )
     }
 
@@ -261,6 +277,9 @@ struct PhysicalTransportSnapshot: Equatable, Sendable {
     let gateway: String?
     let dnsServers: [String]
     let isPrimaryTransport: Bool
+    /// D140: the interface's addresses as iStat lists them
+    /// (`NetworkAddressListing`); nil when the interface was not read.
+    var listedAddresses: [String]? = nil
 }
 
 struct VPNTunnelSnapshot: Equatable, Sendable, Identifiable {
@@ -281,6 +300,10 @@ struct VPNTunnelSnapshot: Equatable, Sendable, Identifiable {
     let gatewayOrRemoteAddress: String?
     let isDefaultRoute: Bool
     let isSplitTunnel: Bool?
+    /// D140: the tunnel interface's addresses as iStat lists them
+    /// (`NetworkAddressListing`: a point-to-point address is not); nil when
+    /// the interface was not read.
+    var listedAddresses: [String]? = nil
 
     var id: String { stableID ?? "runtime:\(bsdName)" }
 }
@@ -417,19 +440,24 @@ struct NetworkTopologyInterfaceRecord: Equatable, Sendable {
     let isPointToPoint: Bool
     let ipv4Addresses: [String]
     let ipv6Addresses: [String]
+    /// D140: the addresses iStat lists for the interface, in its order
+    /// (`NetworkAddressListing`); nil when not read.
+    let listedAddresses: [String]?
 
     init(
         bsdName: String,
         isUp: Bool,
         isPointToPoint: Bool = false,
         ipv4Addresses: [String] = [],
-        ipv6Addresses: [String] = []
+        ipv6Addresses: [String] = [],
+        listedAddresses: [String]? = nil
     ) {
         self.bsdName = bsdName
         self.isUp = isUp
         self.isPointToPoint = isPointToPoint
         self.ipv4Addresses = ipv4Addresses
         self.ipv6Addresses = ipv6Addresses
+        self.listedAddresses = listedAddresses
     }
 }
 
@@ -686,7 +714,8 @@ enum NetworkTopologyResolver {
             isDefaultRoute: isDefaultRoute,
             // Public SystemConfiguration state exposes the default route, but
             // does not prove a per-destination split-tunnel policy.
-            isSplitTunnel: isDefaultRoute ? false : nil
+            isSplitTunnel: isDefaultRoute ? false : nil,
+            listedAddresses: interface?.listedAddresses
         )
     }
 
@@ -710,7 +739,8 @@ enum NetworkTopologyResolver {
             scopedDNSServers: [],
             gatewayOrRemoteAddress: nil,
             isDefaultRoute: interface.bsdName == normalizedName(primaryInterfaceName),
-            isSplitTunnel: nil
+            isSplitTunnel: nil,
+            listedAddresses: interface.listedAddresses
         )
     }
 
@@ -786,7 +816,8 @@ enum NetworkTopologyResolver {
             ipv6Addresses: normalizedAddresses(interface.ipv6Addresses),
             gateway: normalizedName(service.gatewayOrRemoteAddress),
             dnsServers: dnsServers,
-            isPrimaryTransport: true
+            isPrimaryTransport: true,
+            listedAddresses: interface.listedAddresses
         )
     }
 

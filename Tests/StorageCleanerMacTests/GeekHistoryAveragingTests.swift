@@ -94,8 +94,8 @@ final class GeekHistoryAveragingTests: XCTestCase {
         let frame = GeekPreparedNetworkFrame(history: .init(points: points), plotRect: plot,
             duration: 3600, referenceDate: end, displayScale: 2)
         let displayedPeak = try XCTUnwrap(frame.downloadMarks.map(\.value).max())
-        XCTAssertGreaterThanOrEqual(frame.maximum, displayedPeak)
-        XCTAssertLessThan(frame.maximum, 10_000_000)
+        XCTAssertGreaterThanOrEqual(frame.downloadMaximum, displayedPeak)
+        XCTAssertLessThan(frame.downloadMaximum, 10_000_000)
         XCTAssertEqual(frame.downloadMarks.count, 120)
     }
 
@@ -176,6 +176,166 @@ final class GeekHistoryAveragingTests: XCTestCase {
             XCTAssertEqual(boundary?.start, end)
             XCTAssertFalse(boundary?.indices.contains(0) ?? true)
             XCTAssertFalse(windows.flatMap(\.indices).contains(2) && offset < 0.2)
+        }
+    }
+
+    // D114 (replaces the D113 rule): at this time a Date is finer than seconds
+    // since 1970, so the Dates on either side of a boundary convert onto it.
+    // Placement compares the Dates themselves. Windows are half-open,
+    // [boundary, next boundary); only a counted observation exactly at a
+    // boundary reference opens the new window. Before D113 the sample just
+    // before a boundary reference trapped; D113 moved a sample at the boundary
+    // into the window that ends there, and a reference just before a boundary
+    // got an inverted window.
+    func testDatesBesideABoundaryStayInTheirOwnHalfOpenWindows() {
+        let b = Date(timeIntervalSince1970: 1_792_107_072)
+        let ulp = 0x1p-23
+        func step(_ date: Date, _ ulps: Int) -> Date {
+            var time = date.timeIntervalSinceReferenceDate
+            for _ in 0..<abs(ulps) { time = ulps < 0 ? time.nextDown : time.nextUp }
+            return Date(timeIntervalSinceReferenceDate: time)
+        }
+        let below = step(b, -1), above = step(b, 1)
+        XCTAssertEqual(b.timeIntervalSince(below), ulp)
+        XCTAssertEqual(above.timeIntervalSince(b), ulp)
+        for interval in [6.0, 18, 36, 72, 144, 432, 1008, 2016, 4032] {
+            let title = "interval \(interval)"
+            // Three boundaries: b0 starts the range, b1 is between, then b.
+            let b0 = b.addingTimeInterval(-2 * interval), b1 = b.addingTimeInterval(-interval)
+            for edge in [b0, b1, b] {
+                XCTAssertEqual(step(edge, -1).timeIntervalSince1970, edge.timeIntervalSince1970, title)
+                XCTAssertEqual(step(edge, 1).timeIntervalSince1970, edge.timeIntervalSince1970, title)
+            }
+            func windows(_ dates: [Date], reference: Date, from: Date? = nil, missing: Set<Int> = [],
+                         gaps: [DateInterval] = [], measured: [Int: Date] = [:],
+                         line: UInt = #line) -> (groups: [[Int]], weights: [[Double]]) {
+                let start = from ?? b0
+                let windows = GeekHistoryAveraging.windows(dates: dates, interval: interval, start: start,
+                    referenceDate: reference, gaps: gaps, isMissing: { missing.contains($0) },
+                    intervalStart: { measured[$0] })
+                // Contiguous windows from start to the reference, none inverted.
+                XCTAssertEqual(windows.first?.start, start, title, line: line)
+                XCTAssertEqual(windows.last?.end, reference, title, line: line)
+                XCTAssertTrue(windows.allSatisfy { $0.start <= $0.end }, title, line: line)
+                XCTAssertTrue(zip(windows, windows.dropFirst()).allSatisfy { $0.end == $1.start }, title, line: line)
+                // Every counted sample and nothing else: a point once, with
+                // weight 1, in the window that holds its date; a measured span
+                // in the windows it overlaps, its weights adding up to its
+                // coverage inside the range.
+                for (index, date) in dates.enumerated() {
+                    let counted = date >= start && date <= reference && !missing.contains(index)
+                        && !gaps.contains { date >= $0.start && date < $0.end }
+                    let entries: [(window: Int, weight: Double)] = windows.indices.flatMap { place in
+                        zip(windows[place].indices, windows[place].weights).filter { $0.0 == index }.map { (place, $0.1) }
+                    }
+                    if !counted {
+                        XCTAssertTrue(entries.isEmpty, title, line: line)
+                    } else if let measuredStart = measured[index], max(start, measuredStart) < date {
+                        let lower = max(start, measuredStart)
+                        XCTAssertEqual(entries.map(\.weight).reduce(0, +), date.timeIntervalSince(lower), title, line: line)
+                        XCTAssertTrue(entries.allSatisfy {
+                            $0.weight > 0 && windows[$0.window].start < date && lower < windows[$0.window].end
+                        }, title, line: line)
+                    } else {
+                        XCTAssertEqual(entries.map(\.weight), [1], title, line: line)
+                        if let place = entries.first?.window {
+                            let window = windows[place]
+                            XCTAssertTrue(window.start <= date
+                                && (date < window.end || place == windows.count - 1 && date == reference), title, line: line)
+                        }
+                    }
+                }
+                return (windows.map(\.indices), windows.map(\.weights))
+            }
+
+            // Each boundary with the Dates beside it, and one Date before the range.
+            let dates = [b0, step(b0, 1), step(b1, -1), b1, step(b1, 1), below, b, above, step(b0, -1)]
+            // The reference just before b, at b, just after b.
+            XCTAssertEqual(windows(dates, reference: below).groups, [[0, 1, 2], [3, 4, 5]], title)
+            XCTAssertEqual(windows(dates, reference: b).groups, [[0, 1, 2], [3, 4, 5], [6]], title)
+            XCTAssertEqual(windows(dates, reference: above).groups, [[0, 1, 2], [3, 4, 5], [6, 7]], title)
+            // No, a missing, or a paused observation at the reference.
+            XCTAssertEqual(windows(Array(dates[0...4]), reference: below).groups, [[0, 1, 2], [3, 4]], title)
+            XCTAssertEqual(windows(dates, reference: below, missing: [5]).groups, [[0, 1, 2], [3, 4]], title)
+            XCTAssertEqual(windows(dates, reference: below, gaps: [DateInterval(start: below, end: b)]).groups,
+                [[0, 1, 2], [3, 4]], title)
+            XCTAssertEqual(windows(Array(dates[0...5]), reference: b).groups, [[0, 1, 2], [3, 4, 5]], title)
+            XCTAssertEqual(windows(dates, reference: b, missing: [6]).groups, [[0, 1, 2], [3, 4, 5]], title)
+            XCTAssertEqual(windows(dates, reference: b, gaps: [DateInterval(start: b, duration: 1)]).groups,
+                [[0, 1, 2], [3, 4, 5]], title)
+            XCTAssertEqual(windows(dates, reference: b, gaps: [DateInterval(start: b1, end: b)]).groups,
+                [[0, 1, 2], [], [6]], title)
+            XCTAssertEqual(windows(Array(dates[0...6]), reference: above).groups, [[0, 1, 2], [3, 4, 5], [6]], title)
+            XCTAssertEqual(windows(Array(dates[0...5]), reference: above).groups, [[0, 1, 2], [3, 4, 5], []], title)
+            XCTAssertEqual(windows(dates, reference: above, missing: [7]).groups, [[0, 1, 2], [3, 4, 5], [6]], title)
+            XCTAssertEqual(windows(dates, reference: above, gaps: [DateInterval(start: b, duration: 1)]).groups,
+                [[0, 1, 2], [3, 4, 5], []], title)
+            // The cases of CODEX_D113_R6_RECHECK.
+            XCTAssertEqual(windows([b, above], reference: above).groups, [[], [], [0, 1]], title)
+            XCTAssertEqual(windows([below], reference: below).groups, [[], [0]], title)
+            XCTAssertEqual(windows([below, b], reference: b).groups, [[], [0], [1]], title)
+            XCTAssertEqual(windows([below], reference: b).groups, [[], [0]], title)
+            // A start beside a boundary keeps its own window, however short.
+            XCTAssertEqual(windows([step(b0, -1), b0, below], reference: b, from: step(b0, -1)).groups,
+                [[0], [1], [2]], title)
+            XCTAssertEqual(windows([b0, step(b0, 1)], reference: b, from: step(b0, 1)).groups, [[1], []], title)
+            XCTAssertEqual(windows([below, b], reference: b, from: below).groups, [[0], [1]], title)
+
+            // Measured spans: each window gets its part of [max(start, measured start), date).
+            func measured(_ date: Date, from measuredStart: Date, reference: Date = b,
+                          start: Date? = nil, line: UInt = #line) -> (groups: [[Int]], weights: [[Double]]) {
+                windows([date], reference: reference, from: start, measured: [0: measuredStart], line: line)
+            }
+            var result = measured(b1.addingTimeInterval(0.25), from: b1.addingTimeInterval(-0.5))
+            XCTAssertEqual(result.groups, [[0], [0]], title)
+            XCTAssertEqual(result.weights, [[0.5], [0.25]], title)
+            result = measured(b1.addingTimeInterval(1), from: step(b1, -1))
+            XCTAssertEqual(result.groups, [[0], [0]], title)
+            XCTAssertEqual(result.weights, [[ulp], [1]], title)
+            result = measured(step(b1, 1), from: b1.addingTimeInterval(-1))
+            XCTAssertEqual(result.groups, [[0], [0]], title)
+            XCTAssertEqual(result.weights, [[1], [ulp]], title)
+            result = measured(b1, from: b1.addingTimeInterval(-1))
+            XCTAssertEqual(result.groups, [[0], []], title)
+            XCTAssertEqual(result.weights, [[1], []], title)
+            result = measured(b1.addingTimeInterval(1), from: b1)
+            XCTAssertEqual(result.groups, [[], [0]], title)
+            XCTAssertEqual(result.weights, [[], [1]], title)
+            // At the reference: an observation at b opens the new window, but
+            // its span lies in the window before.
+            result = measured(b, from: b.addingTimeInterval(-1))
+            XCTAssertEqual(result.groups, [[], [0], []], title)
+            XCTAssertEqual(result.weights, [[], [1], []], title)
+            result = measured(b, from: b.addingTimeInterval(-1), reference: above)
+            XCTAssertEqual(result.groups, [[], [0], []], title)
+            XCTAssertEqual(result.weights, [[], [1], []], title)
+            result = measured(above, from: below, reference: above)
+            XCTAssertEqual(result.groups, [[], [0], [0]], title)
+            XCTAssertEqual(result.weights, [[], [ulp], [ulp]], title)
+            result = measured(above, from: b.addingTimeInterval(-1), reference: above)
+            XCTAssertEqual(result.groups, [[], [0], [0]], title)
+            XCTAssertEqual(result.weights, [[], [1], [ulp]], title)
+            result = measured(below, from: b.addingTimeInterval(-1), reference: below)
+            XCTAssertEqual(result.groups, [[], [0]], title)
+            XCTAssertEqual(result.weights, [[], [1 - ulp]], title)
+            result = windows([below, b], reference: b, measured: [1: below])
+            XCTAssertEqual(result.groups, [[], [0, 1], []], title)
+            XCTAssertEqual(result.weights, [[], [1, ulp], []], title)
+            result = windows([below, b], reference: b, measured: [1: b.addingTimeInterval(-0.5)])
+            XCTAssertEqual(result.groups, [[], [0, 1], []], title)
+            XCTAssertEqual(result.weights, [[], [1, 0.5], []], title)
+            // At the start: a span is cut at start; with nothing after start
+            // the sample counts as one observation at its own time.
+            result = measured(b0.addingTimeInterval(0.5), from: b0.addingTimeInterval(-0.5))
+            XCTAssertEqual(result.groups, [[0], []], title)
+            XCTAssertEqual(result.weights, [[0.5], []], title)
+            result = measured(b0, from: b0.addingTimeInterval(-1))
+            XCTAssertEqual(result.groups, [[0], []], title)
+            XCTAssertEqual(result.weights, [[1], []], title)
+            let later = b0.addingTimeInterval(0.5)
+            result = measured(later, from: later.addingTimeInterval(-1), start: later)
+            XCTAssertEqual(result.groups, [[0], []], title)
+            XCTAssertEqual(result.weights, [[1], []], title)
         }
     }
 

@@ -152,13 +152,16 @@ final class MiniWindowHistoryDemandTests: XCTestCase {
         defer { TestPreferenceDomain.cleanup(suiteName: suiteName) }
         let settings = MenuBarPanelSettingsState(initialDensity: .geek, defaults: defaults)
         settings.setGeekChartRange(.sevenDays, for: GeekChartRangeMetric.fan)
-        settings.setGeekChartRange(.fiveMinutes, for: GeekChartRangeMetric.cpu)
-        settings.setGeekChartRange(.oneMinute, for: GeekChartRangeMetric.network)
+        // D130 (2026-10-19): 5 minutes and 60 s are no longer windows (they
+        // read as 10 minutes); the cards take two of iStat's ten instead
+        // (were .fiveMinutes and .oneMinute, durations 300 and 60).
+        settings.setGeekChartRange(.tenMinutes, for: GeekChartRangeMetric.cpu)
+        settings.setGeekChartRange(.threeHours, for: GeekChartRangeMetric.network)
 
         let fanHistory = MenuBarHistoryDemandPlan(settings: settings, section: .sensors, inlineMetric: .fan)
-        XCTAssertEqual(fanHistory.durations, [604_800, 300, 60], "open history, CPU card, network card")
+        XCTAssertEqual(fanHistory.durations, [604_800, 600, 10_800], "open history, CPU card, network card")
         let overview = MenuBarHistoryDemandPlan(settings: settings, section: .overview, inlineMetric: nil)
-        XCTAssertEqual(overview.durations, [3_600, 300, 60])
+        XCTAssertEqual(overview.durations, [3_600, 600, 10_800])
         // Equal ranges are one window.
         settings.setGeekChartRange(.oneHour, for: GeekChartRangeMetric.cpu)
         settings.setGeekChartRange(.oneHour, for: GeekChartRangeMetric.network)

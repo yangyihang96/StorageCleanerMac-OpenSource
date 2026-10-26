@@ -245,6 +245,28 @@ final class BTMOutputParserTests: XCTestCase {
         XCTAssertEqual(records[1].enablementState, .disabled)
     }
 
+    /// D192③: the literal "(null)" of an absent field is no value.
+    func testNullPlaceholdersAreAbsentFields() {
+        let output = """
+        UUID: 33333333-3333-3333-3333-333333333333
+        Name: Example
+        Developer Name: (null)
+        Team Identifier: TEAM123456
+        Bundle Identifier: (null)
+        Identifier: 2.com.example.app
+        URL: file:///Applications/Example.app/
+        Disposition: [enabled, allowed, visible, notified]
+        """
+
+        let records = BTMOutputParser().parse(output)
+
+        XCTAssertEqual(records.count, 1)
+        XCTAssertNil(records[0].developerName)
+        XCTAssertNil(records[0].bundleIdentifier)
+        XCTAssertEqual(records[0].teamIdentifier, "TEAM123456")
+        XCTAssertEqual(records[0].identifier, "2.com.example.app")
+    }
+
     func testFormatDriftAndMalformedLinesDoNotEraseValidFields() {
         let output = """
         random heading without delimiter

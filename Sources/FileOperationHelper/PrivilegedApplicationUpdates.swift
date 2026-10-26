@@ -100,29 +100,30 @@ final class PrivilegedApplicationUpdateSession: @unchecked Sendable {
 }
 
 private final class UpdateReplyCallback: @unchecked Sendable {
-    let callback: (Data) -> Void
-    init(_ callback: @escaping (Data) -> Void) { self.callback = callback }
+    let callback: ReplyCallback
+    init(_ callback: ReplyCallback) { self.callback = callback }
     func complete(_ work: () throws -> Void) {
         let response: AuthorizedUpdateReply
         do { try work(); response = .init() }
         catch let failure as AuthenticatedBundleSwap.Failure {
             response = .init(error: failure.localizedDescription, errorCode: Int(EINPROGRESS), finished: false)
         } catch { response = .init(error: error.localizedDescription, errorCode: (error as NSError).code) }
-        callback((try? JSONEncoder().encode(response)) ?? Data())
+        callback.call((try? JSONEncoder().encode(response)) ?? Data())
     }
 }
 
 extension ConnectionService {
     func applicationReplacementCapabilities(reply: @escaping (Data) -> Void) {
+        let callback = trackedReply(reply)
         let value = ApplicationReplacementCapabilities(build: FileOperationHelperBuild.current, busy: FileOperationUpdateActivity.isBusy)
-        reply((try? JSONEncoder().encode(value)) ?? Data())
+        callback.call((try? JSONEncoder().encode(value)) ?? Data())
     }
     func prepareApplicationReplacements(_ request: Data, authorization: Data, reply: @escaping (Data) -> Void) {
-        let callback = UpdateReplyCallback(reply)
+        let callback = UpdateReplyCallback(trackedReply(reply))
         updates.queue.async { callback.complete { try self.updates.prepare(request, authorization: authorization, uid: self.uid) } }
     }
     func replaceAuthenticatedApplication(_ request: Data, reply: @escaping (Data) -> Void) {
-        let callback = UpdateReplyCallback(reply)
+        let callback = UpdateReplyCallback(trackedReply(reply))
         updates.queue.async { callback.complete {
             guard request.count < 262_144 else { throw POSIXError(.EINVAL) }
             let request = try JSONDecoder().decode(AuthenticatedApplicationReplacement.self, from: request)
@@ -133,8 +134,8 @@ extension ConnectionService {
         } }
     }
     func finishApplicationReplacements(_ sessionID: String, reply: @escaping (Data) -> Void) {
+        let callback = UpdateReplyCallback(trackedReply(reply))
         updates.cancel(sessionID: sessionID)
-        let callback = UpdateReplyCallback(reply)
         updates.queue.async { callback.complete { if self.updates.batch?.sessionID.uuidString == sessionID { self.updates.clear() } } }
     }
 }

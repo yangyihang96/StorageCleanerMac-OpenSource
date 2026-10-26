@@ -600,7 +600,7 @@ final class BrowserPrivacyHistoryProcessorTests: XCTestCase {
 
     func testRegisteredProvidersExposeOnlyVersionedChromiumProductionAdapter() {
         let providers = BrowserPrivacyProviderRegistry.defaultProviders
-        XCTAssertEqual(providers.count, 14)
+        XCTAssertEqual(providers.count, 15, "D-FP6 added QQ Browser")
         XCTAssertTrue(providers.filter { $0.descriptor.engine == .chromium }
             .allSatisfy { $0.historyWriteAdapter == .chromiumProduction })
         XCTAssertTrue(providers.filter { $0.descriptor.engine != .chromium }

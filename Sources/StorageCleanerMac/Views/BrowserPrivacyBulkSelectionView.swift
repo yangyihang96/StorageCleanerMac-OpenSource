@@ -263,7 +263,7 @@ struct BrowserPrivacyBulkSelectionView: View {
         .appButtonChrome(.toolbar)
         .disabled(isDisabled || (option.isSensitive && !option.hasDeletableRecord))
         .accessibilityLabel(option.isSensitive ? option.title : L10n.text(
-            "选择网站 \(option.domain) 的 \(option.count) 次访问",
+            "选择网站 \(option.domain) 的 \(ByteFormat.count(option.count)) 次访问",
             "Select \(BrowserPrivacyCountText.visits(option.count)) for \(option.domain)"
         ))
     }

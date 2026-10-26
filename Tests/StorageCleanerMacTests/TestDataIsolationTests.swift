@@ -13,8 +13,9 @@ final class TestDataIsolationTests: XCTestCase {
         try MenuBarPowerHistoryStore.save([power], to: powerURL)
         let store = try ScanStore.makeForTests(for: self, dataDirectory: home, preferences: defaults)
         XCTAssertEqual(store.menuBarAuxiliaryMonitorState.powerHistory, [power])
-        store.menuBarRefreshInterval = .twoSeconds
-        XCTAssertEqual(defaults.string(forKey: "menuBar.refreshInterval"), "twoSeconds")
+        // D127: 2 s is now the default; store a non-default choice (was `.twoSeconds`).
+        store.menuBarRefreshInterval = .threeSeconds
+        XCTAssertEqual(defaults.string(forKey: "menuBar.refreshInterval"), "threeSeconds")
 
         let now = Date()
         for (seconds, date) in [(100.0, now.addingTimeInterval(-60)), (160.0, now)] {
@@ -151,7 +152,9 @@ final class TestDataIsolationTests: XCTestCase {
         let operations = try source("Services/ScanHeavyWorkService.swift")
         for implementation in [
             "try CleanupService.moveToTrash(item, allowedPaths: allowedPaths)",
-            "try CleanupService.emptyUserTrash()", "CleanupService.restoreFromTrash(records)",
+            "try CleanupService.freezeTrash()",
+            "await CleanupService.emptyFrozenTrash(frozen, deleter: FoundationCleanupPermanentDeleter())",
+            "CleanupService.restoreFromTrash(records)",
             "await MemoryOptimizerService.optimize()",
             "try await ScanHeavyWorkService.runCancellableHomebrewUpgrade(for: apps)",
             "AppUpdateService.prepareOneClickUpdate(plan, opensAppStore: true)",

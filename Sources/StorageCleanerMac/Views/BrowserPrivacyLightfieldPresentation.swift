@@ -127,10 +127,10 @@ enum BrowserPrivacyLightfieldPresentation {
     }
 
     static func counts(sites: Int, records: Int) -> String {
-        L10n.text("\(sites) 个站点 · \(records) 条", "\(sites) sites · \(records) records")
+        L10n.text("\(ByteFormat.count(sites)) 个站点 · \(ByteFormat.count(records)) 条", "\(ByteFormat.count(sites)) sites · \(ByteFormat.count(records)) records")
     }
 
     static func recordCount(_ count: Int) -> String {
-        L10n.text("\(count) 条", "\(count) records")
+        L10n.text("\(ByteFormat.count(count)) 条", "\(ByteFormat.count(count)) records")
     }
 }

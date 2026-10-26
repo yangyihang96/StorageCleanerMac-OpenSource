@@ -9,6 +9,9 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
     func testSensorRingTextStaysCompleteAtOriginalDiameterAcrossSizeLanguageAndAppearance() async throws {
         // The seven existing mini-window/card widths, including the tightest
         // 248 pt fixture: gaps may flex, the 72 pt rings and fonts may not.
+        // D118 (iStat `sensors-overview`): no title row, rings with a 2 pt
+        // line, a 10 pt label, 15 pt value and 11 pt Thin frequency; the
+        // fan control is the card menu in the top-left corner.
         for language in [AppLanguage.zhHans, .english] {
             let scope = OverviewLabelLanguageScope(language)
             defer { scope.restore() }
@@ -30,10 +33,10 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
                         let host = OverviewLabelHost(content: view,
                             size: CGSize(width: width, height: GeekPanelLayout.overviewSensorsCardHeight), dark: dark)
                         defer { host.close() }
-                        let frames = try await host.frames(required: ["overview.sensor.card", "overview.sensor.header",
+                        let frames = try await host.frames(required: ["overview.sensor.card",
                             "overview.sensor.cpu", "overview.sensor.gpu", "overview.sensor.fan"])
                         let card = try XCTUnwrap(frames["overview.sensor.card"])
-                        XCTAssertEqual(card.height, 108, accuracy: 0.5)
+                        XCTAssertEqual(card.height, GeekIStatCardGeometry.sensorsHeight, accuracy: 0.5)
                         if width == 304, let directory = ProcessInfo.processInfo.environment["STORAGE_CLEANER_FIX2_EVIDENCE"] {
                             let bitmap = try host.capture(card)
                             let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
@@ -41,10 +44,18 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
                         }
                         if telemetry.isFanless {
                             XCTAssertNil(host.recordedFrames["overview.sensor.entry"], "Passive cooling must not advertise a control")
+                        } else if let entry = host.recordedFrames["overview.sensor.entry"] {
+                            // iStat's card menu: the 24 pt top-left corner of the card.
+                            XCTAssertEqual(entry.minX, card.minX, accuracy: 0.5)
+                            XCTAssertEqual(entry.minY, card.minY, accuracy: 0.5)
+                            XCTAssertEqual(entry.width, GeekIStatCardMenuButton.side, accuracy: 0.5)
                         }
+                        // D128 (old value: "49°C"): the card formats the GPU's
+                        // 49 °C as iStat's whole degrees with "°" only; the CPU
+                        // ring shows the text it is given.
                         let readings: [(String, String, String, String)] = [
                             ("cpu", "CPU", "53°C", "3.60 GHz"),
-                            ("gpu", "GPU", "49°C", "0.34 GHz"),
+                            ("gpu", "GPU", IStatNumberFormat.temperature(49), "0.34 GHz"),
                             ("fan", telemetry.fanCount > 1 ? L10n.text("风扇均值", "Fans") : L10n.text("风扇", "Fan"),
                              telemetry.actualRPM.map(SystemFanSpeedFormat.number) ?? L10n.text("无风扇", "Fanless"),
                              telemetry.actualRPM == nil ? L10n.text("不可用", "Unavailable") : "rpm")
@@ -56,18 +67,34 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
                             XCTAssertGreaterThanOrEqual(ring.width, 72, tag)
                             XCTAssertEqual(ring.width, 72, accuracy: 0.5, tag)
                             XCTAssertEqual(ring.height, 72, accuracy: 0.5, tag)
-                            XCTAssertTrue(card.insetBy(dx: GeekVisualTokens.cardHorizontalPadding - 0.5, dy: 0).contains(ring), tag)
+                            XCTAssertTrue(card.insetBy(dx: GeekIStatCardGeometry.inset - 0.5, dy: 0).contains(ring), tag)
+                            XCTAssertEqual(ring.midY - card.minY, GeekIStatCardGeometry.sensorsHeight / 2, accuracy: 0.5, tag)
                             if let previousRing { XCTAssertLessThanOrEqual(previousRing.maxX, ring.minX + 0.5, tag) }
                             previousRing = ring
+                            // Each ring is centered in its cell: 87 pt at x 8, centered and
+                            // W − 95 from iStat's 285 pt card up; a third of the content
+                            // (never below the ring) on a narrower fixture.
+                            let cell = GeekIStatSensorCells.cellWidth(cardWidth: card.width)
+                            if card.width >= 3 * GeekIStatCardGeometry.sensorCellWidth + 2 * GeekIStatCardGeometry.inset {
+                                XCTAssertEqual(cell, GeekIStatCardGeometry.sensorCellWidth, tag)
+                            }
+                            let index = id == "cpu" ? 0 : id == "gpu" ? 1 : 2
+                            let leadings = [GeekIStatCardGeometry.inset, card.width / 2 - cell / 2,
+                                            card.width - GeekIStatCardGeometry.inset - cell]
+                            XCTAssertEqual(ring.midX - card.minX, leadings[index] + cell / 2, accuracy: 0.5, tag)
                             let progress = id == "cpu" ? 0.53 : id == "gpu" ? 0.49 : telemetry.percentage.map { $0 / 100 }
                             let referenceRing = GeekCombinedRing(title: title, value: value, detail: detail,
-                                progress: progress, tint: .blue, size: 72, labelPlacement: .aboveValue, strokeWidth: 4)
-                            XCTAssertEqual(referenceRing.labelFontSize, 10, "Restore the pre-fix1 label size")
-                            XCTAssertEqual(referenceRing.detailFontSize, 10, "Restore the pre-fix1 secondary size")
-                            let diameter = GeekCombinedRing.contentDiameter(size: ring.width, lineWidth: 4)
+                                progress: progress, tint: .blue, size: 72, labelPlacement: .aboveValue,
+                                fixedValueFontSize: GeekIStatCardGeometry.sensorValueFontSize,
+                                fixedDetailFontSize: GeekIStatCardGeometry.sensorDetailFontSize,
+                                strokeWidth: GeekIStatCardGeometry.sensorRingLineWidth,
+                                fixedLabelFontSize: GeekIStatCardGeometry.ringLabelFontSize, detailFontWeight: .thin)
+                            XCTAssertEqual(referenceRing.labelFontSize, 10, "iStat's 10 pt ring label")
+                            XCTAssertEqual(GeekIStatCardGeometry.sensorDetailFontSize, 11, "iStat's 11 pt Thin frequency line")
+                            let diameter = GeekCombinedRing.contentDiameter(size: ring.width, lineWidth: GeekIStatCardGeometry.sensorRingLineWidth)
                             let boxWidth = diameter / sqrt(2)
                             let titleWidth = (title.uppercased() as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
-                            let detailWidth = (detail as NSString).size(withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)]).width
+                            let detailWidth = (detail as NSString).size(withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .thin)]).width
                             let split = GeekCombinedRing.splitReadout(value)
                             let valueWidth = ((split?.number ?? value) as NSString).size(withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: referenceRing.valueFontSize, weight: .regular)]).width
                                 + ((split?.unit ?? "") as NSString).size(withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: referenceRing.valueFontSize * 0.62, weight: .regular)]).width
@@ -110,7 +137,8 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
         let language = OverviewLabelLanguageScope(.english)
         defer { language.restore() }
         let width = MiniWindowStyleTokens.overviewSize.width - 2 * MiniWindowStyleTokens.contentInset
-        let bodyFont = NSFont.systemFont(ofSize: 11)
+        // D118 (iStat `network-bandwidth`): the 12 pt label font.
+        let bodyFont = NSFont.monospacedDigitSystemFont(ofSize: GeekIStatCardGeometry.textFontSize, weight: .regular)
         let titleHeight = ceil(("Download" as NSString).size(withAttributes: [.font: bodyFont]).height)
 
         for dark in [false, true] {
@@ -132,22 +160,27 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
                 let upload = try XCTUnwrap(frames["overview.network.upload"])
                 let download = try XCTUnwrap(frames["overview.network.download"])
                 let pixel = 1 / host.window.backingScaleFactor
+                // D118: each readout owns a half of the content; the graph
+                // spans the card (x 8, W − 14 wide) below both readouts.
                 XCTAssertEqual(upload.width, download.width, accuracy: pixel)
-                XCTAssertEqual(upload.width, GeekNetworkPresentation.valueColumnWidth, accuracy: pixel)
-                XCTAssertGreaterThanOrEqual(chart.width, 116 - pixel)
-                for frame in [upload, chart, download] {
+                XCTAssertEqual(upload.width, (width - 2 * GeekIStatCardGeometry.inset) / 2, accuracy: pixel)
+                XCTAssertEqual(chart.width, width - GeekIStatCardGeometry.inset - GeekIStatCardGeometry.processorGraphTrailingInset,
+                               accuracy: pixel)
+                for frame in [upload, download] {
                     XCTAssertTrue(row.insetBy(dx: -pixel, dy: -pixel).contains(frame))
                 }
-                XCTAssertEqual(chart.minX - upload.maxX, 6, accuracy: pixel)
-                XCTAssertEqual(download.minX - chart.maxX, 6, accuracy: pixel)
+                XCTAssertGreaterThanOrEqual(chart.minY, row.maxY - pixel, "the graph is below the readouts")
+                XCTAssertEqual(download.minX, upload.maxX, accuracy: pixel)
 
                 for (title, frame) in [("Upload", upload), ("Download", download)] {
                     let naturalWidth = (title as NSString).size(withAttributes: [.font: bodyFont]).width
-                    XCTAssertGreaterThanOrEqual(frame.width, naturalWidth + 9 + 4,
-                        "The full existing-font label, dot and gap must fit before rendering")
+                    XCTAssertGreaterThanOrEqual(frame.width, naturalWidth + GeekIStatCardGeometry.legendDotSize
+                        + GeekIStatCardGeometry.legendDotSpacing,
+                        "The full label, dot and gap must fit before rendering")
                     let bitmap = try host.capture(frame)
-                    let reference = try referenceText(title, fontSize: 11, dark: dark,
-                        scale: CGFloat(bitmap.pixelsWide) / frame.width, secondary: true)
+                    let reference = try referenceText(title, fontSize: GeekIStatCardGeometry.textFontSize, dark: dark,
+                        scale: CGFloat(bitmap.pixelsWide) / frame.width,
+                        color: Color.primary.opacity(GeekIStatCardGeometry.labelOpacity))
                     // Compare actual rasterized glyphs with an unconstrained native
                     // Text. A full AX label or a wide outer frame alone cannot pass.
                     assertCompleteGlyphs(in: bitmap, reference: reference, bandHeight: titleHeight,
@@ -161,8 +194,8 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
         let language = OverviewLabelLanguageScope(.english)
         defer { language.restore() }
         let width = MiniWindowStyleTokens.overviewSize.width - 2 * MiniWindowStyleTokens.contentInset
-        let detailFont = NSFont.systemFont(ofSize: 10)
-        let contentSide = GeekCombinedRing.contentDiameter(size: 72, lineWidth: 4) / sqrt(2)
+        let detailFont = NSFont.systemFont(ofSize: GeekIStatCardGeometry.sensorDetailFontSize, weight: .thin)
+        let contentSide = GeekCombinedRing.contentDiameter(size: 72, lineWidth: GeekIStatCardGeometry.sensorRingLineWidth) / sqrt(2)
         for dark in [false, true] {
             for temperature: Double? in [69, 0, nil] {
                 let presentation = sensorPresentation(temperature: temperature, usage: "42%", progress: 0.42)
@@ -237,10 +270,16 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
 
     private func nativeGPUReference(temperature: Double?, detail: String,
                                     dark: Bool) async throws -> NSBitmapImageRep {
+        // D128 (old value: `String(format: "%.0f°C", $0)`): the production
+        // ring's temperature is iStat's whole degrees with "°" only.
         let ring = GeekCombinedRing(
-            title: "GPU", value: temperature.map { String(format: "%.0f°C", $0) } ?? "42%",
+            title: "GPU", value: temperature.map { IStatNumberFormat.temperature($0) } ?? "42%",
             detail: detail, progress: temperature.map { $0 / 100 } ?? 0.42,
-            tint: .blue, size: 72, labelPlacement: .aboveValue, strokeWidth: 4
+            tint: .blue, size: 72, labelPlacement: .aboveValue,
+            fixedValueFontSize: GeekIStatCardGeometry.sensorValueFontSize,
+            fixedDetailFontSize: GeekIStatCardGeometry.sensorDetailFontSize,
+            strokeWidth: GeekIStatCardGeometry.sensorRingLineWidth,
+            fixedLabelFontSize: GeekIStatCardGeometry.ringLabelFontSize, detailFontWeight: .thin
         )
         // Same native capture backend, appearance and actual production card
         // fill: translucent glyph edges must not be compared with white/black.
@@ -252,10 +291,10 @@ final class GeekOverviewLabelLayoutTests: XCTestCase {
     }
 
     private func referenceText(_ text: String, fontSize: CGFloat, dark: Bool,
-                               scale: CGFloat, secondary: Bool) throws -> NSBitmapImageRep {
+                               scale: CGFloat, color: Color) throws -> NSBitmapImageRep {
         let view = Text(text)
             .font(.system(size: fontSize, weight: .regular))
-            .foregroundStyle(secondary ? Color.secondary : Color.primary.opacity(0.77))
+            .foregroundStyle(color)
             .monospacedDigit()
             .fixedSize()
             .background(dark ? Color.black : Color.white)

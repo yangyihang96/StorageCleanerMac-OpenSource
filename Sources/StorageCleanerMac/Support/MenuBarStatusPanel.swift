@@ -3,6 +3,8 @@ import AppKit
 final class MenuBarStatusPanel: NSPanel {
     var onPointerLocationChanged: ((NSPoint) -> Void)?
     var onEscape: (() -> Bool)?
+    /// D123: the arrow keys, through the same route as Escape.
+    var onArrowKey: ((NSEvent) -> Bool)?
     private let pointerTrackingView = MenuBarPanelPointerTrackingView()
 
     init(contentRect: NSRect) {
@@ -92,6 +94,21 @@ final class MenuBarStatusPanel: NSPanel {
            event.keyCode == 53,
            onEscape?() == true {
             return
+        }
+        if event.type == .keyDown,
+           (123...126).contains(event.keyCode),
+           onArrowKey?(event) == true {
+            return
+        }
+        // D123: read the pointer before the views see the event, so a hover
+        // target that changes on it is judged with this event's step, as in
+        // iStat Menus 7.30 `updateMouse:` (the tracking view reports the same
+        // point again, which changes nothing).
+        switch event.type {
+        case .mouseMoved, .mouseEntered, .mouseExited:
+            onPointerLocationChanged?(convertPoint(toScreen: event.locationInWindow))
+        default:
+            break
         }
         super.sendEvent(event)
     }

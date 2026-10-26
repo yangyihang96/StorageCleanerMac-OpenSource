@@ -241,7 +241,17 @@ final class PhotoLibraryTests: XCTestCase, @unchecked Sendable {
                 XCTAssertFalse(text.contains(forbidden), url.lastPathComponent + ": " + forbidden)
             }
             if text.range(of: #"\bimport\s+Photos\b"#, options: .regularExpression) != nil {
-                XCTAssertEqual(url.standardizedFileURL, root.appendingPathComponent("Sources/StorageCleanerMac/Features/PhotoLibrary/PhotoKitLibraryProvider.swift").standardizedFileURL)
+                // D106: the acceptance display confinement also imports Photos,
+                // only to hold back the first permission prompt of a confined
+                // launch; it must never reach the library itself (was: only
+                // PhotoKitLibraryProvider.swift imports Photos).
+                if url.lastPathComponent == "DisplayConfinement.swift" {
+                    for libraryAccess in ["PHAsset", "PHFetch", "PHImageManager", "PHCachingImageManager", "performChanges"] {
+                        XCTAssertFalse(text.contains(libraryAccess), url.lastPathComponent + ": " + libraryAccess)
+                    }
+                } else {
+                    XCTAssertEqual(url.standardizedFileURL, root.appendingPathComponent("Sources/StorageCleanerMac/Features/PhotoLibrary/PhotoKitLibraryProvider.swift").standardizedFileURL)
+                }
             }
         }
         XCTAssertGreaterThan(inspected, 100)

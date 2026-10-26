@@ -282,10 +282,7 @@ final class BenchmarkV7RuntimeTests: XCTestCase {
 
         try await repository.save(deleted)
         try await repository.save(retained)
-        let decoded = try JSONDecoder().decode(
-            [BenchmarkV7Result].self,
-            from: Data(contentsOf: file)
-        )
+        let decoded = try BenchmarkV7HistoryStoreProbe.records(for: file)
         XCTAssertEqual(Set(decoded.compactMap(\.recordID)), Set([deletedID, retainedID]))
 
         let didDelete = try await repository.delete(recordID: deletedID)
@@ -320,7 +317,7 @@ final class BenchmarkV7RuntimeTests: XCTestCase {
             failure: .cancelled
         )
         try await repository.save(original)
-        let bytesBefore = try Data(contentsOf: file)
+        let bytesBefore = try BenchmarkV7HistoryStoreProbe.files(for: file)
 
         let failingRepository = BenchmarkV7HistoryRepository(
             storageURL: file,
@@ -334,7 +331,7 @@ final class BenchmarkV7RuntimeTests: XCTestCase {
             XCTAssertEqual(status, .failed)
         }
 
-        XCTAssertEqual(try Data(contentsOf: file), bytesBefore)
+        XCTAssertEqual(try BenchmarkV7HistoryStoreProbe.files(for: file), bytesBefore)
         let stored = await repository.load()
         XCTAssertEqual(stored, [original])
     }
@@ -405,12 +402,12 @@ final class BenchmarkV7RuntimeTests: XCTestCase {
         )
 
         try await repository.save(result)
-        let before = try Data(contentsOf: file)
+        let before = try BenchmarkV7HistoryStoreProbe.files(for: file)
 
         let didDelete = try await repository.delete(recordID: UUID())
         XCTAssertFalse(didDelete)
 
-        XCTAssertEqual(try Data(contentsOf: file), before)
+        XCTAssertEqual(try BenchmarkV7HistoryStoreProbe.files(for: file), before)
         let stored = await repository.load()
         XCTAssertEqual(stored, [result])
     }

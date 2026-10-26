@@ -515,7 +515,8 @@ struct LocalModelInventoryScanner: Sendable {
     /// 默认位置的状态：家目录以下的每一层（例如 ~/.ollama 与 ~/.ollama/models）
     /// 都不能是符号链接；全部是真实文件夹时再用 realpath 前缀比对确认没有绕出去。
     /// 家目录本身及其上级（例如临时目录所在的 /var → /private/var）不在检查范围。
-    private func rootState(_ path: String) -> (state: LocalModelRootStatus.State, identity: FileKey?) {
+    /// D116 G11 的 iOS 备份盘点用同一个检查（不会返回 `.sameAs`）。
+    func rootState(_ path: String) -> (state: LocalModelRootStatus.State, identity: FileKey?) {
         let home = homePath.hasSuffix("/") ? String(homePath.dropLast()) : homePath
         guard path.hasPrefix(home + "/") else { return Self.directoryState(path) }
         let components = path.dropFirst(home.count + 1).split(separator: "/").map(String.init)

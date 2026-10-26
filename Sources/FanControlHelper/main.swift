@@ -153,6 +153,9 @@ private struct FanControlHelperReply: Codable {
     let errorCode: FanControlHelperErrorCode?
     let macMiniModeStatus: MacMiniModeStatus?
     let powerSampleResult: PowermetricsResult?
+    /// D105 (review C-R1, C-R2): the returns to system control this helper
+    /// made on its own, on a ping and on every reply that did not succeed.
+    let automaticRestores: [FanControlAutomaticRestore]?
 
     init(
         protocolVersion: Int = FanControlHelperProtocolContract.currentVersion,
@@ -164,7 +167,8 @@ private struct FanControlHelperReply: Codable {
         curveRuntimeState: FanCurveRuntimeState? = nil,
         errorCode: FanControlHelperErrorCode? = nil,
         macMiniModeStatus: MacMiniModeStatus? = nil,
-        powerSampleResult: PowermetricsResult? = nil
+        powerSampleResult: PowermetricsResult? = nil,
+        automaticRestores: [FanControlAutomaticRestore]? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.operation = operation
@@ -176,6 +180,7 @@ private struct FanControlHelperReply: Codable {
         self.errorCode = errorCode
         self.macMiniModeStatus = macMiniModeStatus
         self.powerSampleResult = powerSampleResult
+        self.automaticRestores = automaticRestores
     }
 
     func echoing(_ operation: FanControlHelperRequest.Operation) -> Self {
@@ -188,7 +193,23 @@ private struct FanControlHelperReply: Codable {
             curveRuntimeState: curveRuntimeState,
             errorCode: errorCode,
             macMiniModeStatus: macMiniModeStatus,
-            powerSampleResult: powerSampleResult
+            powerSampleResult: powerSampleResult,
+            automaticRestores: automaticRestores
+        )
+    }
+
+    func reporting(_ restores: [FanControlAutomaticRestore]) -> Self {
+        FanControlHelperReply(
+            operation: operation,
+            success: success,
+            message: message,
+            appliedTargetRPMByFan: appliedTargetRPMByFan,
+            powerConfiguration: powerConfiguration,
+            curveRuntimeState: curveRuntimeState,
+            errorCode: errorCode,
+            macMiniModeStatus: macMiniModeStatus,
+            powerSampleResult: powerSampleResult,
+            automaticRestores: restores
         )
     }
 }
@@ -219,9 +240,17 @@ private final class FanControlHelperDaemon:
         label: "\(StorageCleanerBuildIdentity.helperLabel).watchdog"
     )
     private let startupSafety = FanControlStartupSafety()
+    /// D105 (review C-R1, C-R2): the returns this helper made on its own,
+    /// kept beside the crash-recovery marker in root's /var/run.
+    private let automaticRestores = FanControlAutomaticRestoreJournal(
+        url: URL(fileURLWithPath: "/var/run/\(StorageCleanerBuildIdentity.helperLabel).restores")
+    )
     // Validated before the listener is exposed; never re-derived from an
     // updated on-disk image while this old process is serving connections.
     private let startupIdentity: CodeSigningCheck.StartupIdentity?
+    // D102 L1: the requirement every message from a client must meet, built
+    // once from the startup signature for the same reason.
+    private let clientRequirement: String?
     private let upgradeLedger = HelperUpgradeLedger(label: StorageCleanerBuildIdentity.helperLabel)
     // commandQueue confined; a final check must match this exact candidate.
     private var replacementForTermination: CodeSigningCheck.ReplacementIdentity?
@@ -265,6 +294,13 @@ private final class FanControlHelperDaemon:
             startupIdentity = nil
             NSLog("Helper startup signing snapshot failed: \(error)")
         }
+        clientRequirement = startupIdentity.flatMap { identity in
+            identity.signing.certificates.first.flatMap { leaf in
+                FanControlPeerRequirement.expression(identifier: StorageCleanerBuildIdentity.appBundleIdentifier,
+                                                     leafCertificate: SecCertificateCopyData(leaf) as Data,
+                                                     teamIdentifier: identity.signing.teamIdentifier)
+            }
+        }
         super.init()
         listener.delegate = self
     }
@@ -278,11 +314,16 @@ private final class FanControlHelperDaemon:
             macMiniRuntime = runtime
             startTerminationHandlers()
         }
+        // D105: a helper that left the fans under its control left the marker.
+        let recoversPreviousControl = FileManager.default.fileExists(atPath: Self.controlRecoveryMarkerURL.path)
         let startupState = startupSafety.start(recoverFans: {
             smcQueue.sync { recoverPreviousControlIfNeeded() }
         }, prepareMacMiniForTermination: {
             _ = commandQueue.sync { macMiniRuntime?.prepareForTermination() }
         })
+        if recoversPreviousControl {
+            automaticRestores.record(.startupRecovery, restored: startupState == .ready)
+        }
         startupSafety.startNormalWork {
             commandQueue.sync { macMiniRuntime?.start() }
             startWatchdog()
@@ -324,6 +365,14 @@ private final class FanControlHelperDaemon:
             NSLog("Rejected fan-control XPC client: \(error)")
             return false
         }
+        // D102 L1: on top of the checks above, the system checks every message
+        // against the app's identifier, this helper's leaf certificate and
+        // Team ID; a client that stops meeting it loses the connection.
+        guard let clientRequirement else {
+            NSLog("Rejected fan-control XPC client: no code signing requirement.")
+            return false
+        }
+        newConnection.setCodeSigningRequirement(clientRequirement)
 
         newConnection.exportedInterface = NSXPCInterface(
             with: FanControlHelperProtocol.self
@@ -334,7 +383,7 @@ private final class FanControlHelperDaemon:
             smcQueue.sync {
                 powerSamplingClients.forget(connection: ObjectIdentifier(newConnection))
                 connections.removeAll { $0 === newConnection }
-                if startupSafety.isReady { restoreAllFans() }
+                if startupSafety.isReady { restoreAutomatically(.appDisconnected) }
             }
             commandQueue.async { [weak self] in self?.scheduleIdleExit() }
         }
@@ -401,8 +450,16 @@ private final class FanControlHelperDaemon:
                 requestLock.withLock { pendingRequestCount -= 1 }
                 commandQueue.async { [weak self] in self?.scheduleIdleExit() }
             }
-            reply(Self.encoded(handle(request)))
+            reply(Self.encoded(reportingAutomaticRestores(handle(request))))
         }
+    }
+
+    /// D105 (review C-R1, C-R2): a ping (the app connecting) and every reply
+    /// that did not succeed carry this helper's own returns to system control,
+    /// so the app records what actually happened instead of inferring it.
+    private func reportingAutomaticRestores(_ reply: FanControlHelperReply) -> FanControlHelperReply {
+        guard reply.operation != .samplePowerMetrics, reply.operation == .ping || !reply.success else { return reply }
+        return reply.reporting(automaticRestores.restores)
     }
 
     /// Shares the authenticated listener, but no hardware executor or policy lock.
@@ -688,7 +745,7 @@ private final class FanControlHelperDaemon:
         }, restoreFans: {
             // Startup failure has already tried recovery and latched the
             // marker. Do not dispatch additional writes in a failed process.
-            !startupSafety.isReady || smcQueue.sync { restoreAllFans() }
+            !startupSafety.isReady || smcQueue.sync { restoreAutomatically(.helperStopping) }
         })
         let keepRequestedMode = macMiniRuntime?.requiresResidentHelper == true
         // KeepAlive is SuccessfulExit=false. A successful upgrade is on demand;
@@ -1133,7 +1190,7 @@ private final class FanControlHelperDaemon:
             )
         }
         guard let controller = SMCFanController() else {
-            _ = restoreAllFans()
+            restoreAutomatically(.fanVerificationFailed)
             return failure(
                 "AppleSMC is unavailable while renewing the lease.",
                 errorCode: .smcReadFailed
@@ -1152,6 +1209,7 @@ private final class FanControlHelperDaemon:
         }
         guard controller.verifiesManualTargets(forcedTargetRPMByFan) else {
             let restoreCompleted = restoreAllFans(using: controller)
+            automaticRestores.record(.fanVerificationFailed, restored: restoreCompleted)
             return failure(
                 restoreCompleted
                     ? "Fan state no longer matches the active lease; the automatic-restore request completed."
@@ -1466,9 +1524,32 @@ private final class FanControlHelperDaemon:
         state.failureReason = error
         lastFanCurveRuntimeState = state
         fanCurveController = nil
-        if !restoreAllFans() {
+        if !restoreAutomatically(Self.automaticRestoreReason(for: error)) {
             NSLog("Fan-curve failure could not restore AppleSMC control.")
         }
+    }
+
+    private static func automaticRestoreReason(for error: FanCurveError) -> FanControlAutomaticRestore.Reason {
+        switch error {
+        case .curveLeaseExpired: .curveLeaseExpired
+        case .thermalProtectionActivated: .thermalProtectionActivated
+        default: .curveFailed
+        }
+    }
+
+    /// D105 (review C-R1, C-R2): a return to system control the helper makes
+    /// on its own. Its result is kept for the app, which records it when it
+    /// next hears from the helper; the return never waits for the app. Only a
+    /// return that had something to give back is kept. smcQueue confined.
+    @discardableResult
+    private func restoreAutomatically(_ reason: FanControlAutomaticRestore.Reason) -> Bool {
+        FanControlAutomaticRestore.perform(
+            reason,
+            hadControl: !forcedFanIDs.isEmpty
+                || FileManager.default.fileExists(atPath: Self.controlRecoveryMarkerURL.path),
+            restore: { restoreAllFans() },
+            keep: { automaticRestores.record($0, restored: $1) }
+        )
     }
 
     private func curveRuntimeStatus(for error: FanCurveError) -> FanCurveRuntimeStatus {
@@ -1598,7 +1679,7 @@ private final class FanControlHelperDaemon:
                 }
                 if fanCurveController != nil {
                     failCurveControl(.curveLeaseExpired)
-                } else if !restoreAllFans() {
+                } else if !restoreAutomatically(.fanLeaseExpired) {
                     NSLog("Fan-control watchdog could not restore AppleSMC control.")
                 }
             }
@@ -2546,6 +2627,8 @@ enum CodeSigningCheck {
         guard let code else {
             return SigningIdentity(identifier: "", teamIdentifier: "", certificates: [])
         }
+        // D102 L1: the running client, not only its file, must still be valid.
+        try check(SecCodeCheckValidity(code, [], nil))
         var staticCode: SecStaticCode?
         try check(SecCodeCopyStaticCode(code, [], &staticCode))
         guard let staticCode else {

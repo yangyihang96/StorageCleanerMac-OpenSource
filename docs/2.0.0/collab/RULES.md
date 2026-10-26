@@ -26,7 +26,7 @@ Codex 沙箱（10-08 补）：用户的 `~/.codex/config.toml` 默认 `sandbox_m
 ## 3. 构建与测试命令
 
 ```bash
-export DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.app/Contents/Developer
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 swift build --scratch-path <scratch>/debug --jobs 4
 swift test  --scratch-path <scratch>/debug --jobs 4 --filter '<相关测试类>'
 ```

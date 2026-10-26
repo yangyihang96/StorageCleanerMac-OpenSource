@@ -55,7 +55,8 @@ enum RecordedTrashOperation {
                          requiresFirstSuccess: Bool = false,
                          metadata: any ReadOnlyFileSystem = FoundationReadOnlyFileSystem(),
                          persist: Persistence = { try CleanupReportJournal.live.checkpoint($0, expectedIdentities: $1) },
-                         progress: (CleanReport) async -> Void = { _ in }) async -> CleanReport {
+                         progress: (CleanReport) async -> Void = { _ in },
+                         prepare: ((Item) async throws -> Void)? = nil) async -> CleanReport {
         let state = Recording(items: items, ruleID: ruleID, metadata: metadata)
         guard state.checkpoint(persist, failure: "intent-write-failed") else { return state.report() }
         for (index, item) in items.enumerated() {
@@ -65,6 +66,14 @@ enum RecordedTrashOperation {
             }
             var invokedMove = false
             do {
+                // D184: a bundle swap must have a durable in-flight intent before it happens.
+                // Existing callers omit this hook and retain their original validation order.
+                if let prepare {
+                    state.markInFlight(index)
+                    guard state.checkpoint(persist, failure: "intent-write-failed") else { break }
+                    try Task.checkCancellation()
+                    try await prepare(item)
+                }
                 try await validate(item); try state.validate(item)
                 state.markInFlight(index)
                 guard state.checkpoint(persist, failure: "intent-write-failed") else {

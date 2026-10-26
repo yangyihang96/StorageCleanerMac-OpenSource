@@ -21,7 +21,7 @@ struct LightfieldEnergyPage<PowerMetrics: View>: View {
         let apps = presentation.apps
         let maximum = maximumValue(presentation)
         FeatureLightfieldPage(module: .energy, phase: .result, title: L10n.text("能耗", "Energy"),
-            status: L10n.text("已采样 · \(snapshot.apps.count) 个应用 · \(snapshot.processCount) 个进程", "Sampled · \(snapshot.apps.count) Apps · \(snapshot.processCount) Processes"),
+            status: L10n.text("已采样 · \(ByteFormat.count(snapshot.apps.count)) 个应用 · \(ByteFormat.count(snapshot.processCount)) 个进程", "Sampled · \(ByteFormat.count(snapshot.apps.count)) Apps · \(ByteFormat.count(snapshot.processCount)) Processes"),
             safety: snapshot.calibrationText, actionTitle: L10n.text("重新采样能耗", "Sample Energy Again"),
             actionEnabled: canRefresh, showsArtwork: false, action: refresh) {
             GeometryReader { proxy in
@@ -131,7 +131,7 @@ struct LightfieldEnergyAppRow: View {
         let namingRequest = LightfieldEnergyNamingRequest(expanded: expanded, app: app)
         return LightfieldExpandableRow(title: app.name,
             metadata: values.map { $0.label + " " + $0.value }.joined(separator: " · ") + " · " + evidenceText,
-            subtitle: L10n.text("\(app.processCount) 个进程 · CPU \(app.cpuPercentText)", "\(app.processCount) Processes · CPU \(app.cpuPercentText)"),
+            subtitle: L10n.text("\(ByteFormat.count(app.processCount)) 个进程 · CPU \(app.cpuPercentText)", "\(ByteFormat.count(app.processCount)) Processes · CPU \(app.cpuPercentText)"),
             trailing: AnyView(LightfieldMetricGroup(metrics: values, showsLabels: false, probeID: "energy.values." + app.id)
             .frame(width: metricsWidth).help(evidenceText)), rowHeight: rowHeight, reportsCompactBoundaries: true,
             probeID: "energy.app." + app.id, expanded: $expanded) {

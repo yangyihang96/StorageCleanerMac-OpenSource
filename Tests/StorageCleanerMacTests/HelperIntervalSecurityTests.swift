@@ -161,6 +161,21 @@ final class MSeriesV11TelemetryPrivacyTests: XCTestCase {
         }
     }
 
+    /// D95: every committed record file of the store, and every other file
+    /// in it (the index included), is free of helper identities.
+    private func assertStorePrivacy(_ url: URL, file: StaticString = #filePath, line: UInt = #line) throws {
+        let records = try BenchmarkV7HistoryStoreProbe.recordData(for: url)
+        XCTAssertFalse(records.isEmpty, file: file, line: line)
+        for record in records { try assertPrivacy(Data("[".utf8) + record + Data("]".utf8), file: file, line: line) }
+        for (name, data) in try BenchmarkV7HistoryStoreProbe.files(for: url) {
+            let text = String(decoding: data, as: UTF8.self)
+            for id in [bootA, bootB] {
+                XCTAssertFalse(text.contains(id) || text.contains(id.lowercased()), "\(name) keeps a helper identity",
+                    file: file, line: line)
+            }
+        }
+    }
+
     func testSealingStripsIdentityBeforeHashAndPreservesEfficiencyAndRunLocalGroups() throws {
         let runtime = envelope()
         let sealed = try MSeriesV11RawPayload.seal(core: nil, envelope: runtime)
@@ -188,7 +203,7 @@ final class MSeriesV11TelemetryPrivacyTests: XCTestCase {
             let repository = BenchmarkV7HistoryRepository(storageURL: url)
             let sealed = try MSeriesV11RawPayload.seal(core: nil, envelope: envelope(compact: compact))
             try await repository.save(record(sealed))
-            try assertPrivacy(Data(contentsOf: url))
+            try assertStorePrivacy(url)
             let restored = await repository.load()
             XCTAssertEqual(restored.count, 1); XCTAssertTrue(restored.allSatisfy(\.isPersistable))
             let saved = try XCTUnwrap(restored.first?.mSeriesV11)
@@ -215,7 +230,10 @@ final class MSeriesV11TelemetryPrivacyTests: XCTestCase {
             if operation == "save" { try await repository.save(record(MSeriesV11RawPayload.seal(core: nil, envelope: envelope()))) }
             else if operation == "replace" { try await repository.replace(recordID: XCTUnwrap(old.recordID), with: record(MSeriesV11RawPayload.seal(core: nil, envelope: envelope()))) }
             else { let deleted = try await repository.delete(recordID: XCTUnwrap(old.recordID)); XCTAssertTrue(deleted) }
-            try assertPrivacy(Data(contentsOf: url))
+            // D95: the mutation imports the single file into the record store
+            // and removes it only after that commit.
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+            try assertStorePrivacy(url)
             let saved = await repository.load()
             XCTAssertFalse(saved.isEmpty); XCTAssertTrue(saved.allSatisfy(\.isPersistable))
             let surviving = try XCTUnwrap(saved.first { $0.recordID == second.recordID }?.mSeriesV11)

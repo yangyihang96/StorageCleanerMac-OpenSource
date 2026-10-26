@@ -35,6 +35,8 @@ enum PanelAppearancePreferences {
 
 /// This setting applies only to the menu-bar cascade. An unset or `system`
 /// value inherits the app appearance, which itself may follow macOS.
+/// D135: no longer offered or read; the panel follows the app appearance
+/// and draws the iStat theme chosen for it (`IStatMenuThemePreferences`).
 enum MiniWindowAppearance: String, CaseIterable, Identifiable {
     case system
     case light
@@ -74,6 +76,8 @@ enum MiniWindowAppearance: String, CaseIterable, Identifiable {
 
 /// Both mini-window palettes use dark controls and text. The visual mode only
 /// selects the chrome: graphite in daylight, near-black at night.
+/// D135: it is now the appearance slot of the iStat theme pair: graphite
+/// for the light appearance's theme, black for the dark appearance's.
 enum MiniWindowVisualMode: Equatable {
     case graphite
     case black
@@ -112,6 +116,8 @@ extension AppAppearance {
     }
 }
 
+/// D135: no longer offered or read by the panel; iStat derives the data
+/// colors from the system accent (`IStatAccentPalette`).
 enum PanelColorTheme: String, CaseIterable, Identifiable {
     case system
     case ocean

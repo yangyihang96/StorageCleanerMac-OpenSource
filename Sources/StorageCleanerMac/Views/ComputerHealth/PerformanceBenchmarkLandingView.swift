@@ -9,6 +9,7 @@ struct PerformanceBenchmarkLandingView: View {
     var identity: AppleSiliconIdentity? = nil
     var catalog: AppleSiliconCatalogLoader.Loaded = .init(catalog: nil, sha256: nil, reason: "notRead")
     var preflight: BenchmarkV7PreflightReport? = nil
+    var isPreflighting = false
     var helperAvailable = false
     var selection: Binding<MSeriesV11Selection> = .constant(.init())
     private var palette: FeatureLightfieldPalette { .resolve(scheme) }
@@ -19,8 +20,10 @@ struct PerformanceBenchmarkLandingView: View {
             actionTitle: L10n.text("开始测试", "Start test"), actionEnabled: canStart, action: onStart,
             subtitle: MSeriesV11PagePresentation.chipLine(identity, catalog: catalog), artworkAccessory: AnyView(optionalTests)) {
                 FeatureLightfieldPlacementReader { hasAccessory, _ in
-                GeometryReader { proxy in
-                    ScrollView(.vertical) {
+                    // The shared options scroller, as on the other D67 pages: a
+                    // bare ScrollView with hidden indicators gave no sign that
+                    // the budget line and “本机历史” continued below the fold.
+                    FeatureOptionsScrollView(probePrefix: "performance.landing", balancesContent: false, usesLightfield: true) {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(L10n.text("测试内容 · 18 项核心", "Test content · 18 Core measurements"))
                                 .font(.system(size: 13)).foregroundStyle(palette.fg2).padding(.bottom, 14)
@@ -41,8 +44,7 @@ struct PerformanceBenchmarkLandingView: View {
                             Button(L10n.text("本机历史", "Local history"), action: onShowSaved)
                                 .buttonStyle(FeatureLightfieldRowButtonStyle()).foregroundStyle(palette.fg2).font(.system(size: 13)).padding(.top, 8)
                         }.frame(maxWidth: .infinity, alignment: .leading)
-                    }.scrollIndicators(.hidden).lightfieldComponentProbe("performance.landing.scroll")
-                }
+                    }.lightfieldComponentProbe("performance.landing.scroll")
                 }
             }
     }
@@ -54,16 +56,24 @@ struct PerformanceBenchmarkLandingView: View {
         return L10n.text("约 \(estimate) 分钟（\(mode)） · 写入 ≤512 MB", "About \(estimate) min (\(mode)) · Writes ≤512 MB")
     }
     private var preflightText: String {
-        let power = preflight.map { $0.powerSource == .acPower ? L10n.text("交流电", "AC power") :
-            $0.powerSource == .battery ? L10n.text("电池", "Battery") : MSeriesV11PagePresentation.unread } ?? MSeriesV11PagePresentation.unread
-        let lowPower = (preflight?.lowPowerModeEnabled).map { $0 ? L10n.text("省电模式", "Low Power Mode") : L10n.text("非省电", "Low power off") }
-            ?? MSeriesV11PagePresentation.unread
-        let thermal = preflight.map { $0.thermalState == .unknown ? MSeriesV11PagePresentation.unread : $0.thermalState == .nominal ? L10n.text("温度正常", "Thermal nominal") :
-            L10n.text("温度需关注", "Thermal attention") } ?? MSeriesV11PagePresentation.unread
-        let background = preflight?.backgroundLoadRatio.map { $0 < 0.2 ? L10n.text("后台空闲", "Background idle") : L10n.text("后台繁忙", "Background busy") }
-            ?? MSeriesV11PagePresentation.unread
         let helper = helperAvailable ? L10n.text("系统助手：可用", "System Helper: available") :
             L10n.text("系统助手：不可用（能效将不显示）", "System Helper: unavailable (efficiency hidden)")
+        // An unread item is named, as in the chip line (“散热：未读取”);
+        // four bare “未读取” in a row said nothing about what was missing.
+        guard let preflight else {
+            let pending = isPreflighting ? L10n.text("正在检查电源、省电模式、温度与后台负载", "Checking power, Low Power Mode, thermal state and background load")
+                : L10n.text("电源、省电模式、温度与后台负载：\(MSeriesV11PagePresentation.unread)",
+                    "Power, Low Power Mode, thermal state and background load: \(MSeriesV11PagePresentation.unread)")
+            return [pending, helper].joined(separator: " · ")
+        }
+        let power = preflight.powerSource == .acPower ? L10n.text("交流电", "AC power") :
+            preflight.powerSource == .battery ? L10n.text("电池", "Battery") :
+            L10n.text("电源：\(MSeriesV11PagePresentation.unread)", "Power: \(MSeriesV11PagePresentation.unread)")
+        let lowPower = preflight.lowPowerModeEnabled ? L10n.text("省电模式", "Low Power Mode") : L10n.text("非省电", "Low power off")
+        let thermal = preflight.thermalState == .unknown ? L10n.text("温度：\(MSeriesV11PagePresentation.unread)", "Thermal: \(MSeriesV11PagePresentation.unread)") :
+            preflight.thermalState == .nominal ? L10n.text("温度正常", "Thermal nominal") : L10n.text("温度需关注", "Thermal attention")
+        let background = preflight.backgroundLoadRatio.map { $0 < 0.2 ? L10n.text("后台空闲", "Background idle") : L10n.text("后台繁忙", "Background busy") }
+            ?? L10n.text("后台负载：\(MSeriesV11PagePresentation.unread)", "Background load: \(MSeriesV11PagePresentation.unread)")
         return [power, lowPower, thermal, background, helper].joined(separator: " · ")
     }
     private func planRow(_ title: String, _ detail: String) -> some View {

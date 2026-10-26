@@ -32,12 +32,12 @@ final class GeekDashboardConfigurationTests: XCTestCase {
     }
 
     func testChartRangeOffersRequestedLongDurationsInOrder() {
+        // D121 (2026-10-18): iStat's ten intervals after our three short
+        // ones; 15 minutes left the list (was between 10 minutes and 1 hour).
+        // D130 (2026-10-19): only iStat's ten (was .thirtySeconds,
+        // .oneMinute, .fiveMinutes first, durations 30, 60, 300).
         XCTAssertEqual(GeekChartRange.allCases, [
-            .thirtySeconds,
-            .oneMinute,
-            .fiveMinutes,
             .tenMinutes,
-            .fifteenMinutes,
             .oneHour,
             .threeHours,
             .sixHours,
@@ -49,11 +49,7 @@ final class GeekDashboardConfigurationTests: XCTestCase {
             .twentyEightDays,
         ])
         XCTAssertEqual(GeekChartRange.allCases.map(\.duration), [
-            30,
-            60,
-            300,
             600,
-            900,
             3_600,
             10_800,
             21_600,
@@ -207,7 +203,9 @@ final class GeekDashboardConfigurationTests: XCTestCase {
             normalized.summaryMetrics,
             [.cpu, .gpu, .memory, .temperature, .fans, .battery]
         )
-        XCTAssertEqual(normalized.chartRange, .oneMinute)
+        // D130 (2026-10-19): 60 s is no longer a window and reads as
+        // 10 minutes (was kept as .oneMinute).
+        XCTAssertEqual(normalized.chartRange, .tenMinutes)
     }
 
     @MainActor
@@ -220,8 +218,12 @@ final class GeekDashboardConfigurationTests: XCTestCase {
         state.setGeekChartRange(.fiveMinutes, for: GeekChartRangeMetric.memory)
         state.setGeekChartRange(.fifteenMinutes, for: .cpu)
         let restored = MenuBarPanelSettingsState(initialDensity: .geek, defaults: fixture.defaults)
-        XCTAssertEqual(restored.geekChartRange(for: .cpu, fallbackTo: .processor), .fifteenMinutes)
-        XCTAssertEqual(restored.geekChartRange(for: .memory, fallbackTo: .memory), .fiveMinutes)
+        // D121 (2026-10-18): 15 minutes is no longer offered and is kept as
+        // 10 minutes (was restored as .fifteenMinutes).
+        XCTAssertEqual(restored.geekChartRange(for: .cpu, fallbackTo: .processor), .tenMinutes)
+        // D130 (2026-10-19): 5 minutes is no longer a window and reads as
+        // 10 minutes (was restored as .fiveMinutes).
+        XCTAssertEqual(restored.geekChartRange(for: .memory, fallbackTo: .memory), .tenMinutes)
         XCTAssertEqual(fixture.defaults.string(forKey: "menuBar.refreshInterval"), "twoSeconds")
     }
 

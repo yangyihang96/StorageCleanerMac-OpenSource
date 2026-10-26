@@ -46,7 +46,14 @@ enum DebugSmartScanSessionFixture {
     /// `includesD47Rows` the user-cache group starts with the D47 examples
     /// (review P2-2): a cache whose app is unknown, one whose app is running,
     /// a cache over the 5 GiB rebuild-cost limit and a recently written log.
-    static func makeSession(includesD47Rows: Bool) -> ScanSession {
+    /// D202: the same rows as the Cleanup page's own scan (its rules, no Smart
+    /// Scan scopes), for tests that open the Cleanup page's results; Smart
+    /// Scan's session shows on Smart Care only.
+    static let cleanupPageSession = makeSession(
+        includesD47Rows: ProcessInfo.processInfo.arguments.contains(d47RowsArgument), cleanupPage: true
+    )
+
+    static func makeSession(includesD47Rows: Bool, cleanupPage: Bool = false) -> ScanSession {
         let d47Rows = includesD47Rows ? d47Subcategories : []
         let rowCount = 4 + d47Rows.reduce(0) { $0 + $1.candidates.count }
         let d47Bytes = d47Rows.flatMap(\.candidates).reduce(Int64(0)) { $0 + $1.estimatedSizeBytes }
@@ -76,7 +83,11 @@ enum DebugSmartScanSessionFixture {
                 duration: 0.84
             ),
             system: system,
-            smartScanScopes: [.cleanupCandidates, .filesToReview]
+            includedRuleIDs: cleanupPage
+                ? Set((d47Rows + [browserCacheSubcategory] + developerCategory.subcategories)
+                    .flatMap(\.candidates).map(\.ruleID))
+                : nil,
+            smartScanScopes: cleanupPage ? nil : [.cleanupCandidates, .filesToReview]
         )
     }
 

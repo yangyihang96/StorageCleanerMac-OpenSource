@@ -125,6 +125,13 @@ final class MenuBarPanelSessionTests: XCTestCase {
         height: 900
     )
 
+    /// D172 (R2h): the deterministic frame on the test display, for a test
+    /// that shows the panel. On the menu-bar display's coordinates the D106
+    /// gate moves the shown panel away from the fixed frame.
+    private func deterministicVisibleFrame(on screen: NSScreen) -> NSRect {
+        Self.deterministicVisibleFrame.offsetBy(dx: screen.frame.minX, dy: screen.frame.minY)
+    }
+
     func testSecondarySelectionUsesPreferredContentSizeInItsFirstLayout() throws {
         let screen = try requireScreen()
         let fixture = try makeGeometryFixture()
@@ -336,7 +343,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
     }
 
     func testMeasuredOverviewHeightIsNotCappedByStartupReferenceAndRejectsInvalidSizes() {
-        let measured = CGSize(width: 304, height: 564)
+        // D118 (old value: 304): the overview keeps iStat's 301 pt width.
+        let measured = CGSize(width: 301, height: 564)
         XCTAssertEqual(GeekPanelPresentationMetrics.normalizedOverviewSize(measured), measured)
         for height in [CGFloat.nan, CGFloat.infinity, -CGFloat.infinity, 0, -1] {
             XCTAssertEqual(
@@ -353,7 +361,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testMeasuredOverviewSizeAppliesOnFirstShowAndSurvivesReopenAndRepeatedUpdates() throws {
         let screen = try requireScreen()
         let panel = makePanel()
-        let measured = CGSize(width: 304, height: 564)
+        // D118 (old value: 304): the overview keeps iStat's 301 pt width.
+        let measured = CGSize(width: 301, height: 564)
         let session = makeSession(
             panel: panel,
             initialDensity: .geek,
@@ -436,6 +445,9 @@ final class MenuBarPanelSessionTests: XCTestCase {
 
     func testMeasuredSecondaryContentShrinksItsVisibleSurfaceWithoutMovingOverview() throws {
         let screen = try requireScreen()
+        // D172 (R2h, old value: `Self.deterministicVisibleFrame` with the
+        // anchor on the screen): the shown panel stays on the test display.
+        let visibleFrame = deterministicVisibleFrame(on: screen)
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
         defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
@@ -443,19 +455,21 @@ final class MenuBarPanelSessionTests: XCTestCase {
             panel: panel,
             initialDensity: .geek,
             geometryStore: fixture.store,
-            fixedVisibleFrame: Self.deterministicVisibleFrame
+            fixedVisibleFrame: visibleFrame
         )
         defer { session.teardown() }
 
-        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
+        session.show(anchor: makeAnchor(in: visibleFrame), screen: screen, density: .geek)
         let overviewFrame = panel.frame
         session.setGeekSection(.memory)
 
         let measuredContentSize = CGSize(width: 999, height: 220)
         session.setDetailSize(measuredContentSize)
 
+        // D119 (old value: the shared `detailWidth`): the memory page has
+        // iStat's 270 pt width.
         let expectedDetailSize = CGSize(
-            width: GeekPanelPresentationMetrics.detailWidth,
+            width: MiniWindowStyleTokens.memoryDetailWidth,
             height: measuredContentSize.height
         )
         XCTAssertEqual(session.detailColumnSize, expectedDetailSize)
@@ -472,7 +486,9 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertEqual(frames.count, 2)
         XCTAssertEqual(frames[0].size, expectedDetailSize)
         XCTAssertTrue(frames.contains { $0.size == overviewFrame.size })
-        XCTAssertEqual(frames[0].maxY, frames[1].maxY - 135, accuracy: 0.001)
+        // D123 (old value: 135, the memory card's top): the page opens 8 pt
+        // above the card so their first cards line up.
+        XCTAssertEqual(frames[0].maxY, frames[1].maxY - 127, accuracy: 0.001)
         assertPairwiseDisjoint(frames)
 
         XCTAssertTrue(session.handleMouseDown(
@@ -497,12 +513,14 @@ final class MenuBarPanelSessionTests: XCTestCase {
                     sourceOffset: sourceOffset
                 )
 
+                // D123 (old value: + sourceOffset, the row's top): the page
+                // opens 8 pt above its row (`submenuTopOffset`).
                 XCTAssertEqual(
                     tertiaryOffset,
                     GeekPanelPresentationMetrics.detailVerticalOffset(
                         for: section,
                         density: density
-                    ) + sourceOffset,
+                    ) + sourceOffset - 8,
                     "\(density)-\(section)"
                 )
                 XCTAssertGreaterThan(
@@ -516,7 +534,12 @@ final class MenuBarPanelSessionTests: XCTestCase {
 
     func testInlineTertiaryAlignsItsTopWithTheOwningSecondaryRow() throws {
         let screen = try requireScreen()
-        let wideVisibleFrame = NSRect(x: 0, y: 0, width: 2_400, height: 1_200)
+        // D172 (R2h, old value: (0, 0, 2400, 1200)): the same wide frame on
+        // the test display, which the shown panel must stay on (D106).
+        let wideVisibleFrame = NSRect(
+            x: screen.frame.minX, y: screen.frame.minY,
+            width: min(2_400, screen.frame.width), height: min(1_200, screen.frame.height)
+        )
         let panel = makePanel()
         let fixture = try makeGeometryFixture()
         defer { TestPreferenceDomain.cleanup(suiteName: fixture.suiteName) }
@@ -552,6 +575,16 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertEqual(frames.count, 3)
         let tertiaryFrame = try XCTUnwrap(frames.last)
         XCTAssertEqual(tertiaryFrame.size, energyModeSize)
+        // D119 (2026-10-18): iStat's power page (330) is shorter than the
+        // overview, so it attaches with its bottom on the overview's and the
+        // palette sits 300 pt below the page's top (was 300 beside the 599 pt
+        // page, attached at the top). D123 (old value: + 300): the page opens
+        // 8 pt above its row at 300 (`submenuTopOffset`).
+        XCTAssertEqual(
+            GeekPanelPresentationMetrics.detailVerticalOffset(for: .power, density: .geek),
+            GeekPanelPresentationMetrics.overviewSize.height
+                - GeekPanelPresentationMetrics.detailSize(for: .power).height
+        )
         XCTAssertEqual(
             GeekPanelPresentationMetrics.tertiaryVerticalOffset(
                 for: .power,
@@ -559,7 +592,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
                 tertiarySize: energyModeSize,
                 sourceOffset: 300
             ),
-            300
+            GeekPanelPresentationMetrics.detailVerticalOffset(for: .power, density: .geek) + 300 - 8
         )
         let expectedDetailTopOffset = GeekPanelPresentationMetrics.detailVerticalOffset(
             for: .power,
@@ -576,9 +609,10 @@ final class MenuBarPanelSessionTests: XCTestCase {
             frames[1].maxY - expectedDetailTopOffset,
             accuracy: 0.001
         )
+        // D123 (old value: 300): 8 pt above the row at 300.
         XCTAssertEqual(
             tertiaryFrame.maxY,
-            frames[0].maxY - 300,
+            frames[0].maxY - (300 - 8),
             accuracy: 0.001
         )
         XCTAssertEqual(
@@ -687,7 +721,9 @@ final class MenuBarPanelSessionTests: XCTestCase {
             panelCoordinator.presentHistory(selection, pinned: false)
             session.setTertiaryPresented(
                 true,
-                preferredSize: GeekSensorPowerHoverDetailMetrics.batterySize,
+                // D122 (2026-10-18): the battery page is sized by its rows
+                // (was the fixed `batterySize`).
+                preferredSize: GeekSensorPowerHoverDetailMetrics.batterySize(sectionRowCounts: [2, 4, 3, 3, 1]),
                 sourceOffset: 0
             )
 
@@ -1065,7 +1101,12 @@ final class MenuBarPanelSessionTests: XCTestCase {
 
         for size in [
             GeekHoverDetailMetrics.compactHistorySize,
-            GeekNetworkTertiaryView.referenceSize,
+            // D125 (2026-10-19): the connection page's size from its sections
+            // (was the fixed `referenceSize`, 255 × 419); 464 for the demo Wi-Fi.
+            // D137 (2026-10-19): its width from them too, 228 for the demo in
+            // Chinese (was `GeekNetworkTertiaryView.pageWidth`, 255; the demo
+            // data is not in release builds).
+            CGSize(width: 228, height: 464),
         ] {
             session.setTertiaryPresented(true, preferredSize: size)
 
@@ -1092,31 +1133,48 @@ final class MenuBarPanelSessionTests: XCTestCase {
                 density: .geek
             )
 
-            let expectedWidth = section == .power
-                ? GeekPanelPresentationMetrics.powerDetailWidth
-                : GeekPanelPresentationMetrics.detailWidth
+            // D119 (old value: the shared width, power alone narrower): each
+            // module page has iStat's width for its module, the same in both
+            // densities: CPU 272, memory 270, power 240, the others 301.
+            let expectedWidth: CGFloat = switch section {
+            case .processor: MiniWindowStyleTokens.processorDetailWidth
+            case .memory: MiniWindowStyleTokens.memoryDetailWidth
+            case .power: MiniWindowStyleTokens.powerDetailWidth
+            default: MiniWindowStyleTokens.detailWidth
+            }
             XCTAssertEqual(detailed.width, expectedWidth, section.rawValue)
             XCTAssertEqual(geek.width, expectedWidth, section.rawValue)
             XCTAssertLessThanOrEqual(detailed.height, geek.height, section.rawValue)
+            // D119 (old value: the overview's height for every page): the
+            // sensors page has no Detailed variant and is 698 pt, taller than
+            // the 553 pt overview, so the attached pair is as tall as the page.
             XCTAssertEqual(
                 GeekPanelPresentationMetrics.expandedSize(
                     for: section,
                     density: .complex
                 ).height,
-                GeekPanelPresentationMetrics.overviewSize.height,
+                section == .sensors
+                    ? GeekPanelPresentationMetrics.sensorsDetailHeight
+                    : GeekPanelPresentationMetrics.overviewSize.height,
                 section.rawValue
             )
         }
     }
 
     func testDetailedAttachedPagesRemainAnchoredToTheirOverviewRows() {
+        // D123 (old values: memory 135, disk 254, sensors 174, power 152):
+        // a page opens 8 pt above its card (D118 card tops 135, 254, 410,
+        // 505), as far as the 553 pt overview allows. Memory 127 and disk 246;
+        // the 698 pt sensors page (D119) is taller than the overview and
+        // starts at its top; the 215 pt Detailed power page ends on the
+        // overview's bottom, 553 − 215 = 338.
         let expectedOffsets: [PanelSection: CGFloat] = [
             .processor: 0,
-            .memory: 135,
-            .disk: 254,
+            .memory: 127,
+            .disk: 246,
             .network: 0,
-            .sensors: 174,
-            .power: 152,
+            .sensors: 0,
+            .power: 338,
             .cleanup: 0,
         ]
 
@@ -1129,13 +1187,13 @@ final class MenuBarPanelSessionTests: XCTestCase {
                 expectedOffset,
                 section.rawValue
             )
+            // D119 (old value: the overview's height for every page): a page
+            // ends inside the overview's height unless it is taller than the
+            // overview, as the sensors page is; then it starts at the top.
+            let height = GeekPanelPresentationMetrics.detailSize(for: section, density: .complex).height
             XCTAssertLessThanOrEqual(
-                expectedOffset
-                    + GeekPanelPresentationMetrics.detailSize(
-                        for: section,
-                        density: .complex
-                    ).height,
-                GeekPanelPresentationMetrics.overviewSize.height,
+                expectedOffset + height,
+                max(GeekPanelPresentationMetrics.overviewSize.height, height),
                 section.rawValue
             )
         }
@@ -1144,6 +1202,9 @@ final class MenuBarPanelSessionTests: XCTestCase {
     func testDetailedAndGeekExpansionRemainInsideTheVisibleScreenNearAnEdge() throws {
         let screen = try requireScreen()
         let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+        // D123 (2026-10-19): the menus keep 8 pt from the sides and the
+        // bottom and may reach the menu bar, as iStat's do (was `visible`).
+        let bounds = MenuBarPanelPlacement.menuBounds(screen.visibleFrame, margin: 8)
 
         try [PanelDensity.complex, .geek].forEach { density in
             let panel = makePanel()
@@ -1170,7 +1231,7 @@ final class MenuBarPanelSessionTests: XCTestCase {
             session.show(anchor: makeAnchor(on: screen), screen: screen, density: density)
             session.setGeekSection(.sensors)
 
-            XCTAssertTrue(visible.contains(panel.frame), density.rawValue)
+            XCTAssertTrue(bounds.contains(panel.frame), density.rawValue)
             XCTAssertEqual(
                 panel.frame.size,
                 GeekPanelPresentationMetrics.expandedSize(
@@ -1214,6 +1275,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
         session.setGeekSection(.network)
         let twoColumnFrame = panel.frame
 
+        // D123 (2026-10-19): right is the first side, and it fits here (was
+        // the flip from the left default).
         XCTAssertEqual(session.cascadeDirection, .right)
         XCTAssertEqual(settingsState.cascadeDirection, .right)
         XCTAssertEqual(
@@ -1277,11 +1340,17 @@ final class MenuBarPanelSessionTests: XCTestCase {
         session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
         let overviewFrame = panel.frame
         let leftSpace: CGFloat = 340
+        // D172 (R2h, old value: the screen's whole height): at most 900 pt
+        // below the screen's top. The test display is 1600 pt tall, where the
+        // overview, the network page and the reserved history column
+        // (553 + 366 + 480) stack in one column instead of the compact
+        // fallback this narrow screen is about.
+        let narrowHeight = min(screen.visibleFrame.height, 900)
         let narrowVisibleFrame = NSRect(
             x: overviewFrame.minX - leftSpace - 8,
-            y: screen.visibleFrame.minY,
+            y: screen.visibleFrame.maxY - narrowHeight,
             width: leftSpace + overviewFrame.width + 16,
-            height: screen.visibleFrame.height
+            height: narrowHeight
         )
 
         session.setGeekSection(.network, visibleFrameOverride: narrowVisibleFrame)
@@ -1291,7 +1360,9 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertEqual(session.tertiaryPresentationMode, .column)
         XCTAssertEqual(settingsState.tertiaryPresentationMode, .column)
         XCTAssertTrue(settingsState.cascadeLayout?.isCompact == true)
-        XCTAssertTrue(narrowVisibleFrame.insetBy(dx: 8, dy: 8).contains(panel.frame))
+        // D123 (2026-10-19): inside the menu bounds, which reach the menu bar
+        // (was `narrowVisibleFrame.insetBy(dx: 8, dy: 8)`).
+        XCTAssertTrue(MenuBarPanelPlacement.menuBounds(narrowVisibleFrame, margin: 8).contains(panel.frame))
         XCTAssertEqual(session.geekSection, .network)
         _ = try XCTUnwrap(settingsState.cascadeLayout?.parentFrame)
         session.setTertiaryPresented(true)
@@ -1341,8 +1412,11 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertEqual(frames.count, 2)
         let detailFrame = try XCTUnwrap(frames.first)
         XCTAssertTrue(frames.contains { $0.size == overviewFrame.size })
-        XCTAssertTrue(frames.allSatisfy { constrainedVisibleFrame.insetBy(dx: 8, dy: 8).contains($0) })
-        XCTAssertTrue(constrainedVisibleFrame.insetBy(dx: 8, dy: 8).contains(panel.frame))
+        // D123 (2026-10-19): inside the menu bounds, which reach the menu bar
+        // (was `constrainedVisibleFrame.insetBy(dx: 8, dy: 8)`).
+        let menuBounds = MenuBarPanelPlacement.menuBounds(constrainedVisibleFrame, margin: 8)
+        XCTAssertTrue(frames.allSatisfy { menuBounds.contains($0) })
+        XCTAssertTrue(menuBounds.contains(panel.frame))
         XCTAssertTrue(settingsState.cascadeLayout?.childFrames.contains {
             approximatelyEqual($0, detailFrame)
         } == true)
@@ -1473,14 +1547,22 @@ final class MenuBarPanelSessionTests: XCTestCase {
         defer { session.teardown() }
 
         session.show(anchor: makeAnchor(on: screen), screen: screen, density: .simple)
-        let bounds = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+        // D123 (2026-10-19): the menu bounds reach the menu bar (was
+        // `screen.visibleFrame.insetBy(dx: 8, dy: 8)`).
+        let bounds = MenuBarPanelPlacement.menuBounds(screen.visibleFrame, margin: 8)
+        // D172 (R2h, old value: 2,000 pt beyond the bounds' top-right
+        // corner): the D106 gate keeps a shown test window on the test
+        // display and moves such a frame back onto it before the session
+        // sees it. The display's bottom-right corner is still outside the
+        // menu bounds, inside their 8 pt margins.
         let offscreenFrame = NSRect(
-            x: bounds.maxX + 2_000,
-            y: bounds.maxY + 2_000,
+            x: screen.frame.maxX - PanelDensity.simple.minimumSize.width,
+            y: screen.frame.minY,
             width: PanelDensity.simple.minimumSize.width,
             height: PanelDensity.simple.minimumSize.height
         )
         panel.setFrame(offscreenFrame, display: false)
+        XCTAssertFalse(bounds.contains(panel.frame), "The panel starts outside the menu bounds")
         session.windowDidMove(
             Notification(name: NSWindow.didMoveNotification, object: panel)
         )
@@ -1635,11 +1717,12 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertTrue(session.handleKeyEvent(escape) === escape)
         center.post(name: NSMenu.didEndTrackingNotification, object: menu)
 
-        XCTAssertNil(session.handleKeyEvent(escape, sourceWindow: panel))
-        XCTAssertEqual(coordinator.route, .module(.processor))
+        // D123 (2026-10-19): the first Escape after the native menus closes
+        // the whole hierarchy with the panel, as iStat Menus 7.30's
+        // `onShouldClose` (was the history page, then the module, then the
+        // panel, one Escape each).
         XCTAssertNil(session.handleKeyEvent(escape, sourceWindow: panel))
         XCTAssertEqual(coordinator.route, .summary)
-        XCTAssertNil(session.handleKeyEvent(escape, sourceWindow: panel))
         XCTAssertFalse(session.isPresented)
         XCTAssertEqual(session.activeObserverCount, 0)
     }
@@ -1890,6 +1973,10 @@ final class MenuBarPanelSessionTests: XCTestCase {
         session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
         session.setGeekSection(.network)
 
+        // The module page first, then the overview; D123: the page opens on
+        // the right, so the connector below belongs to the module page.
+        let overview = try XCTUnwrap(session.visibleAttachedContentFramesForTesting.last)
+        XCTAssertEqual(session.cascadeDirection, .right)
         let frames = session.visibleAttachedContentFramesForTesting.sorted { $0.minX < $1.minX }
         XCTAssertEqual(frames.count, 2)
 
@@ -1912,10 +1999,17 @@ final class MenuBarPanelSessionTests: XCTestCase {
 
         let left = try XCTUnwrap(frames.first)
         let right = try XCTUnwrap(frames.dropFirst().first)
+        // D123 (old value: false here): leaving the module column for empty
+        // space keeps the menus, as iStat keeps a submenu the pointer leaves.
         panel.onPointerLocationChanged?(NSPoint(
             x: left.maxX + MiniWindowStyleTokens.cascadeGap / 2,
             y: max(left.maxY, right.maxY) + 8
         ))
+        XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
+        // D123: leaving the overview for empty space drops the envelope.
+        panel.onPointerLocationChanged?(NSPoint(x: overview.midX, y: overview.midY))
+        XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
+        panel.onPointerLocationChanged?(NSPoint(x: overview.midX, y: max(left.maxY, right.maxY) + 8))
         XCTAssertFalse(coordinator.isPointerWithinHoverEnvelope)
     }
 
@@ -1941,6 +2035,8 @@ final class MenuBarPanelSessionTests: XCTestCase {
         let detail = frames[0]
         let overview = frames[1]
         XCTAssertEqual(overview.maxY, detail.maxY, accuracy: 0.001)
+        // D123: the page opens on the right of the overview.
+        XCTAssertEqual(session.cascadeDirection, .right)
 
         let origin = NSPoint(
             x: detail.maxX <= overview.minX ? overview.minX + 40 : overview.maxX - 40,
@@ -1958,7 +2054,15 @@ final class MenuBarPanelSessionTests: XCTestCase {
         panel.onPointerLocationChanged?(safePoint)
         XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
 
+        // D123 (old value: false here): the seam belongs to the module page,
+        // and leaving the module page for empty space keeps the menus, as
+        // iStat keeps a submenu the pointer leaves.
         panel.onPointerLocationChanged?(NSPoint(x: safePoint.x, y: max(overview.maxY, detail.maxY) + 20))
+        XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
+        // D123: leaving the overview for empty space drops the envelope.
+        panel.onPointerLocationChanged?(origin)
+        XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
+        panel.onPointerLocationChanged?(NSPoint(x: origin.x, y: max(overview.maxY, detail.maxY) + 20))
         XCTAssertFalse(coordinator.isPointerWithinHoverEnvelope)
     }
 
@@ -2244,6 +2348,16 @@ final class MenuBarPanelSessionTests: XCTestCase {
         NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
         XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
         try await Task.sleep(for: .milliseconds(450))
+        // D123 (old value: false right after the grace): after the grace the
+        // hover rules apply again. Under them only leaving the overview for
+        // empty space drops the envelope (leaving a submenu keeps it, as
+        // iStat does); this pointer was never over a menu while the native
+        // menu held the envelope, so the refresh keeps it. A reading over the
+        // overview and then outside drops it, which the tracking menu would
+        // have prevented.
+        panel.onPointerLocationChanged?(NSPoint(x: panel.frame.midX, y: panel.frame.midY))
+        XCTAssertTrue(coordinator.isPointerWithinHoverEnvelope)
+        panel.onPointerLocationChanged?(outside)
         XCTAssertFalse(coordinator.isPointerWithinHoverEnvelope)
         XCTAssertTrue(session.isPresented)
     }
@@ -2334,7 +2448,11 @@ final class MenuBarPanelSessionTests: XCTestCase {
         XCTAssertFalse(session.isTornDown)
     }
 
-    func testGeekCoordinatorPinsClicksAndEscapeClosesDeepestRouteFirst() throws {
+    /// D123 (2026-10-19): ← closes the deepest route first and Escape
+    /// closes the panel, as in iStat Menus 7.30 (was
+    /// `testGeekCoordinatorPinsClicksAndEscapeClosesDeepestRouteFirst`, with
+    /// one Escape per level).
+    func testGeekCoordinatorPinsClicksAndLeftArrowClosesDeepestRouteFirst() throws {
         let panel = makePanel()
         let coordinator = GeekPanelCoordinator()
         let session = makeSession(
@@ -2364,18 +2482,61 @@ final class MenuBarPanelSessionTests: XCTestCase {
             .history(module: .memory, selection: .builtIn("memory"))
         )
 
-        let escape = try makeKeyEvent(characters: "\u{1B}", keyCode: 53)
-        XCTAssertNil(session.handleKeyEvent(escape, sourceWindow: panel))
+        let left = try makeKeyEvent(characters: "\u{F702}", keyCode: 123)
+        XCTAssertNil(session.handleKeyEvent(left, sourceWindow: panel))
         XCTAssertEqual(coordinator.route, .module(.memory))
         XCTAssertFalse(session.isTornDown)
 
-        XCTAssertNil(session.handleKeyEvent(escape, sourceWindow: panel))
+        XCTAssertNil(session.handleKeyEvent(left, sourceWindow: panel))
         XCTAssertEqual(coordinator.route, .summary)
+        XCTAssertEqual(coordinator.keyboardHighlight, .card(.memory))
         XCTAssertFalse(session.isTornDown)
 
+        XCTAssertTrue(session.handleKeyEvent(left, sourceWindow: panel) === left, "Nothing left to close")
+        XCTAssertTrue(session.isPresented)
+
+        let escape = try makeKeyEvent(characters: "\u{1B}", keyCode: 53)
         XCTAssertNil(session.handleKeyEvent(escape, sourceWindow: panel))
         XCTAssertFalse(session.isPresented)
         XCTAssertFalse(session.isTornDown)
+    }
+
+    /// D123 (2026-10-19): the arrow keys belong to the attached menus only
+    /// while their panel has them; another window, a modified press, a native
+    /// menu and the plain panel keep them.
+    func testArrowKeysMoveThroughTheAttachedMenusOnlyFromThePanel() throws {
+        let panel = makePanel()
+        let coordinator = GeekPanelCoordinator()
+        let session = makeSession(panel: panel, initialDensity: .geek, panelCoordinator: coordinator)
+        let appWindow = makePanel()
+        defer {
+            appWindow.close()
+            session.teardown()
+        }
+        let screen = try requireScreen()
+        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .geek)
+        coordinator.previewModule(.processor)
+
+        let left = try makeKeyEvent(characters: "\u{F702}", keyCode: 123)
+        XCTAssertTrue(session.handleKeyEvent(left, sourceWindow: appWindow) === left)
+        let commandLeft = try makeKeyEvent(characters: "\u{F702}", keyCode: 123, modifierFlags: .command)
+        XCTAssertTrue(session.handleKeyEvent(commandLeft, sourceWindow: panel) === commandLeft)
+        let menu = NSMenu()
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        XCTAssertTrue(session.handleKeyEvent(left, sourceWindow: panel) === left)
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
+        XCTAssertEqual(coordinator.route, .module(.processor))
+
+        XCTAssertNil(session.handleKeyEvent(left, sourceWindow: panel))
+        XCTAssertEqual(coordinator.route, .summary)
+        let right = try makeKeyEvent(characters: "\u{F703}", keyCode: 124)
+        XCTAssertNil(session.handleKeyEvent(right, sourceWindow: panel))
+        XCTAssertEqual(coordinator.route, .module(.processor))
+        XCTAssertFalse(coordinator.isModulePinned)
+
+        session.hide()
+        session.show(anchor: makeAnchor(on: screen), screen: screen, density: .simple)
+        XCTAssertTrue(session.handleKeyEvent(left, sourceWindow: panel) === left, "The plain panel has no menus")
     }
 
     func testScreenChangeUsesOnlyCurrentlyAttachedScreens() throws {
@@ -2508,8 +2669,14 @@ final class MenuBarPanelSessionTests: XCTestCase {
         }
     }
 
+    /// D172 (R2h, old value: `NSScreen.screens.first`, the menu-bar
+    /// display): the display this run's windows are placed on. The D106
+    /// gate moves a window ordered anywhere else onto it, so a frame computed
+    /// on the menu-bar display is not where the panel is shown, and the
+    /// session then follows the moved window.
     private func requireScreen() throws -> NSScreen {
-        try XCTUnwrap(NSScreen.screens.first, "Tests require an attached screen")
+        try XCTUnwrap(DisplayConfinementGate.shared.targetScreen() ?? NSScreen.screens.first,
+                      "Tests require an attached screen")
     }
 
     private func eventually(
@@ -2539,13 +2706,14 @@ final class MenuBarPanelSessionTests: XCTestCase {
     private func makeKeyEvent(
         characters: String,
         keyCode: UInt16,
-        windowNumber: Int = 0
+        windowNumber: Int = 0,
+        modifierFlags: NSEvent.ModifierFlags = []
     ) throws -> NSEvent {
         try XCTUnwrap(
             NSEvent.keyEvent(
                 with: .keyDown,
                 location: .zero,
-                modifierFlags: [],
+                modifierFlags: modifierFlags,
                 timestamp: 0,
                 windowNumber: windowNumber,
                 context: nil,

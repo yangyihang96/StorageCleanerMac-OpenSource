@@ -1,8 +1,12 @@
+import FileOperationShared
 import Foundation
 
 enum BackgroundTaskManagementScanError: LocalizedError, Equatable {
     case unavailable
     case restricted(String)
+    /// D177: no helper of this build answered, so the default scan could not
+    /// read the list; the startup page's Full Scan still can.
+    case helperUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -10,34 +14,25 @@ enum BackgroundTaskManagementScanError: LocalizedError, Equatable {
             L10n.text("当前系统没有可用的后台任务诊断工具。", "The background-task diagnostic tool is not available on this system.")
         case let .restricted(detail):
             L10n.text("后台任务诊断受系统授权限制：\(detail)", "Background-task diagnostics are restricted by system authorization: \(detail)")
+        case .helperUnavailable:
+            L10n.text("后台助手没有运行或不是当前版本，登录项要用“完整扫描”读取。", "The background helper is not running or is from another build; use Full Scan to read login items.")
         }
     }
 }
 
-/// `sfltool dumpbtm` is an optional, read-only diagnostic source. Its format is
-/// not a public data contract, so failures never block the launchd scanners.
-/// This scanner must never invoke `resetbtm`.
-struct BackgroundTaskManagementScanner: StartupItemScanning {
+/// Where the `sfltool dumpbtm` text comes from.
+protocol BackgroundTaskInventoryReading: Sendable {
+    func dump(context: StartupScanContext) async throws -> String
+}
+
+/// Runs the command in this process. macOS then asks for an administrator
+/// password, so it runs only when the scan asks for the diagnostic (the
+/// startup page's Full Scan) and in tests.
+struct CommandBackgroundTaskInventory: BackgroundTaskInventoryReading {
     let executableURL: URL
-    private let runner: any StartupCommandRunning
-    private let parser: BTMOutputParser
+    let runner: any StartupCommandRunning
 
-    init(
-        executableURL: URL = URL(fileURLWithPath: "/usr/bin/sfltool"),
-        runner: any StartupCommandRunning = StructuredStartupCommandRunner(),
-        parser: BTMOutputParser = BTMOutputParser()
-    ) {
-        self.executableURL = executableURL.standardizedFileURL
-        self.runner = runner
-        self.parser = parser
-    }
-
-    let source = StartupItemsDomain.ScanSource.backgroundTaskDiagnostic
-    let coverageIdentifier = "background-task-management.sfltool-dumpbtm"
-
-    func scan(context: StartupScanContext) async throws -> [StartupItemsDomain.Candidate] {
-        guard context.includeBackgroundTaskDiagnostic else { return [] }
-        try Task.checkCancellation()
+    func dump(context: StartupScanContext) async throws -> String {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw BackgroundTaskManagementScanError.unavailable
         }
@@ -53,8 +48,80 @@ struct BackgroundTaskManagementScanner: StartupItemScanning {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             throw BackgroundTaskManagementScanError.restricted(message.nonEmpty ?? "exit \(result.terminationStatus)")
         }
+        // D177: an administrator's dump lists every account; count this one's.
+        return BackgroundTaskInventoryFilter.records(in: result.standardOutput, uid: context.currentUserID)
+            ?? result.standardOutput
+    }
+}
 
-        return parser.parse(result.standardOutput).map(candidate)
+/// `sfltool dumpbtm` is an optional, read-only diagnostic source. Its format is
+/// not a public data contract, so failures never block the launchd scanners.
+/// This scanner must never invoke `resetbtm`.
+///
+/// D177: the default scanner (`helperBacked()`) reads the list through the
+/// privileged helper, without a password dialog and without the opt-in, so
+/// login items are counted on every scan (10-23: we showed 0 login items
+/// where System Settings and CleanMyMac listed 5). Only the explicit Full
+/// Scan falls back to the command here when no helper of this build answers.
+struct BackgroundTaskManagementScanner: StartupItemScanning {
+    static let defaultExecutableURL = URL(fileURLWithPath: "/usr/bin/sfltool")
+    static let commandCoverageIdentifier = "background-task-management.sfltool-dumpbtm"
+    static let helperCoverageIdentifier = "background-task-management.helper"
+
+    let executableURL: URL
+    private let helper: (any BackgroundTaskInventoryReading)?
+    private let command: CommandBackgroundTaskInventory
+    private let parser: BTMOutputParser
+
+    init(
+        executableURL: URL = Self.defaultExecutableURL,
+        runner: any StartupCommandRunning = StructuredStartupCommandRunner(),
+        parser: BTMOutputParser = BTMOutputParser()
+    ) {
+        self.init(helper: nil, executableURL: executableURL, runner: runner, parser: parser)
+    }
+
+    /// D177: the coordinator's default; see the type's comment.
+    static func helperBacked(
+        helper: any BackgroundTaskInventoryReading = HelperBackgroundTaskInventory(),
+        executableURL: URL = Self.defaultExecutableURL,
+        runner: any StartupCommandRunning = StructuredStartupCommandRunner()
+    ) -> Self {
+        Self(helper: helper, executableURL: executableURL, runner: runner, parser: BTMOutputParser())
+    }
+
+    private init(
+        helper: (any BackgroundTaskInventoryReading)?,
+        executableURL: URL,
+        runner: any StartupCommandRunning,
+        parser: BTMOutputParser
+    ) {
+        self.executableURL = executableURL.standardizedFileURL
+        self.helper = helper
+        command = CommandBackgroundTaskInventory(executableURL: self.executableURL, runner: runner)
+        self.parser = parser
+        coverageIdentifier = helper == nil ? Self.commandCoverageIdentifier : Self.helperCoverageIdentifier
+    }
+
+    let source = StartupItemsDomain.ScanSource.backgroundTaskDiagnostic
+    let coverageIdentifier: String
+
+    func scan(context: StartupScanContext) async throws -> [StartupItemsDomain.Candidate] {
+        try Task.checkCancellation()
+        let output: String
+        if let helper {
+            do {
+                output = try await helper.dump(context: context)
+            } catch let error where context.includeBackgroundTaskDiagnostic && !(error is CancellationError) {
+                // Only the explicit Full Scan may lead to a password dialog.
+                output = try await command.dump(context: context)
+            }
+        } else {
+            guard context.includeBackgroundTaskDiagnostic else { return [] }
+            output = try await command.dump(context: context)
+        }
+        try Task.checkCancellation()
+        return parser.parse(output).map(candidate)
     }
 
     private func candidate(_ record: BTMRecord) -> StartupItemsDomain.Candidate {

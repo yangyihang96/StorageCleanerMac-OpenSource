@@ -223,7 +223,8 @@ final class SafeCleanupLayoutTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(preview.minX, scrollContent.minX - 1)
             XCTAssertLessThanOrEqual(preview.maxX, scrollContent.maxX + 1, "Width \(width)")
             XCTAssertTrue(scrollContent.insetBy(dx: -0.5, dy: -0.5).contains(preview))
-            XCTAssertEqual(preview.width, 304, accuracy: 0.5)
+            // D118 (old value: 304): iStat's 301 pt panel.
+            XCTAssertEqual(preview.width, 301, accuracy: 0.5)
             XCTAssertEqual(preview.height, panel.height + 54, accuracy: 0.5)
             XCTAssertEqual(panel.size, GeekPanelLayout.overviewSize(modules: GeekDashboardConfiguration.defaultModuleOrder))
             XCTAssertGreaterThanOrEqual(actions.minY, viewport.minY)
@@ -245,7 +246,8 @@ final class SafeCleanupLayoutTests: XCTestCase {
                 XCTAssertEqual(scrolled["miniSettings.actions"], actions, "Actions stay fixed while settings and the full panel scroll")
                 XCTAssertLessThanOrEqual(try XCTUnwrap(scrolled["settings.preview.panel"]).maxY,
                     try XCTUnwrap(scrolled["settings.editor.scrollViewport"]).maxY + 0.5)
-                if width < 304 {
+                // D118 (old value: 304): narrower than the 301 pt panel.
+                if width < 301 {
                     try host.scrollPreviewToTrailingEdge()
                     let trailing = try await host.waitForFrames(required: ["settings.preview.panel", "settings.preview.scrollViewport", "miniSettings.actions"])
                     XCTAssertLessThanOrEqual(try XCTUnwrap(trailing["settings.preview.panel"]).maxX,
@@ -1377,6 +1379,9 @@ private final class AppKitLayoutHost {
     init<Content: View>(rootView: Content, contentSize: CGSize) {
         let observedRoot = AnyView(
             rootView
+                // D141: the D70–D77 layouts this host checks are now the
+                // classic view; the studio pages have their own tests.
+                .environment(\.careStudioClassicResults, true)
                 .onPreferenceChange(LayoutFramePreferenceKey.self) { [weak recorder] frames in
                     Task { @MainActor [weak recorder] in
                         recorder?.record(frames)
@@ -1462,7 +1467,8 @@ private final class AppKitLayoutHost {
         }
         let scroll = try XCTUnwrap(window.contentView.flatMap { find(in: $0) })
         let document = try XCTUnwrap(scroll.documentView)
-        XCTAssertEqual(document.bounds.width, 304, accuracy: 0.5)
+        // D118 (old value: 304): the 1:1 panel is 301 pt wide.
+        XCTAssertEqual(document.bounds.width, 301, accuracy: 0.5)
         scroll.contentView.scroll(to: NSPoint(
             x: document.bounds.width - scroll.contentView.bounds.width,
             y: scroll.contentView.bounds.origin.y))

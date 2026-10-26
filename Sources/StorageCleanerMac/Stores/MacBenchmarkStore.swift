@@ -249,7 +249,11 @@ final class MacBenchmarkStore: ObservableObject {
     func prepareLifecycleOnLaunch() async {
         guard !didPrepareLifecycleOnLaunch else { return }
         didPrepareLifecycleOnLaunch = true
-        await lifecycleCleaner.cleanupOrphanedArtifactsOnLaunch()
+        // D106: the sweep deletes benchmark temporaries; an acceptance
+        // session deletes nothing on its own.
+        if !AcceptanceLaunch.isActive {
+            await lifecycleCleaner.cleanupOrphanedArtifactsOnLaunch()
+        }
         await loadHistory()
         if let latestResult {
             onCompletedResult?(latestResult, history)
@@ -1502,6 +1506,7 @@ extension MacBenchmarkStore {
         updateV7Stage(v7State)
         var terminal = result
         var saveFailed = false
+        var historyFull = false
         do {
             let validate = v11PersistabilityCheck
             guard await MSeriesV11BackgroundValidation.run({ validate(result) }) else { throw MSeriesV11RunError.metadataBudget }
@@ -1521,11 +1526,12 @@ extension MacBenchmarkStore {
             // Keep the original outer stop reason and sealed measurement.
             // A failed local commit is not a new measurement failure.
             saveFailed = true
+            historyFull = (error as? BenchmarkV7HistoryError) == .capacityReached
         }
         let snapshot = terminal
         let complete = await MSeriesV11BackgroundValidation.run { snapshot.isComplete }
         guard v7Operation?.generation == generation else { return }
-        v11SaveState = .init(result: terminal, state: saveFailed ? .failed : .saved)
+        v11SaveState = .init(result: terminal, state: saveFailed ? .failed : .saved, historyFull: historyFull)
         v7LatestResult = terminal
         v7Operation = nil
         if saveFailed {

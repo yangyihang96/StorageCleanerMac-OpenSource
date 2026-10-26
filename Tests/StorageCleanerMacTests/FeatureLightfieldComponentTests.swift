@@ -143,6 +143,31 @@ final class FeatureLightfieldComponentTests: XCTestCase {
         try await host.waitForAccessibility(labels: ["展开行"], expectedValues: ["展开行": L10n.text("已折叠", "Collapsed")])
     }
 
+    /// D216: the classic list's closing disclosures read their names and state,
+    /// and AXPress opens and closes them (their `DisclosureGroup` triangles had
+    /// no name and were read only as “disclosure triangle”).
+    func testCleanupListDisclosuresReadTheirNamesAndStateAndPress() async throws {
+        let language = CalibrationLanguageScope(.zhHans)
+        defer { language.restore() }
+        let size = CGSize(width: 520, height: 200)
+        let root = VStack(alignment: .leading, spacing: 0) {
+            CleanupListDisclosure(title: "扫描详情与权限", probe: "details") { Text("详情内容") }
+            CleanupListDisclosure(title: "清空废纸篓 · 永久删除", probe: "trash") { Text("废纸篓里的项目") }
+        }
+        .frame(width: size.width, alignment: .topLeading)
+        let host = lightfieldHost(root: root, size: size, dark: false)
+        defer { host.close() }
+        let names = ["扫描详情与权限", "清空废纸篓 · 永久删除"]
+        try await host.waitForAccessibility(labels: names,
+            expectedValues: Dictionary(uniqueKeysWithValues: names.map { ($0, "已收起") }), pressLabels: Set(names))
+        XCTAssertNil(host.element(label: "详情内容"), "closed")
+        XCTAssertTrue(try host.press(label: "扫描详情与权限"))
+        try await host.waitForAccessibility(labels: ["扫描详情与权限", "详情内容"], expectedValues: ["扫描详情与权限": "已展开"])
+        XCTAssertNil(host.element(label: "废纸篓里的项目"), "the other stays closed")
+        XCTAssertTrue(try host.press(label: "扫描详情与权限"))
+        try await host.waitForAccessibility(labels: ["扫描详情与权限"], expectedValues: ["扫描详情与权限": "已收起"])
+    }
+
     func testTextSegmentsAXPressChangesSelectedItem() async throws {
         let size = CGSize(width: 520, height: 100)
         let host = lightfieldHost(root: LightfieldSegmentsTestFixture(), size: size, dark: false)
@@ -179,6 +204,46 @@ final class FeatureLightfieldComponentTests: XCTestCase {
         let label = { (id: String) in items.first { $0.id == id }.map { $0.label + " · " + $0.formattedValue } ?? id }
         try await host.waitForAccessibility(labels: shown.map(label))
         for id in hidden { XCTAssertNil(host.element(label: label(id)), id) }
+    }
+
+    /// D154 batch 3S: a bubble at least `labelThreshold` across shows its name
+    /// set in its own font, cut at the end when it is too long, inside the
+    /// circle; its spoken label keeps the whole name. (Was: hidden whenever 15 pt
+    /// a character ran past 70% of the bubble, as "node_modules" was.)
+    func testBubbleNamesAreSetInTheirOwnFontAndCutAtTheEnd() async throws {
+        let long = "a-folder-name-far-too-long-for-any-bubble"
+        let items: [LightfieldChartItem] = [
+            .init(id: "long", label: long, value: 60, formattedValue: "60 GB", module: .memory, icon: .fileanalysisOther),
+            .init(id: "node", label: "node_modules", value: 45, formattedValue: "45 GB", module: .devCaches,
+                  icon: .fileanalysisArchives),
+            .init(id: "small", label: "worktrees", value: 3, formattedValue: "3 GB", module: .duplicates,
+                  icon: .fileanalysisDocuments)]
+        let size = CGSize(width: 560, height: 320)
+        let host = lightfieldHost(root: LightfieldBubbleChart(items: items)
+            .environment(\.featureDisablesLayoutAnimations, true), size: size, dark: true)
+        defer { host.close() }
+        let frames = try await host.frames(required: ["lightfield.bubble.long", "lightfield.bubble.label.long",
+                                                      "lightfield.bubble.node", "lightfield.bubble.label.node"], size: size)
+        for id in ["long", "node"] {
+            let bubble = try XCTUnwrap(frames["lightfield.bubble." + id])
+            let label = try XCTUnwrap(frames["lightfield.bubble.label." + id])
+            XCTAssertGreaterThanOrEqual(bubble.width, LightfieldBubbleLayout.labelThreshold, id)
+            let center = CGPoint(x: bubble.midX, y: bubble.midY)
+            let corners = [CGPoint(x: label.minX, y: label.minY), CGPoint(x: label.maxX, y: label.minY),
+                           CGPoint(x: label.minX, y: label.maxY), CGPoint(x: label.maxX, y: label.maxY)]
+            XCTAssertTrue(corners.allSatisfy { hypot($0.x - center.x, $0.y - center.y) <= bubble.width / 2 + 0.5 },
+                          "\(id): its name \(label) runs out of its bubble \(bubble)")
+        }
+        let font = NSFont.systemFont(ofSize: 15, weight: .medium)
+        let whole = { (text: String) in (text as NSString).size(withAttributes: [.font: font]).width }
+        let node = try XCTUnwrap(frames["lightfield.bubble.label.node"])
+        XCTAssertEqual(node.width, whole("node_modules"), accuracy: 2, "node_modules fits whole")
+        let cut = try XCTUnwrap(frames["lightfield.bubble.label.long"])
+        let bubble = try XCTUnwrap(frames["lightfield.bubble.long"])
+        XCTAssertLessThan(cut.width, whole(long) - 20, "the long name is cut at the end")
+        XCTAssertLessThanOrEqual(cut.width, bubble.width * 0.7 + 0.5)
+        XCTAssertNil(frames["lightfield.bubble.label.small"], "a bubble under the threshold shows its icon only")
+        try await host.waitForAccessibility(labels: [long + " · 60 GB"])
     }
 
     func testTrendNativeHistoryAdjustmentInvokesHoverIndexCallback() async throws {

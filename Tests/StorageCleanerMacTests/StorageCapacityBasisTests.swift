@@ -4,72 +4,80 @@ import XCTest
 
 /// D84：容量口径说明。只加说明不改算法；夹具都在系统临时目录（只读分析）。
 final class StorageCapacityBasisTests: XCTestCase {
+    /// D193（用户 10-23 选“改成实际占用”）：名字沿用 D84 时的写法；应用包
+    /// 内容也按本地占用。旧值：应用包内容的口径是 `.logical`，
+    /// `storageMapPreferredSize(10, 4096, /Applications/Tool.app/Contents/Info.plist)` 是 10。
     func testApplicationBundleContentUsesLogicalSizeAndEverythingElseLocalUsage() {
-        XCTAssertEqual(DiskScanner.storageMapSizeBasis(path: "/Applications/Tool.app/Contents/MacOS/Tool"), .logical)
+        XCTAssertEqual(DiskScanner.storageMapSizeBasis(path: "/Applications/Tool.app/Contents/MacOS/Tool"), .allocated)
         XCTAssertEqual(DiskScanner.storageMapSizeBasis(path: "/Users/tester/Downloads/movie.mov"), .allocated)
         XCTAssertEqual(DiskScanner.storageMapSizeBasis(path: "/Applications/readme.txt"), .allocated)
-        // 算法不变：应用包内容逻辑优先，其他分配优先，缺值互补。
+        // 本地占用优先，缺值时用逻辑大小。
         XCTAssertEqual(DiskScanner.storageMapPreferredSize(logicalSize: 10, allocatedSize: 4096,
-            path: "/Applications/Tool.app/Contents/Info.plist"), 10)
+            path: "/Applications/Tool.app/Contents/Info.plist"), 4096)
         XCTAssertEqual(DiskScanner.storageMapPreferredSize(logicalSize: 10, allocatedSize: 4096, path: "/Users/t/a.txt"), 4096)
         XCTAssertEqual(DiskScanner.storageMapPreferredSize(logicalSize: 10, allocatedSize: nil, path: "/Users/t/a.txt"), 10)
         XCTAssertEqual(DiskScanner.storageMapPreferredSize(logicalSize: nil, allocatedSize: 8, path: "/Applications/T.app/x"), 8)
-        XCTAssertEqual(StorageCapacityPresentation.basis(forMeasuredPath: "/Applications/Tool.app", isDirectory: true), .logical)
+        XCTAssertEqual(DiskScanner.storageMapPreferredSize(logicalSize: 10, allocatedSize: nil,
+            path: "/Applications/Tool.app/Contents/Info.plist"), 10)
+        XCTAssertEqual(StorageCapacityPresentation.basis(forMeasuredPath: "/Applications/Tool.app", isDirectory: true), .allocated)
         XCTAssertEqual(StorageCapacityPresentation.basis(forMeasuredPath: "/Users/t/Tool.app", isDirectory: true), .allocated)
     }
 
+    /// D193：不再有“逻辑大小”和“应用包按逻辑大小”两种口径，说明由 9 段
+    /// 变 7 段。旧值：`notes.count == 9`，并含这两段的标题。
     func testBasisTitlesNameTheFourMeasures() {
         XCTAssertEqual(StorageCapacityBasis.allocated.title, L10n.text("本地占用（分配大小）", "Local Usage (Allocated Size)"))
-        XCTAssertEqual(StorageCapacityBasis.logical.title, L10n.text("逻辑大小", "Logical Size"))
         XCTAssertEqual(StorageCapacityBasis.measuredLowerBound.title, L10n.text("本轮量到的下限", "Lower Bound Measured This Run"))
         XCTAssertEqual(StorageCapacityBasis.cloudPlaceholder.title,
                        L10n.text("云端占位（未下载，不占本地）", "Cloud Placeholder (Not Downloaded, No Local Usage)"))
+        XCTAssertEqual(StorageCapacityBasis.allCases, [.allocated, .measuredLowerBound, .cloudPlaceholder])
         let notes = StorageCapacityPresentation.notes.map(\.title)
-        // 修复轮 1：加了“本地占用（应用包按逻辑大小）”混合口径，说明由 8 段变 9 段。
-        XCTAssertEqual(notes.count, 9)
-        XCTAssertTrue(notes.contains(StorageCapacityBasis.mixedWithAppBundles.title))
+        XCTAssertEqual(notes.count, 7)
+        XCTAssertFalse(notes.contains(L10n.text("逻辑大小", "Logical Size")))
+        XCTAssertFalse(notes.contains(L10n.text("本地占用（应用包按逻辑大小）", "Local Usage (App Bundles by Logical Size)")))
         for title in [L10n.text("硬链接", "Hard Links"), L10n.text("APFS 克隆", "APFS Clones"),
                       L10n.text("稀疏文件", "Sparse Files"), L10n.text("废纸篓", "Trash")] {
             XCTAssertTrue(notes.contains(title), title)
         }
     }
 
-    /// 修复轮 1（P1-1）：范围为 / 或 /Applications 时应用包内容按逻辑大小、
-    /// 其余按本地占用，总标签与上层文件夹悬停都写明是混合口径。
+    /// 修复轮 1（P1-1）时范围为 / 或 /Applications 写混合口径；D193 起这些
+    /// 范围和应用包本身都按本地占用，名字沿用。旧值：/、/Applications、
+    /// /Applications/Utilities 的口径为 `.mixedWithAppBundles`，标签
+    /// “已分析 · 本地占用（应用包按逻辑大小）”，说明“按本地占用（应用包按
+    /// 逻辑大小）”；/Applications/Tool.app 的标签“已分析 · 逻辑大小”；
+    /// 完整时 / 与 /Users/tester 的标签不同。
     func testScopesContainingAppBundlesAreLabelledAsMixed() throws {
-        let mixedLabel = L10n.text("已分析 · 本地占用（应用包按逻辑大小）", "Analyzed · Local Usage (App Bundles by Logical Size)")
-        let mixedNote = L10n.text("按本地占用（应用包按逻辑大小）", "By local usage (app bundles by logical size)")
-        for path in ["/", "/Applications", "/Applications/", "/Applications/Utilities"] {
-            XCTAssertEqual(StorageCapacityPresentation.summaryBasis(isComplete: true, path: path), .mixedWithAppBundles, path)
-            XCTAssertEqual(StorageCapacityPresentation.summaryLabel(isComplete: true, path: path), mixedLabel, path)
-            XCTAssertEqual(StorageCapacityPresentation.snapshotNote(isComplete: true, path: path), mixedNote, path)
+        let localLabel = L10n.text("已分析 · 本地占用", "Analyzed · Local Usage")
+        let localNote = L10n.text("按本地占用（分配大小）", "By local usage (allocated size)")
+        for path in ["/", "/Applications", "/Applications/", "/Applications/Utilities", "/Applications/Tool.app"] {
+            XCTAssertEqual(StorageCapacityPresentation.summaryBasis(isComplete: true, path: path), .allocated, path)
+            XCTAssertEqual(StorageCapacityPresentation.summaryLabel(isComplete: true, path: path), localLabel, path)
+            XCTAssertEqual(StorageCapacityPresentation.snapshotNote(isComplete: true, path: path), localNote, path)
         }
-        XCTAssertEqual(StorageCapacityPresentation.summaryLabel(isComplete: true, path: "/Applications/Tool.app"),
-                       L10n.text("已分析 · 逻辑大小", "Analyzed · Logical Size"))
         XCTAssertEqual(StorageCapacityPresentation.summaryLabel(isComplete: true, path: "/Users/tester"),
                        L10n.text("已分析 · 本地占用", "Analyzed · Local Usage"))
         XCTAssertEqual(StorageCapacityPresentation.snapshotNote(isComplete: true, path: "/Users/tester"),
                        L10n.text("按本地占用（分配大小）", "By local usage (allocated size)"))
         XCTAssertEqual(StorageCapacityPresentation.summaryLabel(isComplete: false, path: "/"),
                        L10n.text("本轮量到的下限", "Lower Bound This Run"))
-        XCTAssertNotEqual(StorageCapacityPresentation.summaryLabel(isComplete: true, path: "/"),
-                          StorageCapacityPresentation.summaryLabel(isComplete: true, path: "/Users/tester"))
+        XCTAssertEqual(StorageCapacityPresentation.summaryLabel(isComplete: true, path: "/"),
+                       StorageCapacityPresentation.summaryLabel(isComplete: true, path: "/Users/tester"))
 
-        // 行悬停：包含应用包的上层文件夹写混合，应用包本身写逻辑，其余照旧。
+        // 行悬停：D193 起都写本地占用（旧值：/Applications 与其中文件夹写混合，
+        // 应用包与其内容写逻辑大小）。
         func folder(_ path: String) -> StorageTreemapEntry {
             StorageTreemapEntry(id: path, title: (path as NSString).lastPathComponent, path: path, sizeBytes: 1, kind: "folder",
                                 isDirectory: true, canDescend: true, isEstimated: false, isCloudOnly: false)
         }
-        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications")), .mixedWithAppBundles)
-        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications/Utilities")), .mixedWithAppBundles)
-        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications/Tool.app")), .logical)
-        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications/Tool.app/Contents")), .logical)
+        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications")), .allocated)
+        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications/Utilities")), .allocated)
+        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications/Tool.app")), .allocated)
+        XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Applications/Tool.app/Contents")), .allocated)
         XCTAssertEqual(StorageCapacityPresentation.basis(for: folder("/Users")), .allocated)
         XCTAssertEqual(StorageCapacityPresentation.basis(forMeasuredPath: "/Applications/readme.txt", isDirectory: false), .allocated)
         XCTAssertTrue(StorageCapacityPresentation.rowHelp(folder("/Applications"))
-            .contains(StorageCapacityBasis.mixedWithAppBundles.title))
-        XCTAssertEqual(StorageCapacityBasis.mixedWithAppBundles.title,
-                       L10n.text("本地占用（应用包按逻辑大小）", "Local Usage (App Bundles by Logical Size)"))
+            .contains(StorageCapacityBasis.allocated.title))
 
         // 界面按当前范围 / 当前层级的路径取标签。
         let view = try source("Views/FilesLightfield/FileAnalysisLightfieldView.swift")

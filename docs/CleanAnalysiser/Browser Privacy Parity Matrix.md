@@ -8,7 +8,7 @@
 - SKILL.md 修改时间：2026-06-02T20:22:25+1000。
 - 已读取 SKILL.md、macOS/Windows references、三个 scripts 和 HTML report template；该 Skill 没有 fixtures/examples。
 - 重要边界：Skill 是通用磁盘扫描器；当前 Browser Privacy 产品扫描器只读浏览器历史访问记录。浏览器缓存文件已经由安全清理模块的版本化规则处理，本页不复制第二套文件扫描器。
-- Chromium 系 8 个注册 Provider（Chrome、Chromium、Edge、Brave、Arc、Opera、Opera GX、Vivaldi）提供直接删除：仅当数据库是精确的 Schema 版本 70／兼容版本 16、浏览器应用的安装位置与签名可确认、路径在注册根目录内、浏览器已退出且没有未合并的写入时才写入。Safari、Orion、Firefox 系和动态发现的衍生浏览器没有写入 Adapter，只生成浏览器内处理步骤。
+- Chromium 系 9 个注册 Provider（Chrome、Chromium、Edge、Brave、Arc、Opera、Opera GX、Vivaldi、QQ浏览器）提供直接删除：仅当数据库是精确的 Schema 版本 70／兼容版本 16、浏览器应用的安装位置与签名可确认、路径在注册根目录内、浏览器已退出且没有未合并的写入时才写入。Safari、Orion、Firefox 系和动态发现的衍生浏览器没有写入 Adapter，只生成浏览器内处理步骤。
 - 测试夹具里的删除通过，不等于在真实浏览器数据库上做过实机删除验收；实机验收另行记录。
 
 ## 对标矩阵

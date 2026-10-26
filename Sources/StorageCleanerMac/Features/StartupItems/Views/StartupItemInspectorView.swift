@@ -247,7 +247,7 @@ struct StartupItemInspectorView: View {
     private var actions: some View {
         HStack(spacing: AppDesignTokens.Spacing.small) {
             if canReveal {
-                Button(L10n.text("在 Finder 中显示", "Reveal in Finder")) {
+                Button(L10n.text("在访达中显示", "Reveal in Finder")) {
                     onReveal?(item)
                 }
             }

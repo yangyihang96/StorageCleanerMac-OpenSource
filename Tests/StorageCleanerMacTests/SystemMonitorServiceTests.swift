@@ -1243,13 +1243,16 @@ final class SystemMonitorServiceTests: XCTestCase {
 
     func testMenuBarSamplingKeepsSelectedCadenceAcrossVisibilityAndStatusIcons() {
         XCTAssertEqual(MenuBarMetricKind.defaultSelection, Set(MenuBarMetricKind.allCases))
-        XCTAssertEqual(MenuBarRefreshInterval.defaultValue, .oneSecond)
+        // D127: iStat's default (`UpdateFrequency` 1, 2 s); was `.oneSecond`.
+        XCTAssertEqual(MenuBarRefreshInterval.defaultValue, .twoSeconds)
+        XCTAssertEqual(MenuBarRefreshInterval.allCases.map(\.seconds), [1, 2, 3])
         for interval in MenuBarRefreshInterval.allCases {
             for mode in MenuBarStatusDisplayMode.allCases {
                 for visible in [false, true] {
+                    // D127: one tick, panel open or closed (was 5 s while closed).
                     XCTAssertEqual(interval.sleepNanoseconds(panelVisible: visible,
                         statusDisplayMode: mode, customFanControlActive: false, lowPowerMode: false),
-                        visible ? interval.sleepNanoseconds : 5_000_000_000)
+                        interval.sleepNanoseconds)
                 }
             }
             XCTAssertEqual(interval.memorySnapshotSeconds, interval.seconds)
@@ -1258,7 +1261,8 @@ final class SystemMonitorServiceTests: XCTestCase {
             statusDisplayMode: .network, customFanControlActive: false, lowPowerMode: true), 30_000_000_000)
         XCTAssertEqual(MenuBarRefreshInterval.oneSecond.sleepNanoseconds(panelVisible: true,
             statusDisplayMode: .network, customFanControlActive: false, lowPowerMode: true), 30_000_000_000)
-        XCTAssertEqual(MenuBarRefreshInterval.fiveSeconds.sleepNanoseconds(panelVisible: false,
+        // D127: `.threeSeconds` replaces the retired `.fiveSeconds`.
+        XCTAssertEqual(MenuBarRefreshInterval.threeSeconds.sleepNanoseconds(panelVisible: false,
             statusDisplayMode: .memory, customFanControlActive: true, lowPowerMode: true), 30_000_000_000)
         XCTAssertEqual(MenuBarRefreshInterval.oneSecond.sleepNanoseconds(panelVisible: false,
             statusDisplayMode: .memory, customFanControlActive: true, lowPowerMode: true), 30_000_000_000)
@@ -1538,8 +1542,12 @@ final class SystemMonitorServiceTests: XCTestCase {
         for mode in MenuBarStatusDisplayMode.allCases {
             let image = MenuBarStatusRenderer.image(for: nil, mode: mode)
             XCTAssertEqual(image.size.height, 24, mode.rawValue)
-            XCTAssertEqual(image.isTemplate, mode != .deviceStatus, mode.rawValue)
-            XCTAssertGreaterThanOrEqual(image.size.width, mode == .deviceStatus ? 28 : 30, mode.rawValue)
+            // D153: the combined icon is a coloured 24-pt square like the device
+            // status icon (was `mode != .deviceStatus`; minimum widths 28 and 30).
+            let coloured = mode == .deviceStatus || mode == .combinedStatus
+            XCTAssertEqual(image.isTemplate, !coloured, mode.rawValue)
+            XCTAssertGreaterThanOrEqual(image.size.width,
+                                        mode == .deviceStatus ? 28 : mode == .combinedStatus ? 24 : 30, mode.rawValue)
             XCTAssertNotNil(image.tiffRepresentation, mode.rawValue)
         }
     }
@@ -1658,7 +1666,24 @@ final class SystemMonitorServiceTests: XCTestCase {
             ByteFormat.storageString(1_073_741_824, locale: locale),
             "1.07 GB"
         )
-        XCTAssertEqual(ByteFormat.string(1_073_741_824), "1.0 GiB")
+        // D178: `ByteFormat.string`, the binary formatter ("1.0 GiB" here), is gone.
+    }
+
+    /// D178: files and disks in decimal units with Finder's "KB", memory in
+    /// 1024s written GB as Activity Monitor does, counts grouped; unit words
+    /// in the app's language.
+    func testByteFormatWritesSizesAndCountsAsFinderAndActivityMonitorDo() {
+        let english = Locale(identifier: "en_US"), chinese = Locale(identifier: "zh_Hans")
+        XCTAssertEqual(ByteFormat.storageString(2_000, locale: english), "2 KB", "Finder's KB, not the SI kB")
+        XCTAssertEqual(ByteFormat.storageString(100_000_000, locale: english), "100 MB")
+        XCTAssertEqual(ByteFormat.storageString(0, locale: english), "0 bytes")
+        // D228＋旧值：was "0字节"; bytes stand a space from their number, as every other unit does.
+        XCTAssertEqual(ByteFormat.storageString(0, locale: chinese), "0 字节")
+        XCTAssertEqual(ByteFormat.memoryString(17_179_869_184, locale: english), "16 GB")
+        XCTAssertEqual(ByteFormat.memoryString(1_610_612_736, locale: chinese), "1.5 GB")
+        XCTAssertEqual(ByteFormat.count(51_962, locale: english), "51,962")
+        XCTAssertEqual(ByteFormat.count(Int64(1_234_567), locale: chinese), "1,234,567")
+        XCTAssertEqual(ByteFormat.count(7, locale: chinese), "7")
     }
 
     func testStorageCapacityServiceReadsStartupVolumeWithoutShellingOut() throws {
@@ -1983,30 +2008,47 @@ final class SystemMonitorServiceTests: XCTestCase {
         // D64 retires the non-Geek estimated-traffic captions. The live
         // chart still displays peaks and monitor-owned session totals in
         // both languages, with distinct upload/download accessibility text.
+        // D146 (2026-10-19): iStat's peak row shows the graph's peaks without
+        // session totals; the distinct accessibility text is the row's. Were,
+        // in `geekNetworkTrendCard`: "下载峰值", "Download peak", "上传峰值",
+        // "Upload peak", "会话累计", "session total", D128's
+        // `IStatNumberFormat.space(sessionDownloadedBytes, style: .totals)`
+        // and `total: downloadTotal` for both directions; and the
+        // `var sessionDownloadedBytes:` / `var sessionUploadedBytes:`
+        // accessors reading `monitorState`.
         let network = try D64MenuBarSource.source("MenuBarAdvanced/GeekNetworkView.swift")
         let trend = try r2SourceDeclaration("private var geekNetworkTrendCard:", in: network)
-        XCTAssertTrue(trend.contains("下载峰值"))
-        XCTAssertTrue(trend.contains("Download peak"))
-        XCTAssertTrue(trend.contains("上传峰值"))
-        XCTAssertTrue(trend.contains("Upload peak"))
-        XCTAssertTrue(trend.contains("会话累计"))
-        XCTAssertTrue(trend.contains("session total"))
-        XCTAssertTrue(trend.contains("total: ByteFormat.string(sessionDownloadedBytes)"))
-        XCTAssertTrue(trend.contains("total: ByteFormat.string(sessionUploadedBytes)"))
+        XCTAssertTrue(trend.contains("GeekNetworkPeakRow(peaks: peaks)"))
+        let peakRow = try r2SourceDeclaration("struct GeekNetworkPeakRow:", in: network)
+        XCTAssertTrue(peakRow.contains("下载峰值"))
+        XCTAssertTrue(peakRow.contains("Download peak"))
+        XCTAssertTrue(peakRow.contains("上传峰值"))
+        XCTAssertTrue(peakRow.contains("Upload peak"))
+        XCTAssertFalse(network.contains("会话累计"))
+        XCTAssertFalse(network.contains("session total"))
+        XCTAssertFalse(trend.contains("IStatNumberFormat.space(sessionDownloadedBytes, style: .totals)"))
+        XCTAssertFalse(trend.contains("IStatNumberFormat.space(sessionUploadedBytes, style: .totals)"))
+        XCTAssertFalse(trend.contains("total: downloadTotal"))
+        XCTAssertFalse(trend.contains("total: uploadTotal"))
         let components = try D64MenuBarSource.source("MenuBarAdvanced/MenuBarAdvancedComponents.swift")
-        let downloaded = try r2SourceDeclaration("var sessionDownloadedBytes:", in: components)
-        let uploaded = try r2SourceDeclaration("var sessionUploadedBytes:", in: components)
-        XCTAssertTrue(downloaded.contains("monitorState.sessionDownloadedBytes"))
-        XCTAssertTrue(uploaded.contains("monitorState.sessionUploadedBytes"))
+        XCTAssertFalse(components.contains("var sessionDownloadedBytes:"))
+        XCTAssertFalse(components.contains("var sessionUploadedBytes:"))
         let sensorSummary = try D64MenuBarSource.source("MenuBarAdvanced/GeekOverviewPresentation.swift")
         XCTAssertTrue(sensorSummary.contains("value: geekFanTelemetry.actualRPM.map(SystemFanSpeedFormat.number)"))
         XCTAssertTrue(sensorSummary.contains("geekFanTelemetry.isFanless"))
         XCTAssertTrue(sensorSummary.contains("geekFanTelemetry.isSampling"))
         XCTAssertTrue(advancedSource.contains("if metricAvailable(.fanSpeed)"))
-        XCTAssertTrue(advancedSource.contains("valueRange: 20...110"))
+        // D133: the older sensor page's temperatures use iStat's scale (was
+        // `valueRange: 20...110`).
+        XCTAssertTrue(advancedSource.contains("0...100, unit: .temperature, peak: summary.temperaturePeak)"))
         // The removed tile's fan average lives on in the fan history title.
         XCTAssertTrue(advancedSource.contains("L10n.text(\"平均转速\", \"Average Fan Speed\")"))
-        XCTAssertTrue(advancedSource.contains("geekSensorHeader(L10n.text(\"温度\", \"TEMPERATURE\"))"))
+        // D119 (2026-10-18): the temperature zones are an iStat titled row
+        // group; the separate section header helper was retired.
+        let temperatureGroup = try r2SourceDeclaration("private var geekTemperatureCard:", in: advancedSource)
+        XCTAssertTrue(temperatureGroup.contains("GeekIStatRowsCard("))
+        XCTAssertTrue(temperatureGroup.contains("title: L10n.text(\"温度\", \"TEMPERATURE\")"))
+        XCTAssertFalse(advancedSource.contains("geekSensorHeader("))
         XCTAssertTrue(advancedSource.contains("valueRange: 0...fanTrendMaximum"))
         XCTAssertTrue(advancedSource.contains("channel: .fanRPM"))
         XCTAssertFalse(advancedSource.contains("sensorTrendSeries"))
@@ -2479,7 +2521,8 @@ final class SystemMonitorServiceTests: XCTestCase {
 
         XCTAssertTrue(packageSource.contains(".macOS(.v14)"))
         XCTAssertTrue(sidebarSource.contains("ScrollView(.vertical)"))
-        XCTAssertTrue(sidebarSource.contains("ForEach(SidebarGroup.allCases)"))
+        // D154: the sidebar lists CleanMyMac's modules.
+        XCTAssertTrue(sidebarSource.contains("ForEach(CareStudioFamily.allCases.filter { !$0.isFooter })"))
         XCTAssertFalse(sidebarSource.contains(".scrollIndicators(.hidden)"))
         XCTAssertTrue(sidebarSource.contains("LinearGradient("))
         XCTAssertFalse(sidebarSource.contains(".environment(\\.colorScheme, .dark)"),
@@ -2490,8 +2533,10 @@ final class SystemMonitorServiceTests: XCTestCase {
         // selected row follows its module color like the header and primary button.
         // D53 §3.2.2 draws it as the module gradient block that slides.
         XCTAssertFalse(sidebarSource.contains(".fill(AppAppearanceColors.selectedSurface)"))
-        XCTAssertTrue(sidebarSource.contains("private var pigment: ModulePigment { filter.moduleTheme.pigment }"))
-        XCTAssertTrue(sidebarSource.contains("SidebarSelectionBlock(pigment: pigment)"))
+        // D154: on the classic surface the block keeps the module pigment;
+        // on a studio gradient it is CleanMyMac's translucent block.
+        XCTAssertTrue(sidebarSource.contains("let pigment = family.primaryRoute.moduleTheme.pigment"))
+        XCTAssertTrue(sidebarSource.contains("SidebarSelectionBlock(family: family, onStudio: onStudio)"))
         XCTAssertFalse(sidebarSource.contains("filter.moduleTheme.accent.opacity(0.30)"))
         XCTAssertFalse(sidebarSource.contains("List(selection: listSelection)"))
         XCTAssertFalse(sidebarSource.contains("legacyBackdrop"))

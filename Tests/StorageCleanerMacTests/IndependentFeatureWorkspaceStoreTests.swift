@@ -213,6 +213,61 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         XCTAssertFalse(store.items.contains(late))
     }
 
+    /// Report §4 item 12 (CleanMyMac's Start Over): My Clutter goes back to
+    /// its landing page. The result, its selection and its saved snapshot go,
+    /// so a new launch opens on the landing page too; the settings stay.
+    @MainActor
+    func testDuplicateStoreStartOverForgetsTheResultAndItsSavedSnapshot() async throws {
+        let fixture = try makePersistedDuplicateFixture()
+        defer { TestFileSystem.remove(fixture.root) }
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+        let resultStore = DuplicateFileResultStore(fileURL: fixture.resultURL)
+        let coordinator = HeavyWorkCoordinator()
+        let activity = HeavyWorkActivityStore(coordinator: coordinator)
+        let store = DuplicateFilesStore(
+            defaults: defaults,
+            coordinator: coordinator,
+            activityStore: activity,
+            scanOperation: persistedDuplicateScanOperation(fixture: fixture),
+            resultStore: resultStore,
+            userHomeURL: fixture.root
+        )
+        store.addCustomRoot(fixture.root.path)
+        store.resultSort = .name
+        store.startScan()
+        await store.waitForCurrentScan()
+        let selected = try XCTUnwrap(store.items.first)
+        store.setSelected(true, item: selected, allItems: store.items)
+        XCTAssertTrue(store.hasScanned)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.resultURL.path))
+        let roots = store.customRootPaths
+
+        store.startOver()
+
+        XCTAssertFalse(store.hasScanned)
+        XCTAssertEqual(store.phase, .idle)
+        XCTAssertTrue(store.items.isEmpty)
+        XCTAssertTrue(store.exactGroups.isEmpty)
+        XCTAssertTrue(store.selectedItemIDs.isEmpty)
+        XCTAssertNil(store.scanOutcome)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.resultURL.path), "the saved snapshot goes too")
+        XCTAssertEqual(store.customRootPaths, roots, "the added folder stays")
+        XCTAssertEqual(store.resultSort, .name, "the settings stay")
+
+        let relaunched = DuplicateFilesStore(
+            defaults: defaults,
+            coordinator: coordinator,
+            activityStore: activity,
+            scanOperation: persistedDuplicateScanOperation(fixture: fixture),
+            resultStore: resultStore,
+            userHomeURL: fixture.root
+        )
+        await relaunched.waitForResultRestore()
+        XCTAssertFalse(relaunched.hasScanned, "a new launch opens on the landing page")
+    }
+
     @MainActor
     func testDuplicateStoreReloadsResultAndFiltersWithoutSelection() async throws {
         let fixture = try makePersistedDuplicateFixture()
@@ -243,6 +298,9 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(first.phase, .finished)
         XCTAssertEqual(first.items.count, 2)
         XCTAssertTrue(first.items.allSatisfy { $0.modifiedAt != nil })
+        // D154 batch 2: the proven group stays available for “Merge into Clones”.
+        XCTAssertEqual(first.exactGroups.map(\.id), [Data(repeating: 0xA1, count: 32).base64EncodedString()])
+        XCTAssertEqual(first.exactGroups.first?.files.map(\.path), [fixture.first.path, fixture.second.path])
         let selected = try XCTUnwrap(first.items.first)
         first.setSelected(true, item: selected, allItems: first.items)
         XCTAssertEqual(first.selectedItemIDs, [selected.id])
@@ -271,6 +329,8 @@ final class IndependentFeatureWorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(restored.resultFilter, .exact)
         XCTAssertEqual(restored.resultSort, .name)
         XCTAssertTrue(restored.selectedItemIDs.isEmpty)
+        // A restored result has no proven groups in memory: no merge until a new scan.
+        XCTAssertTrue(restored.exactGroups.isEmpty)
     }
 
     func testDuplicateStoreRestoresResolvedDefaultCacheWithoutStartingScan() throws {

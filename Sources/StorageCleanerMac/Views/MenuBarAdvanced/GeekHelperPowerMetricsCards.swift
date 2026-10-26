@@ -73,15 +73,62 @@ struct GeekHelperPowerMetricsCards<Content: View>: View {
 }
 
 extension MenuBarAdvancedStatusView {
+    /// D119: the sensors page's current, power and voltage groups, in the
+    /// order of iStat's sensor menu. The battery current and voltage and the
+    /// SMC power rows moved here from the power page; the helper's CPU, GPU
+    /// and Neural Engine power joins the SMC rows, and while the helper has
+    /// no reading its state is the power group's last row.
     var geekHelperPowerMetricsCards: some View {
         GeekHelperPowerMetricsCards(monitor: store.helperPowerMetricsMonitor) { presentation in
             VStack(spacing: GeekPanelLayout.detailSpacing) {
-                geekHelperReadoutCard(L10n.text("功率", "POWER"), rows: presentation.powerRows,
-                    unavailableText: presentation.unavailableText)
-                geekHelperReadoutCard(L10n.text("频率", "FREQUENCY"), rows: presentation.frequencyRows,
-                    unavailableText: presentation.unavailableText)
+                let current = geekBatteryCurrentReadouts
+                if !current.isEmpty {
+                    // D138: iStat's group name, 'Sensors.Amperage' (was CURRENT).
+                    geekSensorReadoutCard(L10n.text("电流", "AMPERAGE"), rows: current)
+                }
+                geekSensorPowerCard(helper: presentation)
+                let voltage = geekBatteryVoltageReadouts
+                if !voltage.isEmpty {
+                    geekSensorReadoutCard(L10n.text("电压", "VOLTAGE"), rows: voltage)
+                }
             }
-            .help(presentation.helpText)
+        }
+    }
+
+    /// The SMC rows (D57) and the helper's chip power in one group.
+    @ViewBuilder
+    func geekSensorPowerCard(helper presentation: GeekHelperPowerMetricsPresentation) -> some View {
+        let readouts = geekPowerReadouts
+        if presentation.powerRows.isEmpty {
+            geekSensorReadoutCard(L10n.text("功率", "POWER"), rows: readouts, extraRowCount: 1) {
+                GeekHelperPowerMetricsUnavailableRow(detail: presentation.unavailableText)
+                    .help(presentation.helpText)
+            }
+        } else {
+            geekSensorReadoutCard(L10n.text("功率", "POWER"), rows: readouts + presentation.powerRows)
+        }
+    }
+
+    /// The frequency group redraws with the processor telemetry; the helper's
+    /// readings with its leaf.
+    var geekSensorFrequencyGroup: some View {
+        GeekHelperPowerMetricsCards(monitor: store.helperPowerMetricsMonitor) { presentation in
+            geekFrequencyCard(helper: presentation)
+        }
+    }
+
+    /// D119: the frequency group of the sensors page (iStat `SensorsMenu`),
+    /// formerly a CPU page card: the real IOReport readings when there are
+    /// any, otherwise the passive helper leaf and its missing-state card.
+    @ViewBuilder
+    func geekFrequencyCard(helper presentation: GeekHelperPowerMetricsPresentation) -> some View {
+        let rows = geekFrequencyReadouts
+        if rows.isEmpty {
+            geekHelperReadoutCard(L10n.text("频率", "FREQUENCY"), rows: presentation.frequencyRows,
+                unavailableText: presentation.unavailableText)
+                .help(presentation.helpText)
+        } else {
+            geekSensorReadoutCard(L10n.text("频率", "FREQUENCY"), rows: rows)
         }
     }
 
@@ -95,30 +142,39 @@ extension MenuBarAdvancedStatusView {
     }
 }
 
+/// D119: a titled group with the helper's missing state as its one row.
 struct GeekHelperPowerMetricsUnavailableCard: View {
     let title: String
+    let detail: String
+
+    var body: some View {
+        GeekIStatRowsCard(title: title, rowCount: 1) {
+            GeekHelperPowerMetricsUnavailableRow(detail: detail)
+        }
+    }
+}
+
+/// The helper's missing state as a 15 pt row: why, and the way to the
+/// helper's settings. "开启" only navigates; it never requests the helper.
+struct GeekHelperPowerMetricsUnavailableRow: View {
     let detail: String
     @Environment(\.openSettings) private var openSettings
     @AppStorage("settings.selected-category.v1") private var settingsCategory = SettingsCategory.general
 
     var body: some View {
-        GeekCombinedCard(height: GeekSensorReadoutLayout.cardHeight(rowCount: 1)) {
-            VStack(alignment: .leading, spacing: 0) {
-                GeekSectionTitle(title: title)
-                HStack(spacing: 6) {
-                    Text(detail).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Button(L10n.text("开启", "Enable")) {
-                        settingsCategory = .accessAndSetup
-                        SystemHelperSettingsNavigation.shared.requestID = UUID()
-                        openSettings()
-                    }
-                    .buttonStyle(ResponsivePlainButtonStyle())
-                    .accessibilityLabel(L10n.text("开启系统助手", "Enable System Helper"))
-                }
-                .font(AdvancedPanelTypography.caption)
-                .frame(height: 23)
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+            Text(detail)
+                .geekIStatValueText(.secondary)
+            Spacer(minLength: 4)
+            Button(L10n.text("开启", "Enable")) {
+                settingsCategory = .accessAndSetup
+                SystemHelperSettingsNavigation.shared.requestID = UUID()
+                openSettings()
             }
+            .buttonStyle(ResponsivePlainButtonStyle())
+            .font(.system(size: GeekIStatCardGeometry.textFontSize))
+            .accessibilityLabel(L10n.text("开启系统助手", "Enable System Helper"))
         }
+        .frame(height: GeekIStatSectionGeometry.rowHeight)
     }
 }

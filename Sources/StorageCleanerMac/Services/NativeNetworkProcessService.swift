@@ -79,19 +79,27 @@ enum NativeNetworkProcessService {
         guard headerIndices.count >= 2,
               let deltaHeaderIndex = headerIndices.last else { return nil }
 
+        // D129: idle processes stay in the list, as iStat's network list is
+        // the top five without a threshold (was transferring processes only).
         let parsedRows = lines[lines.index(after: deltaHeaderIndex)...]
             .compactMap(parseDeltaRow)
-            .filter { $0.downloadBytesPerSecond > 0 || $0.uploadBytesPerSecond > 0 }
             .sorted(by: processSort)
 
         // Resolve only the Top-K numeric range. Include the complete boundary
-        // tie because the existing final tiebreaker uses localized app names.
+        // tie because the existing final tiebreaker uses localized app names,
+        // except a tie at zero (every idle process): it takes the rows the
+        // list still has room for, in the order of nettop's names.
         let cutoff = parsedRows.count > 5 ? parsedRows[4] : nil
-        let candidates = parsedRows.prefix { row in
-            guard let cutoff else { return true }
-            return row.totalBytesPerSecond > cutoff.totalBytesPerSecond
-                || (row.totalBytesPerSecond == cutoff.totalBytesPerSecond
-                    && row.downloadBytesPerSecond >= cutoff.downloadBytesPerSecond)
+        let candidates: ArraySlice<NativeNetworkProcessTransfer>
+        if let cutoff, cutoff.totalBytesPerSecond == 0 {
+            candidates = parsedRows.prefix(5)
+        } else {
+            candidates = parsedRows.prefix { row in
+                guard let cutoff else { return true }
+                return row.totalBytesPerSecond > cutoff.totalBytesPerSecond
+                    || (row.totalBytesPerSecond == cutoff.totalBytesPerSecond
+                        && row.downloadBytesPerSecond >= cutoff.downloadBytesPerSecond)
+            }
         }
         let resolve = metadataResolver ?? resolveMetadata
         let resolved = candidates.map { row in

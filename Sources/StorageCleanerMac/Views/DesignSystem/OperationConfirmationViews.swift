@@ -18,13 +18,13 @@ struct OperationConfirmationFactsView: View {
             .frame(maxHeight: Self.fieldRowsMaxHeight)
             if showsItemList, !facts.items.isEmpty {
                 DisclosureGroup(
-                    L10n.text("展开对象清单（\(facts.itemCount) 项）", "Show Item List (\(facts.itemCount))"),
+                    L10n.text("展开对象清单（\(ByteFormat.count(facts.itemCount)) 项）", "Show Item List (\(ByteFormat.count(facts.itemCount)))"),
                     isExpanded: $showsItems
                 ) {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: AppDesignTokens.Spacing.tight) {
                             ForEach(facts.items) { item in
-                                OperationConfirmationItemRow(item: item, byteStyle: facts.byteStyle)
+                                OperationConfirmationItemRow(item: item)
                             }
                         }
                     }
@@ -70,7 +70,6 @@ struct OperationConfirmationFactsView: View {
 
 private struct OperationConfirmationItemRow: View {
     let item: OperationConfirmationItem
-    var byteStyle: OperationByteStyle = .binary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -79,7 +78,7 @@ private struct OperationConfirmationItemRow: View {
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: AppDesignTokens.Spacing.small)
-                Text(item.bytes.map { byteStyle.string($0) } ?? L10n.text("大小未知", "Unknown size"))
+                Text(item.bytes.map { ByteFormat.storageString($0) } ?? L10n.text("大小未知", "Unknown size"))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .fixedSize()
@@ -134,7 +133,7 @@ struct OperationCompletionTallyView: View {
 
             if showsEntryDetails, !issueEntries.isEmpty {
                 DisclosureGroup(
-                    L10n.text("逐项原因（\(issueEntries.count) 项）", "Reasons per Item (\(issueEntries.count))"),
+                    L10n.text("逐项原因（\(ByteFormat.count(issueEntries.count)) 项）", "Reasons per Item (\(ByteFormat.count(issueEntries.count)))"),
                     isExpanded: $showsEntries
                 ) {
                     ScrollView {
@@ -145,7 +144,7 @@ struct OperationCompletionTallyView: View {
                                         .foregroundStyle(tint(entry.bucket))
                                         .accessibilityHidden(true)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(entry.count > 1 ? "\(entry.title) · \(entry.count)" : entry.title)
+                                        Text(entry.count > 1 ? "\(entry.title) · \(ByteFormat.count(entry.count))" : entry.title)
                                             .font(AppDesignTokens.Typography.compactLabelEmphasis)
                                             .fixedSize(horizontal: false, vertical: true)
                                         Text("\(entry.bucket.title)\(L10n.text("：", ": "))\(entry.detail)")

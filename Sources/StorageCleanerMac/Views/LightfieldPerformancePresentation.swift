@@ -60,6 +60,6 @@ enum LightfieldPerformancePresentation {
         guard !items.isEmpty else { return L10n.text("固定检查范围", "Included in Every Check") }
         let matches = items.filter { kinds.contains($0.kind) }
         let manageable = matches.filter { $0.manageability == .directlyManageable }.count
-        return L10n.text("\(matches.count) 项 · 可管理 \(manageable)", "\(matches.count) items · \(manageable) manageable")
+        return L10n.text("\(ByteFormat.count(matches.count)) 项 · 可管理 \(manageable)", "\(ByteFormat.count(matches.count)) items · \(manageable) manageable")
     }
 }

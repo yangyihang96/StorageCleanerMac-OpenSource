@@ -4,13 +4,19 @@ import XCTest
 @testable import StorageCleanerMac
 
 final class DuplicateFileScannerTests: XCTestCase {
-    func testDifferentNamesWithSameContentShareVerifiedGroupAndSavingsRemainUnknown() throws {
+    // D104 G1: renamed from ...AndSavingsRemainUnknown; two independent
+    // copies now report one copy's blocks as surely freed.
+    func testDifferentNamesWithSameContentShareVerifiedGroupAndFreeOneCopysBlocks() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
         let payload = Data("verified duplicate payload".utf8)
         try payload.write(to: root.appendingPathComponent("first-name.bin"))
         try payload.write(to: root.appendingPathComponent("renamed-copy.data"))
+        var copyMetadata = stat()
+        XCTAssertEqual(root.appendingPathComponent("renamed-copy.data").path.withCString {
+            Darwin.lstat($0, &copyMetadata)
+        }, 0)
 
         let groups = DuplicateFileScanner.scanGroups(configuration: configuration(root: root))
 
@@ -19,7 +25,8 @@ final class DuplicateFileScannerTests: XCTestCase {
         XCTAssertEqual(groups[0].contentSizeBytes, Int64(payload.count))
         XCTAssertEqual(groups[0].matchKind, .logicalContentSHA256)
         XCTAssertEqual(groups[0].relationship, .independent)
-        XCTAssertNil(groups[0].estimatedPhysicalReclaimableBytes)
+        XCTAssertGreaterThan(copyMetadata.st_blocks, 0)
+        XCTAssertEqual(groups[0].estimatedPhysicalReclaimableBytes, Int64(copyMetadata.st_blocks) * 512)
     }
 
     func testSameNameAndSizeWithMiddleDifferenceIsRejectedByFullHash() throws {
@@ -275,7 +282,107 @@ final class DuplicateFileScannerTests: XCTestCase {
         XCTAssertEqual(group.contentSizeBytes, Int64(payload.count))
         XCTAssertEqual(group.matchKind, .logicalContentSHA256)
         XCTAssertEqual(group.relationship, .apfsClone)
-        XCTAssertNil(group.estimatedPhysicalReclaimableBytes)
+        // D104 G1: clones share their blocks, so deleting one frees nothing
+        // (was nil, unknown, before the private size was read).
+        XCTAssertEqual(group.estimatedPhysicalReclaimableBytes, 0)
+    }
+
+    func testDuplicateSavingsCountWhatAnyKeptCopyLeavesFreed() {
+        func savings(_ freed: [Int64?]) -> Int64? {
+            let paths = freed.indices.map { "/G1Fixture/copy-\($0)" }
+            let byPath = Dictionary(uniqueKeysWithValues: zip(paths, freed))
+            return DuplicateFileScanner.physicalReclaimableBytes(ofFilesAt: paths) { byPath[$0] ?? nil }
+        }
+
+        XCTAssertEqual(savings([4_096, 4_096, 4_096]), 8_192, "independent copies: all but one")
+        XCTAssertEqual(savings([0, 0, 0]), 0, "clones of each other free nothing")
+        XCTAssertEqual(savings([0, 0, 4_096]), 0, "keeping the independent copy frees only shared blocks")
+        XCTAssertEqual(savings([1_000, 9_000]), 1_000, "whichever copy is kept, the smaller is surely freed")
+        XCTAssertEqual(savings([0, 4_096]), 0, "a copy with another hard link counts none")
+        XCTAssertEqual(savings([-5, 4_096, 4_096]), 4_096, "a negative reading counts none")
+        XCTAssertNil(savings([4_096, nil]), "one unreadable copy makes the group unknown")
+        XCTAssertNil(savings([4_096]), "one copy alone frees nothing to compare")
+        XCTAssertNil(savings([]))
+    }
+
+    func testScanReadsSavingsOnlyForTheCopiesItLists() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let payload = Data("listed duplicate payload".utf8)
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            try payload.write(to: root.appendingPathComponent(name))
+        }
+        let paths = ["a.bin", "b.bin", "c.bin"].map { root.appendingPathComponent($0).path }
+        var asked = [String]()
+        func scan(maxResults: Int, freed: [String: Int64?]) -> DuplicateFileScanReport {
+            DuplicateFileScanner.scanReport(
+                configuration: DuplicateFileScanner.Configuration(
+                    roots: [root.path],
+                    excludedPaths: [],
+                    minimumBytes: 1,
+                    maxFilesScanned: 100,
+                    maxDirectoriesScanned: 100,
+                    maxResults: maxResults,
+                    maxScanSeconds: 5
+                ),
+                resumeIndexData: nil,
+                surelyFreedBytes: { path in
+                    asked.append(path)
+                    return freed[path] ?? nil
+                }
+            )
+        }
+
+        let full = scan(maxResults: 100, freed: [paths[0]: 100, paths[1]: 300, paths[2]: 200])
+        XCTAssertEqual(full.exactGroups.first?.files.map(\.path), paths)
+        XCTAssertEqual(full.exactGroups.first?.estimatedPhysicalReclaimableBytes, 300)
+        XCTAssertEqual(asked, paths)
+
+        asked = []
+        let capped = scan(maxResults: 2, freed: [paths[0]: 100, paths[1]: 300, paths[2]: 200])
+        XCTAssertTrue(capped.coverage.reachedResultLimit)
+        XCTAssertEqual(capped.exactGroups.first?.files.map(\.path), Array(paths.prefix(2)))
+        XCTAssertEqual(capped.exactGroups.first?.estimatedPhysicalReclaimableBytes, 100)
+        XCTAssertEqual(asked, Array(paths.prefix(2)), "a copy left off the list is not read")
+
+        let unreadable = scan(maxResults: 100, freed: [paths[0]: 100, paths[1]: nil, paths[2]: 200])
+        XCTAssertEqual(unreadable.exactGroups.count, 1)
+        XCTAssertNil(unreadable.exactGroups.first?.estimatedPhysicalReclaimableBytes)
+    }
+
+    func testACopyFreesItsOwnBlocksNoneWhenLinkedOrClonedAndNothingIsReadForOtherEntries() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let payload = Data(repeating: 0x5A, count: 64 * 1024)
+        let plain = root.appendingPathComponent("plain.bin")
+        let linked = root.appendingPathComponent("linked.bin")
+        try payload.write(to: plain)
+        try payload.write(to: linked)
+        try FileManager.default.linkItem(at: linked, to: root.appendingPathComponent("second-link.bin"))
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("alias.bin"), withDestinationURL: plain)
+        var plainMetadata = stat()
+        XCTAssertEqual(plain.path.withCString { Darwin.lstat($0, &plainMetadata) }, 0)
+
+        XCTAssertEqual(DuplicateFileScanner.surelyFreedBytes(atPath: plain.path),
+                       Int64(plainMetadata.st_blocks) * 512)
+        XCTAssertGreaterThanOrEqual(Int64(plainMetadata.st_blocks) * 512, Int64(payload.count))
+        XCTAssertEqual(DuplicateFileScanner.surelyFreedBytes(atPath: linked.path), 0,
+                       "another hard link keeps the data")
+        XCTAssertNil(DuplicateFileScanner.surelyFreedBytes(atPath: root.appendingPathComponent("alias.bin").path),
+                     "a link is not followed")
+        XCTAssertNil(DuplicateFileScanner.surelyFreedBytes(atPath: root.path), "a folder is not a copy")
+        XCTAssertNil(DuplicateFileScanner.surelyFreedBytes(atPath: root.appendingPathComponent("missing.bin").path))
+
+        let clone = root.appendingPathComponent("clone.bin")
+        guard clonefile(plain.path, clone.path, 0) == 0 else {
+            let error = errno
+            if error == ENOTSUP { throw XCTSkip("Filesystem does not support clonefile") }
+            throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO)
+        }
+        XCTAssertEqual(DuplicateFileScanner.surelyFreedBytes(atPath: clone.path), 0)
+        XCTAssertEqual(DuplicateFileScanner.surelyFreedBytes(atPath: plain.path), 0,
+                       "after cloning, the original shares its blocks too")
     }
 
     func testSymlinksPackagesAndExcludedPathsStaySkipped() throws {

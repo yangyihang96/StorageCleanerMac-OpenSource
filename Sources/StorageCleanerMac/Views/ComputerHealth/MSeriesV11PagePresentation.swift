@@ -244,12 +244,12 @@ enum MSeriesV11PagePresentation {
         }
         var position: String {
             if mode == "pressure10m" { return L10n.text("独立压力观察 · 不计分", "Independent pressure observation · Unscored") }
-            if state.phase == .persisting { return L10n.text("保存阶段 · 核心 \(completedCoreCount)/18", "Saving · Core \(completedCoreCount)/18") }
-            if state.phase == .cancelling { return L10n.text("核心已完成 \(completedCoreCount)/18", "Core completed \(completedCoreCount)/18") }
+            if state.phase == .persisting { return L10n.text("保存阶段 · 核心 \(ByteFormat.count(completedCoreCount))/18", "Saving · Core \(ByteFormat.count(completedCoreCount))/18") }
+            if state.phase == .cancelling { return L10n.text("核心已完成 \(ByteFormat.count(completedCoreCount))/18", "Core completed \(ByteFormat.count(completedCoreCount))/18") }
             if MSeriesProtocol.coreIDs.contains(state.workloadID ?? "") {
                 return L10n.text("核心第 \(completedCoreCount + 1) / 18 项", "Core \(completedCoreCount + 1) / 18")
             }
-            return L10n.text("扩展阶段 · 核心 \(completedCoreCount)/18", "Extension stage · Core \(completedCoreCount)/18")
+            return L10n.text("扩展阶段 · 核心 \(ByteFormat.count(completedCoreCount))/18", "Extension stage · Core \(ByteFormat.count(completedCoreCount))/18")
         }
     }
 }

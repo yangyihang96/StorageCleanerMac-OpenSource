@@ -26,8 +26,22 @@ enum TestFileSystem {
     /// 不落入真实 Library，也不要求产品接受系统临时目录或测试专用例外。
     static func uniqueOperationRoot(_ purpose: String) -> URL {
         let label = purpose.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+        return operationFixtureParent.appendingPathComponent(
             ".storage-cleaner-\(label.isEmpty ? "fixture" : label)-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private static var operationFixtureParent: URL {
+        // Sandboxed lanes can keep owned operation fixtures in this worktree.
+        // Opt-in only: never change HOME or relax production path validation.
+        if let configured = ProcessInfo.processInfo.environment["STORAGE_CLEANER_TEST_OPERATION_ROOT"] {
+            let path = PathSafety.lexicalPath(configured)
+            let buildRoot = SwiftSourceScanning.projectRoot.appendingPathComponent(".build").path
+            precondition(path.hasPrefix(buildRoot + "/") && !PathSafety.containsSymbolicLinkComponent(in: path),
+                         "Operation fixture override must be inside this worktree's .build")
+            return URL(fileURLWithPath: path, isDirectory: true)
+        } else {
+            return FileManager.default.homeDirectoryForCurrentUser
+        }
     }
 
     /// 需要 Library/Caches 等规则结构时，注入隔离根内的 home，而非真实家目录。
@@ -186,6 +200,9 @@ enum TestFileSystem {
         let normalized = URL(fileURLWithPath: path)
         let name = normalized.lastPathComponent
         guard name.count > 37, UUID(uuidString: String(name.suffix(36))) != nil else { return false }
+        if normalized.deletingLastPathComponent().path == operationFixtureParent.path {
+            return name.hasPrefix(".storage-cleaner-")
+        }
         if normalized.deletingLastPathComponent().path == PathSafety.lexicalPath(FileManager.default.homeDirectoryForCurrentUser.path) {
             return name.hasPrefix(".storage-cleaner-")
         }

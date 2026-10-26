@@ -164,6 +164,27 @@ final class OperationConfirmationModelTests: XCTestCase {
         }
     }
 
+    /// D101 L5：菜单“清空废纸篓”的六个字段取自冻结清单，写明永久删除、不可恢复。
+    func testEmptyTrashFactsComeFromTheFrozenList() {
+        withLanguage(.zhHans) {
+            let frozen = FrozenTrash.testFixture(names: ["a", "b", "c"])
+            let facts = OperationConfirmationFacts.emptyTrash(frozen)
+            XCTAssertEqual(facts.surface, .emptyTrash)
+            XCTAssertEqual(facts.actions, [.permanentDeletion])
+            XCTAssertEqual(facts.recovery, [.notRecoverable])
+            XCTAssertEqual(facts.permission, .notRequired)
+            XCTAssertEqual(facts.items.map(\.title), ["a", "b", "c"])
+            XCTAssertEqual(facts.items.map(\.path), frozen.entries.map { frozen.trashURL.appendingPathComponent($0.name).path })
+            XCTAssertEqual(facts.localBytes, frozen.summary.totalBytes)
+            XCTAssertEqual(facts.permanentDeletionBytes, frozen.summary.totalBytes)
+            XCTAssertEqual(facts.trashBytes, 0)
+            XCTAssertEqual(facts.value(for: .objects), L10n.items(3))
+            XCTAssertTrue(facts.value(for: .capacity).contains("永久删除"), facts.value(for: .capacity))
+            XCTAssertTrue(facts.value(for: .recovery).contains("不可恢复"))
+            XCTAssertEqual(facts.rows.filter(\.isWarning).map(\.field), [.action, .recovery])
+        }
+    }
+
     func testCleanupPlanFactsSplitTrashFromPermanentDeletionAndExplainSkips() {
         withLanguage(.zhHans) {
             let items = Self.planItems([("a", 1_000, .moveToTrash), ("b", 2_000, .moveToTrash), ("trash-entry", 500, .emptyTrash)])
@@ -187,7 +208,8 @@ final class OperationConfirmationModelTests: XCTestCase {
             XCTAssertTrue(facts.rows.first { $0.field == .action }?.isWarning == true)
             XCTAssertEqual(facts.readyCount, 2)
             XCTAssertEqual(facts.value(for: .objects), "共 3 项：2 项将执行，1 项不会执行（原因见清单）")
-            XCTAssertEqual(capacity, "本地占用（将执行的 2 项） \(ByteFormat.string(1_500))；其中 \(ByteFormat.string(1_000)) 移到废纸篓，清空废纸篓后才释放；其中 \(ByteFormat.string(500)) 永久删除，删除后回读确认才计为已释放")
+            // D178: decimal (was `ByteFormat.string`, binary: "1 KiB" for 1,500 bytes).
+            XCTAssertEqual(capacity, "本地占用（将执行的 2 项） \(ByteFormat.storageString(1_500))；其中 \(ByteFormat.storageString(1_000)) 移到废纸篓，清空废纸篓后才释放；其中 \(ByteFormat.storageString(500)) 永久删除，删除后回读确认才计为已释放")
 
             let quarantine = OperationConfirmationFacts.cleanupPlanItems(
                 Self.planItems([("q", 64, .moveToTrash)]), disposition: .quarantine, skipped: [:],
@@ -247,8 +269,9 @@ final class OperationConfirmationModelTests: XCTestCase {
             let note = allMovesSkipped.cleanupTrashReleaseNote(planHasTrashMoves: true)
             XCTAssertEqual(note, "移到废纸篓的项目都不会执行，本次不会移动任何项目。")
             XCTAssertFalse(note?.contains("最多可释放") ?? true)
+            // D178: decimal (was `ByteFormat.string`, binary).
             XCTAssertEqual(oneReady.cleanupTrashReleaseNote(planHasTrashMoves: true),
-                           "清空废纸篓后最多可释放 \(ByteFormat.string(1_000))；当前立即释放取决于废纸篓和文件系统状态。")
+                           "清空废纸篓后最多可释放 \(ByteFormat.storageString(1_000))；当前立即释放取决于废纸篓和文件系统状态。")
             XCTAssertNil(OperationConfirmationFacts.cleanupPlanItems([items[2]], disposition: .trash, skipped: [:],
                 surface: .safeCleanup, appsToQuit: [], permission: .verified)
                 .cleanupTrashReleaseNote(planHasTrashMoves: false))
@@ -459,7 +482,8 @@ final class OperationConfirmationModelTests: XCTestCase {
             XCTAssertEqual(facts.trashBytes, 2 * 4_096, "header and panel count only the items that passed")
             XCTAssertTrue(facts.physicalReleaseUnknown)
             let capacity = facts.value(for: .capacity)
-            XCTAssertEqual(capacity, "本地占用（将执行的 2 项） \(ByteFormat.string(8_192))；其中 \(ByteFormat.string(8_192)) 移到废纸篓；清空废纸篓后最多释放 \(ByteFormat.string(8_192))，可回收量待确认（APFS 克隆或硬链接可能不释放空间）")
+            // D178: decimal (was `ByteFormat.string`, binary: "8 KiB").
+            XCTAssertEqual(capacity, "本地占用（将执行的 2 项） \(ByteFormat.storageString(8_192))；其中 \(ByteFormat.storageString(8_192)) 移到废纸篓；清空废纸篓后最多释放 \(ByteFormat.storageString(8_192))，可回收量待确认（APFS 克隆或硬链接可能不释放空间）")
             XCTAssertFalse(capacity.contains("至少"), capacity)
             XCTAssertFalse(capacity.contains("清空废纸篓后才释放"), capacity)
             XCTAssertTrue(facts.rows.first { $0.field == .capacity }?.isWarning == true)
@@ -488,7 +512,9 @@ final class OperationConfirmationModelTests: XCTestCase {
             XCTAssertEqual(facts.readyCount, review.readyItems.count)
             XCTAssertEqual(facts.value(for: .objects), "共 2 项：1 项将执行，1 项不会执行（原因见清单）")
             XCTAssertFalse(facts.physicalReleaseUnknown)
-            XCTAssertEqual(facts.byteStyle, .storage)
+            // D178: every page writes decimal sizes (was `facts.byteStyle == .storage`,
+            // the one page that did).
+            XCTAssertFalse(facts.value(for: .capacity).contains("iB"), facts.value(for: .capacity))
 
             var items = review.items
             items[0].hasOtherHardLinks = true
@@ -508,12 +534,14 @@ final class OperationConfirmationModelTests: XCTestCase {
             let clones = OperationCompletionTally(report: Self.report(
                 [("copy", 4_096, .moved(Self.receipt("copy")))], movedDuplicates: true))
             XCTAssertTrue(clones.reclaimableUnknown)
+            // D178: decimal (was `ByteFormat.string`, binary: "4 KiB").
             XCTAssertEqual(clones.capacityLines.first,
-                "已移到废纸篓 \(ByteFormat.string(4_096))（未释放；清空废纸篓后最多释放 \(ByteFormat.string(4_096))，可回收量待确认）")
+                "已移到废纸篓 \(ByteFormat.storageString(4_096))（未释放；清空废纸篓后最多释放 \(ByteFormat.storageString(4_096))，可回收量待确认）")
             let plain = OperationCompletionTally(report: Self.report([("cache", 4_096, .moved(Self.receipt("cache")))]))
             XCTAssertFalse(plain.reclaimableUnknown)
+            // D178: decimal (was `ByteFormat.string`, binary).
             XCTAssertEqual(plain.capacityLines.first,
-                           "已移到废纸篓 \(ByteFormat.string(4_096))（未释放，清空废纸篓后才释放）")
+                           "已移到废纸篓 \(ByteFormat.storageString(4_096))（未释放，清空废纸篓后才释放）")
 
             var outcome = FileAnalysisTrashOutcome(
                 report: Self.report([("movie.mov", 4_096, .moved(Self.receipt("movie.mov")))]),
@@ -542,13 +570,15 @@ final class OperationConfirmationModelTests: XCTestCase {
             let tally = OperationCompletionTally(report: report)
             XCTAssertEqual(tally.movedToTrashBytes + tally.movedToQuarantineBytes + tally.unverifiedMovedBytes
                            + tally.restoredBytes, report.summary.movedToRecoverableLocationBytes)
+            // D178: decimal, "1.5 MB" (was `ByteFormat.string`, binary: "1.4 MiB").
             XCTAssertEqual(tally.capacityLines, [
-                "已移到废纸篓 \(ByteFormat.string(1_500_000))（未释放，清空废纸篓后才释放）",
-                "另有 \(ByteFormat.string(50_000)) 已移动但结果待核实，未计入上面",
-                "已恢复到原位置 \(ByteFormat.string(400_000))，不再计入",
+                "已移到废纸篓 \(ByteFormat.storageString(1_500_000))（未释放，清空废纸篓后才释放）",
+                "另有 \(ByteFormat.storageString(50_000)) 已移动但结果待核实，未计入上面",
+                "已恢复到原位置 \(ByteFormat.storageString(400_000))，不再计入",
             ])
-            XCTAssertEqual(OperationByteStyle.binary.string(1_500_000), ByteFormat.string(1_500_000))
-            XCTAssertEqual(OperationByteStyle.storage.string(1_500_000), ByteFormat.storageString(1_500_000))
+            // D178: OperationByteStyle is gone; every page writes decimal sizes
+            // (was `.binary` → `ByteFormat.string`, `.storage` → `storageString`),
+            // which the lines above check.
         }
     }
 
@@ -827,7 +857,7 @@ final class OperationConfirmationModelTests: XCTestCase {
         ], unknownRunningApplicationNames: blockedRunning ? ["Editor"] : [])
     }
 
-    /// 七个页面各一份确认字段；冻结计划的四种页面由 `OperationSurface.inferred` 判断。
+    /// 八个页面各一份确认字段；冻结计划的四种页面由 `OperationSurface.inferred` 判断。
     static func allPageFacts() throws -> [OperationConfirmationFacts] {
         let browser = OperationConfirmationFacts.browserHistory(directRecordCount: 3, manualRecordCount: 0,
             browsers: ["Chrome"], runningBrowsers: [], fullDiskAccessBrowsers: [])
@@ -845,6 +875,7 @@ final class OperationConfirmationModelTests: XCTestCase {
             .uninstall(app: app(), selected: [], residual: false, runningAppNames: ["Fixture"], permission: .verified),
             .fileAnalysis(fileReview(blockedRunning: false), permission: .missingFullDiskAccess(limitedLocations: ["Documents"])),
             browser,
+            .emptyTrash(FrozenTrash.testFixture(names: ["Old Report.pdf"])),
         ]
     }
 

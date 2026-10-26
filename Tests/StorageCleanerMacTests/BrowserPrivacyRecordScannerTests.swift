@@ -5,7 +5,9 @@ import XCTest
 
 @MainActor
 final class BrowserPrivacyRecordScannerTests: XCTestCase {
-#if DEBUG || STORAGE_CLEANER_BETA
+    // `BrowserPrivacyPreviewFixture` exists only in Debug builds, so this test
+    // does too; a Release Beta test build has no fixture to call (D106-R2).
+#if DEBUG
     func testBetaBrowserPrivacyPreviewUsesAnonymousInMemoryRecords() async {
         let store = BrowserPrivacyPreviewFixture.makeStore()
 
@@ -961,7 +963,7 @@ final class BrowserPrivacyRecordScannerTests: XCTestCase {
         let identifiers = Set(BrowserPrivacyProviderRegistry.defaultProviders.map(\.descriptor.id))
         let required: Set<String> = [
             "safari", "chrome", "chromium", "edge", "firefox", "brave", "arc",
-            "opera", "opera-gx", "vivaldi", "orion", "zen", "librewolf", "waterfox",
+            "opera", "opera-gx", "vivaldi", "qq-browser", "orion", "zen", "librewolf", "waterfox",
         ]
 
         XCTAssertTrue(required.isSubset(of: identifiers))
@@ -1094,7 +1096,7 @@ final class BrowserPrivacyRecordScannerTests: XCTestCase {
 
     func testRegisteredProvidersExposeOnlyAuditedChromiumProductionAdapter() {
         let providers = BrowserPrivacyProviderRegistry.defaultProviders
-        XCTAssertEqual(providers.count, 14)
+        XCTAssertEqual(providers.count, 15, "D-FP6 added QQ Browser")
         XCTAssertTrue(providers.filter { $0.descriptor.engine == .chromium }
             .allSatisfy { $0.historyWriteAdapter == .chromiumProduction })
         XCTAssertTrue(providers.filter { $0.descriptor.engine != .chromium }

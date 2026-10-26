@@ -129,6 +129,7 @@ struct DuplicateFileScanner {
         var maxScanSeconds: TimeInterval
         var directoryReadTimeout: TimeInterval
         var candidateRules: Set<DuplicateFileCandidateGroup.Rule>
+        var ignoreList: IgnoreListSnapshot?
         var selectedRootsPass: SelectedRootsPass?
 
         init(
@@ -145,8 +146,10 @@ struct DuplicateFileScanner {
             candidateRules: Set<DuplicateFileCandidateGroup.Rule> = Set(
                 DuplicateFileCandidateGroup.Rule.selectableCases
             ),
-            selectedRootsPass: SelectedRootsPass? = nil
+            selectedRootsPass: SelectedRootsPass? = nil,
+            ignoreList: IgnoreListSnapshot = .empty
         ) {
+            self.ignoreList = ignoreList
             self.scope = scope
             self.roots = roots
             self.excludedPaths = excludedPaths
@@ -912,7 +915,8 @@ struct DuplicateFileScanner {
         resumeIndex resumeIndexHandler: ResumeIndexHandler? = nil,
         progress progressHandler: ProgressHandler? = nil,
         isCloudPlaceholder: (String) -> Bool = DuplicateFileScanner.isCloudPlaceholder,
-        contentReader: GuardedFileContentReader = GuardedFileContentReader()
+        contentReader: GuardedFileContentReader = GuardedFileContentReader(),
+        surelyFreedBytes: (String) -> Int64? = DuplicateFileScanner.surelyFreedBytes(atPath:)
     ) -> DuplicateFileScanReport {
         // Reading a cloud-only placeholder makes macOS download it inside
         // read(), where neither Cancel nor the time budget can interrupt, and
@@ -921,6 +925,9 @@ struct DuplicateFileScanner {
         // the previous policy for whatever task reuses it next.
         let restoreMaterialization = refuseDatalessMaterializationOnThisThread()
         defer { restoreMaterialization() }
+        var configuration = configuration
+        let ignoreList = configuration.ignoreList ?? .empty
+        configuration.excludedPaths += ignoreList.paths(for: .other)
         let fileManager = FileManager.default
         let passes = discoveryPasses(for: configuration)
         let timeBudget = ActiveScanTimeBudget(seconds: totalScanSeconds(for: configuration))
@@ -1322,7 +1329,7 @@ struct DuplicateFileScanner {
         let mayConfirm = passes.count > 1 ? timeBudget.hasTimeRemaining : !reachedTimeLimit
         if !cancelled && mayConfirm {
             confirmation = confirmedGroups(
-                from: candidates,
+                from: candidates.filter { !ignoreList.ignores(path: $0.path, category: .duplicates) },
                 timeBudget: timeBudget,
                 control: control,
                 progress: &progress,
@@ -1354,6 +1361,7 @@ struct DuplicateFileScanner {
                 from: candidates,
                 exactGroups: allExactGroups,
                 rules: configuration.candidateRules,
+                ignoreList: ignoreList,
                 timeBudget: timeBudget,
                 control: control,
                 contentReader: contentReader,
@@ -1365,7 +1373,11 @@ struct DuplicateFileScanner {
         )
         cancelled = cancelled || control.isCancelled
         reachedTimeLimit = reachedTimeLimit || !timeBudget.hasTimeRemaining
-        let exactLimit = limitedExactGroups(allExactGroups, maxResults: configuration.maxResults)
+        let exactLimit = limitedExactGroups(
+            allExactGroups,
+            maxResults: configuration.maxResults,
+            surelyFreedBytes: surelyFreedBytes
+        )
         let exactFileCount = exactLimit.groups.reduce(0) { $0 + $1.files.count }
         let candidateLimit = limitedCandidateGroups(
             allCandidates,
@@ -1378,13 +1390,28 @@ struct DuplicateFileScanner {
         progressHandler?(progress)
 
         let rootCoverage = coverageBuilders.map(\.coverage)
+        let ignoredDuplicateCount = Set(candidates.filter { ignoreList.ignores(path: $0.path, category: .duplicates) }.map(\.path)).count
+        let ignoredSimilarCount = Set(candidates.filter { ignoreList.ignores(path: $0.path, category: .similar) }.map(\.path)).count
+        let policyPaths = Set((protectedWholeComputerRoots + protectedVolumeSubpaths(for: configuration.roots)).map(PathSafety.lexicalPath))
+        let userExcludedPaths = configuration.excludedPaths.filter { !policyPaths.contains(PathSafety.lexicalPath($0)) }
+        let excludedEncounters = rootCoverage.flatMap { root in
+            root.skippedPaths.filter { $0.reason == .excluded }.map(\.path)
+                + (root.skipReason == .excluded ? [root.rootPath] : [])
+        }
+        let ignoredOtherCount = Set(excludedEncounters.filter { path in
+            ignoreList.ignores(path: path, category: .other)
+                || ScanExclusionService.isExcluded(path, excludedPaths: userExcludedPaths)
+        }).count
         let coverage = DuplicateFileScanCoverage(
             roots: rootCoverage,
             reachedTimeLimit: reachedTimeLimit,
             reachedFileLimit: reachedFileLimit,
             reachedDirectoryLimit: reachedDirectoryLimit,
             reachedResultLimit: reachedResultLimit,
-            contentReadUnresponsive: readUnresponsive ? true : nil
+            contentReadUnresponsive: readUnresponsive ? true : nil,
+            ignoredDuplicateFiles: ignoredDuplicateCount,
+            ignoredSimilarFiles: ignoredSimilarCount,
+            ignoredOtherItems: ignoredOtherCount
         )
         let incompleteSkipReasons: Set<DuplicateFileScanSkipReason> = [
             .permissionDenied, .timedOut, .unreadable, .cloudPlaceholder
@@ -1440,6 +1467,48 @@ struct DuplicateFileScanner {
         }
         flush()
         return result
+    }
+
+    /// D104 G1 (plan step 5): what deleting every copy but one surely frees,
+    /// whichever copy is kept: the copies' surely freed bytes less the
+    /// largest. Copies that are clones of each other free almost nothing, so
+    /// a group of clones adds almost nothing to the page's total; keeping a
+    /// clone in a mixed group can free more than this. Nil when any copy
+    /// cannot be read.
+    static func physicalReclaimableBytes(
+        ofFilesAt paths: [String],
+        surelyFreedBytes: (String) -> Int64?
+    ) -> Int64? {
+        guard paths.count > 1 else { return nil }
+        var total: Int64 = 0
+        var largest: Int64 = 0
+        for path in paths {
+            guard let freed = surelyFreedBytes(path).map({ max(0, $0) }) else { return nil }
+            total = CleanupByteCount.adding(freed, to: total)
+            largest = max(largest, freed)
+        }
+        return max(0, total - largest)
+    }
+
+    /// D104 G1: bytes deleting the copy at `path` frees once the Trash is
+    /// emptied: its private bytes (`FileStorageSharing`), every block on a
+    /// volume without clones or snapshots, and none while another hard link
+    /// keeps the data. Nil when that cannot be read. Read-only metadata.
+    static func surelyFreedBytes(atPath path: String) -> Int64? {
+        var metadata = stat()
+        guard path.withCString({ Darwin.lstat($0, &metadata) }) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG else {
+            return nil
+        }
+        guard metadata.st_nlink <= 1 else { return 0 }
+        switch FileStorageSharing.read(at: URL(fileURLWithPath: path)) {
+        case .notReported:
+            return Int64(metadata.st_blocks) * 512
+        case .unknown:
+            return nil
+        case let .known(sharing):
+            return max(0, min(sharing.privateBytes, sharing.allocatedDataBytes))
+        }
     }
 
     private static func storageRelationship(
@@ -1668,6 +1737,7 @@ struct DuplicateFileScanner {
         from candidates: [FileCandidate],
         exactGroups: [DuplicateFileGroup],
         rules: Set<DuplicateFileCandidateGroup.Rule>,
+        ignoreList: IgnoreListSnapshot,
         timeBudget: ActiveScanTimeBudget,
         control: DuplicateFileScanControl,
         contentReader: GuardedFileContentReader,
@@ -1687,7 +1757,7 @@ struct DuplicateFileScanner {
         let metadataGroups = DuplicateFileCandidateGroup.Rule.selectableCases
             .filter { $0 != .similarImage && rules.contains($0) }
             .flatMap { rule -> [DuplicateFileCandidateGroup] in
-                Dictionary(grouping: candidates) { candidate in
+                Dictionary(grouping: candidates.filter { !ignoreList.ignores(path: $0.path, category: .duplicates) }) { candidate in
                     candidateKey(candidate, rule: rule)
                 }
                 .compactMap { key, groupedCandidates in
@@ -1712,7 +1782,7 @@ struct DuplicateFileScanner {
             }
         let imageGroups = rules.contains(.similarImage)
             ? similarImageCandidates(
-                from: candidates,
+                from: candidates.filter { !ignoreList.ignores(path: $0.path, category: .similar) },
                 exactRepresentativeByPath: exactRepresentativeByPath,
                 timeBudget: timeBudget,
                 control: control,
@@ -1868,9 +1938,12 @@ struct DuplicateFileScanner {
         }
     }
 
+    /// D104 G1: savings are read here, once the list is final, for the
+    /// copies it shows.
     private static func limitedExactGroups(
         _ groups: [DuplicateFileGroup],
-        maxResults: Int
+        maxResults: Int,
+        surelyFreedBytes: (String) -> Int64?
     ) -> (groups: [DuplicateFileGroup], reachedLimit: Bool) {
         var remainingFiles = max(0, maxResults)
         var limited = [DuplicateFileGroup]()
@@ -1887,7 +1960,10 @@ struct DuplicateFileScanner {
                     contentSizeBytes: group.contentSizeBytes,
                     matchKind: group.matchKind,
                     relationship: group.relationship,
-                    estimatedPhysicalReclaimableBytes: nil
+                    estimatedPhysicalReclaimableBytes: physicalReclaimableBytes(
+                        ofFilesAt: files.map(\.path),
+                        surelyFreedBytes: surelyFreedBytes
+                    )
                 )
             )
             includedFiles += files.count

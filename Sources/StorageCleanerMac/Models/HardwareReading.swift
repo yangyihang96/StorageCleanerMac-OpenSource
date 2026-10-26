@@ -51,12 +51,15 @@ enum HardwareReadingText {
         }
     }
 
+    /// D128: iStat's power (sensor type 5): "0 W", whole milliwatts under
+    /// 1 W ("850 mW"), else at most one decimal (was "%.2f W").
     static func watts(_ value: Double) -> String {
-        String(format: "%.2f W", value)
+        IStatNumberFormat.power(value)
     }
 
+    /// D128: iStat's frequency (sensor type 8), "1.4 GHz" (was "%.0f MHz").
     static func megahertz(_ value: Double) -> String {
-        String(format: "%.0f MHz", value)
+        IStatNumberFormat.frequency(megahertz: value)
     }
 
     /// "+28.00 W", "-2.60 W"; a zero has no sign.
@@ -79,15 +82,18 @@ enum HardwareReadingText {
         return "\(number) \(unit)"
     }
 
+    /// D128: iStat's voltage and current (sensor types 6 and 4), as power
+    /// (was "%.2f V" and "%.2f A").
     static func volts(_ value: Double) -> String {
-        String(format: "%.2f V", value)
+        IStatNumberFormat.voltage(value)
     }
 
     static func amps(_ value: Double) -> String {
-        String(format: "%.2f A", value)
+        IStatNumberFormat.current(value)
     }
 
+    /// D128: iStat's whole degrees, "37°" (was "%.1f°C").
     static func celsius(_ value: Double) -> String {
-        String(format: "%.1f°C", value)
+        IStatNumberFormat.temperature(value)
     }
 }

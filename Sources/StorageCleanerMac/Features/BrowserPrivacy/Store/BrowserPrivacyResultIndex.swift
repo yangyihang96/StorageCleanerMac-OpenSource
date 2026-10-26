@@ -14,12 +14,16 @@ struct BrowserPrivacyResultIndex: Sendable {
     let concealedBulk: BrowserPrivacyBulkSelectionPresentation
     let allProfiles: [BrowserPrivacyProfileOption]
     let profilesByBrowser: [String: [BrowserPrivacyProfileOption]]
+    /// D154 batch 3E: every browser's record count, unfiltered (the
+    /// Protection manager's category column).
+    let recordCountByBrowser: [String: Int]
 
     init(records: [BrowserPrivacyRecord], version: Int) throws {
         self.version = version; self.records = records
         var byID: [UUID: BrowserPrivacyRecord] = [:], search: [UUID: String] = [:]
         var domains: [UUID: String] = [:], keywords: [UUID: String] = [:]
         var sensitive: Set<BrowserPrivacySiteID> = [], browsers: [String: BrowserPrivacyBrowser] = [:]
+        var counts: [String: Int] = [:]
         for (offset, record) in records.enumerated() {
             if offset % 256 == 0 { try Task.checkCancellation() }
             byID[record.id] = record
@@ -30,8 +34,10 @@ struct BrowserPrivacyResultIndex: Sendable {
                 sensitive.insert(BrowserPrivacyDisclosurePolicy.siteID(record))
             }
             browsers[record.browser.id] = record.browser
+            counts[record.browser.id, default: 0] += 1
         }
         self.byID = byID; self.search = search; self.domains = domains; self.keywords = keywords
+        recordCountByBrowser = counts
         sensitiveSites = sensitive
         concealedBulk = .init(records: records, disclosure: .init(sensitiveSites: sensitive))
         let order = ["safari", "chrome", "edge", "firefox"]
@@ -97,7 +103,8 @@ struct BrowserPrivacyResultIndex: Sendable {
                      hasTextQuery: hasText, policy: policy,
                      bulk: revealedSites.isEmpty && allSensitiveSites == sensitiveSites ? concealedBulk : .init(records: records, disclosure: policy), browserGroups: browserGroups,
                      siteCount: groups.reduce(0) { $0 + $1.sites.count },
-                     recordIDs: Set(matched.map(\.id)), allProfiles: allProfiles, profilesByBrowser: profilesByBrowser)
+                     recordIDs: Set(matched.map(\.id)), allProfiles: allProfiles, profilesByBrowser: profilesByBrowser,
+                     recordCountByBrowser: recordCountByBrowser)
     }
 }
 
@@ -117,4 +124,5 @@ struct BrowserPrivacyResultSnapshot: Sendable {
     let recordIDs: Set<UUID>
     let allProfiles: [BrowserPrivacyProfileOption]
     let profilesByBrowser: [String: [BrowserPrivacyProfileOption]]
+    let recordCountByBrowser: [String: Int]
 }

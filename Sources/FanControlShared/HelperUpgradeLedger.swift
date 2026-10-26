@@ -9,9 +9,15 @@ import Foundation
 /// record's mtime into uptime, then persisted so later reads cannot reset it.
 public final class HelperUpgradeLedger: @unchecked Sendable {
     public static let minimumInterval: TimeInterval = 600
+    /// macOS keeps `/var/run` as root:daemon 0775. Group write is trusted only
+    /// for these system groups (wheel, daemon); world write never is. Without
+    /// this the production ledger always failed closed and the helper never
+    /// handed over to a replaced executable (D97).
+    static let productionTrustedWriterGroups: Set<gid_t> = [0, 1]
     private let directory: URL
     private let filename: String
     private let owner: uid_t
+    private let trustedWriterGroups: Set<gid_t>
     private let wallClock: @Sendable () -> TimeInterval
     private struct Record: Codable {
         let highestYieldedBuild: String?
@@ -24,14 +30,16 @@ public final class HelperUpgradeLedger: @unchecked Sendable {
 
     public convenience init(label: String) {
         self.init(directory: URL(fileURLWithPath: "/var/run").resolvingSymlinksInPath(),
-                  filename: label + ".handoff", owner: 0)
+                  filename: label + ".handoff", owner: 0,
+                  trustedWriterGroups: Self.productionTrustedWriterGroups)
     }
 
     // Pure filesystem tests use their own protected temporary directory/uid.
     // This initializer is not part of the privileged adapter's public API.
-    init(directory: URL, filename: String, owner: uid_t,
+    init(directory: URL, filename: String, owner: uid_t, trustedWriterGroups: Set<gid_t> = [],
          wallClock: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSince1970 }) {
         self.directory = directory; self.filename = filename; self.owner = owner
+        self.trustedWriterGroups = trustedWriterGroups
         self.wallClock = wallClock
     }
 
@@ -58,7 +66,8 @@ public final class HelperUpgradeLedger: @unchecked Sendable {
         var parentStat = stat()
         guard fstat(parent, &parentStat) == 0, parentStat.st_uid == owner,
               parentStat.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-              parentStat.st_mode & 0o022 == 0 else { return false }
+              parentStat.st_mode & 0o002 == 0,
+              parentStat.st_mode & 0o020 == 0 || trustedWriterGroups.contains(parentStat.st_gid) else { return false }
         let flags = O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
         var fd = openat(parent, filename, flags | O_CREAT | O_EXCL, 0o600)
         let created = fd >= 0

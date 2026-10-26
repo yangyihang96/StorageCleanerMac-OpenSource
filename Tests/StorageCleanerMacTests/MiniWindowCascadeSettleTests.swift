@@ -46,9 +46,12 @@ final class MiniWindowCascadeSettleTests: XCTestCase {
         session.setGeekSection(.disk)
         let placed = session.visibleAttachedContentFramesForTesting
         XCTAssertEqual(placed.count, 2)
-        XCTAssertEqual(placed[1].maxY - placed[0].maxY, 248, accuracy: 0.5, "aligned with the disk card")
+        // D123 (2026-10-19): 8 pt above the disk card at 248 so their first
+        // cards line up (was 248).
+        XCTAssertEqual(placed[1].maxY - placed[0].maxY, 240, accuracy: 0.5, "aligned with the disk card")
         let defaultOffset = GeekPanelPresentationMetrics.detailVerticalOffset(for: .disk, density: .geek)
-        XCTAssertNotEqual(defaultOffset, 248, accuracy: 0.5, "the default offset would misplace the page")
+        XCTAssertNotEqual(defaultOffset, 240, accuracy: 0.5,
+                          "the default offset would misplace the page (D123: was 248)")
 
         var appliedFrames = 0
         session.programmaticFrameDidApplyForTesting = { appliedFrames += 1 }
@@ -73,7 +76,7 @@ final class MiniWindowCascadeSettleTests: XCTestCase {
             layoutOffset: 332
         )
         let moved = session.visibleAttachedContentFramesForTesting
-        XCTAssertEqual(moved[1].maxY - moved[0].maxY, 332, accuracy: 0.5)
+        XCTAssertEqual(moved[1].maxY - moved[0].maxY, 324, accuracy: 0.5, "D123: 8 pt above the card (was 332)")
         XCTAssertEqual(appliedFrames, 1)
 
         // A new presentation starts without remembered offsets.
@@ -128,8 +131,9 @@ final class MiniWindowCascadeSettleTests: XCTestCase {
                        anchor: anchor, defaults: defaults, suiteName: suiteName)
     }
 
-    /// Places the disk page at its card (offset 248), then rebuilds the card
-    /// so its anchor is missing while the page is placed again.
+    /// Places the disk page at its card (card offset 248; the page opens at
+    /// 240 since D123, was 248), then rebuilds the card so its anchor is
+    /// missing while the page is placed again.
     private func placeDiskPageAndDropItsAnchor(_ harness: Harness) -> CGFloat {
         harness.coordinator.registerAnchor(
             id: .module(.disk), screenRect: NSRect(x: 900, y: 400, width: 288, height: 78),
@@ -154,13 +158,13 @@ final class MiniWindowCascadeSettleTests: XCTestCase {
 
         let density = try makeHarness()
         defer { density.tearDown() }
-        XCTAssertEqual(placeDiskPageAndDropItsAnchor(density), 248, accuracy: 0.5)
+        XCTAssertEqual(placeDiskPageAndDropItsAnchor(density), 240, accuracy: 0.5, "D123: was 248")
         density.session.selectDensity(.geek)
         XCTAssertEqual(currentDetailOffset(density), defaultOffset, accuracy: 0.5, "a new density forgets it")
 
         let size = try makeHarness()
         defer { size.tearDown() }
-        XCTAssertEqual(placeDiskPageAndDropItsAnchor(size), 248, accuracy: 0.5)
+        XCTAssertEqual(placeDiskPageAndDropItsAnchor(size), 240, accuracy: 0.5, "D123: was 248")
         let overview = GeekPanelPresentationMetrics.normalizedOverviewSize(nil)
         let smaller = CGSize(width: overview.width, height: overview.height - 40)
         size.session.setOverviewSize(smaller)
@@ -170,7 +174,7 @@ final class MiniWindowCascadeSettleTests: XCTestCase {
 
         let layout = try makeHarness()
         defer { layout.tearDown() }
-        XCTAssertEqual(placeDiskPageAndDropItsAnchor(layout), 248, accuracy: 0.5)
+        XCTAssertEqual(placeDiskPageAndDropItsAnchor(layout), 240, accuracy: 0.5, "D123: was 248")
         layout.settings.updateGeekDashboardConfiguration { configuration in
             configuration.modules.reverse()
         }

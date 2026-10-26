@@ -1,13 +1,23 @@
 import SwiftUI
 
 enum GeekSensorPowerHoverDetailMetrics {
-    // The sensor inspector has a two-row header and can show a second value
-    // row. Keep one stable size while history is gathering so neither the
-    // chart nor the time selector is clipped by the compact loading shell.
-    static let sensorHistorySize = CGSize(width: MiniWindowStyleTokens.historyWidth, height: 250)
+    // D121: a sensor history is the graph card (391 × 216); readings shown
+    // below it add rows (`GeekSensorMetricHoverDetail.popoverSize`,
+    // `GeekFanHoverDetail.popoverSize`). The size stays while history is
+    // gathering, so the card does not jump when the first data arrives.
+    static let sensorHistorySize = GeekIStatHistoryGeometry.pageSize(rowCount: 0)
     static let compactSamplingSize = GeekHoverDetailMetrics.compactSize
-    static let batterySize = CGSize(width: 220, height: 196)
-    static let batteryHistorySize = GeekHoverDetailMetrics.compactHistorySize
+    /// D122: the battery page is one titled iStat card per section (iStat's
+    /// battery menu); it was the compact two-column grid's fixed 220 × 196.
+    /// D137: the page passes its width from its rows
+    /// (`GeekBatteryElectricalHoverDetail.popoverSize`; was 220 for any rows).
+    static func batterySize(sectionRowCounts: [Int], width: CGFloat = GeekIStatDetailGeometry.pageWidth) -> CGSize {
+        GeekIStatDetailGeometry.pageSize(
+            cards: sectionRowCounts.map { GeekIStatSectionGeometry.rowsHeight($0, titled: true) },
+            width: width
+        )
+    }
+    static let batteryHistorySize = GeekBatteryHistoryHoverDetail.popoverSize
     static let energyModeSize = CGSize(width: 170, height: 167)
 
     static func energyModeSize(groupCount: Int) -> CGSize {
@@ -155,15 +165,16 @@ struct GeekSensorMetricHoverDetail: View {
     }
 
     private func detailBody(statistics: GeekSeriesStatistics?) -> some View {
-        GeekHoverDetailCanvas(
+        let valueRange = Self.displayedValueRange(self.valueRange, unit: unit, peak: statistics?.maximum)
+        return GeekHoverDetailCanvas(
             title: title,
             trailing: currentValue,
             showsRangePicker: channel != nil,
-            stacksRangePicker: true
+            historyCard: true
         ) {
             if let channel {
                 // The axis row is also under the sampling placeholder, so the
-                // shell keeps its height when the first renderable history
+                // card keeps its layout when the first renderable history
                 // arrives.
                 Group {
                     if hasRenderableHistory {
@@ -172,7 +183,9 @@ struct GeekSensorMetricHoverDetail: View {
                             series: [
                                 MenuBarTelemetrySeries(
                                     id: "sensor-hover-\(channel.rawValue)",
-                                    title: title,
+                                    // D138: iStat's tooltip row, 'Sensors.Value'
+                                    // (was the sensor's name).
+                                    title: L10n.text("数值", "Value"),
                                     channel: channel,
                                     color: tint
                                 )
@@ -188,8 +201,11 @@ struct GeekSensorMetricHoverDetail: View {
                             showsLegend: false,
                             showsTimelineLabels: false,
                             showsTooltip: true,
-                            horizontalInset: 2,
-                            showsSamplingDetails: false
+                            horizontalInset: MiniWindowStyleTokens.historyChartInset,
+                            verticalInset: 0,
+                            showsSamplingDetails: false,
+                            // D130: iStat's history buckets.
+                            bucketing: .history
                         )
                         // The series color is the ring's color (`tint`); a
                         // chart theme must not repaint only the history.
@@ -209,20 +225,25 @@ struct GeekSensorMetricHoverDetail: View {
                 )
                 .frame(height: MiniWindowStyleTokens.historyPlotHeight)
             }
-
-            if let secondaryTitle,
-               let secondaryValue {
-                GeekHoverValueRow(title: secondaryTitle, value: secondaryValue)
-            }
-            ForEach(detailRows) { row in
-                GeekHoverValueRow(title: row.title, value: row.value)
-            }
-            if let note {
-                Text(note)
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        } below: {
+            if extraRowCount > 0 {
+                GeekIStatRowsCard(rowCount: extraRowCount) {
+                    if let secondaryTitle,
+                       let secondaryValue {
+                        GeekIStatRow(title: secondaryTitle, value: secondaryValue)
+                    }
+                    ForEach(detailRows) { row in
+                        GeekIStatRow(title: row.title, value: row.value)
+                    }
+                    if let note {
+                        Text(note)
+                            .geekIStatValueText(.secondary)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(height: GeekIStatSectionGeometry.rowHeight)
+                            .help(note)
+                    }
+                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -230,14 +251,24 @@ struct GeekSensorMetricHoverDetail: View {
         .accessibilityValue(accessibilitySummary(statistics: statistics))
     }
 
-    /// The popover for this detail: the sensor history size plus one row
-    /// per extra reading and the note.
-    static func popoverSize(extraRowCount: Int, hasNote: Bool) -> CGSize {
-        let base = GeekSensorPowerHoverDetailMetrics.sensorHistorySize
-        return CGSize(
-            width: base.width,
-            height: base.height + CGFloat(max(0, extraRowCount)) * 18 + (hasNote ? 18 : 0)
-        )
+    /// The rows below the graph card: the second reading, the extra
+    /// readings and the note, one 15 pt row each.
+    private var extraRowCount: Int {
+        (hasSecondaryDetail ? 1 : 0) + detailRows.count + (note == nil ? 0 : 1)
+    }
+
+    /// D121: the popover for this detail: the graph card and one row per
+    /// extra reading (the second value included) and the note.
+    nonisolated static func popoverSize(extraRowCount: Int, hasNote: Bool) -> CGSize {
+        GeekIStatHistoryGeometry.pageSize(rowCount: max(0, extraRowCount) + (hasNote ? 1 : 0))
+    }
+
+    /// D121: a temperature history's scale is iStat's: from the given
+    /// bottom to the larger of the given top and the visible peak rounded up
+    /// to 10 °C, recomputed on every redraw.
+    nonisolated static func displayedValueRange(_ range: ClosedRange<Double>, unit: GeekChartUnit, peak: Double?) -> ClosedRange<Double> {
+        guard unit == .temperature, let peak, peak.isFinite, peak > range.upperBound else { return range }
+        return range.lowerBound...(ceil(peak / 10) * 10)
     }
 
     private var values: [Double] {
@@ -378,6 +409,16 @@ enum GeekPowerHistoryScale {
     static let connectionTimelineGap: CGFloat = 4
     static let lightningBoltHeight: CGFloat = 10
 
+    /// D132: iStat's battery graphs (`drawRect:` of both battery graph
+    /// sections): the newest bar's right edge 8 pt in from the right
+    /// (`x = W − 8`, bars `[x − 2, x]`), the 8 pt rail with corner 2 4 pt
+    /// below the bars (`H − 16`), its charging icon on a rail of at least
+    /// 11 pt.
+    static let iStatInset: CGFloat = 8
+    static let iStatRailHeight: CGFloat = 8
+    static let iStatRailGap: CGFloat = 4
+    static let iStatIconMinimumRailWidth: CGFloat = 11
+
     @available(*, deprecated, message: "Use PowerConnectionTimeline.connectedRuns")
     static func connectedRuns(statuses: [Bool?]) -> [ClosedRange<Int>] {
         PowerConnectionTimeline.connectedRuns(statuses: statuses)
@@ -456,12 +497,20 @@ struct GeekPowerHistoryChart: View {
     let accessibilityLabel: String
     var showsTimelineLabels = true
     var showsTooltip = false
+    /// The plot's horizontal inset; D121: the history page uses the card's
+    /// 8 pt inset, the module page's card keeps 2.
+    var horizontalInset: CGFloat = 2
+    /// D132: iStat's battery graph (the charge metric only): its buckets and
+    /// geometry (`plotGeometry(in:)`), the bars drawn in the card's full
+    /// width; nil keeps the projection.
+    var batteryGraph: GeekIStatBatteryGraph? = nil
 
     @State private var hoverLocation: CGPoint?
 
     var activeFrame: GeekPreparedPowerFrame? = nil
     private var preparationKernel: GeekPowerPreparationKernel {
-        .init(points: points, metric: metric, duration: duration, displayScale: displayScale)
+        .init(points: points, metric: metric, duration: duration, displayScale: displayScale,
+              batteryGraph: batteryGraph)
     }
 
     var body: some View {
@@ -515,19 +564,59 @@ struct GeekPowerHistoryChart: View {
     private func chartContent(referenceDate: Date) -> some View {
         let kernel = preparationKernel
         return GeometryReader { proxy in
-            let timeline = showsTimelineLabels && metric == .batteryPower && proxy.size.height >= 70
-            let rail = metric == .charge ? GeekPowerHistoryScale.connectionTimelineHeight + GeekPowerHistoryScale.connectionTimelineGap : 0
-            let plot = CGRect(x: 2, y: 2, width: max(1, proxy.size.width - 4),
-                              height: max(1, proxy.size.height - (timeline ? 20 : 4) - rail))
+            let plot = plotGeometry(in: proxy.size).plot
+            let graph = batteryGraph.map { ":\($0)" } ?? ""
             MenuBarChartPreparation(kind: "power-frame", first: points.first?.date, last: points.last?.date,
-                count: points.count, configuration: "\(metric):\(duration):\(plot):\(displayScale)",
-                shape: "\(metric):\(plot):\(displayScale)",
+                count: points.count, configuration: "\(metric):\(duration):\(plot):\(displayScale)\(graph)",
+                shape: "\(metric):\(plot):\(displayScale)\(graph)",
                 window: duration,
-                clockRevision: floor(referenceDate.timeIntervalSince1970), cost: max(1024, points.count * 320),
+                clockRevision: clockRevision(at: referenceDate), cost: max(1024, points.count * 320),
                 build: { GeekPreparedPowerFrame(kernel: kernel, plot: plot, reference: referenceDate) }) { frame in
                     preparedChartContent(frame, referenceDate: referenceDate)
                 }
         }
+    }
+
+    /// The projection prepares a frame on every clock tick; D132: iStat's
+    /// battery graph when a bucket closes.
+    func clockRevision(at referenceDate: Date) -> TimeInterval {
+        guard let batteryGraph else { return floor(referenceDate.timeIntervalSince1970) }
+        return floor(referenceDate.timeIntervalSince1970 / batteryGraph.interval(for: duration))
+    }
+
+    /// The plot and the connection rail in a chart of `size`, and whether
+    /// the timeline labels show.
+    func plotGeometry(in size: CGSize) -> (plot: CGRect, rail: CGRect, showsTimelineLabels: Bool) {
+        if let batteryGraph {
+            let geometry = Self.batteryGraphGeometry(batteryGraph, size: size, displayScale: displayScale)
+            return (geometry.plot, geometry.rail, false)
+        }
+        let timeline = showsTimelineLabels && metric == .batteryPower && size.height >= 70
+        let railHeight: CGFloat = metric == .charge ? GeekPowerHistoryScale.connectionTimelineHeight : 0
+        let railGap: CGFloat = metric == .charge ? GeekPowerHistoryScale.connectionTimelineGap : 0
+        let plot = CGRect(x: horizontalInset, y: 2, width: max(1, size.width - 2 * horizontalInset),
+                          height: max(1, size.height - (timeline ? 20 : 4) - railHeight - railGap))
+        return (plot, CGRect(x: plot.minX, y: plot.maxY + railGap, width: plot.width, height: railHeight), timeline)
+    }
+
+    /// D132: iStat's battery graph in a chart of `size` (the card's width):
+    /// its bars from the top to 12 pt above the bottom, as many as it draws
+    /// with the newest one's right edge 8 pt in from the right (`x = W − 8`),
+    /// then a 4 pt gap and the 8 pt rail.
+    static func batteryGraphGeometry(
+        _ graph: GeekIStatBatteryGraph, size: CGSize, displayScale: CGFloat
+    ) -> (plot: CGRect, rail: CGRect) {
+        let metrics = GeekChartWindow.barMetrics(displayScale: displayScale)
+        let inset = GeekPowerHistoryScale.iStatInset
+        let bars = CGFloat(graph.barCount) * metrics.pitch - metrics.spacing
+        let width = max(1, min(bars, size.width - 2 * inset))
+        let plot = CGRect(
+            x: max(0, size.width - inset - width), y: 0, width: width,
+            height: max(1, size.height - GeekPowerHistoryScale.iStatRailGap - GeekPowerHistoryScale.iStatRailHeight)
+        )
+        let rail = CGRect(x: plot.minX, y: plot.maxY + GeekPowerHistoryScale.iStatRailGap,
+                          width: plot.width, height: GeekPowerHistoryScale.iStatRailHeight)
+        return (plot, rail)
     }
 
     private func preparedChartContent(_ frame: GeekPreparedPowerFrame, referenceDate: Date) -> some View {
@@ -549,33 +638,10 @@ struct GeekPowerHistoryChart: View {
                 PanelChartSamplingPlaceholder()
             } else {
                 GeometryReader { proxy in
-                    let shouldShowTimelineLabels = showsTimelineLabels
-                        && metric == .batteryPower
-                        && proxy.size.height >= 70
-                    let connectionRailHeight: CGFloat = metric == .charge
-                        ? GeekPowerHistoryScale.connectionTimelineHeight
-                        : 0
-                    let connectionRailGap: CGFloat = metric == .charge
-                        ? GeekPowerHistoryScale.connectionTimelineGap
-                        : 0
-                    let plot = CGRect(
-                        x: 2,
-                        y: 2,
-                        width: max(1, proxy.size.width - 4),
-                        height: max(
-                            1,
-                            proxy.size.height
-                                - (shouldShowTimelineLabels ? 20 : 4)
-                                - connectionRailHeight
-                                - connectionRailGap
-                        )
-                    )
-                    let connectionRail = CGRect(
-                        x: plot.minX,
-                        y: plot.maxY + connectionRailGap,
-                        width: plot.width,
-                        height: connectionRailHeight
-                    )
+                    let geometry = plotGeometry(in: proxy.size)
+                    let shouldShowTimelineLabels = geometry.showsTimelineLabels
+                    let plot = geometry.plot
+                    let connectionRail = geometry.rail
 
                     tooltipHoverTracking(
                         ZStack(alignment: .topLeading) {
@@ -732,15 +798,20 @@ struct GeekPowerHistoryChart: View {
             )
             let range = GeekPowerHistoryScale.chargeRange(values: [])
             let span = range.upperBound - range.lowerBound
-            let valuePlot = plot.insetBy(dx: 0, dy: plot.height > 4 ? 2 : 0)
+            // D132: iStat's battery graph maps 100 % to the plot's top and
+            // 0 % to its baseline (`y = 30 + (1 − pct) · (H − 50)`), and draws
+            // nothing for a missing bucket.
+            let valuePlot = batteryGraph != nil ? plot : plot.insetBy(dx: 0, dy: plot.height > 4 ? 2 : 0)
             let baselineY = MiniWindowPixel.aligned(
                 valuePlot.maxY,
                 displayScale: displayScale
             )
             let barWidth = chargeBarWidth
 
-            GeekChartDrawing.gaps(in: context, plot: plot,
-                occupiedX: preparedBuckets.map { $0.bucket.x }, displayScale: displayScale)
+            if batteryGraph == nil {
+                GeekChartDrawing.gaps(in: context, plot: plot,
+                    occupiedX: preparedBuckets.map { $0.bucket.x }, displayScale: displayScale)
+            }
             for prepared in preparedBuckets {
                 let bucket = prepared.bucket
                 let point = prepared.payload
@@ -764,7 +835,7 @@ struct GeekPowerHistoryChart: View {
                 GeekChartDrawing.bar(in: context,
                     rect: CGRect(x: MiniWindowPixel.aligned(bucket.x - barWidth / 2, displayScale: displayScale),
                         y: y, width: barWidth, height: height),
-                    color: barColor(for: point), estimated: prepared.isEstimated, displayScale: displayScale)
+                    color: barColor(for: point), estimated: showsEstimate(prepared), displayScale: displayScale)
             }
             return
         }
@@ -854,7 +925,11 @@ struct GeekPowerHistoryChart: View {
                 Path(roundedRect: segment, cornerRadius: min(2, rail.height / 2)),
                 with: .color(tint)
             )
-            if segment.width >= 14 {
+            if batteryGraph != nil {
+                if floor(segment.width) >= GeekPowerHistoryScale.iStatIconMinimumRailWidth {
+                    drawChargingIcon(context: &context, in: segment)
+                }
+            } else if segment.width >= 14 {
                 drawLightningBolt(context: &context, in: segment)
             }
         }
@@ -864,7 +939,25 @@ struct GeekPowerHistoryChart: View {
         context: inout GraphicsContext,
         in segment: CGRect
     ) {
-        let center = CGPoint(x: segment.midX, y: segment.midY)
+        context.fill(Self.lightningBolt(center: CGPoint(x: segment.midX, y: segment.midY)), with: .color(.white))
+    }
+
+    /// D132: iStat's charging icon on the rail's center: its mask cut out
+    /// of the rail (`chargingMask`, destination-out), then the icon in the
+    /// value text color (`menuItemTextValue`). The bolt's shape is ours.
+    private func drawChargingIcon(
+        context: inout GraphicsContext,
+        in segment: CGRect
+    ) {
+        let bolt = Self.lightningBolt(center: CGPoint(x: segment.midX, y: segment.midY))
+        var mask = context
+        mask.blendMode = .destinationOut
+        mask.stroke(bolt, with: .color(.black), style: StrokeStyle(lineWidth: 3, lineJoin: .round))
+        mask.fill(bolt, with: .color(.black))
+        context.fill(bolt, with: .color(.primary))
+    }
+
+    private static func lightningBolt(center: CGPoint) -> Path {
         let halfHeight = GeekPowerHistoryScale.lightningBoltHeight / 2
         var bolt = Path()
         bolt.move(to: CGPoint(x: center.x + 1, y: center.y - halfHeight))
@@ -874,7 +967,13 @@ struct GeekPowerHistoryChart: View {
         bolt.addLine(to: CGPoint(x: center.x + 3, y: center.y - 1))
         bolt.addLine(to: CGPoint(x: center.x + 0.5, y: center.y - 1))
         bolt.closeSubpath()
-        context.fill(bolt, with: .color(.white))
+        return bolt
+    }
+
+    /// D132: iStat draws and lists a filled bucket of its battery graph as
+    /// any other; the projection marks its estimates.
+    private func showsEstimate(_ prepared: GeekPreparedPowerBucket) -> Bool {
+        batteryGraph == nil && prepared.isEstimated
     }
 
     private func timelineLabels(
@@ -897,38 +996,30 @@ struct GeekPowerHistoryChart: View {
         if let hoveredPoint = hoveredPoint(
             in: plot,
             referenceDate: referenceDate
-        ), let hoverLocation {
-            let hairline = MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
-            let indicatorX = MiniWindowPixel.strokeCenter(
-                hoveredPoint.x,
-                lineWidth: hairline,
-                displayScale: displayScale
-            )
-            Path { path in
-                path.move(to: CGPoint(x: indicatorX, y: plot.minY))
-                path.addLine(to: CGPoint(x: indicatorX, y: plot.maxY))
-            }
-            .stroke(.primary.opacity(0.72), style: StrokeStyle(lineWidth: hairline))
-
-            GeekHoverTooltip(
-                date: hoveredPoint.date,
-                values: [
-                    GeekHoverValue(
-                        title: metric.tooltipTitle(hoveredPoint.point.value),
-                        value: metric.formatted(hoveredPoint.point.value),
-                        color: barColor(for: hoveredPoint.point),
-                        isEstimated: hoveredPoint.isEstimated
+        ) {
+            // D132: iStat's battery history lists the bucket's time and one
+            // "Value" row in the bar's color (`itemForIndex:`, 'Sensors.Value'
+            // and "%.0f%%"), a filled bucket as any other.
+            GeekHistoryHoverIndicator(
+                barCenterX: hoveredPoint.x,
+                plotRect: plot,
+                tooltip: GeekHoverTooltip(
+                    date: hoveredPoint.date,
+                    values: [
+                        GeekHoverValue(
+                            title: batteryGraph != nil ? L10n.text("数值", "Value")
+                                : metric.tooltipTitle(hoveredPoint.point.value),
+                            value: metric.formatted(hoveredPoint.point.value),
+                            color: barColor(for: hoveredPoint.point),
+                            isEstimated: batteryGraph == nil && hoveredPoint.isEstimated
+                        )
+                    ],
+                    visibleDuration: duration,
+                    detail: batteryGraph != nil ? nil : metric.tooltipDetail(
+                        isCharging: hoveredPoint.point.isCharging,
+                        powerSource: hoveredPoint.point.powerSource
                     )
-                ],
-                visibleDuration: duration,
-                detail: metric.tooltipDetail(
-                    isCharging: hoveredPoint.point.isCharging,
-                    powerSource: hoveredPoint.point.powerSource
                 )
-            )
-            .position(
-                x: min(plot.maxX - 72, max(plot.minX + 72, hoverLocation.x)),
-                y: plot.minY + 39
             )
         }
     }
@@ -1038,6 +1129,16 @@ struct GeekFanHoverDetail: View {
         )]
     }
 
+    /// D121: the graph card and the rows below it: a selected fan's
+    /// hardware minimum, maximum and target, or up to two fans' speeds.
+    nonisolated static func popoverSize(selectedFanIndex: Int?, readingCount: Int) -> CGSize {
+        GeekIStatHistoryGeometry.pageSize(rowCount: belowRowCount(selectedFanIndex: selectedFanIndex, readingCount: readingCount))
+    }
+
+    nonisolated static func belowRowCount(selectedFanIndex: Int?, readingCount: Int) -> Int {
+        selectedFanIndex != nil ? 3 : min(2, max(0, readingCount))
+    }
+
     var body: some View {
         GeekHoverDetailCanvas(
             title: chartTitle,
@@ -1049,7 +1150,9 @@ struct GeekFanHoverDetail: View {
                     GeekPrecisionLineChart(
                         points: chartPoints,
                         // The fan rings' color exit.
-                        series: Self.chartSeries(selectedFanIndex: selectedFanIndex, title: chartTitle, color: resolvedTint),
+                        // D138: iStat's tooltip row, 'Sensors.Value' (was the fan's name).
+                        series: Self.chartSeries(selectedFanIndex: selectedFanIndex, title: L10n.text("数值", "Value"),
+                                                 color: resolvedTint),
                         valueRange: valueRange,
                         unit: .fanRPM,
                         accessibilityLabel: chartTitle + L10n.text("转速趋势", " speed trend"),
@@ -1058,8 +1161,11 @@ struct GeekFanHoverDetail: View {
                         showsLegend: false,
                         showsTimelineLabels: false,
                         showsTooltip: true,
-                        horizontalInset: 2,
-                        showsSamplingDetails: false
+                        horizontalInset: MiniWindowStyleTokens.historyChartInset,
+                        verticalInset: 0,
+                        showsSamplingDetails: false,
+                        // D130: iStat's history buckets.
+                        bucketing: .history
                     )
                     .environment(\.panelChartAccentColor, nil)
                 } else {
@@ -1072,27 +1178,27 @@ struct GeekFanHoverDetail: View {
                 valueRange: GeekHistoryAxisFooter.rangeText(valueRange, unit: .fanRPM),
                 isUpdating: isUpdating
             ))
-
+        } below: {
             if selectedFanIndex != nil {
-                Divider().opacity(0.4)
                 // The hardware range, named so: the axis row's vertical scale
                 // above is rounded from the visible readings (fanTrendMaximum),
                 // so "纵轴 0–2,500 rpm" beside a 4,000 rpm maximum is expected.
-                HStack(alignment: .top, spacing: MiniWindowStyleTokens.columnSpacing) {
-                    rangeColumn(L10n.text("硬件最低", "Hardware Min"), value: rangeValues[0])
-                    rangeColumn(L10n.text("硬件最高", "Hardware Max"), value: rangeValues[1])
-                    rangeColumn(L10n.text("目标", "Target"), value: rangeValues[2])
+                GeekIStatRowsCard(rowCount: 3) {
+                    GeekIStatRow(title: L10n.text("硬件最低", "Hardware Min"), value: rangeValues[0])
+                    GeekIStatRow(title: L10n.text("硬件最高", "Hardware Max"), value: rangeValues[1])
+                    GeekIStatRow(title: L10n.text("目标", "Target"), value: rangeValues[2])
                 }
                 .help(L10n.text(
                     "最低和最高为设备报告的硬件量程，目标为设备回读值；不是此时间窗统计值。未读取的值显示 —。",
                     "Minimum and maximum are the hardware-reported range; target is the hardware readback, not statistics for this time window. Unread values show —."
                 ))
-            } else {
-                ForEach(Array(readings.prefix(2))) { reading in
-                    GeekHoverValueRow(
-                        title: reading.displayName,
-                        value: fanReadingText(reading)
-                    )
+            } else if !readings.isEmpty {
+                GeekIStatRowsCard(rowCount: Self.belowRowCount(selectedFanIndex: nil, readingCount: readings.count)) {
+                    ForEach(Array(readings.prefix(2))) { reading in
+                        // The speed on the row; the hardware range in its help.
+                        GeekIStatRow(title: reading.displayName, value: reading.displayRPM)
+                            .help(fanReadingText(reading))
+                    }
                 }
             }
         }
@@ -1116,16 +1222,6 @@ struct GeekFanHoverDetail: View {
     static func rangeValues(for reading: SystemFanReading?) -> [String] {
         [reading?.minimumRPM, reading?.maximumRPM, reading?.targetRPM]
             .map { $0.map(SystemFanSpeedFormat.string) ?? "—" }
-    }
-
-    private func rangeColumn(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).foregroundStyle(.secondary)
-            Text(value).monospacedDigit()
-        }
-        .font(AdvancedPanelTypography.caption)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
     }
 
     private var hasHistory: Bool {
@@ -1204,36 +1300,65 @@ struct GeekBatteryElectricalHoverDetail: View {
 
     var body: some View {
         VStack(spacing: MiniWindowStyleTokens.cardSpacing) {
-            GeekHoverDetailGroup(title: L10n.text("电池", "Battery")) {
-                GeekBatteryCompactValueGrid(rows: batteryRows)
-            }
-
-            if !chargingRows.isEmpty {
-                GeekHoverDetailGroup(title: L10n.text("供电与充电", "Power and Charging")) {
-                    GeekBatteryCompactValueGrid(rows: chargingRows)
-                }
-            }
-
-            if !usbPowerOutRows.isEmpty {
-                GeekHoverDetailGroup(title: L10n.text("USB-C 对外供电", "USB-C Power Out")) {
-                    GeekBatteryCompactValueGrid(rows: usbPowerOutRows)
-                }
-            }
-
-            if !cellRows.isEmpty {
-                GeekHoverDetailGroup(title: L10n.text("电芯电压", "Cell Voltages")) {
-                    GeekBatteryCompactValueGrid(rows: cellRows)
-                }
-            }
-
-            if !healthRows.isEmpty {
-                GeekHoverDetailGroup(title: L10n.text("健康", "Health")) {
-                    GeekBatteryCompactValueGrid(rows: healthRows)
+            ForEach(sections) { section in
+                GeekIStatRowsCard(title: section.title, rowCount: section.rows.count) {
+                    ForEach(Array(section.rows.enumerated()), id: \.offset) { _, row in
+                        GeekIStatRow(title: row.0, value: row.1)
+                    }
                 }
             }
         }
         .padding(pageProvidesInset ? 0 : GeekPanelLayout.contentPadding)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// The rows of each card, for the page size
+    /// (`GeekSensorPowerHoverDetailMetrics.batterySize(sectionRowCounts:)`).
+    var sectionRowCounts: [Int] {
+        sections.map(\.rows.count)
+    }
+
+    /// D137: the page's size, as wide as its widest section + 20 as iStat's
+    /// battery submenu (`-[BatteryMenu updateBatterySubmenu]`): each section
+    /// its widest label-and-value row + 16, from 200 to 350
+    /// (`GeekIStatContentWidth`).
+    var popoverSize: CGSize {
+        GeekSensorPowerHoverDetailMetrics.batterySize(
+            sectionRowCounts: sectionRowCounts,
+            width: GeekIStatContentWidth.page(sections: sections.map { section in
+                GeekIStatContentWidth.section(rows: section.rows.map {
+                    GeekIStatContentWidth.row(title: $0.0, value: $0.1)
+                })
+            })
+        )
+    }
+
+    private struct DetailSection: Identifiable {
+        let title: String
+        let rows: [(String, String)]
+        var id: String { title }
+    }
+
+    /// D122: iStat's battery-menu order (Power Adapter, Battery, Health,
+    /// Cells), then the ports supplying power; a section without rows is
+    /// left out.
+    private var sections: [DetailSection] {
+        var sections = [DetailSection]()
+        if !chargingRows.isEmpty {
+            sections.append(DetailSection(title: L10n.text("供电与充电", "Power and Charging"), rows: chargingRows))
+        }
+        sections.append(DetailSection(title: L10n.text("电池", "Battery"), rows: batteryRows))
+        if !healthRows.isEmpty {
+            sections.append(DetailSection(title: L10n.text("健康", "Health"), rows: healthRows))
+        }
+        if !cellRows.isEmpty {
+            sections.append(DetailSection(title: L10n.text("电芯电压", "Cell Voltages"), rows: cellRows))
+        }
+        if !usbPowerOutRows.isEmpty {
+            sections.append(DetailSection(title: L10n.text("USB-C 对外供电", "USB-C Power Out"), rows: usbPowerOutRows))
+        }
+        return sections
     }
 
     private var batteryRows: [(String, String)] {
@@ -1264,7 +1389,7 @@ struct GeekBatteryElectricalHoverDetail: View {
            watts > 0 {
             rows.append((
                 L10n.text("适配器功率", "Adapter Power"),
-                String(format: "%.0f W", watts)
+                IStatNumberFormat.power(watts)
             ))
         }
         if let chargeTargetPercent {
@@ -1322,7 +1447,7 @@ enum GeekBatteryHoverReadings {
         return cells.enumerated().map { index, reading in
             (
                 L10n.text("电芯 \(index + 1)", "Cell \(index + 1)"),
-                HardwareReadingText.detail(reading) { String(format: "%.3f V", $0) }
+                HardwareReadingText.detail(reading, format: HardwareReadingText.volts)
             )
         }
     }
@@ -1348,43 +1473,6 @@ enum GeekBatteryHoverReadings {
     }
 }
 
-private struct GeekBatteryCompactValueGrid: View {
-    let rows: [(String, String)]
-
-    var body: some View {
-        VStack(spacing: 1) {
-            ForEach(Array(stride(from: 0, to: rows.count, by: 2)), id: \.self) { index in
-                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                    GeekBatteryCompactValueRow(title: rows[index].0, value: rows[index].1)
-                    if rows.indices.contains(index + 1) {
-                        GeekBatteryCompactValueRow(title: rows[index + 1].0, value: rows[index + 1].1)
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct GeekBatteryCompactValueRow: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 2) {
-            Text(title)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: 1)
-            Text(value)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.55)
-        }
-        .font(AdvancedPanelTypography.caption)
-        .frame(maxWidth: .infinity, minHeight: 14, alignment: .leading)
-    }
-}
-
 struct GeekBatteryHistoryHoverDetail: View {
     let points: [MenuBarPowerHistoryPoint]
     let tint: Color
@@ -1392,52 +1480,46 @@ struct GeekBatteryHistoryHoverDetail: View {
 
     @Environment(\.geekChartRangeSelection) private var chartRangeSelection
 
+    /// D132: iStat's battery history submenu, 319 × (180 + 2 × 8); it was the
+    /// 391 × 216 history page (D121).
+    nonisolated static let popoverSize = GeekIStatHistoryGeometry.batteryPageSize
+
+    /// D132: iStat's battery history: the graph card of its own size with
+    /// 96 buckets of the window's tier and the connection rail below them,
+    /// no axis row (was `GeekHistoryAxisFooter` with "0–100%").
     var body: some View {
         GeekHoverDetailCanvas(
             title: L10n.text("电池", "Battery").uppercased(),
             showsRangePicker: true,
-            availableRanges: batteryHistoryRanges
+            availableRanges: GeekIStatBatteryGraph.historyRanges,
+            cardHeight: GeekIStatHistoryGeometry.batteryCardHeight,
+            plotTop: GeekIStatHistoryGeometry.batteryPlotTop
         ) {
             GeekPowerHistoryChart(
                 points: points,
                 metric: .charge,
-                duration: chartRangeSelection.range.duration,
+                duration: rangeSelection.range.duration,
                 tint: tint,
                 chargingTint: chargingTint,
                 accessibilityLabel: L10n.text("电池电量趋势", "Battery-level trend"),
                 showsTimelineLabels: false,
-                showsTooltip: true
+                showsTooltip: true,
+                horizontalInset: MiniWindowStyleTokens.historyChartInset,
+                batteryGraph: .history
             )
-            .geekHistoryAxis(GeekHistoryAxisFooter(duration: chartRangeSelection.range.duration, valueRange: "0–100%"))
         }
+        .environment(\.geekChartRangeSelection, rangeSelection)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L10n.text("电池", "Battery"))
     }
 
-    private var hasRenderableHistory: Bool {
-        points.compactMap(\.chargePercent).filter(\.isFinite).count
-            >= PanelChartSampling.minimumRenderableSampleCount
-    }
-
-    private var batteryHistoryRanges: [GeekChartRange] {
-        let ordered = points.sorted { $0.date < $1.date }
-        let span = ordered.last?.date.timeIntervalSince(ordered.first?.date ?? .distantPast) ?? 0
-        var ranges: [GeekChartRange] = [
-            .oneHour,
-            .threeHours,
-            .sixHours,
-            .twelveHours,
-            .oneDay,
-            .threeDays,
-            .sevenDays,
-        ]
-        if span >= GeekChartRange.fourteenDays.duration {
-            ranges.append(.fourteenDays)
-        }
-        if span >= GeekChartRange.twentyEightDays.duration {
-            ranges.append(.twentyEightDays)
-        }
-        return ranges
+    /// D132: iStat's seven windows (`loadTimePopup`); one it does not offer
+    /// reads as the nearest, so the menu and the graph agree. The windows
+    /// were 1 h – 7 d, and 14 d / 28 d once the history spanned them.
+    private var rangeSelection: GeekChartRangeSelection {
+        var selection = chartRangeSelection
+        selection.range = GeekIStatBatteryGraph.historyRange(chartRangeSelection.range)
+        return selection
     }
 }
 
@@ -1461,22 +1543,17 @@ struct GeekEnergyModeHoverDetail: View {
     let onOpenBatterySettings: () -> Void
     let onChangeMode: (BatteryPowerSource, BatteryPowerMode) -> Void
 
+    /// D124: iStat's energy-mode menu, the battery section above the AC
+    /// section, each its source's modes as tick rows with the dot on the
+    /// current source; then our charge-limit section in the same form (was
+    /// the charge limit first and segmented controls under titles with the
+    /// power). The power stays in each section label's tooltip.
     var body: some View {
         VStack(spacing: MiniWindowStyleTokens.cardSpacing) {
-            if showsChargeTargetSetting {
-                GeekChargeTargetSetting(
-                    showsFullChargeAction: showsFullChargeAction,
-                    powerSource: powerSource,
-                    controlsEnabled: chargeLimitControlsEnabled,
-                    chargeLimitState: chargeLimitState,
-                    chargeToFull: onChargeToFull,
-                    setChargeTarget: onSetChargeTarget,
-                    openBatterySettings: onOpenBatterySettings
-                )
-            }
             if !batterySupportedModes.isEmpty {
                 GeekEnergyModeGroup(
-                    title: GeekEnergyModePowerTitle.battery(
+                    title: L10n.text("电池", "Battery"),
+                    detail: GeekEnergyModePowerTitle.battery(
                         isCharging: isCharging,
                         watts: batteryPowerWatts
                     ),
@@ -1491,7 +1568,8 @@ struct GeekEnergyModeHoverDetail: View {
             }
             if !adapterSupportedModes.isEmpty {
                 GeekEnergyModeGroup(
-                    title: GeekEnergyModePowerTitle.adapter(watts: adapterPowerWatts),
+                    title: L10n.text("电源适配器", "AC"),
+                    detail: GeekEnergyModePowerTitle.adapter(watts: adapterPowerWatts),
                     source: .acPower,
                     mode: adapterMode,
                     supportedModes: adapterSupportedModes,
@@ -1501,8 +1579,37 @@ struct GeekEnergyModeHoverDetail: View {
                     onChangeMode: onChangeMode
                 )
             }
+            if showsChargeTargetSetting {
+                GeekChargeTargetSetting(
+                    showsFullChargeAction: showsFullChargeAction,
+                    powerSource: powerSource,
+                    controlsEnabled: chargeLimitControlsEnabled,
+                    chargeLimitState: chargeLimitState,
+                    chargeToFull: onChargeToFull,
+                    setChargeTarget: onSetChargeTarget,
+                    openBatterySettings: onOpenBatterySettings
+                )
+            }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+extension BatteryPowerMode {
+    /// D124: the energy-mode menu's order, Automatic, Low Power, High Power,
+    /// keeping the modes the source supports.
+    static func energyMenuOrder(_ supported: [BatteryPowerMode]) -> [BatteryPowerMode] {
+        [.automatic, .lowPower, .highPower].filter(supported.contains)
+    }
+
+    /// D124: the energy-mode menu's labels ("Power.Automatic", "Power.Low
+    /// Power", "Power.High Power"; macOS's own energy-mode names).
+    var energyMenuTitle: String {
+        switch self {
+        case .automatic: L10n.text("自动", "Automatic")
+        case .lowPower: L10n.text("低能耗", "Low Power")
+        case .highPower: L10n.text("高能耗", "High Power")
+        }
     }
 }
 
@@ -1518,56 +1625,50 @@ private struct GeekChargeTargetSetting: View {
     @State private var targetUpdateResult: BatteryChargeTargetUpdateResult?
     @State private var result: BatteryFullChargeResult?
     @State private var acceptedSource: BatteryChargeLimitSource?
+    /// The target being written, shown on its segment until the request ends.
+    @State private var pendingTarget: BatteryChargeTarget?
 
+    /// D124: our charge limit as a text section like the energy-mode
+    /// sections above it, the notes, then the actions as rows (was a
+    /// segmented control, a button and a link). D149 (user 2026-10-19,
+    /// “充电上限选择没做好”, chose the segments): the targets are one row of
+    /// segments again, D73's form (D124 had made them tick rows with the
+    /// check on the effective limit); a note says when the limit in force
+    /// differs from the manual limit the segments show.
     var body: some View {
-        GeekHoverDetailGroup(title: L10n.text("充电上限", "Charge Limit")) {
-            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-                VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-                    if chargeLimitState?.availableTargets.isEmpty == false {
-                        chargeTargetSegments
-                            .disabled(!controlsEnabled || isRequesting)
-                    } else {
-                        Text(BatteryChargeLimitPresentation.manualLimitUnavailableMessage())
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .font(AdvancedPanelTypography.body)
-
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                if targetUpdateFailed {
-                    Text(targetStatusText)
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(AppDesignTokens.Palette.destructive)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let explanation = BatteryChargeLimitPresentation.sourceCaption(chargeLimitState) {
-                    Text(explanation)
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let status = BatteryChargeLimitPresentation.fullChargeStatus(
-                    chargeLimitState, acceptedSource: acceptedSource
-                ) {
-                    Text(status)
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if showsFullChargeAction && temporaryFullChargeStatus == nil {
-                    fullChargeButton
-                }
-
-                Button(
-                    L10n.text("打开电池设置", "Open Battery Settings"),
-                    action: openBatterySettings
-                )
-                .buttonStyle(.link)
-                .font(AdvancedPanelTypography.caption)
+        GeekIStatTextSectionCard {
+            GeekIStatMajorLabelRow(title: L10n.text("充电上限", "Charge Limit"))
+            if chargeLimitState?.availableTargets.isEmpty == false {
+                chargeTargetSegments
+                    .disabled(!controlsEnabled || isRequesting)
+            } else {
+                Text(BatteryChargeLimitPresentation.manualLimitUnavailableMessage())
+                    .geekIStatSectionNote()
             }
+            if targetUpdateFailed {
+                Text(targetStatusText)
+                    .geekIStatSectionNote(AppDesignTokens.Palette.destructive)
+            }
+            if let explanation = BatteryChargeLimitPresentation.effectiveLimitNote(chargeLimitState)
+                ?? BatteryChargeLimitPresentation.sourceCaption(chargeLimitState) {
+                Text(explanation)
+                    .geekIStatSectionNote()
+            }
+            if let status = BatteryChargeLimitPresentation.fullChargeStatus(
+                chargeLimitState, acceptedSource: acceptedSource
+            ) {
+                Text(status)
+                    .geekIStatSectionNote()
+            }
+            if showsFullChargeAction && temporaryFullChargeStatus == nil {
+                fullChargeButton
+            }
+            GeekIStatTickRow(
+                title: L10n.text("打开电池设置…", "Open Battery Settings…"),
+                isSelected: false,
+                showsCheck: false,
+                action: openBatterySettings
+            )
         }
         .alert(
             resultTitle,
@@ -1601,53 +1702,31 @@ private struct GeekChargeTargetSetting: View {
         }
     }
 
-    @ViewBuilder private var chargeTargetSegments: some View {
-        // macOS supplies the segments; more than five stay in one scrollable row.
-        if availableTargets.count > 5 {
-            ScrollView(.horizontal) {
-                segmentedPicker.frame(minWidth: CGFloat(availableTargets.count) * 48)
-            }
-            .scrollIndicators(.visible)
-        } else {
-            segmentedPicker
-        }
-    }
-
-    private var segmentedPicker: some View {
-        Picker(L10n.text("充电上限", "Charge Limit"), selection: Binding<BatteryChargeTarget?>(
-            get: { BatteryChargeLimitPresentation.selectedSegment(chargeLimitState) },
-            set: { if let target = $0 { updateTarget(target) } }
-        )) {
-            ForEach(availableTargets) { target in
-                Text(BatteryChargeLimitPresentation.manualTargetLabel(target))
-                    .tag(target as BatteryChargeTarget?)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(maxWidth: .infinity)
-        .accessibilityIdentifier("charge-limit-segments")
-        .accessibilityValue(chargeLimitState?.effectiveLimit.map { "\($0)%" }
-            ?? L10n.text("实际充电上限未知", "Effective charge limit unknown"))
+    /// macOS supplies the targets (80–100 % in steps of 5 on current Macs)
+    /// as one row of equal segments. D149: the filled segment is the manual
+    /// limit macOS reads back (100 % is none), never an unconfirmed request;
+    /// the segment being written turns until the readback confirms it.
+    private var chargeTargetSegments: some View {
+        GeekChargeLimitSegments(
+            targets: availableTargets,
+            selected: BatteryChargeLimitPresentation.selectedSegment(chargeLimitState),
+            pending: pendingTarget,
+            select: updateTarget
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.text("充电上限", "Charge Limit"))
+        .accessibilityIdentifier("charge-limit-targets")
+        .accessibilityValue(BatteryChargeLimitPresentation.segmentsAccessibilityValue(chargeLimitState))
     }
 
     private var fullChargeButton: some View {
-        Button {
+        GeekIStatTickRow(
+            title: L10n.text("本次充到 100%", "Charge This Time to 100%"),
+            isSelected: false,
+            showsCheck: false
+        ) {
             requestFullCharge()
-        } label: {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(L10n.text("本次充到 100%", "Charge This Time to 100%"))
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 2)
-                GeekDisclosureIcon(systemImage: AppSymbols.Panel.attachedDetail)
-            }
-            .font(AdvancedPanelTypography.body)
-
-            .frame(height: 22)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(ResponsivePlainButtonStyle())
         .disabled(!canRequestFullCharge)
         .help(L10n.text(
             "临时解除 macOS 的充电暂停，不改变已选充电上限。",
@@ -1662,13 +1741,17 @@ private struct GeekChargeTargetSetting: View {
 
     private func updateTarget(_ target: BatteryChargeTarget) {
         guard controlsEnabled, availableTargets.contains(target), !isRequesting else { return }
+        // D149: the manual limit already in place needs no write.
+        guard target != BatteryChargeLimitPresentation.selectedSegment(chargeLimitState) else { return }
         isRequesting = true
+        pendingTarget = target
         Task {
             let update = await setChargeTarget(target)
             targetUpdateResult = update
             if update == .applied {
                 acceptedSource = nil
             }
+            pendingTarget = nil
             isRequesting = false
         }
     }
@@ -1797,6 +1880,145 @@ private extension BatteryFullChargeResult {
     }
 }
 
+/// D149: the charge limit's targets as one row of equal segments inside the
+/// text section's 8 pt insets (D73's form, which the user chose again). The
+/// manual limit macOS reads back is filled in the panel's control color; the
+/// segment being written shows a turning mark until the readback confirms
+/// it, and the row keeps its height meanwhile. 20 tall, the section's 2 pt
+/// gap below. More than five targets (none on current Macs) take a 10 pt
+/// label so “100%” still fits its segment.
+private struct GeekChargeLimitSegments: View {
+    static let height: CGFloat = 20
+    static let cornerRadius: CGFloat = 5
+    static let compactFontSize: CGFloat = 10
+
+    @Environment(\.panelChromePalette) private var panelChromePalette
+    let targets: [BatteryChargeTarget]
+    let selected: BatteryChargeTarget?
+    let pending: BatteryChargeTarget?
+    let select: (BatteryChargeTarget) -> Void
+
+    private var borderColor: Color {
+        panelChromePalette?.graphBorder ?? Color.primary.opacity(0.2)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(targets.enumerated()), id: \.element) { index, target in
+                if index > 0 {
+                    // No divider against the filled segment.
+                    Rectangle()
+                        .fill(borderColor)
+                        .frame(width: 1)
+                        .opacity(target == selected || targets[index - 1] == selected ? 0 : 1)
+                        .accessibilityHidden(true)
+                }
+                GeekChargeLimitSegment(
+                    title: BatteryChargeLimitPresentation.manualTargetLabel(target),
+                    help: target == .full ? L10n.text("100% 即不设手动上限", "100% sets no manual limit") : "",
+                    fontSize: targets.count > 5 ? Self.compactFontSize : GeekIStatCardGeometry.textFontSize,
+                    isSelected: target == selected,
+                    isPending: target == pending
+                ) {
+                    select(target)
+                }
+            }
+        }
+        .frame(height: Self.height)
+        .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .strokeBorder(borderColor, lineWidth: 1)
+        }
+        .padding(.horizontal, GeekIStatTextSectionGeometry.leading)
+        .padding(.bottom, GeekIStatTextSectionGeometry.labelRowGap)
+    }
+}
+
+private struct GeekChargeLimitSegment: View {
+    @Environment(\.panelChromePalette) private var panelChromePalette
+    @Environment(\.isEnabled) private var isEnabled
+    let title: String
+    let help: String
+    let fontSize: CGFloat
+    let isSelected: Bool
+    let isPending: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    /// iStat's prominent-control color and its text (D135), as the
+    /// section's switch uses.
+    private var fill: Color {
+        panelChromePalette?.accentColors?.control ?? panelChromePalette?.accent ?? AppAppearanceColors.controlAccent
+    }
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                if isSelected {
+                    fill
+                } else if isHovered && isEnabled {
+                    Color.primary.opacity(0.08)
+                }
+                label
+                    .opacity(isPending ? 0.3 : 1)
+                if isPending {
+                    GeekChargeLimitPendingMark()
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ResponsivePlainButtonStyle())
+        .onHover { isHovered = $0 }
+        .help(help)
+        .accessibilityLabel(Text(title))
+        .accessibilityValue(isSelected ? L10n.text("已选择", "Selected") : L10n.text("未选择", "Not Selected"))
+        .accessibilityHint(isPending ? L10n.text("正在设置", "Setting") : "")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    /// The label text's size and digits (`geekIStatLabelText`), in the
+    /// control text color on the filled segment.
+    @ViewBuilder private var label: some View {
+        if isSelected {
+            Text(title)
+                .font(.system(size: fontSize, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .foregroundStyle(panelChromePalette?.accentColors?.controlText ?? Color.white)
+        } else {
+            Text(title)
+                .font(.system(size: fontSize))
+                .modifier(GeekIStatTextColor(role: .label))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+    }
+}
+
+/// A small turning arc on the segment being written; it stays still while
+/// Reduce Motion is on.
+private struct GeekChargeLimitPendingMark: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var turning = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.7)
+            .stroke(Color.primary.opacity(0.75), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+            .frame(width: 10, height: 10)
+            .rotationEffect(.degrees(turning ? 360 : 0))
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { turning = true }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
 enum GeekEnergyModePowerTitle {
     static func overviewACSummary(
         powerSource: BatteryPowerSource?,
@@ -1835,52 +2057,19 @@ enum GeekEnergyModePowerTitle {
         return "\(base) · \(formatted(watts))"
     }
 
+    /// D128: iStat's power (was "%.0f W").
     private static func formatted(_ watts: Double) -> String {
-        String(format: "%.0f W", locale: Locale(identifier: "en_US_POSIX"), watts)
+        IStatNumberFormat.power(watts)
     }
 }
 
-private struct GeekHoverDetailGroup<Content: View>: View {
-    @Environment(\.panelMetricColors) private var metricColors
-    let title: String
-    let isActive: Bool
-    let showsFailure: Bool
-    let content: Content
-
-    init(title: String, isActive: Bool = false, showsFailure: Bool = false,
-         @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.isActive = isActive
-        self.showsFailure = showsFailure
-        self.content = content()
-    }
-
-    var body: some View {
-        MiniWindowGroup {
-            HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(title.uppercased())
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .foregroundStyle(metricColors.sectionHeader)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                if showsFailure {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(AdvancedPanelTypography.symbol)
-                        .foregroundStyle(AppDesignTokens.Palette.warning)
-                        .accessibilityHidden(true)
-                } else if isActive {
-                    Circle().fill(Color.accentColor).frame(width: 8, height: 8)
-                        .accessibilityHidden(true)
-                }
-            }
-            content
-        }
-    }
-}
-
+/// D124: one source of iStat's energy-mode menu: the major label (with the
+/// dot on the current power source, our warning in its place after a failed
+/// change), the supported modes as tick rows, and our status note.
 private struct GeekEnergyModeGroup: View {
     let title: String
+    /// The source's power, in the label's tooltip.
+    let detail: String
     let source: BatteryPowerSource
     let mode: BatteryPowerMode?
     let supportedModes: [BatteryPowerMode]
@@ -1890,47 +2079,33 @@ private struct GeekEnergyModeGroup: View {
     let onChangeMode: (BatteryPowerSource, BatteryPowerMode) -> Void
 
     var body: some View {
-        GeekHoverDetailGroup(title: title, isActive: isActiveSource, showsFailure: showsFailure) {
-            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-                MiniWindowSegmentedPicker(
-                    title: title,
-                    selection: modeBinding,
-                    options: (mode == nil ? [nil] : []) + supportedModes.map(Optional.some),
-                    label: { $0.map { title(for: $0) } ?? "—" }
-                )
-                .frame(maxWidth: .infinity)
-                .disabled(!controlsEnabled || adjustmentState.isChanging)
-
-                if let statusText {
-                    Text(statusText)
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(showsFailure ? AppDesignTokens.Palette.warning : .secondary)
-                        .lineLimit(1)
+        GeekIStatTextSectionCard {
+            GeekIStatMajorLabelRow(title: title, showsDot: isActiveSource && !showsFailure) {
+                if showsFailure {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(AdvancedPanelTypography.symbol)
+                        .foregroundStyle(AppDesignTokens.Palette.warning)
+                        .accessibilityHidden(true)
                 }
+            }
+            .help(detail)
+            ForEach(BatteryPowerMode.energyMenuOrder(supportedModes), id: \.self) { selected in
+                GeekIStatTickRow(title: selected.energyMenuTitle, isSelected: selected == mode) {
+                    onChangeMode(source, selected)
+                }
+            }
+            .disabled(!controlsEnabled || adjustmentState.isChanging)
+
+            if let statusText {
+                Text(statusText)
+                    .lineLimit(1)
+                    .geekIStatSectionNote(showsFailure ? AppDesignTokens.Palette.warning : nil)
             }
         }
         .help(statusText ?? L10n.text(
             "选择模式后会通过同一个高级控制辅助程序写入，并读取系统实际值确认。",
             "The shared advanced-control helper applies the mode and reads the system value back for confirmation."
         ))
-    }
-
-    private var modeBinding: Binding<BatteryPowerMode?> {
-        Binding(
-            get: { mode },
-            set: { if let selected = $0 { onChangeMode(source, selected) } }
-        )
-    }
-
-    private func title(for mode: BatteryPowerMode) -> String {
-        switch mode {
-        case .automatic:
-            L10n.text("自动", "Automatic")
-        case .lowPower:
-            L10n.text("低功耗", "Low Power")
-        case .highPower:
-            L10n.text("高功率", "High Power")
-        }
     }
 
     private var showsFailure: Bool {
@@ -1962,7 +2137,7 @@ private struct GeekEnergyModeGroup: View {
         case let .timedOut(failedSource, _) where failedSource == source:
             L10n.text("更改超时，请重试", "The change timed out; try again")
         case let .failed(failedSource, _) where failedSource == source:
-            L10n.text("无法更改能源模式", "Could not change Energy Mode")
+            L10n.text("无法更改能耗模式", "Could not change Energy Mode")
         case let .verificationFailed(failedSource, _) where failedSource == source:
             L10n.text("系统未应用所选模式", "macOS did not apply the selected mode")
         default:

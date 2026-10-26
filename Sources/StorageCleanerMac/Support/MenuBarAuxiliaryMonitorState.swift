@@ -173,6 +173,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private var statusWiFiGeneration = 0
     typealias DiskCounterProvider = @Sendable () -> NativeDiskIOCounters?
     typealias StorageVolumeProvider = @Sendable () -> MountedStorageVolumeInventory
+    /// The startup volume's capacity; `true` asks for the important-usage
+    /// (purgeable) figure too, which costs a CacheDelete query (D173).
+    typealias StorageCapacityProvider = @Sendable (_ includeImportantUsage: Bool) -> StorageCapacitySnapshot?
     typealias BatterySnapshotProvider = @Sendable () -> (
         BatteryPowerSnapshot?,
         NativeBatteryElectricalSnapshot?
@@ -186,6 +189,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     static let batteryHistorySamplingInterval: TimeInterval = 30
     static let visibleBatterySamplingInterval = MenuBarPerformancePolicy.visibleExpensiveInterval
     static let storageVolumeSamplingInterval: TimeInterval = 300
+    /// D173: iStat reads the purgeable space every 5 minutes (its CacheDelete
+    /// queries, 10-22); free space is still read on every tick.
+    static let purgeableSamplingInterval: TimeInterval = 300
     static let diskIOSamplingInterval: Duration = .seconds(MenuBarPerformancePolicy.visibleExpensiveInterval)
 
     /// Each logical domain publishes one immutable value. A storage refresh or
@@ -277,6 +283,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private var storageRefreshTask: Task<Void, Never>?
     private var residentBatteryAttemptAt: Date?
     private var residentStorageAttemptAt: Date?
+    /// D173: when the purgeable space was last asked for, and what it was.
+    private var purgeableAttemptAt: Date?
+    private var measuredPurgeableBytes: Int64?
     private var networkInterfaceRefreshTask: Task<Void, Never>?
     private var localDataGeneration = 0
     private var storageVolumesRefreshedAt: Date?
@@ -310,6 +319,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private var networkTopologyRefreshTask: Task<Void, Never>?
     private let diskCounterProvider: DiskCounterProvider
     private let storageVolumeProvider: StorageVolumeProvider
+    private let storageCapacityProvider: StorageCapacityProvider
     private let batteryAvailabilityProvider: @Sendable () -> InternalBatteryAvailability
     private let batterySnapshotProvider: BatterySnapshotProvider
     private let publicNetworkAddressProvider: PublicNetworkAddressProvider
@@ -336,6 +346,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         },
         storageVolumeProvider: @escaping StorageVolumeProvider = {
             MountedStorageVolumeService.snapshots()
+        },
+        storageCapacityProvider: @escaping StorageCapacityProvider = {
+            StorageCapacityService.snapshot(includeImportantUsage: $0)
         },
         batterySnapshotProvider: @escaping BatterySnapshotProvider = {
             (
@@ -371,6 +384,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         self.batteryAvailabilityProvider = batteryAvailabilityProvider
         self.diskCounterProvider = diskCounterProvider
         self.storageVolumeProvider = storageVolumeProvider
+        self.storageCapacityProvider = storageCapacityProvider
         self.batterySnapshotProvider = batterySnapshotProvider
         self.publicNetworkAddressProvider = publicNetworkAddressProvider
         self.publicNetworkConsentProvider = publicNetworkConsentProvider
@@ -422,6 +436,41 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         diskData = restoredDiskData
     }
 
+#if DEBUG
+    /// Offscreen page tests: the volumes as the local refresh would publish
+    /// them, without the system probes.
+    func seedVolumesForTesting(
+        storageSnapshot: StorageCapacitySnapshot?,
+        volumeName: String,
+        networkStorageVolumes: [MountedStorageVolumeSnapshot] = []
+    ) {
+        var next = localData
+        next.storageSnapshot = storageSnapshot
+        next.volumeName = volumeName
+        next.networkStorageVolumes = networkStorageVolumes
+        localData = next
+    }
+
+    /// Offscreen page tests: the battery, power and processor readings as
+    /// their refreshes would publish them at `date`, without the probes.
+    func seedSensorsForTesting(
+        battery: BatteryPowerSnapshot?,
+        electrical: NativeBatteryElectricalSnapshot?,
+        power: MenuBarPowerTelemetry?,
+        processor: CPUPerformanceStateService.Snapshot?,
+        at date: Date
+    ) {
+        var next = localData
+        next.internalBatteryAvailability = battery == nil ? .absent : .present
+        next.batterySnapshot = battery
+        next.batteryElectricalSnapshot = electrical
+        next.batteryRefreshedAt = date
+        localData = next
+        powerData = MenuBarPowerMonitorData(telemetry: power, refreshedAt: power.map { _ in date })
+        processorData = MenuBarProcessorMonitorData(telemetry: processor, refreshedAt: processor.map { _ in date })
+    }
+#endif
+
     func attachSamplingContext(_ context: MenuBarSamplingContext) {
         guard samplingContext !== context else { return }
         samplingContext = context
@@ -434,6 +483,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         if samplingContext != nil {
             if visible { refreshPublicNetworkAddressIfReady() }
             else { cancelPublicNetworkAddressRefresh() }
+            reconcileResidentNetworkProcessDemand()
             return
         }
         if visible {
@@ -467,6 +517,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         updatePrimaryDemand()
         reconcilePublicNetworkAddressDemand()
         reconcile(forceLocalData: false, forceProcessor: false)
+        reconcileResidentNetworkProcessDemand()
     }
 
     func updateConsumer(
@@ -478,6 +529,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         updatePrimaryDemand()
         reconcilePublicNetworkAddressDemand()
         reconcile(forceLocalData: false, forceProcessor: false)
+        reconcileResidentNetworkProcessDemand()
     }
 
     func unregisterConsumer(_ id: UUID) {
@@ -495,6 +547,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         } else {
             reconcile(forceLocalData: false, forceProcessor: false)
         }
+        reconcileResidentNetworkProcessDemand()
     }
 
     func setPaused(_ paused: Bool) {
@@ -515,6 +568,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
             residentDiskTask?.cancel()
         } else {
             reconcile(forceLocalData: true, forceProcessor: true)
+            reconcileResidentNetworkProcessDemand()
         }
     }
 
@@ -551,7 +605,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
     private func refreshResidentDisk() {
         let now = collectionClock()
         guard residentEnabled, residentDiskTask == nil,
-              residentDiskAttemptAt.map({ now.timeIntervalSince($0) >= cheapInterval }) != false else { return }
+              MenuBarPerformancePolicy.isDue(since: residentDiskAttemptAt, now: now, interval: cheapInterval) else { return }
         residentDiskAttemptAt = now
         let generation = residentDiskGeneration
         let provider = diskCounterProvider
@@ -758,6 +812,14 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         refreshNetworkProcesses(force: true)
     }
 
+    /// D140: iStat's refresh icon on the public addresses
+    /// (`onPublicAddressRefresh`): looks the public addresses up again now,
+    /// within the same consent and demand as any lookup.
+    func requestPublicNetworkAddressRefresh() {
+        guard !isPaused, isPresentationVisible, !consumers.isEmpty else { return }
+        refreshPublicNetworkAddressIfReady(force: true)
+    }
+
     func setChargeLimitDataOnlyFixture(_ isFixture: Bool) {
         isChargeLimitDataOnlyFixture = isFixture
     }
@@ -801,7 +863,8 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
             needsDiskIOSampling: prestored || values.contains { $0.needsDiskIOSampling },
             needsNetworkInterface: prestored || values.contains { $0.needsNetworkInterface },
             needsPublicNetworkAddress: values.contains { $0.needsPublicNetworkAddress },
-            needsNetworkProcesses: prestored || values.contains { $0.needsNetworkProcesses },
+            // D127: a process list is read only while its page is open.
+            needsNetworkProcesses: values.contains { $0.needsNetworkProcesses },
             needsStorageVolumes: prestored || values.contains { $0.needsStorageVolumes },
             needsPowerTelemetry: prestored || values.contains { $0.needsPowerTelemetry },
             needsChargeLimit: isPresentationVisible && values.contains { $0.needsChargeLimit },
@@ -867,9 +930,10 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
 
         let now = collectionClock()
         let refreshInterval = networkProcessInterval
-        guard force || networkProcessData.lastAttemptAt.map({
-            now.timeIntervalSince($0) >= refreshInterval
-        }) != false else { return }
+        guard force || (samplingContext == nil
+            ? networkProcessData.lastAttemptAt.map({ now.timeIntervalSince($0) >= refreshInterval }) != false
+            : MenuBarPerformancePolicy.isDue(since: networkProcessData.lastAttemptAt, now: now,
+                                             interval: refreshInterval)) else { return }
 
         networkProcessGeneration &+= 1
         let generation = networkProcessGeneration
@@ -924,6 +988,23 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
             var nextData = networkProcessData
             nextData.samplingState = nextData.snapshot == nil ? .idle : .available
             networkProcessData = nextData
+        }
+    }
+
+    /// D127 (iStat `startItemsForKey:` / `stopItemsForKey:`): the per-app
+    /// network list is read only while its page is open — at once, then on
+    /// each tick — and dropped when the page closes (was prestored every
+    /// 10 s open / 60 s closed, D74). Pausing keeps what is shown.
+    private func reconcileResidentNetworkProcessDemand() {
+        guard samplingContext != nil, !isPaused else { return }
+        if combinedDemand.needsNetworkProcesses {
+            refreshNetworkProcesses()
+        } else if networkProcessTask != nil || networkProcessData.snapshot != nil
+                    || networkProcessData.lastAttemptAt != nil {
+            // The running nettop keeps the gate (handle kept); its completion
+            // starts the next read if the page opens again meanwhile.
+            cancelNetworkProcessRefresh()
+            networkProcessData = MenuBarNetworkProcessData()
         }
     }
 
@@ -1037,9 +1118,10 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
 
         let now = collectionClock()
         let refreshInterval = cheapInterval
-        guard force || processorTelemetryRefreshedAt.map({
-            now.timeIntervalSince($0) >= refreshInterval
-        }) != false else { return }
+        guard force || (samplingContext == nil
+            ? processorTelemetryRefreshedAt.map({ now.timeIntervalSince($0) >= refreshInterval }) != false
+            : MenuBarPerformancePolicy.isDue(since: processorTelemetryRefreshedAt, now: now,
+                                             interval: refreshInterval)) else { return }
 
         processorTelemetryGeneration &+= 1
         let generation = processorTelemetryGeneration
@@ -1222,6 +1304,19 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         backgroundDiskRefreshTask?.cancel()
     }
 
+    /// D173: a reading with the important-usage figure remembers the purgeable
+    /// space it shows; the free-space-only readings in between get it added.
+    private func completingPurgeable(
+        _ snapshot: StorageCapacitySnapshot,
+        readImportantUsage: Bool
+    ) -> StorageCapacitySnapshot {
+        if readImportantUsage, let important = snapshot.availableForImportantUsageBytes {
+            measuredPurgeableBytes = max(0, important - snapshot.availableBytes)
+            return snapshot
+        }
+        return snapshot.addingPurgeableEstimate(measuredPurgeableBytes)
+    }
+
     private func refreshLocalData(
         force: Bool = false,
         forceNetworkInterface: Bool = false,
@@ -1234,7 +1329,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         let capacityAttempt = samplingContext == nil ? storageRefreshedAt : residentStorageAttemptAt
         let batteryAttempt = samplingContext == nil ? batteryRefreshedAt : residentBatteryAttemptAt
         let needsStorageCapacity = !networkOnly && combinedDemand.needsStorageCapacity && (force
-            || capacityAttempt.map { now.timeIntervalSince($0) >= (samplingContext == nil ? 30 : cheapInterval) } != false
+            || (samplingContext == nil
+                ? capacityAttempt.map { now.timeIntervalSince($0) >= 30 } != false
+                : MenuBarPerformancePolicy.isDue(since: capacityAttempt, now: now, interval: cheapInterval))
         )
         let needsStorageVolumes = !networkOnly
             && combinedDemand.needsStorageVolumes
@@ -1259,6 +1356,12 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
         if needsStorage, storageRefreshTask == nil {
             if samplingContext != nil { residentStorageAttemptAt = now }
             let volumeProvider = needsStorageVolumes ? storageVolumeProvider : nil
+            let capacityProvider = storageCapacityProvider
+            // D173: free space on every capacity read, the purgeable space
+            // (a CacheDelete query) only every five minutes, as iStat.
+            let readsPurgeable = needsStorageCapacity && MenuBarPerformancePolicy.isDue(
+                since: purgeableAttemptAt, now: now, interval: Self.purgeableSamplingInterval)
+            if readsPurgeable { purgeableAttemptAt = now }
             storageRefreshTask = Task { @MainActor [weak self] in
                 if Task.isCancelled {
                     guard let self else { return }
@@ -1269,7 +1372,7 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
                 let resolvedStorage = await Task.detached(priority: .utility) {
                     let rootURL = URL(fileURLWithPath: "/", isDirectory: true)
                     return MenuBarPresentationTrace.measureSample("storage.capacity-volumes") { (
-                        StorageCapacityService.snapshot(),
+                        capacityProvider(readsPurgeable),
                         (try? rootURL.resourceValues(forKeys: [.volumeNameKey]).volumeName),
                         volumeProvider?()
                     ) }
@@ -1283,7 +1386,9 @@ final class MenuBarAuxiliaryMonitorState: ObservableObject {
                 }
                 var nextLocalData = localData
                 if samplingContext == nil || resolvedStorage.0 != nil {
-                    nextLocalData.storageSnapshot = resolvedStorage.0
+                    nextLocalData.storageSnapshot = resolvedStorage.0.map {
+                        completingPurgeable($0, readImportantUsage: readsPurgeable)
+                    }
                     nextLocalData.storageRefreshedAt = collectionClock()
                 }
                 if let volumes = resolvedStorage.2 {

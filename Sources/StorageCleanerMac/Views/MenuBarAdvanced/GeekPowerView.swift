@@ -1,52 +1,78 @@
+import AppKit
 import SwiftUI
 
+/// D138: iStat's energy-mode section (`-[BBRBatteryMenuEnergyModeSection
+/// drawRect:]`) titles itself 'Power.Energy Mode', or 'Power.Mode' when the
+/// title (upper case, the label font), the value (the value font), 16 and 20
+/// are wider than the section; both texts unrounded. Our value carries the
+/// charge limit after the mode, so in English the title is often MODE.
+enum GeekEnergyModeTitle {
+    static let padding: CGFloat = 16 + 20
+    static var sectionWidth: CGFloat {
+        MiniWindowStyleTokens.powerDetailWidth - 2 * MiniWindowStyleTokens.contentInset
+    }
+
+    static func title(value: String, sectionWidth: CGFloat = sectionWidth) -> String {
+        let full = L10n.text("能耗模式", "Energy Mode")
+        let titleFont = NSFont.systemFont(ofSize: GeekIStatCardGeometry.textFontSize)
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: GeekIStatCardGeometry.textFontSize, weight: .regular)
+        let needed = width(full.uppercased(), titleFont) + width(value, valueFont) + padding
+        return needed > sectionWidth ? L10n.text("模式", "Mode") : full
+    }
+
+    private static func width(_ text: String, _ font: NSFont) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: font]).width
+    }
+}
+
 enum GeekPowerLayout {
-    static let gaugeHeight: CGFloat = 112
-    static let adapterHeight: CGFloat = 94
-    static let historyHeight: CGFloat = 79
-    static let modeHeight: CGFloat = 25
-    static let significantEnergyHeight: CGFloat = 79
-    static let electricalHeight = GeekSensorReadoutLayout.cardHeight(rowCount: 2)
-    /// D57: computer, power input, battery, display backlight, chip total.
-    static let powerHeight = GeekSensorReadoutLayout.cardHeight(rowCount: 5)
-    /// A desktop: computer, power input, chip total.
-    static let desktopPowerHeight = GeekSensorReadoutLayout.cardHeight(rowCount: 3)
+    /// D119: iStat's battery card is the memory card's: two 96 pt rings
+    /// (line 6) centered in the halves, 56 pt below the top.
+    static let gaugeHeight: CGFloat = GeekIStatCardGeometry.memoryHeight
+    /// D119: the adapter's title row and its three negotiated readings,
+    /// 24 + 17 × 3 (was 94).
+    static let adapterHeight = GeekIStatSectionGeometry.rowsHeight(3, titled: true)
+    /// D119: iStat's 80 pt charge chart (was 79).
+    static let historyHeight = GeekIStatSectionGeometry.chargeChartHeight
+    static var historyChartHeight: CGFloat {
+        historyHeight - GeekIStatSectionGeometry.chargeChartTop - GeekIStatSectionGeometry.chargeChartBottomInset
+    }
+    static let modeHeight = GeekIStatSectionGeometry.singleRowHeight
     static let displayedEnergyAppCount = 3
-    static let detailPreviewDuration: TimeInterval = 60 * 60
+    /// D119: iStat's process section for three apps, 25 + 17 × 3 (was 79).
+    static let significantEnergyHeight = GeekIStatSectionGeometry.processesHeight(displayedEnergyAppCount)
+    /// D132: the charge chart is iStat's battery menu graph, 69 buckets of
+    /// 15 minutes (`GeekIStatBatteryGraph.menu`); it showed the last hour
+    /// (`detailPreviewDuration`, 3600 s).
+    static let menuGraphDuration = Double(GeekIStatBatteryGraph.menuBarCount) * GeekIStatBatteryGraph.menuInterval
     static let historyTertiaryOffset = GeekPanelLayout.contentPadding
         + gaugeHeight
         + GeekPanelLayout.detailSpacing
+    /// D119: the energy mode follows the charge chart (the electrical and
+    /// power cards moved to the sensors page).
     static let energyModeTertiaryOffset = GeekPanelLayout.contentPadding
         + gaugeHeight
         + GeekPanelLayout.detailSpacing
         + historyHeight
         + GeekPanelLayout.detailSpacing
-        + electricalHeight
-        + GeekPanelLayout.detailSpacing
-        + powerHeight
-        + GeekPanelLayout.detailSpacing
 
     static func energyModeSourceOffset(hasInternalBattery: Bool) -> CGFloat {
         hasInternalBattery
             ? energyModeTertiaryOffset
-            : GeekPanelLayout.contentPadding + adapterHeight
-                + GeekPanelLayout.detailSpacing + desktopPowerHeight
-                + GeekPanelLayout.detailSpacing
+            : GeekPanelLayout.contentPadding + adapterHeight + GeekPanelLayout.detailSpacing
     }
 
+    /// The process section lists up to three apps and shrinks with fewer:
+    /// 42, 59 or 76 (one row for the scanning and empty states).
     static func significantEnergyHeight(for appCount: Int) -> CGFloat {
-        switch min(max(0, appCount), displayedEnergyAppCount) {
-        case 0...1: return 39
-        case 2: return 59
-        default: return significantEnergyHeight
-        }
+        GeekIStatSectionGeometry.processesHeight(min(max(1, appCount), displayedEnergyAppCount))
     }
 
+    /// iStat's battery menu: the battery card, the charge chart, the energy
+    /// mode and the apps using significant energy.
     static let secondaryCardHeights = [
         gaugeHeight,
         historyHeight,
-        electricalHeight,
-        powerHeight,
         modeHeight,
         significantEnergyHeight,
     ]
@@ -117,31 +143,23 @@ enum GeekBatteryRingState: Equatable {
 
 extension MenuBarAdvancedStatusView {
     var geekPowerPage: some View {
+        // D119: iStat's battery menu at 240 pt: the battery card (charge and
+        // health), the charge chart, the energy mode and the apps using
+        // significant energy.
         VStack(spacing: GeekPanelLayout.detailSpacing) {
             liveCard(.battery) {
                 VStack(spacing: GeekPanelLayout.detailSpacing) {
-            if hasInternalBattery {
-                geekPowerGaugeCard
-                geekPowerHistoryCard
-                // D57: rows whose SMC key does not exist are hidden.
-                let electricalReadouts = geekBatteryElectricalReadouts
-                if !electricalReadouts.isEmpty {
-                    geekSensorReadoutCard(
-                        L10n.text("电池电气", "BATTERY ELECTRICAL"),
-                        rows: electricalReadouts
-                    )
-                }
-            } else {
-                geekPowerAdapterCard
-            }
-            // BOARD N16-6, D57: only rows with a reading; no card without any.
-            let powerReadouts = geekPowerReadouts
-            if !powerReadouts.isEmpty {
-                geekSensorReadoutCard(L10n.text("功耗", "POWER"), rows: powerReadouts)
-            }
+                    if hasInternalBattery {
+                        geekPowerGaugeCard
+                        geekPowerHistoryCard
+                    } else {
+                        geekPowerAdapterCard
+                    }
                 }
             }
-            geekHelperPowerMetricsCards
+            // D119: the battery current and voltage, the power rows (D57,
+            // BOARD N16-6) and the helper's chip power are groups of the
+            // sensors page, as in iStat's sensor menu.
             if showsExtendedGeekDetails {
                 if hasAvailableEnergyMode || MacMiniHardwareCapabilities.shouldOffer(
                     hasInternalBattery: hasInternalBattery, isDataOnlyFixture: fanControl.isDataOnlyFixture
@@ -182,35 +200,16 @@ extension MenuBarAdvancedStatusView {
         )
     }
 
+    /// D119: a titled group of iStat rows with the adapter's name in the
+    /// title row (was a combined card's 18 pt header over telemetry rows).
     private var geekPowerAdapterCard: some View {
-        GeekCombinedCard(height: GeekPowerLayout.adapterHeight) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    GeekSectionTitle(title: L10n.text("电源适配器", "Power Adapter").uppercased())
-                    Spacer(minLength: 4)
-                    Text(geekAdapterNameText)
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(height: 18)
-
-                GeekTelemetryRow(
-                    title: L10n.text("协商功率", "Negotiated Power"),
-                    value: geekAdapterPowerText,
-                    tint: panelMetricColors.battery
-                )
-                GeekTelemetryRow(
-                    title: L10n.text("协商电压", "Negotiated Voltage"),
-                    value: geekAdapterVoltageText,
-                    tint: panelMetricColors.battery
-                )
-                GeekTelemetryRow(
-                    title: L10n.text("协商电流", "Negotiated Current"),
-                    value: geekAdapterAmperageText,
-                    tint: panelMetricColors.battery
-                )
-            }
+        GeekIStatRowsCard(title: L10n.text("电源适配器", "POWER ADAPTER"), rowCount: 3) {
+            Text(geekAdapterNameText)
+                .geekIStatValueText(.secondary)
+        } rows: {
+            GeekIStatRow(title: L10n.text("协商功率", "Negotiated Power"), value: geekAdapterPowerText)
+            GeekIStatRow(title: L10n.text("协商电压", "Negotiated Voltage"), value: geekAdapterVoltageText)
+            GeekIStatRow(title: L10n.text("协商电流", "Negotiated Current"), value: geekAdapterAmperageText)
         }
         .accessibilityHint(L10n.text(
             "由 macOS 电源适配器接口报告；这是协商输入规格，不是墙插功率计读数。",
@@ -221,11 +220,13 @@ extension MenuBarAdvancedStatusView {
     private var geekPowerGaugeCard: some View {
         GeekHoverDetailTarget(
             accessibilityLabel: L10n.text("电池与充电三级详情", "Battery and Charging Deep Detail"),
-            popoverSize: GeekSensorPowerHoverDetailMetrics.batterySize,
+            popoverSize: geekBatteryElectricalDetail.popoverSize,
             usesCardActiveBorder: true
         ) {
-            GeekCombinedCard(height: GeekPowerLayout.gaugeHeight) {
-                HStack(spacing: 12) {
+            // D119: the memory card's rings (iStat's battery card), each
+            // centered in its half (were 96 pt rings 12 pt apart).
+            GeekIStatCard(height: GeekPowerLayout.gaugeHeight) {
+                HStack(spacing: 0) {
                     GeekCombinedRing(
                         title: L10n.text("电池", "BATTERY"),
                         value: batterySnapshot?.chargePercent.map { "\($0)%" } ?? "--",
@@ -236,38 +237,56 @@ extension MenuBarAdvancedStatusView {
                         statusSymbolTint: panelMetricColors.batteryCharging,
                         progress: batterySnapshot?.chargePercent.map { Double($0) / 100 },
                         tint: panelMetricColors.battery,
-                        size: 96
+                        size: GeekIStatCardGeometry.memoryRingSize,
+                        fixedValueFontSize: GeekIStatCardGeometry.memoryValueFontSize,
+                        strokeWidth: GeekIStatCardGeometry.memoryRingLineWidth,
+                        fixedLabelFontSize: GeekIStatCardGeometry.ringLabelFontSize
                     )
+                    .frame(maxWidth: .infinity)
 
                     GeekCombinedRing(
-                        title: L10n.text("电池健康", "HEALTH"),
+                        // D138: iStat's 'Power.HealthShort' (was 电池健康).
+                        title: L10n.text("健康", "HEALTH"),
                         value: geekBatteryHealthPercent.map { "\($0)%" } ?? "--",
                         detail: geekBatteryHealthPercent == nil
                             ? geekBatteryHealthDetail
                             : nil,
                         progress: geekBatteryHealthPercent.map { min(1, Double($0) / 100) },
                         tint: panelMetricColors.batteryHealth,
-                        size: 96
+                        size: GeekIStatCardGeometry.memoryRingSize,
+                        fixedValueFontSize: GeekIStatCardGeometry.memoryValueFontSize,
+                        strokeWidth: GeekIStatCardGeometry.memoryRingLineWidth,
+                        fixedLabelFontSize: GeekIStatCardGeometry.ringLabelFontSize
                     )
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .geekIStatLayer(
+                    top: GeekIStatCardGeometry.memoryRingCenterY - GeekIStatCardGeometry.memoryRingSize / 2,
+                    height: GeekIStatCardGeometry.memoryRingSize
+                )
             }
         } detail: {
-            GeekBatteryElectricalHoverDetail(
-                electrical: batteryElectricalSnapshot,
-                cycleCount: healthSummary?.batteryCycleCount
-                    ?? batteryElectricalSnapshot?.cycleCount,
-                condition: healthSummary?.batteryCondition.map(batteryConditionText)
-                    ?? batteryElectricalSnapshot?.condition.map(batteryConditionText),
-                chargePercent: batterySnapshot?.chargePercent,
-                healthPercent: geekBatteryHealthPercent,
-                statusText: batteryStatusTitle,
-                isCharging: batterySnapshot?.isCharging,
-                chargeTargetPercent: batteryChargeLimitState?.effectiveLimit,
-                remainingTimeMinutes: batterySnapshot?.remainingTimeMinutes,
-                runtimeEstimate: batteryRuntimeEstimate
-            )
+            geekBatteryElectricalDetail
         }
+    }
+
+    /// D122: the battery page; its size counts the same readings' rows (and,
+    /// D137, their widths).
+    private var geekBatteryElectricalDetail: GeekBatteryElectricalHoverDetail {
+        GeekBatteryElectricalHoverDetail(
+            electrical: batteryElectricalSnapshot,
+            cycleCount: healthSummary?.batteryCycleCount
+                ?? batteryElectricalSnapshot?.cycleCount,
+            condition: healthSummary?.batteryCondition.map(batteryConditionText)
+                ?? batteryElectricalSnapshot?.condition.map(batteryConditionText),
+            chargePercent: batterySnapshot?.chargePercent,
+            healthPercent: geekBatteryHealthPercent,
+            statusText: batteryStatusTitle,
+            isCharging: batterySnapshot?.isCharging,
+            chargeTargetPercent: batteryChargeLimitState?.effectiveLimit,
+            remainingTimeMinutes: batterySnapshot?.remainingTimeMinutes,
+            runtimeEstimate: batteryRuntimeEstimate
+        )
     }
 
     private var geekPowerHistoryCard: some View {
@@ -281,19 +300,27 @@ extension MenuBarAdvancedStatusView {
             sourceOffset: GeekPowerLayout.historyTertiaryOffset,
             usesCardActiveBorder: true
         ) {
-            GeekCombinedCard(height: GeekPowerLayout.historyHeight) {
+            // D119: iStat's 80 pt charge chart (was a 67 pt chart on a 79 pt
+            // combined card). D132: its battery menu graph, 69 buckets of
+            // 15 minutes, the newest bar's right edge 8 pt in from the card's
+            // right, the bars from 8 to 60 and the rail from 64 to 72; the
+            // chart takes the card's width (was the last hour across the card
+            // inside its 8 pt insets, the bars from 6).
+            GeekIStatCard(height: GeekPowerLayout.historyHeight) {
                 GeekPowerHistoryChart(
                     points: batteryPowerHistory,
                     metric: .charge,
-                    duration: GeekPowerLayout.detailPreviewDuration,
+                    duration: GeekPowerLayout.menuGraphDuration,
                     tint: panelMetricColors.batteryCharging,
                     chargingTint: panelMetricColors.batteryDraining,
                     accessibilityLabel: L10n.text(
-                        "最近一小时的电池电量历史",
-                        "Battery-level history over the last hour"
-                    )
+                        "电池电量历史，每柱 15 分钟",
+                        "Battery-level history, 15 minutes per bar"
+                    ),
+                    batteryGraph: .menu
                 )
-                .frame(height: 67)
+                .geekIStatLayer(top: GeekIStatSectionGeometry.chargeChartTop, height: GeekPowerLayout.historyChartHeight,
+                                leading: 0, trailing: 0)
             }
         } detail: {
             GeekBatteryHistoryHoverDetail(
@@ -309,21 +336,14 @@ extension MenuBarAdvancedStatusView {
             kind: .power,
             accessibilityLabel: L10n.text("打开电源模式控制", "Open Power Mode Controls")
         ) {
-            GeekCombinedCard(height: GeekPowerLayout.modeHeight) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    GeekSectionTitle(title: L10n.text("能源模式", "Energy Mode").uppercased())
-
-                    Spacer(minLength: 8)
-
-                    Text(geekPowerModeTitle
-                        ?? geekHealthSamplingText)
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                }
-                .accessibilityElement(children: .combine)
-                .help(geekPowerModeHelpText)
+            // D119: iStat's energy-mode row, the title and the mode on one
+            // 25 pt row (was the combined card's caption).
+            let value = geekPowerModeTitle ?? geekHealthSamplingText
+            GeekIStatSingleRowCard(title: GeekEnergyModeTitle.title(value: value)) {
+                Text(value)
+                    .geekIStatValueText()
             }
+            .help(geekPowerModeHelpText)
         }
     }
 
@@ -345,56 +365,51 @@ extension MenuBarAdvancedStatusView {
             kind: .power,
             accessibilityLabel: L10n.text("打开电源管理", "Open Power Management")
         ) {
-            GeekCombinedCard(height: GeekPowerLayout.modeHeight) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    GeekSectionTitle(title: L10n.text("Mac mini 模式", "Mac mini Mode"))
-                    Spacer(minLength: 8)
-                    Text(L10n.text("管理", "Manage")).font(AdvancedPanelTypography.captionStrong)
-                }
+            // D119: the energy-mode row's place on a Mac without a battery.
+            GeekIStatSingleRowCard(title: L10n.text("Mac mini 模式", "Mac mini Mode")) {
+                Text(L10n.text("管理", "Manage"))
+                    .geekIStatValueText()
             }
         }
     }
 
+    /// D119: iStat's process section, 25 + 17n for up to three apps, the
+    /// apps under the title alone; the current power stays as each row's
+    /// value (a "Power" column label truncated the title at 240 pt).
     private var geekSignificantEnergyCard: some View {
         let apps = geekDisplayedEnergyApps
+        let isLoading = store.isLoadingEnergyImpact || store.isMenuBarProcessSamplePending
         let state = GeekPowerEnergyCardState.resolve(
             hasCachedSnapshot: geekHasEnergyImpactSnapshot,
-            isLoading: store.isLoadingEnergyImpact || store.isMenuBarProcessSamplePending,
+            isLoading: isLoading,
             appCount: apps.count
         )
-        return GeekCombinedCard(
-            height: GeekPowerLayout.significantEnergyHeight(for: apps.count)
+        return GeekIStatProcessCard(
+            // D138: iStat's 'Power.Using Significant Energy' (was 使用显著能耗).
+            title: L10n.text("使用大量能耗", "Using Significant Energy"),
+            rowCapacity: max(1, apps.count)
         ) {
-            VStack(alignment: .leading, spacing: 1) {
-                GeekProcessListHeader(
-                    title: L10n.text("使用显著能耗", "Using Significant Energy").uppercased(),
-                    columns: [GeekProcessListColumn(id: "power", title: L10n.text("功率", "Power"),
-                                                    accessibilityLabel: L10n.text("当前功率", "Current power"))]
-                ) {
-                    if store.isLoadingEnergyImpact || store.isMenuBarProcessSamplePending {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .frame(width: 10, height: 10)
-                    }
-                }
-
-                switch state {
-                case .apps:
-                    ForEach(apps) { app in
-                        GeekPowerEnergyAppRow(app: app)
-                    }
-                case .loading:
-                    geekPowerSamplingRow(L10n.text("正在扫描应用…", "Scanning apps…"))
-                case .empty:
-                    geekPowerSamplingRow(
-                        L10n.text(
-                            "当前没有显著能耗应用",
-                            "No significant-energy apps"
-                        )
-                    )
-                }
+            if isLoading {
+                ProgressView()
+                    .controlSize(.mini)
+                    .frame(width: 10, height: 10)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } rows: {
+            switch state {
+            case .apps:
+                ForEach(apps) { app in
+                    GeekPowerEnergyAppRow(app: app)
+                }
+            case .loading:
+                geekPowerSamplingRow(L10n.text("正在扫描应用…", "Scanning apps…"))
+            case .empty:
+                geekPowerSamplingRow(
+                    L10n.text(
+                        "当前没有显著能耗应用",
+                        "No significant-energy apps"
+                    )
+                )
+            }
         }
     }
 
@@ -481,7 +496,7 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekPowerModeHelpText: String {
-        "\(L10n.text("能源模式", "Energy Mode")): \(geekPowerModeTitle ?? geekHealthSamplingText)"
+        "\(L10n.text("能耗模式", "Energy Mode")): \(geekPowerModeTitle ?? geekHealthSamplingText)"
     }
 
     var geekCurrentPowerMode: BatteryPowerMode? {
@@ -553,28 +568,30 @@ extension MenuBarAdvancedStatusView {
 
     private var geekAdapterPowerText: String {
         batteryElectricalSnapshot?.adapterPowerWatts
-            .map { String(format: "%.0f W", $0) } ?? "--"
+            .map { IStatNumberFormat.power($0) } ?? "--"
     }
 
     private var geekAdapterVoltageText: String {
         batteryElectricalSnapshot?.adapterVoltageVolts
-            .map { String(format: "%.1f V", $0) } ?? "--"
+            .map { IStatNumberFormat.voltage($0) } ?? "--"
     }
 
     private var geekAdapterAmperageText: String {
         batteryElectricalSnapshot?.adapterAmperageAmps
-            .map { String(format: "%.2f A", $0) } ?? "--"
+            .map { IStatNumberFormat.current($0) } ?? "--"
     }
 
+    /// D119: a 15 pt row of the process section.
     private func geekPowerSamplingRow(_ title: String) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(AdvancedPanelTypography.body)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(height: 19)
-        .accessibilityElement(children: .combine)
+        Text(title)
+            .geekIStatValueText(.secondary)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: GeekIStatSectionGeometry.rowHeight,
+                maxHeight: GeekIStatSectionGeometry.rowHeight,
+                alignment: .leading
+            )
+            .accessibilityElement(children: .combine)
     }
 }
 
@@ -586,22 +603,12 @@ private struct GeekPowerEnergyAppRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            GeekSecondaryProcessIcon(path: app.iconPath, fallback: AppSymbols.Monitor.power)
-
-            Text(app.name)
-                .font(AdvancedPanelTypography.body)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
-
+        // D119: iStat's process row, the 16 pt icon, the name from 28 and
+        // the value at the trailing inset (was a 6 pt-spaced data row).
+        GeekIStatProcessRow(iconPath: app.iconPath, fallbackSymbol: AppSymbols.Monitor.power, name: app.name) {
             Text(powerText)
-                .font(AdvancedPanelTypography.body.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .geekIStatValueText(.secondary)
         }
-        .frame(height: MiniWindowStyleTokens.dataRowHeight)
         .help("\(app.name) · \(powerText) · \(app.currentEvidence.detail)")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(app.name)

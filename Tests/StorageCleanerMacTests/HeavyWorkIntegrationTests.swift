@@ -190,7 +190,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let coordinator = HeavyWorkCoordinator()
         let inventoryScanner = CountingApplicationInventoryScanner(applications: [])
         let duplicateGate = AsyncValueGate(value: [StorageItem]())
-        let emptyTrashGate = AsyncValueGate(value: TrashSummary.empty)
+        let emptyTrashGate = AsyncValueGate(value: FrozenTrashEmptyResult())
         let restoreGate = AsyncValueGate(value: TrashRestoreSummary.empty)
         let updateGate = AsyncValueGate(value: ApplicationUpdateInstallResult(
             applicationID: makeHomebrewUpdate().id,
@@ -210,7 +210,7 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let store = try ScanStore.makeForTests(for: self,
             heavyWorkCoordinator: coordinator,
             scanHeavyWorkOperations: TestOperationFactory(for: self).scanOperations(
-                emptyTrash: { await emptyTrashGate.wait() },
+                emptyTrash: { _ in await emptyTrashGate.wait() },
                 restoreFromTrash: { _ in await restoreGate.wait() }
             ),
             duplicateFilesScanOperation: { _, _, _, _, _ in
@@ -253,8 +253,8 @@ final class HeavyWorkIntegrationTests: XCTestCase {
         let ownerAfterDuplicate = await coordinator.activeOwner
         XCTAssertNil(ownerAfterDuplicate)
 
-        store.pendingEmptyTrashSummary = TrashSummary(itemCount: 1, totalBytes: 1)
-        store.confirmEmptyTrash()
+        store.pendingEmptyTrash = FrozenTrash.testFixture(names: ["fixture"])
+        store.confirmEmptyTrash(acknowledgesPermanentDeletion: true, acknowledgesTrashContentsReviewed: true)
         await emptyTrashGate.waitUntilStarted()
         let emptyTrashOwner = await coordinator.activeOwner
         XCTAssertEqual(emptyTrashOwner, .emptyTrash)

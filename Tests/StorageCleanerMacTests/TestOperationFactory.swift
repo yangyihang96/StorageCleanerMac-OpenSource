@@ -27,17 +27,19 @@ struct TestOperationFactory: Sendable {
     func scanOperations(
         scan: (@Sendable (ScanMode, DiskScanProgressHandler?) async throws -> ScanResult)? = nil,
         moveToTrash: (@Sendable (StorageItem, Set<String>) async throws -> [TrashMoveRecord])? = nil,
-        emptyTrash: (@Sendable () async throws -> TrashSummary)? = nil,
+        freezeTrash: (@Sendable () async throws -> FrozenTrash?)? = nil,
+        emptyTrash: (@Sendable (FrozenTrash) async throws -> FrozenTrashEmptyResult)? = nil,
         restoreFromTrash: (@Sendable ([TrashMoveRecord]) async throws -> TrashRestoreSummary)? = nil,
         optimizeMemory: (@Sendable () async throws -> MemoryOptimizationResult)? = nil,
         runHomebrewUpgrade: (@Sendable ([AppUpdateItem]) async throws -> AppUpdateHomebrewRunResult)? = nil,
         prepareOneClickUpdate: (@MainActor @Sendable (AppUpdateOneClickPlan) -> AppUpdateOneClickLaunchResult)? = nil
     ) -> ScanHeavyWorkService.Operations {
         let recorder = recorder
-        // 一个只读扫描入口沿用生产实现；六个有副作用的入口逐项封闭。
+        // 只读扫描入口沿用生产实现；冻结废纸篓会读真实的废纸篓，和六个有副作用的入口一样逐项封闭。
         let denied = ScanHeavyWorkService.Operations(
             moveToTrash: { _, _ in throw recorder.refuse("legacy.moveToTrash") },
-            emptyTrash: { throw recorder.refuse("legacy.emptyTrash") },
+            freezeTrash: { throw recorder.refuse("legacy.freezeTrash") },
+            emptyTrash: { _ in throw recorder.refuse("legacy.emptyTrash") },
             restoreFromTrash: { _ in throw recorder.refuse("legacy.restoreFromTrash") },
             optimizeMemory: { throw recorder.refuse("legacy.optimizeMemory") },
             runHomebrewUpgrade: { _ in throw recorder.refuse("legacy.runHomebrewUpgrade") },
@@ -50,6 +52,7 @@ struct TestOperationFactory: Sendable {
         return ScanHeavyWorkService.Operations(
             scan: scan ?? denied.scan,
             moveToTrash: moveToTrash ?? denied.moveToTrash,
+            freezeTrash: freezeTrash ?? denied.freezeTrash,
             emptyTrash: emptyTrash ?? denied.emptyTrash,
             restoreFromTrash: restoreFromTrash ?? denied.restoreFromTrash,
             optimizeMemory: optimizeMemory ?? denied.optimizeMemory,
@@ -295,7 +298,8 @@ final class TestOperationFactoryTests: XCTestCase {
                                                 entryName: "never-created", entryIdentity: identity)
         let attempts: [@Sendable () async throws -> Void] = [
             { _ = try await operations.moveToTrash(item, []) },
-            { _ = try await operations.emptyTrash() },
+            { _ = try await operations.freezeTrash() },
+            { _ = try await operations.emptyTrash(FrozenTrash.testFixture(names: ["never-created"])) },
             { _ = try await operations.restoreFromTrash([]) },
             { _ = try await operations.optimizeMemory() },
             { _ = try await operations.runHomebrewUpgrade([]) },
@@ -313,7 +317,7 @@ final class TestOperationFactoryTests: XCTestCase {
             appStoreApps: [], automaticApps: [], authorizationApps: [], sparkleApps: [], manualApps: []))
         XCTAssertFalse(launch.openedAppStore)
         XCTAssertFalse(launch.copiedManualReviewList)
-        XCTAssertEqual(recorder.calls, ["legacy.moveToTrash", "legacy.emptyTrash", "legacy.restoreFromTrash", "legacy.optimizeMemory",
+        XCTAssertEqual(recorder.calls, ["legacy.moveToTrash", "legacy.freezeTrash", "legacy.emptyTrash", "legacy.restoreFromTrash", "legacy.optimizeMemory",
             "legacy.runHomebrewUpgrade", "uninstall.recycle", "cleanup.moveToTrash", "cleanup.moveToQuarantine",
             "cleanup.removeTrashEntry", "fileAnalysis.moveToTrash", "legacy.prepareOneClickUpdate"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: input.path))
@@ -398,9 +402,9 @@ final class TestOperationFactoryTests: XCTestCase {
 
     func testExplicitIsolatedOperationDoesNotEnableAnUnspecifiedOne() async throws {
         let recorder = TestUnexpectedOperations()
-        let operations = TestOperationFactory(recorder: recorder).scanOperations(emptyTrash: { .empty })
-        let result = try await operations.emptyTrash()
-        XCTAssertEqual(result, .empty)
+        let operations = TestOperationFactory(recorder: recorder).scanOperations(emptyTrash: { _ in FrozenTrashEmptyResult() })
+        let result = try await operations.emptyTrash(FrozenTrash.testFixture(names: []))
+        XCTAssertEqual(result, FrozenTrashEmptyResult())
         XCTAssertEqual(recorder.calls, [])
         do { _ = try await operations.restoreFromTrash([]); XCTFail("遗漏的恢复操作必须拒绝") }
         catch { XCTAssertTrue(error is TestOperationRefused) }

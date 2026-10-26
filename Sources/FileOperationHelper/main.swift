@@ -6,6 +6,7 @@ import FileOperationShared
 
 /// No shell, recursive deletion, chown or cross-volume copy. All moves are
 /// atomic, exclusive renames between preopened, non-symlink directories.
+/// The one command it runs is the read-only `sfltool dumpbtm` (D177).
 private enum RestrictedMove {
     static func directory(_ path: String) throws -> Int32 {
         guard path.hasPrefix("/"), URL(fileURLWithPath: path).standardizedFileURL.path == path,
@@ -49,7 +50,7 @@ private enum RestrictedMove {
             ? Int64(info.st_birthtimespec.tv_sec) * 1_000_000_000 + Int64(info.st_birthtimespec.tv_nsec) : nil
         guard info.st_mode & S_IFMT == S_IFDIR, UInt64(info.st_dev) == request.device,
               UInt64(info.st_ino) == request.inode, birth == request.birthNanoseconds,
-              info.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE | SF_RESTRICTED) == 0 else { throw POSIXError(.EPERM) }
+              FileProtectionFlags.lock(info.st_flags) == .none else { throw POSIXError(.EPERM) }
         // Read Info.plist through the pinned source directory, never a following URL.
         let appFD = openat(sourceFD, source.lastPathComponent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard appFD >= 0 else { throw POSIXError(.EIO) }; defer { close(appFD) }
@@ -90,15 +91,26 @@ private enum RestrictedMove {
 
 final class ConnectionService: NSObject, FileOperationHelperProtocol, @unchecked Sendable {
     let uid: uid_t
+    let lifecycle: FileOperationHelperLifecycle
+    let connectionID: UUID
     private let queue = DispatchQueue(label: "file-operation.serial")
     private var requests = Set<UUID>()
     private var commitGate = AuthorizedFileCommitGate()
     let updates = PrivilegedApplicationUpdateSession()
-    init(uid: uid_t) { self.uid = uid }
+    let systemCaches = PrivilegedSystemCacheSession()
+    init(uid: uid_t, lifecycle: FileOperationHelperLifecycle, connectionID: UUID) {
+        self.uid = uid; self.lifecycle = lifecycle; self.connectionID = connectionID
+    }
+    /// Counts queued work as well as executing work. ReplyCallback releases
+    /// the request only after the reply has been handed back to XPC.
+    func trackedReply(_ reply: @escaping (Data) -> Void) -> ReplyCallback {
+        lifecycle.beginRequest()
+        return ReplyCallback(reply) { [lifecycle] in lifecycle.finishRequest() }
+    }
     func prepare(_ data: Data, authorization: Data, reply: @escaping (Data) -> Void) {
         // Authentication can present SecurityAgent in the imported user's
         // session. No filesystem mutation occurs until a separate commit.
-        let callback = ReplyCallback(reply)
+        let callback = trackedReply(reply)
         queue.async {
             var requestID = UUID()
             var stage: AuthorizedFileFailureStage = .request
@@ -142,11 +154,12 @@ final class ConnectionService: NSObject, FileOperationHelperProtocol, @unchecked
                 let error = error as NSError
                 response = AuthorizedFileReply(requestID: requestID, errorDomain: error.domain, errorCode: error.code, failureStage: stage)
             }
+            self.lifecycle.setApproval(until: self.commitGate.approvalExpiration, connection: self.connectionID, kind: .move)
             callback.call((try? JSONEncoder().encode(response)) ?? Data())
         }
     }
     func commit(_ data: Data, reply: @escaping (Data) -> Void) {
-        let callback = ReplyCallback(reply)
+        let callback = trackedReply(reply)
         queue.async {
             var requestID = UUID()
             var stage: AuthorizedFileFailureStage = .commit
@@ -165,23 +178,31 @@ final class ConnectionService: NSObject, FileOperationHelperProtocol, @unchecked
                 response = AuthorizedFileReply(requestID: requestID, errorDomain: error.domain,
                                                errorCode: error.code, failureStage: stage)
             }
+            self.lifecycle.setApproval(until: self.commitGate.approvalExpiration, connection: self.connectionID, kind: .move)
             callback.call((try? JSONEncoder().encode(response)) ?? Data())
         }
     }
 }
-private final class ReplyCallback: @unchecked Sendable {
+final class ReplyCallback: @unchecked Sendable {
     let callback: (Data) -> Void
-    init(_ callback: @escaping (Data) -> Void) { self.callback = callback }
-    func call(_ value: Data) { callback(value) }
+    let didReply: @Sendable () -> Void
+    init(_ callback: @escaping (Data) -> Void, didReply: @escaping @Sendable () -> Void) {
+        self.callback = callback; self.didReply = didReply
+    }
+    func call(_ value: Data) { callback(value); didReply() }
 }
 
 private final class Listener: NSObject, NSXPCListenerDelegate {
+    let lifecycle = FileOperationHelperLifecycle(
+        signer: { FileOperationPeerRequirement.currentSigner(peerIdentifier: FileOperationIdentity.application) },
+        updateIsBusy: { FileOperationUpdateActivity.isBusy })
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        guard connection.effectiveUserIdentifier >= 501,
-              let requirement = FileOperationPeerRequirement.currentSigner(peerIdentifier: FileOperationIdentity.application) else { return false }
-        connection.setCodeSigningRequirement(requirement)
+        guard let admission = lifecycle.admit(uid: connection.effectiveUserIdentifier) else { return false }
+        connection.setCodeSigningRequirement(admission.requirement)
         connection.exportedInterface = NSXPCInterface(with: FileOperationHelperProtocol.self)
-        connection.exportedObject = ConnectionService(uid: connection.effectiveUserIdentifier)
+        connection.exportedObject = ConnectionService(uid: connection.effectiveUserIdentifier,
+                                                     lifecycle: lifecycle, connectionID: admission.id)
+        connection.invalidationHandler = { @Sendable [lifecycle] in lifecycle.invalidate(admission.id) }
         connection.resume()
         return true
     }
@@ -190,5 +211,6 @@ private final class Listener: NSObject, NSXPCListenerDelegate {
 private let delegate = Listener()
 let listener = NSXPCListener(machServiceName: FileOperationIdentity.helper)
 listener.delegate = delegate
+delegate.lifecycle.start()
 listener.resume()
 RunLoop.current.run()

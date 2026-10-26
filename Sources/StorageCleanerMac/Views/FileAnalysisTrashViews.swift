@@ -174,13 +174,20 @@ enum FileAnalysisTrashPresentation {
                   "The receipt is incomplete; check Operation History. Writing it failed midway, so the move stopped; moved items may show as needing verification.")
     }
 
+    /// D104 G1: what a ready file frees once the Trash is emptied, when
+    /// clones or a local snapshot keep noticeably part of it.
+    static func reclaimableNote(_ item: FileAnalysisTrashReviewItem) -> String? {
+        guard item.isReady else { return nil }
+        return CleanupCandidateRowHint.reclaimable(item.reclaimableEstimate, ofSize: item.selection.bytes)?.text
+    }
+
     /// D54 ④: a file with other hard links.
     static var otherHardLinksNote: String {
         L10n.text("另有硬链接，移走后空间不一定释放", "Has other hard links; moving it may free no space")
     }
 
     static func selectionSummary(count: Int, bytes: Int64) -> String {
-        L10n.text("已选 \(count) 项 · \(ByteFormat.storageString(bytes))",
+        L10n.text("已选 \(ByteFormat.count(count)) 项 · \(ByteFormat.storageString(bytes))",
                   "\(L10n.items(count)) selected · \(ByteFormat.storageString(bytes))")
     }
 
@@ -207,7 +214,7 @@ enum FileAnalysisTrashPresentation {
             ? StorageMapContentCategory.classify(name: selection.title, kind: "package", isDirectory: true).title
             : L10n.text("文件夹", "Folder")
         guard let count = selection.itemCount else { return kind }
-        return L10n.text("\(kind) · 含 \(count) 项", "\(kind) · \(L10n.items(count)) inside")
+        return L10n.text("\(kind) · 含 \(ByteFormat.count(count)) 项", "\(kind) · \(L10n.items(count)) inside")
     }
 }
 
@@ -231,7 +238,7 @@ struct FileAnalysisTrashBar: View {
                     .foregroundStyle(.secondary)
             }
             if workspace.trashPutBackCount > 0 {
-                Text(L10n.text("已从“操作记录”放回 \(workspace.trashPutBackCount) 项，已重新计入。",
+                Text(L10n.text("已从“操作记录”放回 \(ByteFormat.count(workspace.trashPutBackCount)) 项，已重新计入。",
                               "\(L10n.items(workspace.trashPutBackCount)) put back from Operation History are counted again."))
                 .font(AppDesignTokens.Typography.metadata)
                 .foregroundStyle(AppDesignTokens.Palette.success)
@@ -381,11 +388,11 @@ struct FileAnalysisTrashBar: View {
                 : L10n.text("没有移动任何项目。", "Nothing was moved.")
         }
         let moved = L10n.text(
-            "已移到废纸篓 \(outcome.movedPaths.count) 项 · \(ByteFormat.storageString(outcome.movedBytes))",
+            "已移到废纸篓 \(ByteFormat.count(outcome.movedPaths.count)) 项 · \(ByteFormat.storageString(outcome.movedBytes))",
             "Moved \(L10n.items(outcome.movedPaths.count)) to the Trash · \(ByteFormat.storageString(outcome.movedBytes))"
         )
         guard !outcome.skipped.isEmpty else { return moved }
-        return moved + L10n.text("；\(outcome.skipped.count) 项未移动", "; \(outcome.skipped.count) not moved")
+        return moved + L10n.text("；\(ByteFormat.count(outcome.skipped.count)) 项未移动", "; \(ByteFormat.count(outcome.skipped.count)) not moved")
     }
 
     private func outcomeRestoreNote(_ outcome: FileAnalysisTrashOutcome) -> String {
@@ -394,7 +401,7 @@ struct FileAnalysisTrashBar: View {
         }
         if outcome.notRestorableHereCount > 0 {
             return L10n.text(
-                "其中 \(outcome.notRestorableHereCount) 项的结果需要核实，请在“操作记录”中刷新后查看。",
+                "其中 \(ByteFormat.count(outcome.notRestorableHereCount)) 项的结果需要核实，请在“操作记录”中刷新后查看。",
                 "\(L10n.items(outcome.notRestorableHereCount)) need checking; refresh Operation History to review them."
             )
         }
@@ -461,14 +468,14 @@ struct FileAnalysisTrashReviewSheet: View {
                 Text(L10n.text("审阅后移到废纸篓", "Review Before Moving to the Trash"))
                     .font(AppDesignTokens.Typography.sectionTitle)
                 Text(L10n.text(
-                    "\(review.readyItems.count) 项可以移到废纸篓 · 合计 \(ByteFormat.storageString(review.readyBytes))",
+                    "\(ByteFormat.count(review.readyItems.count)) 项可以移到废纸篓 · 合计 \(ByteFormat.storageString(review.readyBytes))",
                     "\(L10n.items(review.readyItems.count)) can move · \(ByteFormat.storageString(review.readyBytes)) in total"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 if review.blockedCount > 0 {
-                    Text(L10n.text("另有 \(review.blockedCount) 项不会处理，原因见下方。",
+                    Text(L10n.text("另有 \(ByteFormat.count(review.blockedCount)) 项不会处理，原因见下方。",
                                    "\(L10n.items(review.blockedCount)) will not be handled; see why below."))
                         .font(AppDesignTokens.Typography.metadata)
                         .foregroundStyle(AppDesignTokens.Palette.warning)
@@ -521,8 +528,8 @@ struct FileAnalysisTrashReviewSheet: View {
                 .font(AppDesignTokens.Typography.metadata)
                 .monospacedDigit()
             if let title = progress.verifyingTitle {
-                Text(L10n.text("正在与分析结果比对“\(title)”（已读 \(progress.verifiedItemCount) 项）",
-                               "Comparing “\(title)” with the analysis (\(progress.verifiedItemCount) items read)"))
+                Text(L10n.text("正在与分析结果比对“\(title)”（已读 \(ByteFormat.count(progress.verifiedItemCount)) 项）",
+                               "Comparing “\(title)” with the analysis (\(ByteFormat.count(progress.verifiedItemCount)) items read)"))
                     .font(AppDesignTokens.Typography.metadata)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -547,7 +554,7 @@ struct FileAnalysisTrashReviewSheet: View {
             Button {
                 workspace.confirmTrash()
             } label: {
-                Text(L10n.text("移到废纸篓（\(review.readyItems.count) 项）",
+                Text(L10n.text("移到废纸篓（\(ByteFormat.count(review.readyItems.count)) 项）",
                                 "Move \(L10n.items(review.readyItems.count)) to the Trash"))
             }
             .appButtonChrome(.primary)
@@ -601,6 +608,13 @@ private struct FileAnalysisTrashReviewRow: View {
                     Text(FileAnalysisTrashPresentation.otherHardLinksNote)
                         .font(AppDesignTokens.Typography.metadata)
                         .foregroundStyle(AppDesignTokens.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let reclaimable = FileAnalysisTrashPresentation.reclaimableNote(item) {
+                    // D104 G1: clones or a local snapshot keep part of it.
+                    Text(reclaimable)
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

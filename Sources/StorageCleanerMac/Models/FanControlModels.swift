@@ -468,6 +468,10 @@ enum FanControlPreferences {
     static let modeKey = "fanControl.mode"
     static let setKey = "fanControl.set"
     static let manualFractionKey = "fanControl.manualFraction"
+    /// D152: iStat's Sync (`Sensors.Global.Fans.Curve.Manual.Sync`, on by
+    /// default) and its per-fan slider values (`Sensors.Global.Fans.Manual.%@`).
+    static let manualSyncKey = "fanControl.manualSync"
+    static let manualFractionByFanKey = "fanControl.manualFractionByFan.v1"
     static let curveLowTemperatureKey = "fanControl.curveLowTemperature"
     static let curveHighTemperatureKey = "fanControl.curveHighTemperature"
     static let curveConfigurationKey = "fanControl.curveConfiguration.v1"
@@ -505,7 +509,8 @@ enum FanControlSafetyPolicy {
     // Matches the hardware-facing SystemMonitorSnapshot validation boundary.
     static let sensorTemperatureRange = 5.0...130.0
     static let minimumUpdateInterval: TimeInterval = 2
-    static let manualControlDebounce: TimeInterval = 0.15
+    /// D152: iStat's slider writes 0.2 s after the last drag (was 0.15).
+    static let manualControlDebounce: TimeInterval = 0.2
     static let leaseRenewalInterval: TimeInterval = 5
     static let maximumRPMChangePerSecond = 500
     static let feedbackGracePeriod: TimeInterval = 12
@@ -1150,6 +1155,10 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
     let errorCode: FanControlHelperErrorCode?
     let macMiniModeStatus: MacMiniModeStatus?
     let powerSampleResult: PowermetricsResult?
+    /// D105 (review C-R1, C-R2): the returns to system control the helper made
+    /// on its own and their results, on a ping and on a reply that did not
+    /// succeed. Absent from older helpers; never on a power sample.
+    let automaticRestores: [FanControlAutomaticRestore]?
 
     init(
         protocolVersion: Int? = FanControlHelperProtocolContract.currentVersion,
@@ -1161,7 +1170,8 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
         curveRuntimeState: FanCurveRuntimeState? = nil,
         errorCode: FanControlHelperErrorCode? = nil,
         macMiniModeStatus: MacMiniModeStatus? = nil,
-        powerSampleResult: PowermetricsResult? = nil
+        powerSampleResult: PowermetricsResult? = nil,
+        automaticRestores: [FanControlAutomaticRestore]? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.operation = operation
@@ -1173,12 +1183,14 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
         self.errorCode = errorCode
         self.macMiniModeStatus = macMiniModeStatus
         self.powerSampleResult = powerSampleResult
+        self.automaticRestores = automaticRestores
     }
 
     func replacingMessage(_ message: String) -> Self {
         Self(protocolVersion: protocolVersion, operation: operation, success: success, message: message,
              appliedTargetRPMByFan: appliedTargetRPMByFan, powerConfiguration: powerConfiguration,
-             curveRuntimeState: curveRuntimeState, errorCode: errorCode, macMiniModeStatus: macMiniModeStatus, powerSampleResult: powerSampleResult)
+             curveRuntimeState: curveRuntimeState, errorCode: errorCode, macMiniModeStatus: macMiniModeStatus, powerSampleResult: powerSampleResult,
+             automaticRestores: automaticRestores)
     }
 
     func validated(for request: FanControlHelperRequest) throws -> Self {
@@ -1222,7 +1234,8 @@ struct FanControlHelperReply: Codable, Equatable, Sendable {
             throw FanControlHelperProtocolError.macMiniModeMismatch
         }
         if request.operation == .samplePowerMetrics,
-           (!appliedTargetRPMByFan.isEmpty || powerConfiguration != nil || curveRuntimeState != nil || macMiniModeStatus != nil || errorCode != nil) {
+           (!appliedTargetRPMByFan.isEmpty || powerConfiguration != nil || curveRuntimeState != nil || macMiniModeStatus != nil || errorCode != nil
+            || automaticRestores != nil) {
             throw FanControlHelperProtocolError.invalidPowerSample
         }
         if success, request.operation == .samplePowerMetrics {

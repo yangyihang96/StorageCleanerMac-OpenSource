@@ -15,15 +15,17 @@ final class MiniWindowD43LayoutTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPresentation.swift")
         let card = try MiniWindowLogicFixtures.section(
             overview, from: "struct GeekMemoryPresentation: View {", to: "struct GeekNetworkPresentation: View {")
-        try assertPressureBeforeUsage(card, pressure: "L10n.text(\"压力评估\", \"Pressure estimate\")",
-                                      usage: "L10n.text(\"占用\", \"Used\")", where: "overview / settings preview")
+        // D118: iStat's one-line "Pressure" label (was "压力评估 / Pressure estimate").
+        // D138: the usage ring is iStat's 'Memory.Memory' (was "占用", "Used").
+        try assertPressureBeforeUsage(card, pressure: "L10n.text(\"压力\", \"Pressure\")",
+                                      usage: "L10n.text(\"内存\", \"Memory\")", where: "overview / settings preview")
 
         let memoryPage = try MiniWindowLogicFixtures.source(
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift")
         let rings = try MiniWindowLogicFixtures.section(
             memoryPage, from: "private var geekMemoryRingsCard: some View {", to: "private var geekMemoryProcessesCard")
         try assertPressureBeforeUsage(rings, pressure: "geekMemoryPressureRing(size:",
-                                      usage: "L10n.text(\"占用\", \"Used\")", where: "memory page")
+                                      usage: "L10n.text(\"内存\", \"Memory\")", where: "memory page")
 
         // The settings preview draws the overview's presentation.
         let settings = try MiniWindowLogicFixtures.source(
@@ -32,8 +34,9 @@ final class MiniWindowD43LayoutTests: XCTestCase {
     }
 
     func testTheCPUTitleShowsFrequencyAndTemperatureOnlyWhenRead() throws {
+        // D128 (2026-10-19): iStat's CPU section joins them with ", " (was " · ").
         XCTAssertEqual(GeekProcessorPresentation.headerReadout(frequency: "4.43 GHz", temperature: "80°C"),
-                       "4.43 GHz · 80°C")
+                       "4.43 GHz, 80°C")
         XCTAssertEqual(GeekProcessorPresentation.headerReadout(frequency: nil, temperature: "80°C"), "80°C")
         XCTAssertEqual(GeekProcessorPresentation.headerReadout(frequency: "4.43 GHz", temperature: nil), "4.43 GHz")
         XCTAssertNil(GeekProcessorPresentation.headerReadout(frequency: nil, temperature: nil),
@@ -43,8 +46,9 @@ final class MiniWindowD43LayoutTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPresentation.swift")
         let card = try MiniWindowLogicFixtures.section(
             overview, from: "struct GeekProcessorPresentation: View {", to: "struct GeekMemoryPresentation: View {")
+        // D118: the title alone, no symbol (iStat).
         let header = try MiniWindowLogicFixtures.section(
-            card, from: "GeekModuleHeader(systemImage: AppSymbols.Monitor.processor, title: \"CPU\") {",
+            card, from: "GeekModuleHeader(title: \"CPU\") {",
             to: "GeekPrecisionLineChart(")
         XCTAssertTrue(header.contains("Self.headerReadout(frequency: headerFrequencyText, temperature: headerTemperatureText)"))
         XCTAssertFalse(header.contains("Text(Self.totalText("), "the total is in the legend, not the title")
@@ -57,7 +61,9 @@ final class MiniWindowD43LayoutTests: XCTestCase {
     }
 
     /// The header readout ends at the card's trailing inset; without a
-    /// reading the title row has no readout at all.
+    /// reading the title row has no readout at all. D118: the readout is in
+    /// the value color (white on the dark card), the title in the header
+    /// color, so the readout's pixels are the neutral bright ones.
     func testTheCPUTitleReadoutRendersAtTheTrailingInset() throws {
         let width = MiniWindowStyleTokens.overviewSize.width - 2 * MiniWindowStyleTokens.contentInset
         let scale: CGFloat = 2
@@ -66,13 +72,11 @@ final class MiniWindowD43LayoutTests: XCTestCase {
         let point = MenuBarTelemetryPoint(
             date: date, cpuTotal: 40, cpuUser: 24, cpuSystem: 16, gpu: nil, memory: nil,
             chipTemperature: nil, fanRPM: nil, downBytesPerSecond: nil, upBytesPerSecond: nil)
-        let readoutTint = Color(red: 0, green: 0.78, blue: 0)
         func headerReadoutMaxX(frequency: String?, temperature: String?) throws -> CGFloat? {
             let view = GeekProcessorPresentation(
                 cpuChartHistory: [point], cpuChartRange: .oneMinute, samplingInterval: 1,
                 processorTint: .orange, geekCPUUserBarColor: .blue, geekCPUSystemBarColor: .pink,
-                headerFrequencyText: frequency, headerTemperatureText: temperature,
-                headerReadoutTint: readoutTint)
+                headerFrequencyText: frequency, headerTemperatureText: temperature)
                 .frame(width: width)
                 .environment(\.colorScheme, .dark)
                 .environment(\.miniWindowVisualMode, .black)
@@ -81,13 +85,13 @@ final class MiniWindowD43LayoutTests: XCTestCase {
             let renderer = ImageRenderer(content: view)
             renderer.scale = scale
             let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(renderer.cgImage))
-            let headerBottom = Int((GeekVisualTokens.cardVerticalPadding + MiniWindowStyleTokens.dataRowHeight) * scale)
+            let headerBottom = Int((GeekIStatCardGeometry.titleTop + GeekIStatCardGeometry.titleHeight) * scale)
             var maximumX = -1
             for y in 0..<min(bitmap.pixelsHigh, headerBottom) {
                 for x in 0..<bitmap.pixelsWide {
                     guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
-                          color.alphaComponent > 0.8, color.greenComponent > 0.5,
-                          color.redComponent < 0.3, color.blueComponent < 0.3 else { continue }
+                          color.alphaComponent > 0.8, color.redComponent > 0.75,
+                          color.greenComponent > 0.75, color.blueComponent > 0.75 else { continue }
                     maximumX = max(maximumX, x)
                 }
             }
@@ -96,7 +100,7 @@ final class MiniWindowD43LayoutTests: XCTestCase {
         for (frequency, temperature) in [("4.43 GHz", "80°C"), (nil, "80°C"), ("4.43 GHz", nil)] as [(String?, String?)] {
             let maxX = try XCTUnwrap(try headerReadoutMaxX(frequency: frequency, temperature: temperature),
                                      "the readout is drawn: \(frequency ?? "-") \(temperature ?? "-")")
-            XCTAssertEqual(maxX, width - GeekVisualTokens.cardHorizontalPadding, accuracy: 2)
+            XCTAssertEqual(maxX, width - GeekIStatCardGeometry.inset, accuracy: 2)
         }
         XCTAssertNil(try headerReadoutMaxX(frequency: nil, temperature: nil), "no readout without a reading")
     }
@@ -112,7 +116,7 @@ final class MiniWindowD43LayoutTests: XCTestCase {
             "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekOverviewPresentation.swift")
         let header = try MiniWindowLogicFixtures.section(
             overview,
-            from: "GeekModuleHeader(systemImage: AppSymbols.Monitor.processor, title: \"CPU\") {",
+            from: "GeekModuleHeader(title: \"CPU\") {",
             to: "GeekPrecisionLineChart(")
         let combine = try XCTUnwrap(header.range(of: ".accessibilityElement(children: .combine)"),
                                     "the header is one element").lowerBound

@@ -443,8 +443,8 @@ enum CleanPlanBuilder {
                   !candidate.snapshot.hasSymbolicLinkComponent,
                   candidate.snapshot.identity.entryKind != .symbolicLink,
                   candidate.snapshot.isWritableVolume,
-                  !candidate.snapshot.isCloudPlaceholder,
                   let rule = rulesByID[candidate.ruleID],
+                  !candidate.snapshot.isCloudPlaceholder || rule.isICloudDriveTrash,
                   rule.allowsManualSelection,
                   rule.measurementRequirement == .complete,
                   rule.selectionPolicyVersion == candidate.ruleSelectionPolicyVersion,
@@ -562,7 +562,9 @@ enum CleanPlanBuilder {
                       sourcePath: sourcePath,
                       allowedRootPath: rootPath,
                       rule: rule
-                  ) else {
+                  ),
+                  rule.effectiveCandidateScope != .namedDescendantDirectories
+                    || candidate.snapshot.identity.entryKind == .directory else {
                 throw CleanPlanBuildError.invalidCandidate
             }
             guard seenPaths.insert(sourcePath).inserted else {
@@ -574,6 +576,7 @@ enum CleanPlanBuilder {
             if isPermanentDeletion {
                 items.append(contentsOf: try permanentDeletionItems(
                     candidate: candidate,
+                    includesCloudOnlyEntries: rule.isICloudDriveTrash,
                     trashPath: sourcePath,
                     seenPaths: &seenPaths,
                     seenIdentities: &seenIdentities
@@ -639,6 +642,7 @@ enum CleanPlanBuilder {
     /// (including items this plan moves there) is touched.
     private static func permanentDeletionItems(
         candidate: ScanCandidate,
+        includesCloudOnlyEntries: Bool,
         trashPath: String,
         seenPaths: inout Set<String>,
         seenIdentities: inout Set<FileIdentity>
@@ -651,9 +655,9 @@ enum CleanPlanBuilder {
         for entry in entries {
             let entryPath = PathSafety.lexicalPath(entry.standardizedPath)
             let entryURL = URL(fileURLWithPath: entryPath)
-            // P2-5: a cloud file that is not downloaded is left in the Trash;
-            // it never fails the rest of the plan.
-            if entry.isCloudPlaceholder { continue }
+            // P2-5: ordinary Trash leaves cloud-only files alone. D192's
+            // explicitly reviewed iCloud Trash also unlinks placeholders.
+            if entry.isCloudPlaceholder && !includesCloudOnlyEntries { continue }
             guard entryPath != trashPath,
                   PathSafety.lexicalPath(entryURL.deletingLastPathComponent().path) == trashPath,
                   entry.identity.entryKind == .symbolicLink || !entry.hasSymbolicLinkComponent,
@@ -707,7 +711,21 @@ enum CleanPlanBuilder {
                 && URL(fileURLWithPath: sourcePath).pathExtension.lowercased() == "app"
                 && (rule.effectiveRequiresDuplicateBundleIdentifier
                     || !rule.effectiveIncludedBundleIdentifiers.isEmpty)
+        case .mountedVolumeTrashes:
+            // D181: exactly `/Volumes/<name>/.Trashes/<uid>`; its parent is
+            // the allowed root, as for `~/.Trash`.
+            return rule.action == .emptyTrash
+                && rule.effectiveCandidateScope == .root
+                && VolumeTrashLocator.isTrashPath(sourcePath, uid: getuid())
+                && allowedRootPath == PathSafety.lexicalPath(
+                    URL(fileURLWithPath: sourcePath).deletingLastPathComponent().path
+                )
         case .homeRelative:
+            if rule.effectiveCandidateScope == .namedDescendantDirectories {
+                return CleanupNamedDescendantScope.matches(
+                    sourcePath: sourcePath, rootPath: allowedRootPath, rule: rule
+                )
+            }
             let comparedPath: String
             if rule.effectiveCandidateScope == .root {
                 guard allowedRootPath == PathSafety.lexicalPath(
@@ -850,7 +868,10 @@ extension ScanCandidate {
             ruleRevision: ruleRevision,
             rulesProvenance: rulesProvenance,
             ruleOwnerDisplayName: ruleOwnerDisplayName,
-            cleanupImpactText: cleanupImpactText
+            cleanupImpactText: cleanupImpactText,
+            // D100 G1: sharing was measured for every entry together, not for
+            // the ones left, so their size is shown as what they free.
+            reclaimableEstimate: nil
         )
     }
 }
@@ -902,6 +923,8 @@ struct CleanPreflightReport: Equatable, Sendable {
     let checkedAt: Date
     let items: [CleanPreflightItem]
     let failure: CleanFailure?
+    /// D101 G13: set when the items that will run are far more than usual.
+    var scaleAlert: CleanPlanScaleAlert? = nil
 
     var readyCount: Int {
         items.filter { $0.status == .ready }.count
@@ -913,6 +936,70 @@ struct CleanPreflightReport: Equatable, Sendable {
 
     var isConfirmable: Bool {
         failure == nil && readyCount > 0
+    }
+}
+
+/// D101 G13: a run far larger than usual (Mac Sai refuses more than 10,000
+/// items in one deletion). It is not a block: the confirmation shows this
+/// summary and asks once more. A run of a normal size has none.
+struct CleanPlanScaleAlert: Equatable, Sendable {
+    /// More items than this in one run need the extra confirmation.
+    static let itemCountLimit = 10_000
+    /// Rules the summary lists, most bytes first.
+    static let listedRuleLimit = 3
+
+    struct VolumeShare: Equatable, Sendable {
+        let volumeIdentifier: String
+        let plannedBytes: Int64
+        /// The volume's used space (total less available) when checked.
+        let usedBytes: Int64
+    }
+
+    struct RuleShare: Equatable, Sendable {
+        let ruleID: String
+        let title: String
+        let itemCount: Int
+        let bytes: Int64
+    }
+
+    /// The items that will run.
+    let itemCount: Int
+    let bytes: Int64
+    /// Volumes where the run takes more than half the used space.
+    let largeVolumeShares: [VolumeShare]
+    let largestRules: [RuleShare]
+
+    var exceedsItemCount: Bool { itemCount > Self.itemCountLimit }
+
+    /// Nil when `items` are a normal size. `usedBytes` holds each volume's
+    /// used space by volume identifier; a volume without it is judged by the
+    /// item count alone.
+    init?(items: [CleanPlanItem], usedBytes: [String: Int64], ruleTitle: (String) -> String) {
+        var bytes: Int64 = 0
+        var volumes: [String: Int64] = [:]
+        var rules: [String: (count: Int, bytes: Int64)] = [:]
+        for item in items {
+            let size = item.estimatedSizeBytes
+            bytes = CleanupByteCount.adding(size, to: bytes)
+            let volume = item.expectedSnapshot.volumeIdentifier
+            volumes[volume] = CleanupByteCount.adding(size, to: volumes[volume] ?? 0)
+            let rule = rules[item.ruleID] ?? (0, 0)
+            rules[item.ruleID] = (rule.count + 1, CleanupByteCount.adding(size, to: rule.bytes))
+        }
+        let shares = volumes.compactMap { volume, planned -> VolumeShare? in
+            guard let used = usedBytes[volume], used > 0, planned > used / 2 else { return nil }
+            return VolumeShare(volumeIdentifier: volume, plannedBytes: planned, usedBytes: used)
+        }
+        guard items.count > Self.itemCountLimit || !shares.isEmpty else { return nil }
+        itemCount = items.count
+        self.bytes = bytes
+        largeVolumeShares = shares.sorted {
+            ($0.plannedBytes, $1.volumeIdentifier) > ($1.plannedBytes, $0.volumeIdentifier)
+        }
+        largestRules = Array(rules
+            .map { RuleShare(ruleID: $0.key, title: ruleTitle($0.key), itemCount: $0.value.count, bytes: $0.value.bytes) }
+            .sorted { ($0.bytes, $0.itemCount, $1.ruleID) > ($1.bytes, $1.itemCount, $0.ruleID) }
+            .prefix(Self.listedRuleLimit))
     }
 }
 
@@ -1048,7 +1135,9 @@ struct CleanupRestoreAuthorization: Codable, Equatable, Sendable {
 
     func permitsApplication(_ item: CleanReportItem, receipt: CleanupMoveReceipt) -> Bool {
         let source = URL(fileURLWithPath: sourcePath)
-        return allowedRootPath == "/Applications"
+        // D184 + old value: only /Applications. Utilities restore is restricted to D184 receipts.
+        return (allowedRootPath == "/Applications"
+                || (allowedRootPath == "/Applications/Utilities" && ruleID == UniversalBinaryService.ruleID))
             && sourcePath == PathSafety.lexicalPath(sourcePath)
             && source.deletingLastPathComponent().path == allowedRootPath
             && source.pathExtension.lowercased() == "app"
@@ -1077,6 +1166,11 @@ struct CleanReport: Identifiable, Codable, Equatable, Sendable {
     var restoreAuthorizations: [String: CleanupRestoreAuthorization]? = nil
     var uninstallOwnership: [String: UninstallOwnershipEvidence]? = nil
     var rulesProvenance: CleanupRuleSetProvenance? = nil
+    /// D214: why the run never started — another task or app instance held
+    /// the work lease, the plan no longer matched, or its intent could not
+    /// be recorded. Every item is then `.notProcessed` and nothing moved.
+    /// Missing in older receipts.
+    var startRefusal: CleanFailure? = nil
 
     var authorizedApplicationRestorePaths: Set<String> {
         Set(items.compactMap { item in
@@ -1192,13 +1286,13 @@ struct CleanupRecoveryReport: Codable, Equatable, Sendable {
             return L10n.text("没有文件已确认恢复；请查看逐项结果。", "No files were confirmed restored. Review the item results.")
         }
         if persistenceFailure != nil {
-            return L10n.text("已确认恢复 \(restoredCount) 项，但结果保存失败，请保留回执。",
-                             "Confirmed \(restoredCount) restored item(s), but saving failed. Keep this receipt.")
+            return L10n.text("已确认恢复 \(ByteFormat.count(restoredCount)) 项，但结果保存失败，请保留回执。",
+                             "Confirmed \(ByteFormat.count(restoredCount)) restored item(s), but saving failed. Keep this receipt.")
         }
         if restoredCount == items.count {
-            return L10n.text("已恢复全部 \(restoredCount) 项。", "All \(restoredCount) items restored.")
+            return L10n.text("已恢复全部 \(ByteFormat.count(restoredCount)) 项。", "All \(ByteFormat.count(restoredCount)) items restored.")
         }
-        return L10n.text("已恢复 \(restoredCount) 项；其余项目请查看逐项结果。",
-                         "Restored \(restoredCount) item(s). Review the remaining item results.")
+        return L10n.text("已恢复 \(ByteFormat.count(restoredCount)) 项；其余项目请查看逐项结果。",
+                         "Restored \(ByteFormat.count(restoredCount)) item(s). Review the remaining item results.")
     }
 }

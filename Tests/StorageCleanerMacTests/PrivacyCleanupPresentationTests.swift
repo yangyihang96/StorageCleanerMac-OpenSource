@@ -1247,7 +1247,17 @@ final class PrivacyCleanupPresentationTests: XCTestCase {
         // The scan reads all history; it never filtered to "possibly sensitive" sites.
         XCTAssertFalse(sidebar.contains("只扫描可能敏感的网站记录"))
         XCTAssertFalse(sidebar.contains("Scan only possibly sensitive-site history"))
-        XCTAssertTrue(sidebar.contains("读取本机全部浏览记录，逐页列出网站和页面；删除前确认"))
+        // D154: the sidebar lists modules; Protection's line and the Browser
+        // Privacy card on My Tools describe the page.
+        let theme = try String(contentsOf: root.appendingPathComponent(
+            "Sources/StorageCleanerMac/Views/CareStudio/CareStudioTheme.swift"), encoding: .utf8)
+        let tools = try String(contentsOf: root.appendingPathComponent(
+            "Sources/StorageCleanerMac/Views/CareStudio/CareStudioMyTools.swift"), encoding: .utf8)
+        XCTAssertTrue(theme.contains("case .protection: L10n.text(\"浏览记录、Cookie 和站点数据\""))
+        XCTAssertTrue(tools.contains("浏览记录、Cookie 和站点数据，先备份再删除，可以恢复。"))
+        for source in [theme, tools] {
+            XCTAssertFalse(source.contains("只扫描可能敏感的网站记录"))
+        }
 
         let matrix = try String(
             contentsOf: root.appendingPathComponent(

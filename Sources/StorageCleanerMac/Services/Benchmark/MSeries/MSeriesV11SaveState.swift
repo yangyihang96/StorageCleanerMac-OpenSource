@@ -9,12 +9,16 @@ struct MSeriesV11SaveState: Equatable, Sendable {
     let sessionID: UUID
     let rawPayloadSHA256: String?
     let state: State
+    /// The save was refused because the local history is at its explicit
+    /// record capacity (D95), not because the commit failed.
+    let historyFull: Bool
 
-    init(result: BenchmarkV7Result, state: State) {
+    init(result: BenchmarkV7Result, state: State, historyFull: Bool = false) {
         recordID = result.recordID
         sessionID = result.session.id
         rawPayloadSHA256 = result.mSeriesV11?.rawPayloadSHA256
         self.state = state
+        self.historyFull = state == .failed && historyFull
     }
     func matches(_ result: BenchmarkV7Result) -> Bool {
         recordID == result.recordID && sessionID == result.session.id

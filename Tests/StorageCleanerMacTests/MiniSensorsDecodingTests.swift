@@ -440,13 +440,15 @@ final class MiniSensorsDecodingTests: XCTestCase {
 
     /// Incremental review P2-1: with the encoding of `fanTargetRPM` deleted,
     /// every related test still passed, because no fixture filled that
-    /// field. Every one of the 24 fields filled (D80's `bucketStatistics`
-    /// among them), written and read back by this version, field by field;
-    /// the file has exactly their keys.
+    /// field. Every one of the 25 fields filled (D80's `bucketStatistics`
+    /// and D133's `swapUsedPercent` among them; 24 before D133), written
+    /// and read back by this version, field by field; the file has exactly
+    /// their keys.
     func testSavedHistoryRoundTripsEveryField() throws {
         let point = Self.everyFieldPoint
         let fields = Mirror(reflecting: point).children.map { (label: $0.label ?? "?", value: $0.value) }
-        XCTAssertEqual(fields.count, 24, "MenuBarTelemetryPoint gained or lost a stored field: fill it here and code it")
+        // D133: 25 with the swap share (was 24).
+        XCTAssertEqual(fields.count, 25, "MenuBarTelemetryPoint gained or lost a stored field: fill it here and code it")
         for field in fields {
             let value = Mirror(reflecting: field.value)
             XCTAssertFalse(value.displayStyle == .optional && value.children.isEmpty, "\(field.label) is not filled")
@@ -487,9 +489,11 @@ final class MiniSensorsDecodingTests: XCTestCase {
             JSONDecoder().decode(BoundedMonitoringArray<EarlierFullTelemetryPoint>.self, from: data).values.first
         )
         // D71④: earlier builds ignore the two new optional source-time keys;
-        // D80: and the bucket statistics, written under their own optional key.
+        // D80: and the bucket statistics, written under their own optional key;
+        // D133: and the swap share (the list was the first four).
         // The full original payload must still arrive unchanged.
-        let laterFields = ["temperatureReadings", "sensorSampledAt", "gpuSampledAt", "bucketStatistics"]
+        let laterFields = ["temperatureReadings", "sensorSampledAt", "gpuSampledAt", "bucketStatistics",
+                           "swapUsedPercent"]
         let expected = Mirror(reflecting: point).children.filter { !laterFields.contains($0.label ?? "") }
         let actual = Mirror(reflecting: earlier).children.filter { $0.label != "temperatureReadings" }
         XCTAssertEqual(actual.map(\.label), expected.map(\.label))
@@ -511,6 +515,9 @@ final class MiniSensorsDecodingTests: XCTestCase {
         XCTAssertNil(backAgain.gpuSampledAt)
         XCTAssertNotNil(point.bucketStatistics, "the fixture carries a compacted bucket")
         XCTAssertNil(backAgain.bucketStatistics, "an earlier build drops only the statistics, never an old field")
+        // D133: and the swap share, new as well; those minutes have no swap bar.
+        XCTAssertNotNil(point.swapUsedPercent, "the fixture carries a swap share")
+        XCTAssertNil(backAgain.swapUsedPercent, "an earlier build drops the swap share, never an old field")
         XCTAssertEqual(backAgain, MenuBarTelemetryPoint(
             date: point.date, cpuTotal: point.cpuTotal, cpuUser: point.cpuUser, cpuSystem: point.cpuSystem,
             gpu: point.gpu, memory: point.memory, memoryPressure: point.memoryPressure,
@@ -623,7 +630,7 @@ final class MiniSensorsDecodingTests: XCTestCase {
         }
     }
 
-    /// Every one of MenuBarTelemetryPoint's 24 fields filled with a value of
+    /// Every one of MenuBarTelemetryPoint's 25 fields (24 before D133) filled with a value of
     /// its own (no two equal), the charging circuit among the zones, and a
     /// compacted bucket's statistics (D80) whose peak differs from the
     /// representative sample's own values.
@@ -634,6 +641,8 @@ final class MiniSensorsDecodingTests: XCTestCase {
             memoryPressure: 42.5, memoryPressureLevelCode: 2,
             memoryAppOrOtherBytes: 9_663_676_416, memoryWiredBytes: 3_221_225_472,
             memoryPhysicalBytes: 25_769_803_776, compressedMemoryBytes: 1_073_741_824, swapUsedBytes: 536_870_912,
+            // D133: the swap files' used share.
+            swapUsedPercent: 12.5,
             chipTemperature: 85.5, gpuTemperature: 62.25,
             temperatureReadings: [
                 SystemTemperatureReading(zone: .chip, celsius: 85.5),

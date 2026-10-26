@@ -16,6 +16,8 @@ struct DuplicateFilesLightfieldView: View {
     /// Similar-photos route only: switches the source to the system Photos library.
     var onUseSystemPhotoLibrary: (() -> Void)? = nil
     @State private var showingDetails = false
+    /// D154 batch 2: “Merge into Clones” (D163) for the proven groups.
+    private var cloneMerge: DuplicateCloneMergeAction { ToolboxStores.of(store).cloneMerge }
     private var selected: [StorageItem] { workspace.selectedItems(from: allItems) }
     private var confirmedGroups: [DuplicateDisplayGroup] { allGroups.filter(\.isContentConfirmed) }
     private var logicalBytes: Int64 { FileLightfieldPresentation.sum(confirmedGroups.map(\.logicalDuplicateBytes)) }
@@ -64,6 +66,8 @@ struct DuplicateFilesLightfieldView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(L10n.text("扫描与操作详情", "Scan and Operation Details")).font(.system(size: 24, weight: .semibold))
+                    Text(workspace.scanCoverage?.ignoredSummary(for: isSimilarPhotos ? .similar : .duplicates) ?? IgnoreListSnapshot.summary(0))
+                        .font(.system(size: 13))
                     if let details { details }
                     if let error = workspace.errorMessage { Text(error).font(.system(size: 15)) }
                     Button(L10n.text("返回", "Back")) { showingDetails = false }.buttonStyle(FeatureLightfieldRowButtonStyle())
@@ -73,8 +77,8 @@ struct DuplicateFilesLightfieldView: View {
     }
     private var resultStatus: String {
         if let progress = store.duplicateCleanupProgress {
-            return L10n.text("已处理 \(progress.processedItemCount)/\(progress.totalItemCount) · 移动 \(progress.movedItemCount) · 失败 \(progress.failedItemCount)",
-                "Processed \(progress.processedItemCount)/\(progress.totalItemCount) · Moved \(progress.movedItemCount) · Failed \(progress.failedItemCount)")
+            return L10n.text("已处理 \(ByteFormat.count(progress.processedItemCount))/\(ByteFormat.count(progress.totalItemCount)) · 移动 \(ByteFormat.count(progress.movedItemCount)) · 失败 \(ByteFormat.count(progress.failedItemCount))",
+                "Processed \(ByteFormat.count(progress.processedItemCount))/\(ByteFormat.count(progress.totalItemCount)) · Moved \(ByteFormat.count(progress.movedItemCount)) · Failed \(ByteFormat.count(progress.failedItemCount))")
         }
         if let error = workspace.errorMessage { return error }
         if isSimilarPhotos { return L10n.text("图像指纹相近 · 需要人工确认", "Similar image fingerprints · Manual review required") }
@@ -106,6 +110,9 @@ struct DuplicateFilesLightfieldView: View {
                 Button(L10n.text("取消剩余项目", "Cancel Remaining"), action: store.cancelVerifiedDuplicateCleanupExecution)
                     .buttonStyle(FeatureLightfieldRowButtonStyle()).fixedSize()
             }
+            if !isSimilarPhotos {
+                DuplicateCloneMergeOffer(action: cloneMerge, groups: workspace.exactGroups)
+            }
             if isSimilarPhotos, let onUseSystemPhotoLibrary {
                 Button(L10n.text("系统照片图库", "System Photo Library"), action: onUseSystemPhotoLibrary)
                     .buttonStyle(FeatureLightfieldRowButtonStyle()).fixedSize().disabled(isBusy)
@@ -114,6 +121,23 @@ struct DuplicateFilesLightfieldView: View {
         }.font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
             .frame(height: 42).overlay(alignment: .top) { FeatureLightfieldHairline() }
             .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+    }
+}
+
+/// Shows “Merge into Clones” only when the latest scan has proven groups
+/// that are not clones yet, and keeps the action's groups current.
+struct DuplicateCloneMergeOffer: View {
+    @ObservedObject var action: DuplicateCloneMergeAction
+    let groups: [DuplicateFileGroup]
+
+    var body: some View {
+        Group {
+            if !action.groups.isEmpty || action.isMerging {
+                DuplicateCloneMergeButton(action: action).fixedSize()
+            }
+        }
+        .onAppear { if action.groups != groups.filter(DuplicateCloneMergeAction.isOffered) { action.update(groups: groups) } }
+        .onChange(of: groups) { _, newGroups in action.update(groups: newGroups) }
     }
 }
 
@@ -127,6 +151,8 @@ struct DuplicateLightfieldBody: View {
     let onSelected: (Bool, StorageItem) -> Void
     let onReveal: (StorageItem) -> Void
     let onCopyPath: (StorageItem) -> Void
+    /// D207: "加入忽略列表" in each file's menus; nil hides it.
+    var onIgnore: ((StorageItem) -> Void)? = nil
     @State private var keepers: [String: String] = [:]
     @State private var collapsed: Set<String> = []
     @State private var reviewIDs: Set<String> = []
@@ -157,7 +183,8 @@ struct DuplicateLightfieldBody: View {
                                 LightfieldSimilarPhotoTile(item: item, kept: presentation.keeperIDsByGroup[group.id] == item.id,
                                     marked: reviewIDs.contains(item.id), isBusy: isBusy,
                                     onMark: { if reviewIDs.contains(item.id) { reviewIDs.remove(item.id) } else { reviewIDs.insert(item.id) } },
-                                    onKeep: { keepers[group.id] = item.id; reviewIDs.remove(item.id) }, onReveal: { onReveal(item) })
+                                    onKeep: { keepers[group.id] = item.id; reviewIDs.remove(item.id) }, onReveal: { onReveal(item) },
+                                    onIgnore: onIgnore.map { ignore in { ignore(item) } })
                             }
                         }.padding(.vertical, 12)
                     } else {
@@ -167,7 +194,8 @@ struct DuplicateLightfieldBody: View {
                                 modifiedAt: presentation.modifiedAtByItemID[item.id], isBusy: isBusy,
                                 onToggle: { onSelected(!selectedIDs.contains(item.id), item) },
                                 onKeep: { onSelected(false, item); keepers[group.id] = item.id },
-                                onReveal: { onReveal(item) }, onCopyPath: { onCopyPath(item) })
+                                onReveal: { onReveal(item) }, onCopyPath: { onCopyPath(item) },
+                                onIgnore: onIgnore.map { ignore in { ignore(item) } })
                         }
                     }
                 }
@@ -181,7 +209,7 @@ struct DuplicateLightfieldBody: View {
         .init(id: item.id, title: item.title, path: item.path, sizeBytes: item.sizeBytes, kind: item.kind, isDirectory: item.isDirectory)
     }
     private func metadata(_ group: DuplicateDisplayGroup) -> String {
-        let count = L10n.text("\(group.items.count) 份 · ", "\(group.items.count) copies · ")
+        let count = L10n.text("\(ByteFormat.count(group.items.count)) 份 · ", "\(ByteFormat.count(group.items.count)) copies · ")
         if group.isContentConfirmed {
             return count + L10n.text("逻辑重复 ", "Logical duplicates ") + ByteFormat.storageString(group.logicalDuplicateBytes)
         }
@@ -209,6 +237,7 @@ struct LightfieldDuplicateRow: View {
     let onKeep: () -> Void
     let onReveal: () -> Void
     let onCopyPath: () -> Void
+    var onIgnore: (() -> Void)? = nil
     @State private var quickLookURL: URL?
     var body: some View {
         LightfieldMigrationColumns {
@@ -231,11 +260,13 @@ struct LightfieldDuplicateRow: View {
                 Button(L10n.text("预览原件", "Quick Look")) { quickLookURL = URL(fileURLWithPath: item.path) }.disabled(item.status != .available)
                 Button(L10n.text("在访达中显示", "Show in Finder"), action: onReveal)
                 Button(L10n.text("复制路径", "Copy Path"), action: onCopyPath)
+                if let onIgnore { Button(IgnoreListMenu.title(count: 1), action: onIgnore).disabled(isBusy) }
             } label: { Text(kept ? L10n.text("保留此份", "Kept") : L10n.text("操作", "Actions")).font(.system(size: 13)).lineLimit(1) }
                 .menuStyle(.borderlessButton).frame(maxWidth: .infinity, maxHeight: .infinity)
                 .lightfieldComponentProbe("lightfield.duplicates.actions." + item.id)
         }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
             .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+            .contextMenu { if let onIgnore { Button(IgnoreListMenu.title(count: 1), action: onIgnore).disabled(isBusy) } }
             .quickLookPreview($quickLookURL).lightfieldComponentProbe("lightfield.duplicates.row." + item.id)
     }
 }
@@ -252,6 +283,7 @@ struct LightfieldSimilarPhotoTile: View {
     let onMark: () -> Void
     let onKeep: () -> Void
     let onReveal: () -> Void
+    var onIgnore: (() -> Void)? = nil
     @State private var thumbnail: NSImage?
     @State private var unavailableReason: String?
     @State private var quickLookURL: URL?
@@ -285,9 +317,11 @@ struct LightfieldSimilarPhotoTile: View {
                 Menu {
                     Button(L10n.text("预览原件", "Quick Look")) { quickLookURL = URL(fileURLWithPath: item.path) }
                     Button(L10n.text("在访达中显示", "Show in Finder"), action: onReveal)
+                    if let onIgnore { Button(IgnoreListMenu.title(count: 1), action: onIgnore).disabled(isBusy) }
                 } label: { Text(L10n.text("查看", "View")) }.menuStyle(.borderlessButton).disabled(item.status != .available)
             }.font(.system(size: 13)).lineLimit(1)
         }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
+            .contextMenu { if let onIgnore { Button(IgnoreListMenu.title(count: 1), action: onIgnore).disabled(isBusy) } }
             .quickLookPreview($quickLookURL).lightfieldComponentProbe("lightfield.photos.tile." + item.id)
             .task(id: item.id) {
 #if DEBUG

@@ -1,48 +1,23 @@
 import SwiftUI
 
+/// The hardware probes list (level three): two columns. D119: the sensors
+/// page's temperature group is iStat's single column of 15 pt rows; the
+/// grid's row, chrome and font constants went with the old card.
 enum GeekSensorTemperatureLayout {
-    static let chromeHeight: CGFloat = 26
-    static let rowHeight: CGFloat = 16
-    static let gridRowHeight: CGFloat = 18
     static let gridColumnSpacing: CGFloat = 10
-    static let gaugeSpacing: CGFloat = 24
-    static let miniRingSize: CGFloat = 14
-    static let fontSize: CGFloat = 11
-
-    static func cardHeight(rowCount: Int) -> CGFloat {
-        chromeHeight + CGFloat(max(0, rowCount)) * rowHeight
-    }
 
     static func temperatureGridRowCount(itemCount: Int) -> Int {
         guard itemCount > 0 else { return 0 }
         return (itemCount + 1) / 2
     }
-
-    static func temperatureCardHeight(itemCount: Int) -> CGFloat {
-        chromeHeight
-            + CGFloat(temperatureGridRowCount(itemCount: itemCount)) * gridRowHeight
-    }
 }
 
+/// D119: the sensors page's three rings are the overview card's (iStat
+/// `sensors-overview`): 72 pt rings in 87 pt cells on an 88 pt card (was
+/// 62 pt rings 24 pt apart).
 enum GeekSensorSummaryLayout {
-    static let ringSize: CGFloat = 62
-    static let spacing = GeekSensorTemperatureLayout.gaugeSpacing
-    static let cardHeight = ringSize + 2 * MiniWindowStyleTokens.cardVerticalInset
-}
-
-struct GeekSensorSummaryCard<Content: View>: View {
-    let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        GeekCombinedCard(height: GeekSensorSummaryLayout.cardHeight) {
-            HStack(spacing: GeekSensorSummaryLayout.spacing) { content }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
+    static let ringSize = GeekIStatCardGeometry.sensorRingSize
+    static let cardHeight = GeekIStatCardGeometry.sensorsHeight
 }
 
 /// Snapshot-only copy for the compact ring. Keep the unit visible; the full
@@ -68,7 +43,7 @@ struct GeekSensorFanRingPresentation {
             value = formattedRPM
             caption = "rpm"
             explanation = telemetry.fanCount > 1
-                ? L10n.text("\(telemetry.fanCount) 个风扇的平均转速：\(formattedRPM) rpm。", "Average speed across \(telemetry.fanCount) fans: \(formattedRPM) rpm.")
+                ? L10n.text("\(ByteFormat.count(telemetry.fanCount)) 个风扇的平均转速：\(formattedRPM) rpm。", "Average speed across \(ByteFormat.count(telemetry.fanCount)) fans: \(formattedRPM) rpm.")
                 : L10n.text("风扇实际转速：\(formattedRPM) rpm。", "Actual fan speed: \(formattedRPM) rpm.")
         } else {
             value = "—"
@@ -92,15 +67,12 @@ struct GeekSensorFanRing: View {
 
     var body: some View {
         let presentation = GeekSensorFanRingPresentation(telemetry: telemetry)
-        GeekCombinedRing(
+        GeekIStatSensorRing(
             title: L10n.text("风扇", "FANS"),
             value: presentation.value,
             detail: presentation.caption,
             progress: telemetry.percentage.map { $0 / 100 },
-            tint: tint,
-            size: GeekSensorSummaryLayout.ringSize,
-            labelPlacement: .aboveValue,
-            fixedDetailFontSize: 8.5
+            tint: tint
         )
         .help(presentation.helpText)
         .accessibilityValue(presentation.accessibilityValue)
@@ -127,14 +99,32 @@ enum GeekSensorPageAvailability: Equatable {
 }
 
 enum GeekSensorReadoutLayout {
+    /// D119: a titled group of 15 pt rows on the 17 pt pitch, 24 + 17n (was
+    /// 26 + 23n).
     static func cardHeight(rowCount: Int) -> CGFloat {
-        26 + CGFloat(rowCount) * 23
+        GeekIStatSectionGeometry.rowsHeight(rowCount, titled: true)
     }
 
-    /// A readout's third level: the source, sample and note rows, plus one
-    /// row per extra detail (input voltage, brightness, chip blocks…).
-    static func detailSize(extraRowCount: Int) -> CGSize {
-        CGSize(width: 270, height: 190 + CGFloat(max(0, extraRowCount)) * 18)
+    /// D122: a readout's third level: the titled card of its rows
+    /// (`detailRowCount`), and the note's card (three lines until it is
+    /// measured); was 190 + 18 per extra detail row.
+    static func detailSize(_ readout: GeekSensorReadout) -> CGSize {
+        GeekIStatDetailGeometry.pageSize(
+            cards: [
+                GeekIStatSectionGeometry.rowsHeight(detailRowCount(readout), titled: true),
+                GeekIStatNoteCard.estimatedHeight,
+            ],
+            width: detailWidth
+        )
+    }
+
+    /// The readout pages keep their 270 pt width for the chip blocks' names.
+    static let detailWidth: CGFloat = 270
+
+    /// The rows of a readout's titled card: the source, the sample when
+    /// there is one, and the extra readings.
+    static func detailRowCount(_ readout: GeekSensorReadout) -> Int {
+        1 + (readout.sampledAt == nil ? 0 : 1) + readout.detailRows.count
     }
 
     /// The indent of a detail row that is part of the row above it.
@@ -230,7 +220,7 @@ enum GeekPowerReadouts {
                     HardwareReadingText.detail(smc.inputCurrentAmps, format: HardwareReadingText.amps)
                 ),
             ] + (electrical?.adapterPowerWatts.map {
-                [GeekSensorReadoutDetailRow(L10n.text("协商功率", "Negotiated"), String(format: "%.0f W", $0))]
+                [GeekSensorReadoutDetailRow(L10n.text("协商功率", "Negotiated"), IStatNumberFormat.power($0))]
             } ?? [])
             rows.append(row)
         }
@@ -458,8 +448,8 @@ enum GeekPowerReadouts {
         )
         if let watts = total.watts, let referenceWatts = reference.value {
             note += L10n.text(
-                "；与系统控制器的芯片功率估计相差 \(String(format: "%.1f", abs(watts - referenceWatts))) W",
-                "; differs from the SMC chip estimate by \(String(format: "%.1f", abs(watts - referenceWatts))) W"
+                "；与系统控制器的芯片功率估计相差 \(IStatNumberFormat.power(abs(watts - referenceWatts)))",
+                "; differs from the SMC chip estimate by \(IStatNumberFormat.power(abs(watts - referenceWatts)))"
             )
         }
         return GeekSensorReadout(
@@ -497,11 +487,14 @@ enum GeekPowerReadouts {
 /// the SMC lacks the key, and then labelled as such.
 enum GeekBatteryElectricalReadouts {
     static func rows(electrical: NativeBatteryElectricalSnapshot?) -> [GeekSensorReadout] {
+        currentRows(electrical: electrical) + voltageRows(electrical: electrical)
+    }
+
+    /// D119: the sensors page's current group.
+    static func currentRows(electrical: NativeBatteryElectricalSnapshot?) -> [GeekSensorReadout] {
         guard let electrical else { return [] }
         let isSMC = electrical.electricalSource == .smc
-        let controllerNote = L10n.text("电池控制器约每分钟才更新一次", "The battery controller updates only about once a minute")
-        var rows: [GeekSensorReadout] = []
-        if let row = row(
+        return row(
             id: "battery-current",
             title: L10n.text("电池电流", "Battery Current"),
             reading: electrical.currentReading,
@@ -511,23 +504,28 @@ enum GeekBatteryElectricalReadouts {
                 ? L10n.text("带符号的电池电流，负值为放电；约每秒更新", "Signed battery current, negative while discharging; updated about every second")
                 : controllerNote,
             sampledAt: electrical.generatedAt
-        ) {
-            rows.append(row)
-        }
-        if let row = row(
+        ).map { [$0] } ?? []
+    }
+
+    /// D119: the sensors page's voltage group.
+    static func voltageRows(electrical: NativeBatteryElectricalSnapshot?) -> [GeekSensorReadout] {
+        guard let electrical else { return [] }
+        let isSMC = electrical.electricalSource == .smc
+        return row(
             id: "battery-voltage",
             title: L10n.text("电池电压", "Battery Voltage"),
             reading: electrical.voltageReading,
-            format: { String(format: "%.2f V", $0) },
+            format: HardwareReadingText.volts,
             source: isSMC ? "SMC B0AV" : "AppleSmartBattery",
             note: isSMC
                 ? L10n.text("电池端电压；约每秒更新", "Battery terminal voltage; updated about every second")
                 : controllerNote,
             sampledAt: electrical.generatedAt
-        ) {
-            rows.append(row)
-        }
-        return rows
+        ).map { [$0] } ?? []
+    }
+
+    private static var controllerNote: String {
+        L10n.text("电池控制器约每分钟才更新一次", "The battery controller updates only about once a minute")
     }
 
     private static func row(
@@ -567,7 +565,7 @@ enum GeekProcessorFrequencyPresentation {
             frequency.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         }
         func text(_ frequency: Double) -> String {
-            String(format: "%.2f GHz", frequency / 1_000)
+            IStatNumberFormat.frequency(megahertz: frequency)
         }
         var rows: [GeekSensorReadout] = []
         if let highest = clusters.compactMap({ valid($0.frequencyMHz) }).max() {
@@ -582,7 +580,7 @@ enum GeekProcessorFrequencyPresentation {
             guard let frequency = valid(cluster.frequencyMHz) else { return nil }
             return GeekSensorReadout(
                 id: "cpu-cluster-\(cluster.identifier)",
-                title: L10n.text("核心组 \(index + 1) · \(cluster.coreCount) 核", "Cluster \(index + 1) · \(cluster.coreCount) cores"),
+                title: L10n.text("核心组 \(index + 1) · \(ByteFormat.count(cluster.coreCount)) 核", "Cluster \(index + 1) · \(ByteFormat.count(cluster.coreCount)) cores"),
                 value: text(frequency), source: "IOReport",
                 note: L10n.text("\(cluster.performanceLevelName) 层级的平均工作点", "Average operating point of \(cluster.performanceLevelName) level"),
                 sampledAt: sampledAt)
@@ -596,6 +594,7 @@ enum GeekProcessorFrequencyPresentation {
 
 enum GeekGPUFrequencyPresentation {
     /// "0.34 GHz", "空闲" while the GPU was off, "—" without a reading.
+    /// D128: iStat's frequency, at most two decimals ("1.4 GHz").
     static func value(_ reading: CPUPerformanceStateService.GPUReading?) -> String {
         guard let reading else { return "—" }
         guard let frequency = reading.frequencyMHz else { return idleTitle }
@@ -606,7 +605,7 @@ enum GeekGPUFrequencyPresentation {
     static func ringValue(_ reading: CPUPerformanceStateService.GPUReading?) -> (value: String, unit: String?) {
         guard let reading else { return ("—", nil) }
         guard let frequency = reading.frequencyMHz else { return (idleTitle, nil) }
-        return (String(format: "%.2f", frequency / 1_000), "GHz")
+        return (IStatNumberFormat.number(frequency / 1_000, decimals: 2), "GHz")
     }
 
     /// The share of the GPU's highest operating point (a ring's arc).
@@ -647,39 +646,50 @@ enum GeekGPUFrequencyPresentation {
     private static var idleTitle: String { L10n.text("空闲", "Idle") }
 
     private static func gigahertz(_ megahertz: Double) -> String {
-        String(format: "%.2f GHz", megahertz / 1_000)
+        IStatNumberFormat.frequency(megahertz: megahertz)
     }
 }
 
+/// D122: a reading's level three in iStat's plain-menu cards: a titled card
+/// of rows (the value in the title row; the source, the sample and the
+/// extra readings, parts indented under their row) and a card of the note.
 struct GeekSensorReadoutDetail: View {
+    @Environment(\.miniWindowPageProvidesInset) private var pageProvidesInset
     let readout: GeekSensorReadout
 
     var body: some View {
-        GeekHoverDetailCanvas(title: readout.title, trailing: readout.value) {
-            GeekHoverValueRow(title: L10n.text("来源", "Source"), value: readout.source)
-            if let sampledAt = readout.sampledAt {
-                GeekHoverValueRow(
-                    title: L10n.text("采样", "Sampled"),
-                    value: readout.isUpdating
-                        ? "\(sampledAt.formatted(date: .omitted, time: .standard)) · \(HardwareReadingText.updating)"
-                        : sampledAt.formatted(date: .omitted, time: .standard)
-                )
+        VStack(spacing: MiniWindowStyleTokens.cardSpacing) {
+            GeekIStatRowsCard(
+                title: readout.title,
+                rowCount: GeekSensorReadoutLayout.detailRowCount(readout)
+            ) {
+                Text(readout.value)
+                    .geekIStatValueText(readout.isUpdating ? .secondary : .primary)
+            } rows: {
+                GeekIStatRow(title: L10n.text("来源", "Source"), value: readout.source)
+                if let sampledAt = readout.sampledAt {
+                    GeekIStatRow(
+                        title: L10n.text("采样", "Sampled"),
+                        value: readout.isUpdating
+                            ? "\(sampledAt.formatted(date: .omitted, time: .standard)) · \(HardwareReadingText.updating)"
+                            : sampledAt.formatted(date: .omitted, time: .standard)
+                    )
+                }
+                ForEach(readout.detailRows) { row in
+                    GeekIStatRow(
+                        title: row.title,
+                        value: row.isUpdating && !row.value.hasSuffix("…")
+                            ? "\(row.value) · \(HardwareReadingText.updating)"
+                            : row.value
+                    )
+                    .padding(.leading, row.isIndented ? GeekSensorReadoutLayout.childIndent : 0)
+                    .help("\(row.title) \(row.value)")
+                }
             }
-            ForEach(readout.detailRows) { row in
-                GeekHoverValueRow(
-                    title: row.title,
-                    value: row.isUpdating && !row.value.hasSuffix("…")
-                        ? "\(row.value) · \(HardwareReadingText.updating)"
-                        : row.value
-                )
-                .padding(.leading, row.isIndented ? GeekSensorReadoutLayout.childIndent : 0)
-            }
-            Text(readout.note)
-                .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            GeekIStatNoteCard(text: readout.note)
         }
+        .padding(pageProvidesInset ? 0 : GeekPanelLayout.contentPadding)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .accessibilityElement(children: .contain)
     }
 }
@@ -687,92 +697,115 @@ struct GeekSensorReadoutDetail: View {
 /// Individual probes are snapshot-only. Present all of them together as a
 /// current-reading inspector; a regional history must not be labelled as the
 /// history of a particular core or SMC probe.
+/// D122: one titled iStat card: the probes in two columns of 15 pt rows on
+/// the 17 pt pitch (the columns 10 pt apart), then the sample time.
 struct GeekDetailedTemperaturesDetail: View {
+    @Environment(\.miniWindowPageProvidesInset) private var pageProvidesInset
     let readings: [SystemTemperatureDetailReading]
     let sampledAt: Date?
 
+    /// The card's rows: the grid's and the sample's.
+    nonisolated static func rowCount(readingCount: Int, hasSample: Bool) -> Int {
+        GeekSensorTemperatureLayout.temperatureGridRowCount(itemCount: readingCount) + (hasSample ? 1 : 0)
+    }
+
+    nonisolated static func popoverSize(readingCount: Int, hasSample: Bool) -> CGSize {
+        GeekIStatDetailGeometry.pageSize(
+            cards: [GeekIStatSectionGeometry.rowsHeight(rowCount(readingCount: readingCount, hasSample: hasSample), titled: true)],
+            width: MiniWindowStyleTokens.historyWidth
+        )
+    }
+
     var body: some View {
-        GeekHoverDetailCanvas(
+        GeekIStatRowsCard(
             title: L10n.text("核心与硬件温度", "Core & Hardware Temperature"),
-            trailing: L10n.text("\(readings.count) 项", "\(readings.count) Sensors")
+            rowCount: Self.rowCount(readingCount: readings.count, hasSample: sampledAt != nil)
         ) {
+            Text(L10n.text("\(ByteFormat.count(readings.count)) 项", "\(ByteFormat.count(readings.count)) Sensors"))
+                .geekIStatValueText(.secondary)
+        } rows: {
             LazyVGrid(
-                // The same two-column grid as the sensors card; its 10 pt
-                // column gap is calibrated geometry (GeekSensorsPowerHoverDetailTests).
+                // The sensors card's former two-column grid (its zones are one
+                // iStat column since D119); the 10 pt column gap is calibrated
+                // geometry (GeekSensorsPowerHoverDetailTests).
                 columns: [
                     GridItem(.flexible(), spacing: GeekSensorTemperatureLayout.gridColumnSpacing),
                     GridItem(.flexible()),
                 ],
                 alignment: .leading,
-                spacing: 2
+                spacing: GeekIStatSectionGeometry.rowGap
             ) {
                 ForEach(readings) { reading in
-                    HStack(spacing: 4) {
+                    HStack(spacing: MiniWindowStyleTokens.rowSpacing) {
                         Text(reading.name)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                            .geekIStatLabelText()
                             .truncationMode(.middle)
                         Spacer(minLength: 2)
-                        Text(String(format: "%.0f°C", reading.celsius))
-                            .foregroundStyle(reading.celsius >= 90
+                        Text(IStatNumberFormat.temperature(reading.celsius))
+                            .geekIStatValueText(reading.celsius >= 90
                                 ? AppDesignTokens.Palette.destructive
                                 : reading.celsius >= 80
                                     ? AppDesignTokens.Palette.warning
                                     : .primary)
-                            .monospacedDigit()
-                            .lineLimit(1)
                     }
-                    .font(AdvancedPanelTypography.caption)
-                    .frame(minHeight: 18)
+                    .frame(height: GeekIStatSectionGeometry.rowHeight)
                     .help(reading.sourceHelp)
                     .accessibilityElement(children: .combine)
                 }
             }
             if let sampledAt {
-                Text(L10n.text("采样 \(sampledAt.formatted(date: .omitted, time: .standard))", "Sampled \(sampledAt.formatted(date: .omitted, time: .standard))"))
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                GeekIStatRow(
+                    title: L10n.text("采样", "Sampled"),
+                    value: sampledAt.formatted(date: .omitted, time: .standard),
+                    valueColor: .secondary
+                )
             }
         }
+        .padding(pageProvidesInset ? 0 : GeekPanelLayout.contentPadding)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .accessibilityElement(children: .contain)
     }
 }
 
 extension MenuBarAdvancedStatusView {
+    /// D119: iStat's sensor menu (`SensorsMenu`): the three rings (88), then a
+    /// titled group per kind of reading (24 + 17n): temperature, the fans
+    /// with our fan control entry, current, power, voltage, frequency and
+    /// ambient light. The battery current and voltage and the power rows
+    /// moved here from the power page.
     var geekSensorsPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
             liveCard(.sensors) {
                 VStack(spacing: GeekPanelLayout.detailSpacing) {
-            switch geekSensorPageAvailability {
-            case .sampling:
-                geekSensorStatusCard(PanelChartSampling.statusText)
-                    .id(GeekHardwareDetailFocus.monitoring)
-            case .unavailable:
-                geekSensorStatusCard(
-                    L10n.text(
-                        "此 Mac 没有可用的传感器读数",
-                        "No sensor readings are available for this Mac"
-                    )
-                )
-                .id(GeekHardwareDetailFocus.monitoring)
-            case .available:
-                if geekHasSensorGaugeData {
-                    geekSensorsGaugeCard
+                    switch geekSensorPageAvailability {
+                    case .sampling:
+                        geekSensorStatusCard(PanelChartSampling.statusText)
+                            .id(GeekHardwareDetailFocus.monitoring)
+                    case .unavailable:
+                        geekSensorStatusCard(
+                            L10n.text(
+                                "此 Mac 没有可用的传感器读数",
+                                "No sensor readings are available for this Mac"
+                            )
+                        )
                         .id(GeekHardwareDetailFocus.monitoring)
-                }
-                if !geekDisplayedTemperatures.isEmpty {
-                    geekTemperatureCard
-                }
-                if !geekDetailedTemperatures.isEmpty {
-                    geekDetailedTemperatureCard
+                    case .available:
+                        if geekHasSensorGaugeData {
+                            geekSensorsGaugeCard
+                                .id(GeekHardwareDetailFocus.monitoring)
+                        }
+                        if !geekDisplayedTemperatures.isEmpty || !geekDetailedTemperatures.isEmpty {
+                            geekTemperatureCard
+                        }
+                    }
                 }
             }
-
-                }
-            }
-            geekHelperPowerMetricsCards
             liveCard(.controls) { geekHardwareControlSummaryCard }
                 .id(GeekHardwareDetailFocus.power)
+            // The battery and power readings redraw with their own samples,
+            // the helper's with its leaf (GeekHelperPowerMetricsCards).
+            liveCard(.battery) { geekHelperPowerMetricsCards }
+            liveCard(.sensors) { geekSensorFrequencyGroup }
             // D57: ambient light at the end of the page, only on a Mac with
             // the sensor.
             if monitorSnapshot?.ambientLight?.isSupported == true {
@@ -787,130 +820,162 @@ extension MenuBarAdvancedStatusView {
             monitorSnapshot?.ambientLight,
             sampledAt: monitorSnapshot?.sensorReadingDate
         ) {
-            geekSensorReadoutCard(L10n.text("环境", "ENVIRONMENT"), rows: [readout])
+            // D138: iStat's group name, 'Sensors.Light' (was AMBIENT LIGHT).
+            geekSensorReadoutCard(L10n.text("环境光", "LIGHT"), rows: [readout])
         }
     }
 
+    /// The page while there is no sensor reading: one 25 pt row.
     private func geekSensorStatusCard(_ text: String) -> some View {
-        GeekCombinedCard(height: 43) {
+        GeekIStatCard(height: GeekIStatSectionGeometry.singleRowHeight) {
             Text(text)
-                .font(AdvancedPanelTypography.body)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .accessibilityLabel(text)
+                .geekIStatLabelText()
+                .geekIStatLayer(top: GeekIStatCardGeometry.titleTop, height: GeekIStatCardGeometry.titleHeight)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
     }
 
+    /// iStat `sensors-overview` on the module page: the overview card's three
+    /// rings (72 pt in 87 pt cells), each opening its history (level three);
+    /// the card menu ("⋮") opens the fan control palette.
     private var geekSensorsGaugeCard: some View {
-        GeekSensorSummaryCard {
-            if let temperatureValue {
-                GeekHoverDetailTarget(
-                    accessibilityLabel: L10n.text("CPU 温度三级详情", "CPU Temperature Deep Detail"),
-                    chartRangeMetric: .temperature,
-                    popoverSize: GeekSensorPowerHoverDetailMetrics.sensorHistorySize
-                ) {
-                    GeekCombinedRing(
-                        title: "CPU",
-                        value: geekCompactTemperature(temperatureValue),
-                        progress: min(1, max(0, temperatureValue / 100)),
-                        tint: temperatureTint,
-                        size: GeekSensorSummaryLayout.ringSize,
-                        labelPlacement: .aboveValue
-                    )
-                    .help(L10n.text(
-                        "芯片温度汇总；温度弧范围为 0–100°C，并非 CPU 占用率。",
-                        "Aggregated chip temperature; the arc spans 0–100°C, not CPU utilization."
-                    ))
-                } detail: {
-                    GeekSensorMetricHoverDetail(
-                        title: L10n.text("CPU 温度", "CPU Temperature"),
-                        currentValue: metricValue(.chipTemperature),
-                        points: geekMetricHistory(.temperature),
-                        channel: .chipTemperature,
-                        unit: .temperature,
-                        valueRange: 0...100,
-                        tint: temperatureTint,
-                        duration: geekMetricRange(.temperature).duration,
-                        isUpdating: geekMetricIsUpdating(.temperature)
-                    )
-                }
+        GeekIStatCard(height: GeekSensorSummaryLayout.cardHeight) {
+            GeekIStatSensorCells {
+                geekSensorRingCell { geekCPUTemperatureRing }
+                geekSensorRingCell { geekGPUTemperatureRing }
+                geekSensorRingCell { geekFanRing }
             }
+            .geekIStatLayer(top: (GeekSensorSummaryLayout.cardHeight - GeekSensorSummaryLayout.ringSize) / 2,
+                            height: GeekSensorSummaryLayout.ringSize, leading: 0, trailing: 0)
 
-            if geekGPUTemperature != nil || metricAvailable(.gpuUsage) {
-                let gpuTemperatureChannel = geekGPUTemperature.map { _ in
-                    MenuBarTelemetryChannel.gpuTemperature
-                }
-                GeekHoverDetailTarget(
-                    accessibilityLabel: L10n.text(
-                        "GPU 温度三级详情",
-                        "GPU Temperature Deep Detail"
-                    ),
-                    chartRangeMetric: .temperature,
-                    popoverSize: GeekSensorPowerHoverDetailMetrics.sensorHistorySize
-                ) {
-                    GeekCombinedRing(
-                        title: "GPU",
-                        value: geekGPUTemperature.map(geekCompactTemperature) ?? metricValue(.gpuUsage),
-                        detail: geekGPURingDetail,
-                        progress: geekGPUTemperature.map { min(1, max(0, $0 / 100)) }
-                            ?? metricPercent(.gpuUsage),
-                        tint: geekGPUTemperature.map(geekTemperatureTint) ?? resolvedGPUTint,
-                        size: GeekSensorSummaryLayout.ringSize,
-                        labelPlacement: .aboveValue
-                    )
-                    .help(geekGPUTemperature != nil
-                        ? L10n.text("GPU 温度；温度弧范围为 0–100°C。", "GPU temperature; the arc spans 0–100°C.")
-                        : L10n.text("GPU 温度不可用；当前显示负载，范围为 0–100%。", "GPU temperature is unavailable; showing utilization on a 0–100% scale."))
-                } detail: {
-                    GeekSensorMetricHoverDetail(
-                        title: L10n.text("GPU 温度", "GPU Temperature"),
-                        currentValue: geekGPUTemperature.map { String(format: "%.1f°C", $0) }
-                            ?? PanelChartSampling.statusText,
-                        points: geekMetricHistory(.temperature),
-                        channel: gpuTemperatureChannel,
-                        unit: .temperature,
-                        valueRange: 0...100,
-                        tint: geekGPUTemperature.map(geekTemperatureTint) ?? resolvedGPUTint,
-                        duration: geekMetricRange(.temperature).duration,
-                        secondaryTitle: metricAvailable(.gpuUsage)
-                            ? L10n.text("负载", "Load")
-                            : nil,
-                        secondaryValue: metricAvailable(.gpuUsage) ? metricValue(.gpuUsage) : nil,
-                        isUpdating: geekMetricIsUpdating(.temperature)
-                    )
-                }
+            if geekFanControlEntryPresentation.showsControl {
+                GeekIStatCardMenuButton(state: geekFanControlEntryPresentation)
+                    .geekIStatLayer(top: 0, height: GeekIStatCardMenuButton.side, leading: 0, alignment: .topLeading)
             }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.text("传感器", "Sensors"))
+    }
 
-            // Same exit as the fan speed history (GeekFanHoverDetail).
-            GeekSensorFanRing(telemetry: geekFanTelemetry, tint: panelMetricColors.sensorGraph(chartAccent: panelChartAccentColor))
+    private func geekSensorRingCell<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content().frame(width: GeekSensorSummaryLayout.ringSize, height: GeekSensorSummaryLayout.ringSize)
+    }
+
+    private var geekCPUTemperatureRing: some View {
+        GeekHoverDetailTarget(
+            accessibilityLabel: L10n.text("CPU 温度三级详情", "CPU Temperature Deep Detail"),
+            chartRangeMetric: .temperature,
+            popoverSize: GeekSensorPowerHoverDetailMetrics.sensorHistorySize
+        ) {
+            GeekIStatSensorRing(
+                title: "CPU",
+                value: temperatureValue.map(geekCompactTemperature) ?? "—",
+                // iStat: the temperature over the frequency, as on the overview.
+                detail: temperatureValue == nil ? nil : geekCompactFrequencyText,
+                progress: temperatureValue.map { min(1, max(0, $0 / 100)) },
+                tint: temperatureTint
+            )
+            .help(L10n.text(
+                "芯片温度汇总；温度弧范围为 0–100°C，并非 CPU 占用率。",
+                "Aggregated chip temperature; the arc spans 0–100°C, not CPU utilization."
+            ))
+        } detail: {
+            GeekSensorMetricHoverDetail(
+                title: L10n.text("CPU 温度", "CPU Temperature"),
+                currentValue: metricValue(.chipTemperature),
+                points: geekMetricHistory(.temperature),
+                channel: .chipTemperature,
+                unit: .temperature,
+                valueRange: 0...100,
+                tint: temperatureTint,
+                duration: geekMetricRange(.temperature).duration,
+                isUpdating: geekMetricIsUpdating(.temperature)
+            )
         }
     }
 
-    private var geekTemperatureCard: some View {
-        GeekCombinedCard(
-            height: GeekSensorTemperatureLayout.temperatureCardHeight(
-                itemCount: geekDisplayedTemperatures.count
+    private var geekGPUTemperatureRing: some View {
+        let gpuTemperatureChannel = geekGPUTemperature.map { _ in
+            MenuBarTelemetryChannel.gpuTemperature
+        }
+        return GeekHoverDetailTarget(
+            accessibilityLabel: L10n.text(
+                "GPU 温度三级详情",
+                "GPU Temperature Deep Detail"
+            ),
+            chartRangeMetric: .temperature,
+            popoverSize: GeekSensorMetricHoverDetail.popoverSize(
+                extraRowCount: metricAvailable(.gpuUsage) ? 1 : 0,
+                hasNote: false
             )
         ) {
-            VStack(alignment: .leading, spacing: 0) {
-                geekSensorHeader(L10n.text("温度", "TEMPERATURE"))
+            GeekIStatSensorRing(
+                title: "GPU",
+                value: geekGPUTemperature.map(geekCompactTemperature) ?? metricValue(.gpuUsage),
+                detail: geekGPURingDetail,
+                progress: geekGPUTemperature.map { min(1, max(0, $0 / 100)) }
+                    ?? metricPercent(.gpuUsage),
+                tint: geekGPUTemperature.map(geekTemperatureTint) ?? resolvedGPUTint
+            )
+            .help(geekGPUTemperature != nil
+                ? L10n.text("GPU 温度；温度弧范围为 0–100°C。", "GPU temperature; the arc spans 0–100°C.")
+                : L10n.text("GPU 温度不可用；当前显示负载，范围为 0–100%。", "GPU temperature is unavailable; showing utilization on a 0–100% scale."))
+        } detail: {
+            GeekSensorMetricHoverDetail(
+                title: L10n.text("GPU 温度", "GPU Temperature"),
+                currentValue: geekGPUTemperature.map { IStatNumberFormat.temperature($0) }
+                    ?? PanelChartSampling.statusText,
+                points: geekMetricHistory(.temperature),
+                channel: gpuTemperatureChannel,
+                unit: .temperature,
+                valueRange: 0...100,
+                tint: geekGPUTemperature.map(geekTemperatureTint) ?? resolvedGPUTint,
+                duration: geekMetricRange(.temperature).duration,
+                secondaryTitle: metricAvailable(.gpuUsage)
+                    ? L10n.text("负载", "Load")
+                    : nil,
+                secondaryValue: metricAvailable(.gpuUsage) ? metricValue(.gpuUsage) : nil,
+                isUpdating: geekMetricIsUpdating(.temperature)
+            )
+        }
+    }
 
-                LazyVGrid(
-                    columns: [
-                        GridItem(
-                            .flexible(),
-                            spacing: GeekSensorTemperatureLayout.gridColumnSpacing,
-                            alignment: .leading
-                        ),
-                        GridItem(.flexible(), alignment: .leading),
-                    ],
-                    alignment: .leading,
-                    spacing: 0
-                ) {
-                    ForEach(geekDisplayedTemperatures) { reading in
-                        geekTemperatureRow(reading)
-                    }
-                }
+    /// The fan ring opens the fan speed history, as the fan rows do; a Mac
+    /// without fans has no history to open.
+    @ViewBuilder
+    private var geekFanRing: some View {
+        // Same exit as the fan speed history (GeekFanHoverDetail).
+        let ring = GeekSensorFanRing(telemetry: geekFanTelemetry, tint: panelMetricColors.sensorGraph(chartAccent: panelChartAccentColor))
+        if geekFanTelemetry.isFanless {
+            ring
+        } else {
+            GeekHoverDetailTarget(
+                accessibilityLabel: L10n.text("风扇转速三级详情", "Fan Speed Deep Detail"),
+                chartRangeMetric: .fan,
+                popoverSize: GeekFanHoverDetail.popoverSize(selectedFanIndex: nil, readingCount: geekFanReadings.count)
+            ) {
+                ring
+            } detail: {
+                geekFanHoverDetail
+            }
+        }
+    }
+
+    /// D119: one 15 pt row per zone in a single column (iStat's temperature
+    /// group); the hardware probes list is the group's last row (was a
+    /// two-column grid and a card of its own).
+    private var geekTemperatureCard: some View {
+        let showsProbes = !geekDetailedTemperatures.isEmpty
+        return GeekIStatRowsCard(
+            title: L10n.text("温度", "TEMPERATURE"),
+            rowCount: geekDisplayedTemperatures.count + (showsProbes ? 1 : 0)
+        ) {
+            ForEach(geekDisplayedTemperatures) { reading in
+                geekTemperatureRow(reading)
+            }
+            if showsProbes {
+                geekDetailedTemperatureRow
             }
         }
     }
@@ -919,29 +984,17 @@ extension MenuBarAdvancedStatusView {
         monitorSnapshot?.temperatureDetails ?? []
     }
 
-    private var geekDetailedTemperatureCard: some View {
+    private var geekDetailedTemperatureRow: some View {
         GeekHoverDetailTarget(
             accessibilityLabel: L10n.text("全部核心与硬件温度", "All Core & Hardware Temperatures"),
-            popoverSize: CGSize(
-                width: MiniWindowStyleTokens.historyWidth,
-                height: 60 + CGFloat(GeekSensorTemperatureLayout.temperatureGridRowCount(
-                    itemCount: geekDetailedTemperatures.count
-                )) * 20
-            ),
-            usesCardActiveBorder: true
+            popoverSize: geekDetailedTemperaturesPopoverSize,
+            selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset
         ) {
-            GeekCombinedCard(height: 48) {
-                HStack(spacing: 8) {
-                    geekSensorHeader(L10n.text("硬件探头", "HARDWARE PROBES"))
-                    Spacer(minLength: 2)
-                    Text(L10n.text("\(geekDetailedTemperatures.count) 项", "\(geekDetailedTemperatures.count) Sensors"))
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                    GeekDisclosureIcon()
-                }
-                .frame(maxWidth: .infinity, minHeight: 36)
-            }
+            GeekIStatRow(
+                title: L10n.text("硬件探头", "Hardware Probes"),
+                value: L10n.text("\(ByteFormat.count(geekDetailedTemperatures.count)) 项", "\(ByteFormat.count(geekDetailedTemperatures.count)) Sensors"),
+                valueColor: .secondary
+            )
         } detail: {
             GeekDetailedTemperaturesDetail(
                 readings: geekDetailedTemperatures,
@@ -950,103 +1003,109 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
+    /// D122: the probe card (was 60 + 20 per grid row).
+    private var geekDetailedTemperaturesPopoverSize: CGSize {
+        GeekDetailedTemperaturesDetail.popoverSize(
+            readingCount: geekDetailedTemperatures.count,
+            hasSample: monitorSnapshot?.sensorReadingDate != nil
+        )
+    }
+
+    /// D119: a titled group of 15 pt readout rows (iStat's sensor groups),
+    /// each opening its source, sample and note (level three).
     func geekSensorReadoutCard(_ title: String, rows: [GeekSensorReadout]) -> some View {
-        GeekCombinedCard(height: GeekSensorReadoutLayout.cardHeight(rowCount: rows.count)) {
-            VStack(alignment: .leading, spacing: 0) {
-                geekSensorHeader(title)
-                ForEach(rows) { readout in
-                    GeekHoverDetailTarget(
-                        accessibilityLabel: "\(readout.title)\(L10n.text("详情", " Details"))",
-                        popoverSize: GeekSensorReadoutLayout.detailSize(extraRowCount: readout.detailRows.count),
-                        selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset
-                    ) {
-                        HStack(spacing: 6) {
-                            Text(readout.title)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Spacer(minLength: 4)
-                            if readout.isUpdating {
-                                Text(HardwareReadingText.updating)
-                                    .font(AdvancedPanelTypography.caption)
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                            }
-                            Text(readout.value)
-                                .foregroundStyle(readout.isUpdating ? .secondary : .primary)
-                                .monospacedDigit()
-                                .lineLimit(1)
+        geekSensorReadoutCard(title, rows: rows, extraRowCount: 0) { EmptyView() }
+    }
+
+    /// The group with `extraRowCount` rows of the caller's after the
+    /// readouts (the power group's helper state).
+    func geekSensorReadoutCard<Extra: View>(
+        _ title: String,
+        rows: [GeekSensorReadout],
+        extraRowCount: Int,
+        @ViewBuilder extra: () -> Extra
+    ) -> some View {
+        GeekIStatRowsCard(title: title, rowCount: rows.count + extraRowCount) {
+            ForEach(rows) { readout in
+                GeekHoverDetailTarget(
+                    accessibilityLabel: "\(readout.title)\(L10n.text("详情", " Details"))",
+                    popoverSize: GeekSensorReadoutLayout.detailSize(readout),
+                    selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset
+                ) {
+                    HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                        Text(readout.title)
+                            .geekIStatLabelText()
+                        Spacer(minLength: 4)
+                        if readout.isUpdating {
+                            Text(HardwareReadingText.updating)
+                                .geekIStatValueText(.secondary)
                         }
-                        .font(AdvancedPanelTypography.caption)
-                        .frame(height: 23)
-                        .accessibilityElement(children: .combine)
-                    } detail: {
-                        GeekSensorReadoutDetail(readout: readout)
+                        Text(readout.value)
+                            .geekIStatValueText(readout.isUpdating ? .secondary : .primary)
                     }
+                    .frame(height: GeekIStatSectionGeometry.rowHeight)
+                    .accessibilityElement(children: .combine)
+                } detail: {
+                    GeekSensorReadoutDetail(readout: readout)
                 }
             }
+            extra()
         }
     }
 
     /// Monitoring and control are deliberately separate surfaces (the iStat
-    /// model). This card only *reads*: per-fan speeds with hover history and
+    /// model). This group only *reads*: per-fan speeds with hover history and
     /// the current mode. All mode switches and sliders live exclusively in
     /// the attached control palette, so interacting with monitoring UI can
     /// never change the hardware state.
+    /// D119: iStat's fan group (24 + 17n): a 15 pt row per fan, then our fan
+    /// control entry and the thermal state as rows; the helper action is the
+    /// title row's trailing text (was a capsule above 24 pt rows).
     private var geekHardwareControlSummaryCard: some View {
-        GeekCombinedCard(height: geekFanControlCardHeight) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(L10n.text("风扇", "FANS"))
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(panelMetricColors.sectionHeader)
-                    Spacer(minLength: 4)
-                    if !geekFanTelemetry.isFanless, geekHelperState != .enabled, fanControl.offersHelperConnectionAction {
-                        Button(action: compactHelperAction) {
-                        MiniWindowStatusCapsule(
-                            title: compactHelperActionTitle,
-                            tint: helperSummaryTint,
-                            isBusy: fanControl.isPreparingHelper
-                                || fanControl.isRefreshingConnection
-                        )
-                        .contentShape(Capsule())
+        GeekIStatRowsCard(title: L10n.text("风扇", "FANS"), rowCount: geekFanGroupRowCount) {
+            if !geekFanTelemetry.isFanless, geekHelperState != .enabled, fanControl.offersHelperConnectionAction {
+                Button(action: compactHelperAction) {
+                    HStack(spacing: 4) {
+                        if fanControl.isPreparingHelper || fanControl.isRefreshingConnection {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                        Text(compactHelperActionTitle)
+                            .geekIStatValueText(helperSummaryTint)
                     }
-                    .buttonStyle(ResponsivePlainButtonStyle())
-                    .disabled(fanControl.isDataOnlyFixture || (compactHelperActionIsReconnect && fanControl.helperReconnectWaitSeconds > 0))
-                    .help(compactHelperHelp)
-                    .accessibilityLabel(L10n.text("高级控制状态", "Advanced Control Status"))
-                    .accessibilityValue(FanStatusPresentation.controlTitle(geekFanControlCapabilityState))
-                    }
+                    .contentShape(Rectangle())
                 }
-                .frame(height: 18)
-
-                if geekFanTelemetry.readings.isEmpty {
-                    HStack(spacing: 6) {
-                        Text(geekFanTelemetry.isFanless
-                            ? L10n.text("无风扇 · 被动散热", "No Fans · Passive Cooling")
-                            : geekFanTelemetry.isSampling
-                                ? L10n.text("正在检测风扇…", "Checking Fans…")
-                                : L10n.text("风扇读数不可用", "Fan readings unavailable"))
-                            .font(AdvancedPanelTypography.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                    }
-                    .frame(height: 24)
-                } else {
-                    ForEach(geekFanTelemetry.readings.prefix(2)) { reading in
-                        compactFanHistoryRow(reading)
-                    }
+                .buttonStyle(ResponsivePlainButtonStyle())
+                .disabled(fanControl.isDataOnlyFixture || (compactHelperActionIsReconnect && fanControl.helperReconnectWaitSeconds > 0))
+                .help(compactHelperHelp)
+                .accessibilityLabel(L10n.text("高级控制状态", "Advanced Control Status"))
+                .accessibilityValue(FanStatusPresentation.controlTitle(geekFanControlCapabilityState))
+            }
+        } rows: {
+            if geekFanTelemetry.readings.isEmpty {
+                Text(geekFanTelemetry.isFanless
+                    ? L10n.text("无风扇 · 被动散热", "No Fans · Passive Cooling")
+                    : geekFanTelemetry.isSampling
+                        ? L10n.text("正在检测风扇…", "Checking Fans…")
+                        : L10n.text("风扇读数不可用", "Fan readings unavailable"))
+                    .geekIStatLabelText()
+                    .frame(maxWidth: .infinity, minHeight: GeekIStatSectionGeometry.rowHeight,
+                           maxHeight: GeekIStatSectionGeometry.rowHeight, alignment: .leading)
+            } else {
+                ForEach(geekFanTelemetry.readings.prefix(2)) { reading in
+                    compactFanHistoryRow(reading)
                 }
+            }
 
-                if !geekFanTelemetry.isFanless {
-                    geekFanControlEntryRow
-                }
+            if !geekFanTelemetry.isFanless {
+                geekFanControlEntryRow
+            }
 
-                if geekFanThermallyProtected {
-                    Text(L10n.text("热保护中", "Thermal protection"))
-                        .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(AppDesignTokens.Palette.warning)
-                }
-
+            if geekFanThermallyProtected {
+                Text(L10n.text("热保护中", "Thermal protection"))
+                    .geekIStatValueText(AppDesignTokens.Palette.warning)
+                    .frame(maxWidth: .infinity, minHeight: GeekIStatSectionGeometry.rowHeight,
+                           maxHeight: GeekIStatSectionGeometry.rowHeight, alignment: .leading)
             }
         }
     }
@@ -1068,26 +1127,26 @@ extension MenuBarAdvancedStatusView {
         return state == .serious || state == .critical
     }
 
-    private var geekFanControlCardHeight: CGFloat {
-        let rows = max(1, min(2, geekFanTelemetry.readings.count))
-        let controlRows = geekFanTelemetry.isFanless ? 0 : 1
-        let itemCount = 1 + rows + controlRows + (geekFanThermallyProtected ? 1 : 0)
-        return 10 + 18 + CGFloat(rows + controlRows) * 24
-            + CGFloat(itemCount - 1) * 4 + (geekFanThermallyProtected ? 17 : 0)
+    /// The fans (at most two, D73) or their state, the control entry and
+    /// the thermal state.
+    private var geekFanGroupRowCount: Int {
+        max(1, min(2, geekFanTelemetry.readings.count))
+            + (geekFanTelemetry.isFanless ? 0 : 1)
+            + (geekFanThermallyProtected ? 1 : 0)
     }
 
     private func compactFanHistoryRow(_ reading: SystemFanReading) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
             GeekHoverDetailTarget(
                 accessibilityLabel: L10n.text("\(reading.displayName)转速历史", "\(reading.displayName) Speed History"),
                 chartRangeMetric: .fan,
-                popoverSize: GeekSensorPowerHoverDetailMetrics.sensorHistorySize,
+                popoverSize: GeekFanHoverDetail.popoverSize(selectedFanIndex: reading.index,
+                                                            readingCount: geekFanTelemetry.readings.count),
                 selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset
             ) {
                 Text(reading.displayName)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+                    .geekIStatLabelText()
+                    .frame(maxWidth: .infinity, minHeight: GeekIStatSectionGeometry.rowHeight, alignment: .leading)
             } detail: {
                 GeekFanHoverDetail(
                     points: geekMetricHistory(.fan),
@@ -1105,14 +1164,11 @@ extension MenuBarAdvancedStatusView {
                 selectedFanIndex: reading.index
             ) {
                 Text(reading.displayRPM)
-                    .foregroundStyle(.primary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .frame(minHeight: 24, alignment: .trailing)
+                    .geekIStatValueText()
+                    .frame(minHeight: GeekIStatSectionGeometry.rowHeight, alignment: .trailing)
             }
         }
-        .font(AdvancedPanelTypography.caption)
-        .frame(height: 24)
+        .frame(height: GeekIStatSectionGeometry.rowHeight)
     }
 
     private var helperSummaryTint: Color {
@@ -1188,8 +1244,14 @@ extension MenuBarAdvancedStatusView {
             .compactMap { byZone[$0] }
     }
 
-    var geekBatteryElectricalReadouts: [GeekSensorReadout] {
-        GeekBatteryElectricalReadouts.rows(electrical: batteryElectricalSnapshot)
+    /// D119: the sensors page's current and voltage groups (were the power
+    /// page's battery electrical card).
+    var geekBatteryCurrentReadouts: [GeekSensorReadout] {
+        GeekBatteryElectricalReadouts.currentRows(electrical: batteryElectricalSnapshot)
+    }
+
+    var geekBatteryVoltageReadouts: [GeekSensorReadout] {
+        GeekBatteryElectricalReadouts.voltageRows(electrical: batteryElectricalSnapshot)
     }
 
     var geekPowerReadouts: [GeekSensorReadout] {
@@ -1371,17 +1433,6 @@ extension MenuBarAdvancedStatusView {
         )
     }
 
-    private func geekSensorHeader(
-        _ title: String,
-        emphasized: Bool = true
-    ) -> some View {
-        Text(title)
-            .font(AdvancedPanelTypography.captionStrong)
-            .foregroundStyle(emphasized ? panelMetricColors.sectionHeader : Color.secondary)
-            .lineLimit(1)
-            .accessibilityAddTraits(.isHeader)
-    }
-
     private func geekTemperatureRow(_ reading: SystemTemperatureReading) -> some View {
         let zone = reading.zone
         let detail = geekTemperatureDetail(reading)
@@ -1418,7 +1469,7 @@ extension MenuBarAdvancedStatusView {
         )
         let view = GeekSensorMetricHoverDetail(
             title: geekTemperatureZoneTitle(zone),
-            currentValue: String(format: "%.1f°C", reading.celsius),
+            currentValue: IStatNumberFormat.temperature(reading.celsius),
             points: geekMetricHistory(.temperature),
             channel: MenuBarTelemetryChannel.temperature(zone),
             unit: .temperature,
@@ -1450,12 +1501,7 @@ extension MenuBarAdvancedStatusView {
                 readings: geekDetailedTemperatures,
                 sampledAt: monitorSnapshot?.sensorReadingDate
             )),
-            CGSize(
-                width: MiniWindowStyleTokens.historyWidth,
-                height: 60 + CGFloat(GeekSensorTemperatureLayout.temperatureGridRowCount(
-                    itemCount: geekDetailedTemperatures.count
-                )) * 20
-            )
+            geekDetailedTemperaturesPopoverSize
         )
     }
 
@@ -1468,33 +1514,23 @@ extension MenuBarAdvancedStatusView {
         zone: SystemTemperatureZone,
         reading: SystemTemperatureReading
     ) -> some View {
-        HStack(alignment: .center, spacing: 4) {
-            Text(geekCompactTemperatureZoneTitle(zone))
-                .font(.system(size: GeekSensorTemperatureLayout.fontSize, weight: .regular))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-            Spacer(minLength: 2)
-
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+            Text(geekTemperatureZoneTitle(zone))
+                .geekIStatLabelText()
+            Spacer(minLength: 4)
             Text(geekCompactTemperature(reading.celsius))
-                .font(.system(size: GeekSensorTemperatureLayout.fontSize, weight: .regular))
-                .foregroundStyle(geekTemperatureValueForeground(reading.celsius))
-                .monospacedDigit()
-                .lineLimit(1)
-
-            GeekDisclosureIcon()
-                .frame(width: GeekSensorTemperatureLayout.miniRingSize)
+                .geekIStatValueText(geekTemperatureValueForeground(reading.celsius))
         }
         .frame(
             maxWidth: .infinity,
-            minHeight: GeekSensorTemperatureLayout.gridRowHeight,
-            maxHeight: GeekSensorTemperatureLayout.gridRowHeight,
+            minHeight: GeekIStatSectionGeometry.rowHeight,
+            maxHeight: GeekIStatSectionGeometry.rowHeight,
             alignment: .leading
         )
         .help(L10n.text("查看历史趋势", "View History Trend"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(geekTemperatureZoneTitle(zone))
-        .accessibilityValue(String(format: "%.1f°C", reading.celsius))
+        .accessibilityValue(IStatNumberFormat.temperature(reading.celsius))
     }
 
     private func geekTemperatureZoneTitle(_ zone: SystemTemperatureZone) -> String {
@@ -1516,20 +1552,10 @@ extension MenuBarAdvancedStatusView {
         }
     }
 
-    private func geekCompactTemperatureZoneTitle(_ zone: SystemTemperatureZone) -> String {
-        switch zone {
-        case .performanceCores: L10n.text("性能核心", "P-Cores")
-        case .superCores: L10n.text("超级核心", "Super Cores")
-        case .efficiencyCores: L10n.text("能效核心", "E-Cores")
-        case .thunderboltLeft: L10n.text("雷雳左", "TB Left")
-        case .thunderboltRight: L10n.text("雷雳右", "TB Right")
-        default: geekTemperatureZoneTitle(zone)
-        }
-    }
-
-    /// "80°C" (the sensors rings and, D43, the CPU card's title).
+    /// "80°" (the sensors rings and, D43, the CPU card's title). D128:
+    /// iStat's whole degrees without the scale (was "%.0f°C").
     func geekCompactTemperature(_ value: Double) -> String {
-        String(format: "%.0f°C", value)
+        IStatNumberFormat.temperature(value)
     }
 
     /// One temperature color rule for every ring and history that shows a
@@ -1558,7 +1584,7 @@ enum GeekAmbientLightReadout {
         }
         return GeekSensorReadout(
             id: "ambient-light", title: L10n.text("光照", "Light"),
-            value: String(format: "%.0f lx", lux), source: source, note: note, sampledAt: sampledAt
+            value: IStatNumberFormat.light(lux), source: source, note: note, sampledAt: sampledAt
         )
     }
 }
@@ -1582,7 +1608,7 @@ enum GeekTemperatureRowDetail {
         var rows = [GeekSensorReadoutDetailRow(L10n.text("最高", "Hottest"), HardwareReadingText.celsius(celsius))]
         if !cores.isEmpty {
             rows.append(GeekSensorReadoutDetailRow(
-                L10n.text("平均（\(cores.count) 个传感器）", "Average (\(cores.count) sensors)"),
+                L10n.text("平均（\(ByteFormat.count(cores.count)) 个传感器）", "Average (\(ByteFormat.count(cores.count)) sensors)"),
                 HardwareReadingText.celsius(cores.reduce(0, +) / Double(cores.count))
             ))
         }

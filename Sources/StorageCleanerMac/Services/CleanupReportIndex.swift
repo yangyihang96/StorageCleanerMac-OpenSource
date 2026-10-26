@@ -28,6 +28,9 @@ struct CleanupReportIndex: Codable, Identifiable, Equatable, Sendable {
             // when it is shown, in the language of that moment.
             subject = report.items.first
                 .map { String(URL(fileURLWithPath: $0.sourcePath).lastPathComponent.prefix(160)) }
+        } else if ToolboxOperationTitles.prefix(for: report.rulesVersion) != nil {
+            subject = ToolboxOperationTitles.subject(rulesVersion: report.rulesVersion,
+                                                     firstSourcePath: report.items.first?.sourcePath)
         } else {
             subject = report.items.first(where: { $0.sourcePath.hasSuffix(".app") })
                 .map { String(URL(fileURLWithPath: $0.sourcePath).deletingPathExtension().lastPathComponent.prefix(160)) }

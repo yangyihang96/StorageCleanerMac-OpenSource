@@ -66,6 +66,7 @@ struct DiskHealthSnapshot: Codable, Equatable, Sendable {
     let availableBytes: Int64?
     let remainingLifePercent: Int?
     let temperatureCelsius: Double?
+    let smartDetails: DiskSMARTDetails?
     let summaryText: String?
     let checkedAt: Date
 
@@ -82,6 +83,7 @@ struct DiskHealthSnapshot: Codable, Equatable, Sendable {
         case availableBytes
         case remainingLifePercent
         case temperatureCelsius
+        case smartDetails
         case summaryText
         case checkedAt
     }
@@ -99,6 +101,7 @@ struct DiskHealthSnapshot: Codable, Equatable, Sendable {
         availableBytes: Int64? = nil,
         remainingLifePercent: Int? = nil,
         temperatureCelsius: Double? = nil,
+        smartDetails: DiskSMARTDetails? = nil,
         summaryText: String?,
         checkedAt: Date
     ) {
@@ -114,6 +117,7 @@ struct DiskHealthSnapshot: Codable, Equatable, Sendable {
         self.availableBytes = availableBytes
         self.remainingLifePercent = remainingLifePercent
         self.temperatureCelsius = temperatureCelsius
+        self.smartDetails = smartDetails
         self.summaryText = summaryText
         self.checkedAt = checkedAt
     }
@@ -139,9 +143,39 @@ struct DiskHealthSnapshot: Codable, Equatable, Sendable {
                 Double.self,
                 forKey: .temperatureCelsius
             ),
+            smartDetails: try container.decodeIfPresent(DiskSMARTDetails.self, forKey: .smartDetails),
             summaryText: try container.decodeIfPresent(String.self, forKey: .summaryText),
             checkedAt: try container.decode(Date.self, forKey: .checkedAt)
         )
+    }
+}
+
+/// NVMe SMART counters from `diskutil info -plist`, under
+/// SMARTDeviceSpecificKeysMayVaryNotGuaranteed (DECISIONS D100 G8). Keys vary
+/// by model and macOS version, so every field is optional and a missing or
+/// non-numeric key leaves its field nil. 128-bit counters (`_0` low and `_1`
+/// high 64 bits) are kept as Double.
+struct DiskSMARTDetails: Codable, Equatable, Sendable {
+    /// NVMe data units: 1 unit is 1,000 512-byte blocks.
+    static let bytesPerDataUnit = 512_000.0
+
+    var dataUnitsWritten: Double?
+    var dataUnitsRead: Double?
+    var powerOnHours: Double?
+    var powerCycles: Double?
+    var unsafeShutdowns: Double?
+    var mediaErrors: Double?
+    var availableSparePercent: Int?
+    var availableSpareThresholdPercent: Int?
+    /// NVMe critical warning bits, when macOS reports them; nonzero means the
+    /// drive itself reports a critical condition.
+    var criticalWarning: Int?
+
+    var bytesWritten: Double? { dataUnitsWritten.map { $0 * Self.bytesPerDataUnit } }
+    var bytesRead: Double? { dataUnitsRead.map { $0 * Self.bytesPerDataUnit } }
+
+    var isEmpty: Bool {
+        self == DiskSMARTDetails()
     }
 }
 

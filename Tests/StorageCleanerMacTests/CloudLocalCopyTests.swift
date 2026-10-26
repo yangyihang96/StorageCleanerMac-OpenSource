@@ -226,6 +226,7 @@ final class CloudLocalCopyTests: XCTestCase {
         catch { XCTAssertTrue(error is CloudCopyGateError) }
     }
 
+    // D185: original test name retained; complete third-party evidence now permits the same API.
     func testCloudStorageReturnsUnsupportedWithoutReadingSyncMetadata() async throws {
         let root = try fixture()
         let probe = NativeProbe(NativeProbe.readyICloud)
@@ -234,11 +235,10 @@ final class CloudLocalCopyTests: XCTestCase {
         try makeFile(path)
         let state = try await native.state(at: path)
         XCTAssertEqual(state.provider, .external("OneDrive"))
-        XCTAssertEqual(state.block, .unsupported)
-        XCTAssertEqual(probe.counts.reads, 0, "CloudStorage must fail closed before any sync metadata read")
-        do { try await native.evict(state); XCTFail("unsupported provider must be rejected") }
-        catch { XCTAssertTrue(error is CloudCopyGateError) }
-        XCTAssertEqual(probe.counts.evicts, 0)
+        XCTAssertNil(state.block) // D185＋旧值：.unsupported
+        XCTAssertEqual(probe.counts.reads, 1) // D185＋旧值：0，CloudStorage 在读取同步元数据前降级。
+        try await native.evict(state) // D185＋旧值：应抛 CloudCopyGateError，提供商一律不支持。
+        XCTAssertEqual(probe.counts.evicts, 1) // D185＋旧值：0；仍只调用计数器，不调用真实释放 API。
     }
 
     func testOnlyPositivelyIdentifiedICloudLocationsAreSupported() async throws {

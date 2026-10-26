@@ -1,14 +1,14 @@
 # 存储清理助手 / Storage Cleaner Mac
 
-**当前版本 / Current version:** `2.0.0`
+**当前版本 / Current version:** `2.0.1`
 
-[下载与更新说明 / Downloads and update notes](https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v2.0.0) · [源码发布 / Source release](https://github.com/yangyihang96/StorageCleanerMac-OpenSource/releases/tag/v2.0.0)
+[下载与更新说明 / Downloads and update notes](https://github.com/yangyihang96/StorageCleanerMacUpdates/releases/tag/v2.0.1) · [源码发布 / Source release](https://github.com/yangyihang96/StorageCleanerMac-OpenSource/releases/tag/v2.0.1)
 
-正式版通过原有的 `appcast.xml` 更新，测试版使用独立的 `appcast-beta.xml`，两者都用 Sparkle 校验更新包签名。旧正式版可以在“工具 → 检查存储清理助手更新”里升级到 2.0.0。两个通道的应用标识不同，不会互相覆盖。
+正式版通过原有的 `appcast.xml` 更新，测试版使用独立的 `appcast-beta.xml`，两者都用 Sparkle 校验更新包签名。旧正式版可以在“工具 → 检查存储清理助手更新”里升级到 2.0.1。两个通道的应用标识不同，不会互相覆盖。
 
 下载包适用于 Apple Silicon、macOS 14 或更新版本。目前使用 Apple Development 签名，没有经过 Developer ID 公证，其他 Mac 可能会阻止打开；应用内更新的签名校验通过，不等于 Gatekeeper 已批准发行。
 
-Production uses `appcast.xml`; Beta uses a separate `appcast-beta.xml`. Both use Sparkle archive-signature verification, and existing production installs can update to 2.0.0 from Tools → Check for Updates. Downloads require Apple silicon and macOS 14+. Builds use Apple Development signing and are not Developer ID notarized; other Macs may block them.
+Production uses `appcast.xml`; Beta uses a separate `appcast-beta.xml`. Both use Sparkle archive-signature verification, and existing production installs can update to 2.0.1 from Tools → Check for Updates. Downloads require Apple silicon and macOS 14+. Builds use Apple Development signing and are not Developer ID notarized; other Macs may block them.
 
 存储清理助手是一款原生 macOS SwiftUI 应用，用来把本机磁盘占用、可自动清理、大文件、重复文件、应用残留、启动项、程序升级和内存状态放到一个可复核的界面里。它强调“先看清楚，再决定处理”，扫描阶段保持只读，清理动作需要用户明确确认，并优先移到废纸篓。
 
@@ -185,11 +185,15 @@ This overview follows the 2.0.0 beta sidebar. Supported scope reflects live resu
 
 ## 发布状态 / Release Status
 
+`2.0.1` 把主窗口改为十个功能模块的新界面，智能扫描一次检查清理、防护、性能、应用、杂乱五项；新增系统缓存、应用瘦身、恶意软件扫描、扩展管理、云盘清理、空间地图方块图、按类别的忽略列表和四类提醒，杂乱文件新增大型和旧文件、下载与聊天文件，菜单栏小窗重新设计。完整改动见 [更新日志](CHANGELOG.md)，门禁、正式包、应用内更新实测和限制见 [发行记录](docs/RELEASE_VALIDATION_2.0.1.md)。
+
 `2.0.0` 是全新的主窗口和功能版本：智能扫描的每一项都可以勾选、可以恢复，新增项目产物清理，浏览器隐私按页面列出记录，新增 iCloud 释放本地副本，菜单栏小窗打开更快。完整改动见 [更新日志](CHANGELOG.md)。门禁结果、发布包、Sparkle 实测升级和已知问题见 [发行记录](docs/RELEASE_VALIDATION_2.0.0.md)。正式版使用 Apple Development 签名，没有经过公证；访达右键卸载和系统照片图库只在测试版提供。
 
 `1.10.1` 包含浅色界面、小窗响应与后台开销优化、安全回执、M 系列 Core18 草案及独立通道的应用内更新。完整改动见 [更新日志](CHANGELOG.md)，本次更新链路、签名和发布状态见 [发行记录](docs/RELEASE_VALIDATION_1.10.1.md)。按用户要求，本次未运行测试套件，也未运行 GitHub Actions。此前 [初次 Beta 验证记录](docs/RELEASE_VALIDATION_1.10.1-beta.md) 只描述其原始构建，不能视为本次更新改动的测试结果。
 
 Core18 尚无生产参考，只显示原始结果；未完成扩展、其他硬件验证、端到端性能预算和原 49 项视觉验收仍独立保留，不因发布而标记通过。
+
+2.0.1: see the [changelog](CHANGELOG.md) and [release record](docs/RELEASE_VALIDATION_2.0.1.md) for the local test gate (Release 5912 and Debug 6205 tests with 0 failures, 660 window tests on a separate virtual display), packaging, the real Sparkle update from 2.0.0, and the actions covered by automated tests only. Builds use Apple Development signing without notarization.
 
 2.0.0: see the [changelog](CHANGELOG.md) and [release record](docs/RELEASE_VALIDATION_2.0.0.md) for the local test gate, packaging, the real Sparkle upgrade from 1.10.1, and known issues (benchmark history above 1 MiB cannot save new results; one menu-bar performance test is flaky under heavy load). Finder uninstall and Photos library access remain Beta-only.
 

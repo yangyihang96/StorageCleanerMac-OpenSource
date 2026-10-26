@@ -1,0 +1,27 @@
+/* D116: Little Snitch shows these with InternetAccessPolicy.plist. Keys are the English texts in that file; this table keeps English readers from falling back to the Chinese development region. */
+
+"This app scans and cleans up your Mac on the Mac itself. It goes online only for its own updates, app update checks, the network speed test, the public IP display and the benchmark leaderboard. It does not upload scan results or file contents." = "This app scans and cleans up your Mac on the Mac itself. It goes online only for its own updates, app update checks, the network speed test, the public IP display and the benchmark leaderboard. It does not upload scan results or file contents.";
+
+"Checks for and downloads updates to this app, reads the signed list of official app download sources, and downloads the official GitHub releases of apps you update." = "Checks for and downloads updates to this app, reads the signed list of official app download sources, and downloads the official GitHub releases of apps you update.";
+"This app cannot check for or install its own updates, and apps released on GitHub cannot be updated." = "This app cannot check for or install its own updates, and apps released on GitHub cannot be updated.";
+
+"Looks up the latest official release of apps that publish their updates on GitHub, when App Updates checks for updates." = "Looks up the latest official release of apps that publish their updates on GitHub, when App Updates checks for updates.";
+"Apps that publish their updates on GitHub are not checked for updates." = "Apps that publish their updates on GitHub are not checked for updates.";
+
+"Looks up the current App Store version of apps installed from the App Store, when App Updates checks for updates." = "Looks up the current App Store version of apps installed from the App Store, when App Updates checks for updates.";
+"Apps installed from the App Store are not checked for updates." = "Apps installed from the App Store are not checked for updates.";
+
+"Downloads and uploads test data for the network speed test, only when you start the test and confirm it." = "Downloads and uploads test data for the network speed test, only when you start the test and confirm it.";
+"The network speed test cannot run." = "The network speed test cannot run.";
+
+"Shows your public IPv4 and IPv6 addresses in the Mini Window's network view while it is open. On by default; you can turn it off in Settings › Access." = "Shows your public IPv4 and IPv6 addresses in the Mini Window's network view while it is open. On by default; you can turn it off in Settings › Access.";
+"Your public IP address is not shown." = "Your public IP address is not shown.";
+
+"Looks up the country or region of your public IP address, only after you allow it separately in Settings › Access. The address is sent to this service." = "Looks up the country or region of your public IP address, only after you allow it separately in Settings › Access. The address is sent to this service.";
+"The country or region of your IP address is not shown." = "The country or region of your IP address is not shown.";
+
+"Shows the benchmark leaderboard and, only after you confirm, publishes or removes your benchmark result." = "Shows the benchmark leaderboard and, only after you confirm, publishes or removes your benchmark result.";
+"The leaderboard cannot be shown, and benchmark results cannot be published or removed." = "The leaderboard cannot be shown, and benchmark results cannot be published or removed.";
+
+"Checks for and downloads updates of other apps from their developers' own update feeds and official download sites, when App Updates checks for or installs updates. The addresses come from each app or from the signed list of official sources." = "Checks for and downloads updates of other apps from their developers' own update feeds and official download sites, when App Updates checks for or installs updates. The addresses come from each app or from the signed list of official sources.";
+"Apps that update from their developer's own site cannot be checked or updated." = "Apps that update from their developer's own site cannot be checked or updated.";

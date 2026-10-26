@@ -51,6 +51,23 @@ enum PanelMetricColorRole: String, CaseIterable, Identifiable {
         }
     }
 
+    /// D135: which of iStat's three accent-derived colors the metric takes
+    /// (`_MenuAttributes{Primary,Secondary,Tertiary}ColorWithKey` by graph
+    /// key; the card title is `mainLabelAttributes:`, the accent itself).
+    var accentRole: IStatAccentRole {
+        switch self {
+        case .sectionHeader, .cpuUser, .gpu, .memoryPressure, .memoryApp,
+             .swap, .diskWrite, .networkDownload, .sensorGraph,
+             .battery, .batteryCharging:
+            .primary
+        case .cpuSystem, .memoryWired, .diskRead, .networkUpload,
+             .batteryHealth, .batteryDraining:
+            .secondary
+        case .memoryCompressed:
+            .tertiary
+        }
+    }
+
     var defaultColor: Color {
         switch self {
         case .sectionHeader, .cpuUser, .gpu, .memoryPressure, .memoryApp,
@@ -62,6 +79,20 @@ enum PanelMetricColorRole: String, CaseIterable, Identifiable {
             MiniWindowColorPalette.pink
         case .memoryCompressed:
             MiniWindowColorPalette.yellow
+        }
+    }
+}
+
+enum IStatAccentRole {
+    case primary, secondary, tertiary
+}
+
+extension PanelAccentColors {
+    func color(for role: IStatAccentRole) -> Color {
+        switch role {
+        case .primary: primary
+        case .secondary: secondary
+        case .tertiary: tertiary
         }
     }
 }
@@ -92,6 +123,7 @@ struct PanelMetricColors {
         visualMode: MiniWindowVisualMode = .black,
         lightSurface: Bool = false,
         surfaceAccent: Color? = nil,
+        accentColors: PanelAccentColors? = nil,
         sectionHeader: String = "",
         cpuUser: String = "", cpuSystem: String = "",
         gpu: String = "", memoryPressure: String = "",
@@ -103,6 +135,9 @@ struct PanelMetricColors {
     ) {
         func resolved(_ role: PanelMetricColorRole, _ stored: String) -> Color {
             if let override = PanelAppearancePreferences.color(from: stored) { return override }
+            // D135: an iStat theme takes its colors from the system accent,
+            // on light themes too (no light variants, no graphite header).
+            if let accentColors { return accentColors.color(for: role.accentRole) }
             if role == .sectionHeader, let surfaceAccent { return surfaceAccent }
             if lightSurface {
                 switch role {
@@ -254,6 +289,7 @@ struct PanelMetricColorEnvironment: ViewModifier {
             visualMode: visualMode,
             lightSurface: panelChromePalette?.controlScheme == .light,
             surfaceAccent: panelChromePalette?.accent,
+            accentColors: panelChromePalette?.accentColors,
             sectionHeader: sectionHeader,
             cpuUser: cpuUser, cpuSystem: cpuSystem,
             gpu: gpu, memoryPressure: memoryPressure,
@@ -269,10 +305,22 @@ struct PanelMetricColorEnvironment: ViewModifier {
 struct PanelMetricColorPicker: View {
     let role: PanelMetricColorRole
     @AppStorage private var storedHex: String
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(IStatMenuThemePreferences.darkThemeKey) private var darkThemeID = IStatMenuTheme.defaultID
+    @AppStorage(IStatMenuThemePreferences.lightThemeKey) private var lightThemeID = IStatMenuTheme.defaultID
+    @AppStorage(IStatMenuThemePreferences.vibrancyKey) private var vibrancy = true
 
     init(role: PanelMetricColorRole) {
         self.role = role
         _storedHex = AppStorage(wrappedValue: "", role.defaultsKey)
+    }
+
+    /// D135: the default is the panel's accent-derived color for the theme
+    /// of this window's appearance.
+    private var defaultColor: Color {
+        let theme = IStatMenuThemePreferences.theme(darkID: darkThemeID, lightID: lightThemeID,
+                                                    vibrancy: vibrancy, isDark: colorScheme == .dark)
+        return IStatAccentPalette.current(themeID: theme.id).color(for: role.accentRole)
     }
 
     var body: some View {
@@ -280,7 +328,7 @@ struct PanelMetricColorPicker: View {
             Text(role.title)
             Spacer(minLength: 8)
             ColorPicker(role.title, selection: Binding(
-                get: { PanelAppearancePreferences.color(from: storedHex) ?? role.defaultColor },
+                get: { PanelAppearancePreferences.color(from: storedHex) ?? defaultColor },
                 set: { storedHex = PanelAppearancePreferences.hexString(from: $0) ?? "" }
             ), supportsOpacity: false)
             .labelsHidden()

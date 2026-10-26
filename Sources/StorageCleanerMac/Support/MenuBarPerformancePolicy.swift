@@ -2,16 +2,17 @@ import Foundation
 
 /// Local performance contract shared by collection, presentation and release checks.
 enum MenuBarPerformancePolicy {
+    /// Interval of the standalone readers (no resident controller attached).
+    /// D127: the resident plan reads these sources on every main-loop tick.
     static let visibleExpensiveInterval: TimeInterval = 5
     static let networkProcessInterval: TimeInterval = 10
+    /// D74 hidden budgets (status 5 s, process lists 15 s, per-app nettop 60 s),
+    /// retired from the resident plan by D127: iStat reads every source on the
+    /// same tick whether its menu is open or not, and reads process lists only
+    /// while a module menu that shows one is open. Low Power Mode keeps its own
+    /// slower tier below (iStat does not throttle; ours does, D127 deviation).
     static let hiddenStatusInterval: TimeInterval = 5
-    /// D74: cheap kernel/SMC reads share the resident tick. Process enumeration
-    /// runs once per three hidden ticks; the fixed helper command once per 12.
-    /// These are cost budgets, not measured energy savings (see batch handoff).
     static let hiddenProcessInterval: TimeInterval = 15
-    /// D75: only per-app nettop reads move from 15 to 60 seconds when hidden.
-    /// PS and memory grouping retain hiddenProcessInterval. The low-power
-    /// hidden network tier uses the existing helper's 60 -> 180 (3x) budget.
     static let hiddenNetworkProcessInterval: TimeInterval = 60
     static let lowPowerHiddenNetworkProcessInterval: TimeInterval = 180
     static let hiddenHelperPowerInterval: TimeInterval = 60
@@ -29,8 +30,27 @@ enum MenuBarPerformancePolicy {
     static let visibleProcessInterval: TimeInterval = 10
     /// BOARD N16-2: the first measurement after a process page opens. Its
     /// baseline is read at once; the first delta does not wait a full
-    /// `visibleProcessInterval`.
+    /// `visibleProcessInterval`. D127: iStat's `-[ItemManager startItemsForKey:]`
+    /// reads at once and again after 0.5 s (0x1DCD6500 ns), then every tick.
     static let firstProcessSampleInterval: TimeInterval = 0.5
+    /// D127: a reading due on every tick must not skip one because two
+    /// wake-ups of the main loop landed a few milliseconds closer together.
+    static let tickTolerance: TimeInterval = 0.1
+
+    static func isDue(since last: Date?, now: Date, interval: TimeInterval) -> Bool {
+        guard let last else { return true }
+        return now.timeIntervalSince(last) >= interval - tickTolerance
+    }
+
+    /// D127: an open process page reads on every tick, never two reads less
+    /// than a second apart (no 0.2 s deltas when a tick lands right after the
+    /// 0.5 s follow-up). A process budget slower than the tick (Low Power
+    /// Mode) is kept as is.
+    static let processMinimumSpacing: TimeInterval = 1
+
+    static func processSpacing(_ processes: TimeInterval, tick: TimeInterval) -> TimeInterval {
+        processes > tick ? processes : processMinimumSpacing
+    }
     /// Review P2-8: how long a process page may say "正在采样…" before it says
     /// nothing was measured (a reader that keeps giving nothing).
     static let processSampleTimeout: TimeInterval = 5
@@ -63,12 +83,15 @@ struct MenuBarSamplingCadence: Equatable, Sendable {
                          helperPower: MenuBarPerformancePolicy.lowPowerHelperPowerInterval,
                          suspended: suspended)
         }
-        return .init(cheap: visible ? selectedInterval : MenuBarPerformancePolicy.hiddenStatusInterval,
-                     expensive: MenuBarPerformancePolicy.visibleExpensiveInterval,
-                     processes: visible ? MenuBarPerformancePolicy.visibleProcessInterval
-                         : MenuBarPerformancePolicy.hiddenProcessInterval,
-                     networkProcesses: visible ? MenuBarPerformancePolicy.networkProcessInterval
-                         : MenuBarPerformancePolicy.hiddenNetworkProcessInterval,
+        // D127 (iStat `-[Statistics update]`): one loop at the selected interval
+        // reads every source, menu open or closed, and the open menu redraws
+        // from it. Process lists use the same tick but only run while their
+        // page is open (ScanStore / MenuBarAuxiliaryMonitorState). The helper's
+        // power command keeps its own budget (G3, waiting for the user).
+        return .init(cheap: selectedInterval,
+                     expensive: selectedInterval,
+                     processes: selectedInterval,
+                     networkProcesses: selectedInterval,
                      helperPower: visible ? MenuBarPerformancePolicy.visibleHelperPowerInterval
                          : MenuBarPerformancePolicy.hiddenHelperPowerInterval,
                      suspended: suspended)

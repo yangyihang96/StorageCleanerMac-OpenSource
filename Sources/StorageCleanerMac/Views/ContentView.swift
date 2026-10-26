@@ -8,6 +8,7 @@ struct ContentView: View {
     private let computerHealthStore: ComputerHealthStore
     private let networkSpeedTestStore: NetworkSpeedTestStore
     @StateObject private var browserPrivacyStore: BrowserPrivacyStore
+    @StateObject private var malwareScanStore: MalwareScanStore
     private let macBenchmarkStore: MacBenchmarkStore
     private let macBenchmarkLeaderboardStore: BenchmarkV7LeaderboardStore
     private let heavyWorkActivityStore: HeavyWorkActivityStore
@@ -41,6 +42,9 @@ struct ContentView: View {
         _browserPrivacyStore = StateObject(
             wrappedValue: browserPrivacyStore ?? BrowserPrivacyStore()
         )
+        _malwareScanStore = StateObject(wrappedValue: MalwareScanStore(
+            trash: MalwareTrashService(environment: .live, coordinator: store.heavyWorkCoordinator),
+            didMove: { [weak store] in store?.refreshOperationReports() }))
         self.macBenchmarkStore = macBenchmarkStore
         self.macBenchmarkLeaderboardStore = macBenchmarkLeaderboardStore
         self.heavyWorkActivityStore = heavyWorkActivityStore
@@ -106,6 +110,14 @@ struct ContentView: View {
                         sidebarPresentation = next
                     }
                 }
+                // D176: the first scan or run of this launch folds the sidebar
+                // on every page (CleanMyMac); a window opened later folds at once.
+                .onReceive(CareStudioCanvas.shared.$hasWorked.removeDuplicates()) { worked in
+                    guard worked else { return }
+                    withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {
+                        sidebarPresentation.scanStarted()
+                    }
+                }
         }
     }
 
@@ -130,26 +142,10 @@ struct ContentView: View {
         // view of the main window, its sheets and overlays.
         .environment(\.canvasTheme, AppCanvasTheme.resolve(rawValue: canvasThemeRawValue))
         .toolbar(removing: .sidebarToggle)
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    isShowingOperationHistory = true
-                } label: {
-                    Label(L10n.text("操作记录", "Operation History"), systemImage: "clock.arrow.circlepath")
-                }
-                .help(L10n.text("查看清理、卸载及迁移回执与恢复", "View cleanup, uninstall and migration receipts and recovery"))
-            }
-            if #available(macOS 26.0, *) {
-                ToolbarItem(placement: .principal) {
-                    IntegratedTitlebar(theme: activePresentationFilter.moduleTheme)
-                }
-                .sharedBackgroundVisibility(.hidden)
-            } else {
-                ToolbarItem(placement: .principal) {
-                    IntegratedTitlebar(theme: activePresentationFilter.moduleTheme)
-                }
-            }
-        }
+        // D94: the window has no toolbar items on any page, so the window
+        // buttons and the sidebar keep one place. The sidebar header names
+        // the app; “操作记录” is in the D67 status line or, on V1 pages, in
+        // MainWindowHistoryBand.
         .sheet(isPresented: $isShowingOperationHistory) {
             ReversibleOperationsView(store: store, resumeUninstall: { report in
                 selectFilter(.uninstall)
@@ -157,17 +153,17 @@ struct ContentView: View {
             })
         }
         .toolbarBackground(.hidden, for: .windowToolbar)
-        .toolbar(FeatureLightfield.owns(activePresentationFilter) ? .hidden : .visible, for: .windowToolbar)
+        // D94: never hide the window toolbar. On macOS 15 and later hiding it
+        // also removes the close, minimize and zoom buttons, and they did not
+        // come back when a later page showed the toolbar again.
         .background(MainWindowChromeConfigurator().frame(width: 0, height: 0))
+        // D175: ⌃⌘S folds the sidebar to icons and back, as its own button
+        // does (D94). It no longer hides the column: the window has no control
+        // that shows a hidden column again, and AppKit restored it hidden on
+        // every launch (10-22: only Smart Scan was left on screen).
         .focusedSceneValue(
             \.mainWindowSidebarAction,
-            MainWindowSidebarAction {
-                NSApp.sendAction(
-                    #selector(NSSplitViewController.toggleSidebar(_:)),
-                    to: nil,
-                    from: nil
-                )
-            }
+            MainWindowSidebarAction { toggleSidebarPresentation() }
         )
         .focusedSceneValue(
             \.startupItemsKeyboardActions,
@@ -203,6 +199,11 @@ struct ContentView: View {
             Task { @MainActor in
                 store.requestedFilter = nil
             }
+        }
+        // D207: after a manager adds rows to the ignore list; above the managers' footers.
+        .overlay(alignment: .bottom) {
+            CareStudioIgnoreNote(feedback: store.ignoreFeedback, place: .window)
+                .padding(.bottom, 84)
         }
         .overlay(alignment: .bottom) {
             if let actionMessage = store.actionMessage {
@@ -334,17 +335,12 @@ struct ContentView: View {
                 .environment(\.moduleTheme, activePresentationFilter.moduleTheme)
             }
         }
-        .alert(L10n.text("清空废纸篓？", "Empty Trash?"), isPresented: emptyTrashAlertBinding) {
-            Button(L10n.text("取消", "Cancel"), role: .cancel) {
-                store.cancelEmptyTrash()
-            }
-            Button(L10n.text("永久删除", "Permanently Delete"), role: .destructive) {
-                store.confirmEmptyTrash()
-            }
-            .disabled(!store.canRequestEmptyTrash)
-        } message: {
-            if let summary = store.pendingEmptyTrashSummary {
-                Text(L10n.emptyTrashMessage(count: summary.itemCount, bytes: ByteFormat.string(summary.totalBytes)))
+        // D101 L5: the frozen list with D23's two confirmations.
+        .sheet(isPresented: EmptyTrashConfirmationPresentation.binding(for: store)) {
+            if let frozen = store.pendingEmptyTrash {
+                EmptyTrashConfirmationSheet(store: store, frozen: frozen)
+                    .environment(\.locale, L10n.locale)
+                    .environment(\.moduleTheme, activePresentationFilter.moduleTheme)
             }
         }
         .alert(L10n.text("撤销最近清理？", "Undo Latest Cleanup?"), isPresented: cleanupRestoreAlertBinding) {
@@ -357,8 +353,8 @@ struct ContentView: View {
         } message: {
             let count = store.pendingCleanupRestoreEntry?.restorableMoveRecords.count ?? 0
             Text(L10n.text(
-                "将尝试从废纸篓恢复 \(count) 项。如果原位置已有同名文件，该项会跳过，不会覆盖或自动改名。",
-                "The app will try to restore \(count) item(s) from Trash. Existing items at the original locations are skipped without overwrite or automatic renaming."
+                "将尝试从废纸篓恢复 \(ByteFormat.count(count)) 项。如果原位置已有同名文件，该项会跳过，不会覆盖或自动改名。",
+                "The app will try to restore \(ByteFormat.count(count)) item(s) from Trash. Existing items at the original locations are skipped without overwrite or automatic renaming."
             ))
         }
         .alert(
@@ -476,19 +472,32 @@ struct ContentView: View {
         }
     }
 
+    /// The sidebar's own button (D94) and ⌃⌘S (D175) fold it to icons and back.
+    private func toggleSidebarPresentation() {
+        withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {
+            sidebarPresentation.toggle()
+        }
+    }
+
     private func fullWorkspace(metrics: WindowLayoutMetrics) -> some View {
+        // D176: one sidebar for every page — the icon rail from the first scan
+        // of this launch (as CleanMyMac), the window width before it, the
+        // user's toggle over both (was: scanning, result and cleaning pages
+        // forced the rail while they were on screen, D141).
         let sidebarMode = sidebarPresentation.effective
         return NavigationSplitView {
             SidebarView(
                 store: store,
                 selection: selectedFilter,
                 presentation: sidebarMode,
-                onTogglePresentation: {
-                    withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {
-                        sidebarPresentation.toggle()
-                    }
-                }
+                onTogglePresentation: { toggleSidebarPresentation() },
+                privacy: browserPrivacyStore,
+                malware: malwareScanStore
             )
+            // D94: the sidebar's own button collapses it to icons. The system
+            // toggle beside the window buttons is removed where SwiftUI reads
+            // it, on the sidebar column.
+            .toolbar(removing: .sidebarToggle)
             // D53 §2.2 replaces the old 900 pt window-width switch (172 /
             // 196 pt), under which a wider window got a narrower detail.
             // D67: the full sidebar is the same 210 pt on every page, so
@@ -535,10 +544,12 @@ struct ContentView: View {
                         computerHealthStore: computerHealthStore,
                         networkSpeedTestStore: networkSpeedTestStore,
                         browserPrivacyStore: browserPrivacyStore,
+                        malwareScanStore: malwareScanStore,
                         macBenchmarkStore: macBenchmarkStore,
                         macBenchmarkLeaderboardStore: macBenchmarkLeaderboardStore,
                         heavyWorkActivityStore: heavyWorkActivityStore,
-                        selection: selectedFilter
+                        selection: selectedFilter,
+                        navigationState: navigationState
                     )
                 }
 #else
@@ -548,16 +559,25 @@ struct ContentView: View {
                     computerHealthStore: computerHealthStore,
                     networkSpeedTestStore: networkSpeedTestStore,
                     browserPrivacyStore: browserPrivacyStore,
+                    malwareScanStore: malwareScanStore,
                     macBenchmarkStore: macBenchmarkStore,
                     macBenchmarkLeaderboardStore: macBenchmarkLeaderboardStore,
                     heavyWorkActivityStore: heavyWorkActivityStore,
-                    selection: selectedFilter
+                    selection: selectedFilter,
+                    navigationState: navigationState
                 )
 #endif
             }
-            // D67 pages hide the window toolbar; they show the same
-            // “操作记录” entry in their status line instead.
+            // “操作记录”: the D67 status line, or MainWindowHistoryBand on V1 pages.
             .environment(\.featureOperationHistoryAction, { isShowingOperationHistory = true })
+            // D207: the managers' "加入忽略列表" and its note.
+            .environment(\.ignoreListFeedback, store.ignoreFeedback)
+            // D202: a page Smart Care's Review opened goes back to Smart Care.
+            .environment(\.careStudioReviewReturn, navigationState.smartCareReview.map { _ in
+                CareStudioReviewReturn { store.showFilter(.overview) }
+            })
+            // D154 batch 2: a module page's related-tool pills open their page.
+            .environment(\.careStudioOpenRoute, { store.showFilter($0) })
         }
     }
 
@@ -665,16 +685,6 @@ struct ContentView: View {
 
     private var v2CleanupConfirmationBinding: Binding<Bool> {
         CleanupPlanConfirmationPresentation.binding(for: store)
-    }
-
-    private var emptyTrashAlertBinding: Binding<Bool> {
-        Binding {
-            store.pendingEmptyTrashSummary != nil
-        } set: { isPresented in
-            if !isPresented {
-                store.cancelEmptyTrash()
-            }
-        }
     }
 
     private var cleanupRestoreAlertBinding: Binding<Bool> {
@@ -813,10 +823,13 @@ private struct DetailRouterView: View {
     let computerHealthStore: ComputerHealthStore
     let networkSpeedTestStore: NetworkSpeedTestStore
     @ObservedObject var browserPrivacyStore: BrowserPrivacyStore
+    let malwareScanStore: MalwareScanStore
     let macBenchmarkStore: MacBenchmarkStore
     let macBenchmarkLeaderboardStore: BenchmarkV7LeaderboardStore
     let heavyWorkActivityStore: HeavyWorkActivityStore
     @Binding var selection: ReviewFilter
+    /// D202: Smart Care's Review mark decides the module pages' landing.
+    @ObservedObject var navigationState: AppNavigationState
     private var filter: ReviewFilter {
         selection
     }
@@ -835,7 +848,7 @@ private struct DetailRouterView: View {
                 // never retains the old scan page beneath results during a
                 // removal transition.
                 if presentationFilter == .overview || presentsV2CleanupPage {
-                    SmartScanFlowHost(store: store, selection: $selection)
+                    SmartScanFlowHost(store: store, selection: $selection, privacy: browserPrivacyStore)
                 } else if store.scanPresentationState.showsProgressPage,
                           store.scanPresentationRoute == presentationFilter {
                     ScanProgressView(store: store, module: presentationFilter)
@@ -885,7 +898,11 @@ private struct DetailRouterView: View {
             cleanupWorkspace
         } else if filter == .privacy {
             BrowserPrivacyWorkspaceView(
-                browserPrivacyStore: browserPrivacyStore
+                browserPrivacyStore: browserPrivacyStore, malware: malwareScanStore,
+                recentItemsCoordinator: store.heavyWorkCoordinator,
+                onRecentOperationComplete: { store.refreshOperationReports() },
+                recordsAreSmartCares: !store.moduleShowsResult(.protection, privacy: browserPrivacyStore),
+                onScan: { store.noteModuleScan(.protection) }
             )
         } else if ReviewFilter.fileWorkspaceCases.contains(filter) {
             fileWorkspace
@@ -908,6 +925,24 @@ private struct DetailRouterView: View {
             )
         } else if filter == .utilityHub {
             SystemUtilitiesHubView(store: store)
+        } else if filter == .cloudCleanup {
+            // D154: CleanMyMac's Cloud Cleanup, My Tools and My Activity.
+            CareStudioCloudCleanupPage(store: store)
+        } else if filter == .myTools {
+            CareStudioMyToolsPage(store: store)
+        } else if filter == .myActivity {
+            CareStudioMyActivityPage(store: store, healthStore: computerHealthStore, privacy: browserPrivacyStore)
+        } else if filter == .extensions {
+            // D154 batch 2: the D160–D165 tool pages, each in its module.
+            ExtensionManagerPage(store: ToolboxStores.of(store).extensions, module: .applications,
+                                 onBack: { store.showFilter(.uninstall) })
+        } else if filter == .maintenance {
+            SystemMaintenancePage(store: ToolboxStores.of(store).maintenance, module: .startup,
+                                  onBack: { store.showFilter(.startup) },
+                                  openFreeUpMemory: { store.showFilter(.memory) })
+        } else if filter == .chatFiles {
+            ChatFilesPage(store: ToolboxStores.of(store).chatFiles, module: .clutter,
+                          onBack: { store.showFilter(.duplicates) })
         } else {
             StartView(store: store)
         }
@@ -1073,13 +1108,68 @@ struct CleanupWorkspaceView: View {
 private struct SmartScanFlowHost: View {
     @ObservedObject var store: ScanStore
     @Binding var selection: ReviewFilter
+    /// D168: the app's browser privacy store, for Smart Care's protection card.
+    let privacy: BrowserPrivacyStore?
+    @ObservedObject private var smartCare: SmartCareCoordinator
     /// D53 §3.2.3: the start button morphs into the progress card.
     @Namespace private var flowNamespace
+
+    init(store: ScanStore, selection: Binding<ReviewFilter>, privacy: BrowserPrivacyStore? = nil) {
+        self.store = store
+        _selection = selection
+        self.privacy = privacy
+        _smartCare = ObservedObject(wrappedValue: SmartCareCoordinator.of(store))
+    }
+
+    /// D168: Smart Care's scanning page and its five cards stand in front of
+    /// the junk scan's pages while it scans or shows its cards (a stopped or
+    /// failed junk scan is one card); confirming keeps the cards under the
+    /// sheet, and cleaning, verifying and the completed page stay the junk
+    /// flow's own.
+    /// Another page that borrows this host for its cleanup keeps the junk
+    /// flow, even while Smart Care scans or shows its cards. While Run
+    /// cleans (D168, batch 3L), the cards stay under its confirmation sheet.
+    private var showsSmartCareResults: Bool {
+        guard selection == .overview,
+              smartCare.stage == .results || smartCare.stage == .running(.cleanup) else { return false }
+        switch store.scanPresentationState {
+        case .idle, .results, .confirming, .cancelled, .failed: return true
+        default: return false
+        }
+    }
+
+    private var showsSmartCareScanning: Bool { selection == .overview && smartCare.isScanning }
+
+    /// Run's maintenance part; once the junk is cleaned and tasks come next,
+    /// the cleanup's own completed page is not shown in between.
+    private var showsMaintenanceRun: Bool {
+        guard selection == .overview else { return false }
+        return smartCare.stage == .running(.performance)
+            || (smartCare.stage == .running(.cleanup) && smartCare.plannedRun.contains(.performance)
+                && store.scanPresentationState == .completed)
+    }
+
+    private var showsRunFinished: Bool { selection == .overview && smartCare.stage == .finished }
+
+    /// D202: Smart Care's page shows its own junk scan only; a module page's
+    /// scan, its progress and its results stay on that page (the Cleanup
+    /// page's results used to open here as "清理任务已准备好…").
+    private var showsModuleJunkScan: Bool {
+        selection == .overview && ScanStore.junkFlowIsAModules(state: store.scanPresentationState,
+                                                               route: store.scanPresentationRoute,
+                                                               session: store.cleanupScanSession,
+                                                               cancellingCleanup: isCancellingCleanup)
+    }
 
     /// One value per page of the flow; progress updates inside a page do
     /// not count as a page change.
     private var flowStage: Int {
-        switch store.scanPresentationState {
+        if showsSmartCareScanning { return 1 }
+        if showsMaintenanceRun { return 3 }
+        if showsRunFinished { return 4 }
+        if showsSmartCareResults { return 2 }
+        if showsModuleJunkScan { return 0 }
+        return switch store.scanPresentationState {
         case .idle: 0
         case .preparing, .scanning, .finalizing: 1
         case .cancelling: isCancellingCleanup ? 3 : 1
@@ -1098,9 +1188,27 @@ private struct SmartScanFlowHost: View {
             flowPage
         }
         .environment(\.smartScanFlowNamespace, flowNamespace)
+        .onAppear { if let privacy { smartCare.attach(privacy: privacy) } }
     }
 
+    @ViewBuilder
     private var flowPage: some View {
+        if showsSmartCareScanning {
+            SmartCareScanningPage(store: store, smartCare: smartCare, privacy: privacy)
+        } else if showsMaintenanceRun {
+            SmartCareMaintenanceRunningPage(maintenance: ToolboxStores.of(store).maintenance)
+        } else if showsRunFinished {
+            runFinishedPage
+        } else if showsSmartCareResults {
+            SmartCareResultsPage(store: store, smartCare: smartCare, privacy: privacy)
+        } else if showsModuleJunkScan {
+            StartView(store: store)
+        } else {
+            junkFlowPage
+        }
+    }
+
+    private var junkFlowPage: some View {
         Group {
             switch store.scanPresentationState {
             case .idle:
@@ -1154,7 +1262,7 @@ private struct SmartScanFlowHost: View {
                     SmartScanCleanupCompletedPage(
                         store: store,
                         report: report,
-                        onDone: store.dismissV2CleanupReport
+                        onDone: finishCleanup
                     )
                 } else {
                     SmartScanTerminalPage(
@@ -1164,7 +1272,7 @@ private struct SmartScanFlowHost: View {
                         status: .completed(L10n.text("已完成", "Completed")),
                         actionTitle: L10n.text("完成", "Done"),
                         stateArt: .stateSuccess,
-                        action: store.dismissV2CleanupReport
+                        action: finishCleanup
                     )
                 }
 
@@ -1173,7 +1281,7 @@ private struct SmartScanFlowHost: View {
                     SmartScanCleanupCompletedPage(
                         store: store,
                         report: report,
-                        onDone: store.dismissV2CleanupReport
+                        onDone: finishCleanup
                     )
                 } else {
                     SmartScanTerminalPage(
@@ -1194,7 +1302,7 @@ private struct SmartScanFlowHost: View {
                     SmartScanCleanupCompletedPage(
                         store: store,
                         report: report,
-                        onDone: store.dismissV2CleanupReport
+                        onDone: finishCleanup
                     )
                 } else {
                     SmartScanTerminalPage(
@@ -1227,6 +1335,40 @@ private struct SmartScanFlowHost: View {
         } else {
             StartView(store: store)
         }
+    }
+
+    /// D168, batch 3L: the cleanup report with the other cards' results
+    /// above it, or, when Run did not clean, one page with those results.
+    @ViewBuilder
+    private var runFinishedPage: some View {
+        let lines = SmartCareRunLines.lines(smartCare)
+        if [.done, .stopped].contains(smartCare.runOutcomes[.cleanup]), let report = store.lastCleanReport {
+            SmartScanCleanupCompletedPage(store: store, report: report, onDone: finishCleanup, otherResults: lines)
+        } else {
+            SmartScanTerminalPage(
+                title: L10n.text("运行完成", "Run Complete"),
+                detail: lines.joined(separator: "\n"),
+                systemImage: "checkmark.seal.fill",
+                status: SmartCareRunLines.hasFailure(smartCare)
+                    ? .failed(L10n.text("有任务没有完成", "Some tasks did not finish"))
+                    : .completed(L10n.text("已完成", "Completed")),
+                actionTitle: L10n.text("完成", "Done"),
+                stateArt: SmartCareRunLines.hasFailure(smartCare) ? .stateError : .stateSuccess,
+                action: finishCleanup)
+        }
+    }
+
+    /// D168: after Smart Care's run, Done goes back to the landing, as
+    /// CleanMyMac starts over after Run (batch 3K only cleared the cards, so
+    /// Done fell back to the junk scan's own results). A cleanup started
+    /// elsewhere still returns to its remaining rows.
+    private func finishCleanup() {
+        let endsSmartCareRun = smartCare.stage != .idle
+        store.dismissV2CleanupReport()
+        guard endsSmartCareRun else { return }
+        smartCare.reset()
+        // D202: Smart Care's own results go with its run, and only those.
+        store.clearSmartCareResults(privacy: privacy)
     }
 
     private var isCancellingCleanup: Bool {
@@ -1318,7 +1460,22 @@ struct ToolPreparationView: View {
         store.scanHistorySummary.latestStatus()
     }
 
+    /// Tests of the D70 landings set `careStudioClassicResults`.
+    @Environment(\.careStudioClassicResults) private var usesClassicLanding
+
+    /// D141: the CleanMyMac Cleanup landing for Safe Cleanup (the four scan
+    /// scopes as its list) and for Developer Junk (what it covers, the
+    /// activity threshold and the project and simulator tools). The D70
+    /// landings stay as the classic view.
     var body: some View {
+        if usesClassicLanding {
+            classicBody
+        } else {
+            studioBody
+        }
+    }
+
+    private var classicBody: some View {
         Group {
         if filter == .green {
             FeatureLightfieldPage(module: .green, phase: .landing, title: filter.sidebarTitle,
@@ -1360,6 +1517,63 @@ struct ToolPreparationView: View {
             }
         }
         }
+        }
+    }
+
+    @ViewBuilder
+    private var studioBody: some View {
+        if filter == .devCaches {
+            CareStudioLandingPage(
+                module: .devTools,
+                bullets: [
+                    CareStudioBullet(id: "dev.caches", title: L10n.text("包管理与编译缓存", "Package & Build Caches"),
+                                     systemImage: "shippingbox.fill"),
+                    CareStudioBullet(id: "dev.ai", title: L10n.text("AI 工具缓存与日志", "AI Tool Caches & Logs"),
+                                     systemImage: "sparkles"),
+                    CareStudioBullet(id: "dev.xcode", title: L10n.text("Xcode 派生数据", "Xcode Derived Data"),
+                                     systemImage: "hammer.fill")
+                ],
+                status: preparationStatusText,
+                footnote: L10n.text("只读扫描 · 会话、配置和源码不会列出", "Read-only scan · Sessions, settings and sources are never listed"),
+                actionTitle: store.isPreparingMainScan ? L10n.text("准备中", "Preparing") : L10n.text("扫描", "Scan"),
+                actionEnabled: !store.isPreparingScan,
+                action: store.startScanRespectingAccessGuide
+            ) {
+                CareStudioDeveloperThresholdControl(store: store)
+            }
+        } else {
+            CareStudioLandingPage(
+                module: .cleanup,
+                bullets: SafeCleanupScanScope.allCases.map { scope in
+                    CareStudioBullet(
+                        id: "scope.\(scope.rawValue)",
+                        title: FeatureLightfieldCleanupScopeRow.title(scope),
+                        systemImage: Self.symbol(for: scope),
+                        hint: FeatureLightfieldCleanupScopeRow.detail(scope),
+                        isSelected: store.selectedSafeCleanupScopes.contains(scope),
+                        toggle: store.isPreparingScan ? nil : { store.toggleSafeCleanupScope(scope) })
+                },
+                status: preparationStatusText,
+                footnote: L10n.text("只读扫描 · 清理前逐项确认", "Read-only scan · Review before cleanup"),
+                actionTitle: store.isPreparingMainScan ? L10n.text("准备中", "Preparing") : L10n.text("扫描", "Scan"),
+                actionEnabled: !store.isPreparingScan && !hasEmptySafeCleanupSelection,
+                action: store.startScanRespectingAccessGuide)
+        }
+    }
+
+    static func symbol(for scope: SafeCleanupScanScope) -> String {
+        switch scope {
+        case .systemJunk: "gearshape.2.fill"
+        case .aiClutter: "sparkles"
+        case .mailAttachments: "envelope.fill"
+        case .trashBins: "trash.fill"
+        }
+    }
+
+    private var preparationStatusText: String? {
+        switch preparationStatus {
+        case .neverScanned: nil
+        default: preparationStatus.title
         }
     }
 
@@ -1539,52 +1753,38 @@ private struct SafeCleanupScopeButton: View {
 #endif
     }
 
-    private var title: String {
-        switch scope {
-        case .caches: L10n.text("系统缓存", "System Caches")
-        case .logs: L10n.text("日志文件", "Log Files")
-        case .temporaryFiles: L10n.text("临时文件", "Temporary Files")
-        case .downloadResidue: L10n.text("下载残留", "Download Residue")
-        }
-    }
-
-    private var detail: String {
-        switch scope {
-        case .caches:
-            L10n.text("可重新生成的系统与应用缓存", "Regenerable system and app caches")
-        case .logs:
-            L10n.text("扫描后仅供逐项审阅", "Review individually after scanning")
-        case .temporaryFiles:
-            L10n.text("已知可再生成的临时目录", "Known regenerable temporary folders")
-        case .downloadResidue:
-            L10n.text("安装包与下载内容需确认", "Installers and downloads require review")
-        }
-    }
-
-    private var systemImage: String {
-        switch scope {
-        case .caches: "internaldrive.fill"
-        case .logs: "doc.text.fill"
-        case .temporaryFiles: "clock.fill"
-        case .downloadResidue: "arrow.down.circle.fill"
-        }
-    }
+    private var title: String { FeatureLightfieldCleanupScopeRow.title(scope) }
+    private var detail: String { FeatureLightfieldCleanupScopeRow.detail(scope) }
+    private var systemImage: String { ToolPreparationView.symbol(for: scope) }
 
     private var categoryPigment: ModulePigment {
         switch scope {
-        case .caches: .cleanup
-        case .logs: .smartScan
-        case .temporaryFiles: .protection
-        case .downloadResidue: .files
+        case .systemJunk: .cleanup
+        case .aiClutter: .smartScan
+        case .mailAttachments: .protection
+        case .trashBins: .files
         }
     }
+
 }
 
 private struct StartView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Tests of the D70 start page set `careStudioClassicResults`.
+    @Environment(\.careStudioClassicResults) private var usesClassicStart
     @ObservedObject var store: ScanStore
+    @State private var showsReadiness = false
 
     var body: some View {
+        if usesClassicStart {
+            classicBody
+        } else {
+            studioBody
+        }
+    }
+
+    /// The D70 start page: the landing, with the readiness panel under it.
+    private var classicBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             Group {
                 if store.shouldShowPermissionPanelInMainInterface {
@@ -1609,16 +1809,49 @@ private struct StartView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(
-            maxWidth: .infinity,
-            maxHeight: .infinity,
-            alignment: .top
-        )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(
             AppMotionTokens.resolved(AppMotionTokens.stateChange, reduceMotion: reduceMotion),
             value: store.shouldShowPermissionPanelInMainInterface
         )
+    }
+
+    /// D141: the studio landing fills the page; when some folders cannot be
+    /// read, a notice on the gradient opens the readiness panel in a sheet
+    /// (CleanMyMac shows access guidance over the page, not under it).
+    private var studioBody: some View {
+        heroStage
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .overlay(alignment: .top) {
+                if store.shouldShowPermissionPanelInMainInterface {
+                    CareStudioNotice(
+                        systemImage: "lock.fill",
+                        text: L10n.text("部分位置还不能读取，扫描结果会不完整。",
+                                        "Some places can't be read yet; results would be incomplete."),
+                        actionTitle: L10n.text("查看权限", "Review Access")) {
+                        showsReadiness = true
+                    }
+                    .padding(.top, 16)
+                    .padding(.horizontal, 24)
+                }
+            }
+            .sheet(isPresented: $showsReadiness) {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Text(L10n.text("读取权限", "Access")).font(.system(size: 15, weight: .semibold))
+                        Spacer()
+                        Button(L10n.text("完成", "Done")) { showsReadiness = false }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                    .padding(16)
+                    Divider()
+                    ScrollView {
+                        ScanReadinessPanel(store: store, latestStatus: latestScanStatus)
+                            .padding(16)
+                    }
+                }
+                .frame(minWidth: 560, idealWidth: 620, minHeight: 440, idealHeight: 560)
+            }
     }
 
     private var heroStage: some View {
@@ -1710,7 +1943,7 @@ private struct AccessRepairGuideSheet: View {
 
     private var headerDetail: String {
         if deniedCount > 0 {
-            return L10n.text("\(deniedCount) 个位置未读取", "\(deniedCount) unread locations")
+            return L10n.text("\(ByteFormat.count(deniedCount)) 个位置未读取", "\(ByteFormat.count(deniedCount)) unread locations")
         }
         return L10n.text("确认关键位置权限", "Check key location access")
     }
@@ -1828,7 +2061,7 @@ private struct HomeStatusBoard: View {
     private var cleanupSummaryColumn: some View {
         VStack(alignment: .trailing, spacing: 6) {
             if cleanableBytes > 0 {
-                Text(ByteFormat.string(cleanableBytes))
+                Text(ByteFormat.storageString(cleanableBytes))
                     .font(AppDesignTokens.Typography.numeric)
                     .monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
@@ -1904,7 +2137,7 @@ private struct HomeStatusBoard: View {
             if store.cleanupHistorySummary.totalCount > 0 {
                 SmartCareMetric(
                     title: L10n.text("累计移到废纸篓", "Moved to Trash"),
-                    value: ByteFormat.string(store.cleanupHistorySummary.totalBytes),
+                    value: ByteFormat.storageString(store.cleanupHistorySummary.totalBytes),
                     systemImage: "trash",
                     tint: AppDesignTokens.Palette.tertiary
                 )
@@ -1998,7 +2231,7 @@ private struct HomeStatusBoard: View {
         case .rescanRecommended:
             return L10n.text("扫描于 \(dateText)", "Scanned \(dateText)")
         case .permissionLimited:
-            return L10n.text("\(summary.entry.deniedCount) 个位置未读取", "\(summary.entry.deniedCount) unread locations")
+            return L10n.text("\(ByteFormat.count(summary.entry.deniedCount)) 个位置未读取", "\(ByteFormat.count(summary.entry.deniedCount)) unread locations")
         }
     }
 
@@ -2096,7 +2329,7 @@ private struct HomeStatusBoard: View {
     private func accessText(for status: LastScanStatusSummary) -> String {
         status.entry.deniedCount == 0
             ? L10n.text("权限完整", "Full access")
-            : L10n.text("\(status.entry.deniedCount) 处受限", "\(status.entry.deniedCount) gaps")
+            : L10n.text("\(ByteFormat.count(status.entry.deniedCount)) 处受限", "\(ByteFormat.count(status.entry.deniedCount)) gaps")
     }
 
 }
@@ -2321,14 +2554,14 @@ private struct ScanReadinessPanel: View {
     private func readinessSummaryPills(_ summary: ScanReadinessSummary) -> some View {
         HStack(spacing: 8) {
             MetadataPill(
-                text: L10n.text("可读 \(summary.readableCount)", "\(summary.readableCount) readable"),
+                text: L10n.text("可读 \(ByteFormat.count(summary.readableCount))", "\(ByteFormat.count(summary.readableCount)) readable"),
                 systemImage: "checkmark.circle.fill",
                 tint: AppDesignTokens.Palette.success
             )
 
             if summary.blockedCount > 0 {
                 MetadataPill(
-                    text: L10n.text("受限 \(summary.blockedCount)", "\(summary.blockedCount) blocked"),
+                    text: L10n.text("受限 \(ByteFormat.count(summary.blockedCount))", "\(ByteFormat.count(summary.blockedCount)) blocked"),
                     systemImage: "lock.fill",
                     tint: AppDesignTokens.Palette.warning
                 )
@@ -2336,7 +2569,7 @@ private struct ScanReadinessPanel: View {
 
             if summary.missingCount > 0 {
                 MetadataPill(
-                    text: L10n.text("跳过 \(summary.missingCount)", "\(summary.missingCount) skipped"),
+                    text: L10n.text("跳过 \(ByteFormat.count(summary.missingCount))", "\(ByteFormat.count(summary.missingCount)) skipped"),
                     systemImage: "minus.circle",
                     tint: .secondary
                 )
@@ -2586,7 +2819,7 @@ private struct SmartCleanupFocusPanel: View {
                 tint: freshnessTint(for: lastScanStatus)
             )
             FocusInfoLabel(
-                text: lastScanStatus.entry.deniedCount == 0 ? L10n.text("权限完整", "Full access") : L10n.text("\(lastScanStatus.entry.deniedCount) 处受限", "\(lastScanStatus.entry.deniedCount) gaps"),
+                text: lastScanStatus.entry.deniedCount == 0 ? L10n.text("权限完整", "Full access") : L10n.text("\(ByteFormat.count(lastScanStatus.entry.deniedCount)) 处受限", "\(ByteFormat.count(lastScanStatus.entry.deniedCount)) gaps"),
                 systemImage: lastScanStatus.entry.deniedCount == 0 ? "checkmark.shield.fill" : "lock.fill",
                 tint: lastScanStatus.entry.deniedCount == 0 ? AppDesignTokens.Palette.success : AppDesignTokens.Palette.warning
             )
@@ -2659,7 +2892,7 @@ private struct SmartCleanupFocusPanel: View {
 
     private var detail: String {
         if hasCleanableCandidates {
-            return L10n.text("\(displayCount) 个可安全清理项目", "\(displayCount) safe cleanup items")
+            return L10n.text("\(ByteFormat.count(displayCount)) 个可安全清理项目", "\(ByteFormat.count(displayCount)) safe cleanup items")
         }
         if hasLiveResult {
             return L10n.text("没有可安全清理项目", "No safe cleanup items")
@@ -2801,7 +3034,7 @@ private struct CleanupAmountMetric: View {
                 Image(systemName: isHistorical ? "clock.arrow.circlepath" : "trash")
                     .foregroundStyle(tint)
 
-                Text(ByteFormat.string(bytes))
+                Text(ByteFormat.storageString(bytes))
                     .font(AppDesignTokens.Typography.sectionTitle)
                     .monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
@@ -2819,7 +3052,7 @@ private struct CleanupAmountMetric: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(isHistorical ? L10n.text("上次可清理空间", "Last cleanable space") : L10n.text("可清理空间", "Cleanable space"))
-        .accessibilityValue(ByteFormat.string(bytes))
+        .accessibilityValue(ByteFormat.storageString(bytes))
     }
 }
 
@@ -2998,8 +3231,8 @@ private struct CleanupPreviewSheet: View {
                     } label: {
                         Label(
                             L10n.text(
-                                "移入废纸篓 · \(ByteFormat.string(selectedBytes))",
-                                "Move to Trash · \(ByteFormat.string(selectedBytes))"
+                                "移入废纸篓 · \(ByteFormat.storageString(selectedBytes))",
+                                "Move to Trash · \(ByteFormat.storageString(selectedBytes))"
                             ),
                             systemImage: "trash"
                         )
@@ -3068,7 +3301,7 @@ private struct CleanupPreviewSheet: View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
             Text(
                 L10n.text(
-                    "本页 \(items.count) 项可安全清理",
+                    "本页 \(ByteFormat.count(items.count)) 项可安全清理",
                     "\(L10n.items(items.count)) safe to clean on this page"
                 )
             )
@@ -3076,8 +3309,8 @@ private struct CleanupPreviewSheet: View {
 
             Text(
                 L10n.text(
-                    "当前选择 \(selectedItemIDs.count) 项，共 \(ByteFormat.string(selectedBytes))",
-                    "\(L10n.items(selectedItemIDs.count)) selected, \(ByteFormat.string(selectedBytes))"
+                    "当前选择 \(ByteFormat.count(selectedItemIDs.count)) 项，共 \(ByteFormat.storageString(selectedBytes))",
+                    "\(L10n.items(selectedItemIDs.count)) selected, \(ByteFormat.storageString(selectedBytes))"
                 )
             )
             .font(AppDesignTokens.Typography.body)
@@ -3152,7 +3385,7 @@ private struct CleanupSelectionRing: View {
                     .font(AppDesignTokens.Typography.compactLabel)
                     .foregroundStyle(.secondary)
 
-                Text(ByteFormat.string(selectedBytes))
+                Text(ByteFormat.storageString(selectedBytes))
                     .font(AppDesignTokens.Typography.metricValue)
                     .monospacedDigit()
 
@@ -3166,8 +3399,8 @@ private struct CleanupSelectionRing: View {
         .accessibilityLabel(L10n.text("已选择清理项目", "Selected cleanup items"))
         .accessibilityValue(
             L10n.text(
-                "\(selectedCount) 项，\(ByteFormat.string(selectedBytes))",
-                "\(L10n.items(selectedCount)), \(ByteFormat.string(selectedBytes))"
+                "\(ByteFormat.count(selectedCount)) 项，\(ByteFormat.storageString(selectedBytes))",
+                "\(L10n.items(selectedCount)), \(ByteFormat.storageString(selectedBytes))"
             )
         )
     }
@@ -3238,8 +3471,8 @@ private struct CleanupSelectionGroupView: View {
 
                     Text(
                         L10n.text(
-                            "\(selectedCount)/\(group.items.count) 项已选择",
-                            "\(selectedCount) of \(group.items.count) selected"
+                            "\(ByteFormat.count(selectedCount))/\(ByteFormat.count(group.items.count)) 项已选择",
+                            "\(ByteFormat.count(selectedCount)) of \(ByteFormat.count(group.items.count)) selected"
                         )
                     )
                     .font(AppDesignTokens.Typography.compactLabel)
@@ -3249,7 +3482,7 @@ private struct CleanupSelectionGroupView: View {
 
                 Spacer(minLength: 8)
 
-                Text(ByteFormat.string(group.bytes))
+                Text(ByteFormat.storageString(group.bytes))
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -3323,7 +3556,7 @@ private struct CleanupPreviewRow: View {
 
             Spacer(minLength: 8)
 
-            Text(ByteFormat.string(item.sizeBytes))
+            Text(ByteFormat.storageString(item.sizeBytes))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)

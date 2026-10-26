@@ -84,7 +84,9 @@ final class SmartScanScopeTests: XCTestCase {
             for language in [AppLanguage.zhHans, .english] {
                 let languageScope = CalibrationLanguageScope(language)
                 defer { languageScope.restore() }
-                XCTAssertEqual(panel.safeCleanupBytesText, expectedBytes.map(ByteFormat.string)
+                // D128 (2026-10-19): the menu's total in iStat's disk-space
+                // format (was `expectedBytes.map(ByteFormat.string)`).
+                XCTAssertEqual(panel.safeCleanupBytesText, expectedBytes.map { IStatNumberFormat.space($0) }
                     ?? L10n.text("尚未扫描", "Not Scanned Yet"), "mask=\(mask)")
                 XCTAssertEqual(panel.safeCleanupCountText, expectedCount.map { L10n.text("\($0) 项", "\($0) items") }
                     ?? L10n.text("等待扫描", "Waiting for Scan"), "mask=\(mask)")
@@ -198,7 +200,9 @@ final class SmartScanScopeTests: XCTestCase {
             XCTAssertFalse(model.isPreparing)
             XCTAssertTrue(model.isInitialLayoutReady)
             XCTAssertEqual(store.scanHistorySummary.latestScanAt, latest.completedAt)
-            XCTAssertEqual(summaryPanel(store: store, defaults: defaults).safeCleanupBytesText, ByteFormat.string(8192))
+            // D128 (2026-10-19): iStat's disk-space format (was
+            // `ByteFormat.string(8192)`).
+            XCTAssertEqual(summaryPanel(store: store, defaults: defaults).safeCleanupBytesText, IStatNumberFormat.space(8192))
         }
         for task in model.stop() { await task.value }
         let opening = model.presentation(beforeStarting: source.current())
@@ -225,7 +229,9 @@ final class SmartScanScopeTests: XCTestCase {
         XCTAssertEqual(store.scanHistorySummary.latestCleanupEntry?.greenCount, 0)
         XCTAssertEqual(store.scanHistorySummary.latestCleanupEntry?.date, session.completedAt)
         let panel = summaryPanel(store: store, defaults: defaults)
-        XCTAssertEqual(panel.safeCleanupBytesText, ByteFormat.string(0))
+        // D128 (2026-10-19): iStat's disk-space format, here and below (was
+        // `ByteFormat.string(0)`).
+        XCTAssertEqual(panel.safeCleanupBytesText, IStatNumberFormat.space(0))
         XCTAssertEqual(panel.safeCleanupCountText, L10n.text("0 项", "0 items"))
         let presentation = MiniWindowCleanupPresentation.resolve(session: session,
             details: MiniWindowCleanupDetails(session: session), history: store.scanHistorySummary.latestCleanupStatus())
@@ -235,7 +241,7 @@ final class SmartScanScopeTests: XCTestCase {
         XCTAssertEqual(presentation.title, L10n.text("可安全清理", "Safe Cleanup"))
         store.clearScanHistory()
         XCTAssertNil(store.scanHistorySummary.latestCleanupEntry)
-        XCTAssertEqual(panel.safeCleanupBytesText, ByteFormat.string(0), "The loaded covered result survives history clearing")
+        XCTAssertEqual(panel.safeCleanupBytesText, IStatNumberFormat.space(0), "The loaded covered result survives history clearing")
         XCTAssertEqual(panel.safeCleanupCountText, L10n.text("0 项", "0 items"))
     }
 
@@ -252,6 +258,54 @@ final class SmartScanScopeTests: XCTestCase {
         try await assertDedicatedScanDoesNotReplaceSummary(route: .green)
     }
 
+    func testD192CleanupScopeSwitchesPersistAcrossStoreInstances() throws {
+        let preferences = TestPreferenceDomain.make(for: self)
+        let first = try ScanStore.makeForTests(for: self, cleanupPreferences: preferences)
+        first.toggleSafeCleanupScope(.trashBins)
+        first.toggleSafeCleanupScope(.aiClutter)
+        XCTAssertEqual(first.selectedSafeCleanupScopes, [.systemJunk, .mailAttachments])
+        let second = try ScanStore.makeForTests(for: self, cleanupPreferences: preferences)
+        XCTAssertEqual(second.selectedSafeCleanupScopes, first.selectedSafeCleanupScopes,
+                       "D192＋旧值：专页开关原只在内存中，重建 store 就全选")
+    }
+
+    func testD192CleanupNewScanUsesSwitchesAndResultsRescanKeepsItsSessionScope() async throws {
+        let rules = try CleanupRuleSetLoader.loadBundled()
+        let calls = D192ScopeRequests()
+        let store = try ScanStore.makeForTests(for: self, cleanupScanOperation: { request, _ in
+            await calls.record(request)
+            return Self.emptySummarySession(request)
+        }, cleanupRuleSetLoader: { rules })
+        store.selectedFilter = .green
+        store.startScan()
+        let first = try await finished(store)
+        XCTAssertEqual(first.includedRuleIDs, Set(rules.rules.map(\.id)))
+        store.toggleSafeCleanupScope(.trashBins)
+        store.startScan()
+        let withoutTrash = try await finished(store)
+        let expected = Set(rules.rules.filter { !SafeCleanupScanScope.trashBins.includes($0) }.map(\.id))
+        XCTAssertEqual(withoutTrash.includedRuleIDs, expected)
+        XCTAssertFalse(withoutTrash.includedCategoryIDs?.contains("trash") == true)
+        for scope in SafeCleanupScanScope.allCases where store.selectedSafeCleanupScopes.contains(scope) {
+            store.toggleSafeCleanupScope(scope)
+        }
+        XCTAssertTrue(store.selectedSafeCleanupScopes.isEmpty)
+        store.rescanV2Results()
+        let rescanned = try await finished(store)
+        XCTAssertNotEqual(rescanned.id, withoutTrash.id)
+        let rescanCalls = await calls.count
+        XCTAssertEqual(rescanCalls, 3, "The result action must actually start another scan")
+        XCTAssertEqual(rescanned.includedRuleIDs, expected, "D192 / A-R3 keeps the finished session's scope even with all switches off")
+        XCTAssertEqual(rescanned.includedCategoryIDs, withoutTrash.includedCategoryIDs)
+        let before = await calls.count
+        store.startScan()
+        XCTAssertEqual(store.actionMessage, L10n.text("请至少选择一个扫描项目。", "Select at least one scan item."))
+        let after = await calls.count
+        XCTAssertEqual(after, before)
+    }
+
+    // D192＋旧值：专页缩小范围原为 downloadResidue，现为 mailAttachments；
+    // 改复选框后 D68 的全局摘要边界仍不变。
     private func assertDedicatedScanDoesNotReplaceSummary(route: ReviewFilter, narrowed: Bool = false) async throws {
         for hasHistory in [false, true] {
             let defaults = TestPreferenceDomain.make(for: self)
@@ -268,10 +322,10 @@ final class SmartScanScopeTests: XCTestCase {
             if route == .green {
                 XCTAssertEqual(store.selectedSafeCleanupScopes, SafeCleanupScanScope.defaultSelection)
                 if narrowed {
-                    for scope in SafeCleanupScanScope.allCases where scope != .downloadResidue {
+                    for scope in SafeCleanupScanScope.allCases where scope != .mailAttachments {
                         store.toggleSafeCleanupScope(scope)
                     }
-                    XCTAssertEqual(store.selectedSafeCleanupScopes, [.downloadResidue])
+                    XCTAssertEqual(store.selectedSafeCleanupScopes, [.mailAttachments])
                 }
             }
             store.startScan()
@@ -289,11 +343,11 @@ final class SmartScanScopeTests: XCTestCase {
             } else {
                 XCTAssertNotNil(session.includedRuleIDs)
                 if narrowed {
-                    for scope in SafeCleanupScanScope.allCases where scope != .downloadResidue {
+                    for scope in SafeCleanupScanScope.allCases where scope != .mailAttachments {
                         store.toggleSafeCleanupScope(scope)
                     }
                 } else {
-                    store.toggleSafeCleanupScope(.caches)
+                    store.toggleSafeCleanupScope(.systemJunk)
                 }
                 XCTAssertFalse(session.coversCleanupCandidates, "A later checkbox edit cannot make a dedicated run global")
             }
@@ -304,8 +358,10 @@ final class SmartScanScopeTests: XCTestCase {
             XCTAssertEqual(store.latestSafeCleanupEntry?.greenBytes, expectedBytes)
             XCTAssertEqual(store.latestSafeCleanupEntry?.date, hasHistory ? old.date : nil)
             let panel = summaryPanel(store: store, defaults: defaults)
+            // D128 (2026-10-19): iStat's disk-space format (was
+            // `expectedBytes.map(ByteFormat.string)`).
             XCTAssertEqual(panel.safeCleanupBytesText,
-                expectedBytes.map(ByteFormat.string) ?? L10n.text("尚未扫描", "Not Scanned Yet"))
+                expectedBytes.map { IStatNumberFormat.space($0) } ?? L10n.text("尚未扫描", "Not Scanned Yet"))
             XCTAssertEqual(panel.safeCleanupCountText,
                 expectedCount.map { L10n.text("\($0) 项", "\($0) items") }
                     ?? L10n.text("等待扫描", "Waiting for Scan"))
@@ -367,15 +423,17 @@ final class SmartScanScopeTests: XCTestCase {
         let newerLegacy = summaryEntry(date: session.completedAt.addingTimeInterval(180),
             scopes: nil, greenBytes: 294_912, greenCount: 8)
         store.scanHistorySummary = ScanHistorySummary(entries: [newerReview, tied])
-        XCTAssertEqual(panel.safeCleanupBytesText, ByteFormat.string(0), "Loaded totals supersede the original history at the same date")
+        // D128 (2026-10-19): iStat's disk-space format, here and below (were
+        // `ByteFormat.string(0)` and `ByteFormat.string(newerJunk.greenBytes)`).
+        XCTAssertEqual(panel.safeCleanupBytesText, IStatNumberFormat.space(0), "Loaded totals supersede the original history at the same date")
         store.scanHistorySummary = ScanHistorySummary(entries: [newerReview, newerJunk, tied])
-        XCTAssertEqual(panel.safeCleanupBytesText, ByteFormat.string(newerJunk.greenBytes))
+        XCTAssertEqual(panel.safeCleanupBytesText, IStatNumberFormat.space(newerJunk.greenBytes))
         XCTAssertEqual(panel.safeCleanupCountText, L10n.text("4 项", "4 items"))
         store.scanHistorySummary = ScanHistorySummary(entries: [newerLegacy, newerReview, newerJunk, tied])
-        XCTAssertEqual(panel.safeCleanupBytesText, ByteFormat.string(newerJunk.greenBytes),
+        XCTAssertEqual(panel.safeCleanupBytesText, IStatNumberFormat.space(newerJunk.greenBytes),
             "A newer legacy record cannot supply a global Smart Scan total")
         store.scanHistorySummary = ScanHistorySummary(entries: [newerLegacy, newerReview])
-        XCTAssertEqual(panel.safeCleanupBytesText, ByteFormat.string(0),
+        XCTAssertEqual(panel.safeCleanupBytesText, IStatNumberFormat.space(0),
             "Newer legacy or review-only history cannot hide the loaded Smart Scan total")
         XCTAssertEqual(panel.safeCleanupCountText, L10n.text("0 项", "0 items"))
     }
@@ -667,9 +725,16 @@ final class SmartScanScopeTests: XCTestCase {
         XCTAssertTrue(landing.contains("store.selectedSmartScanScopes.isEmpty"))
         let store = try String(contentsOf: root.appendingPathComponent(
             "Sources/StorageCleanerMac/Stores/ScanStore.swift"), encoding: .utf8)
-        XCTAssertTrue(store.contains("if FeaturePresentationDemo.isEnabled { selectedSmartScanScopes = SmartScanScope.defaultSelection }"))
+        // D192＋旧值：原断言匹配只设置 SmartScanScope 的单行 if；现在还要让垃圾清理的四项捕获保持默认。
+        let inertDefaults = try SwiftSourceScanning.body(of: "if FeaturePresentationDemo.isEnabled", in: store)
+        XCTAssertTrue(inertDefaults.contains("selectedSmartScanScopes = SmartScanScope.defaultSelection"))
+        XCTAssertTrue(inertDefaults.contains("selectedSafeCleanupScopes = SafeCleanupScanScope.defaultSelection"))
+        XCTAssertFalse(inertDefaults.contains("selection(in:"))
+        XCTAssertFalse(inertDefaults.contains(".save("))
         XCTAssertFalse(store.contains("SmartScanScope.save(SmartScanScope.defaultSelection"),
             "Inert captures must not overwrite saved user selection")
+        XCTAssertFalse(store.contains("SafeCleanupScanScope.save(SafeCleanupScanScope.defaultSelection"),
+            "Inert captures must not overwrite saved cleanup switches")
     }
 
     func testLegacyDiagnosticHealthFailureKeepsItsOriginalFileResult() async throws {
@@ -741,7 +806,10 @@ final class SmartScanScopeTests: XCTestCase {
             for scope in SmartScanScope.allCases { store.toggleSmartScanScope(scope) }
             for route in [ReviewFilter.green, .devCaches] {
                 store.selectedFilter = route
-                let showsResults = scopes.contains(.cleanupCandidates)
+                // D202＋旧值：`let showsResults = scopes.contains(.cleanupCandidates)`. A Smart
+                // Scan session filled the Cleanup and developer pages; since D202 it shows
+                // on Smart Care only, and both pages keep their landing.
+                let showsResults = false
                 XCTAssertEqual(store.cleanupSession(for: route)?.id, showsResults ? session.id : nil)
                 let root = AdaptivePageViewport {
                     CleanupWorkspaceView(store: store, filter: route)
@@ -898,7 +966,9 @@ final class SmartScanScopeTests: XCTestCase {
             XCTAssertEqual(session.metrics.candidateCount, 5)
             let entry = try XCTUnwrap(store.scanHistorySummary.latest)
             XCTAssertEqual(entry.smartScanHealthStatus, .failed)
-            XCTAssertEqual(entry.scanWasLimited, fileOutcome == .partial)
+            // D179: denied folders are counted by deniedCount, not again as a
+            // limited scan (was `fileOutcome == .partial`, true for .partial + denied).
+            XCTAssertEqual(entry.scanWasLimited, fileOutcome == .partial && !denied)
             XCTAssertEqual(entry.deniedCount, denied ? 1 : 0)
             let healthy = session.withSmartScan(scopes: SmartScanScope.defaultSelection,
                 health: ScopeRecordingHealthProbe.snapshot)
@@ -984,6 +1054,12 @@ final class SmartScanScopeTests: XCTestCase {
                     requiredClosedBundleIDs: [], reasonKey: "cleanup.rule.userCaches.reason")
             })
     }
+}
+
+private actor D192ScopeRequests {
+    private var requests: [CleanupScanRequest] = []
+    var count: Int { requests.count }
+    func record(_ request: CleanupScanRequest) { requests.append(request) }
 }
 
 private actor ScopeWorkspaceCalls {

@@ -80,15 +80,15 @@ struct HealthFactorGrid: View {
                 return L10n.text("可用空间未读取", "Available Space Not Read")
             }
             return L10n.text(
-                "\(ByteFormat.string(available)) 可用",
-                "\(ByteFormat.string(available)) Available"
+                "\(ByteFormat.storageString(available)) 可用",
+                "\(ByteFormat.storageString(available)) Available"
             )
         case .stability:
             let serious = (snapshot.stability.panicCount ?? 0)
                 + (snapshot.stability.unexpectedRestartCount ?? 0)
             return serious == 0
                 ? L10n.text("未发现严重系统事件", "No Serious System Events Found")
-                : L10n.text("\(serious) 项严重系统事件", "\(serious) Serious System Events")
+                : L10n.text("\(ByteFormat.count(serious)) 项严重系统事件", "\(ByteFormat.count(serious)) Serious System Events")
         case .battery:
             switch snapshot.batteryEvidence {
             case .notPresent:
@@ -142,7 +142,7 @@ struct HealthFactorGrid: View {
             guard let battery = snapshot.battery else {
                 return L10n.text("未知保持未知，不用当前电量代替寿命。", "Unknown stays unknown; current charge never substitutes for lifespan.")
             }
-            let cycles = battery.cycleCount.map(String.init) ?? "--"
+            let cycles = battery.cycleCount.map { ByteFormat.count($0) } ?? "--"
             return L10n.text(
                 "循环 \(cycles) 次 · 系统状况：\(batteryConditionText(battery.condition))",
                 "\(cycles) cycles · system condition: \(batteryConditionText(battery.condition))"

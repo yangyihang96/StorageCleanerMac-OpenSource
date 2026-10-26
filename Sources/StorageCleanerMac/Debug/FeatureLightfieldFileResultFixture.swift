@@ -7,21 +7,51 @@ struct FeatureLightfieldFileResultFixture: View {
     let module: ReviewFilter
     var isSimilarPhotos = false
     @State private var surface: Int
+    @State private var spaceMapStyle: SpaceMapViewStyle
+    @State private var spaceMapColorMode: SpaceMapColorMode
+    private var selectionReclaim: CleanupSelectionReclaimable?
+    private var isEstimatingReclaim: Bool
     @State private var destinationID = Self.volume.id
     @State private var selections: Set<String> = []
     @State private var navigation: [StorageMapDirectorySnapshot] = [Self.analysis.rootSnapshot]
-    init(module: ReviewFilter, isSimilarPhotos: Bool = false, analysisView: Int? = nil) {
+    /// D154 batch 3G: the studio shows the Space Lens page.
+    @Environment(\.careStudioClassicResults) private var usesClassicPages
+    init(module: ReviewFilter, isSimilarPhotos: Bool = false, analysisView: Int? = nil,
+         spaceMapStyle: SpaceMapViewStyle = .bubbles, spaceMapColorMode: SpaceMapColorMode = .type,
+         selectionReclaim: CleanupSelectionReclaimable? = nil, isEstimatingReclaim: Bool = false) {
         self.module = module
         self.isSimilarPhotos = isSimilarPhotos
+        _spaceMapStyle = State(initialValue: spaceMapStyle)
+        _spaceMapColorMode = State(initialValue: spaceMapColorMode)
+        self.selectionReclaim = selectionReclaim
+        self.isEstimatingReclaim = isEstimatingReclaim
         _surface = State(initialValue: analysisView ?? FeaturePresentationDemo.analysisView(arguments: ProcessInfo.processInfo.arguments))
     }
     var body: some View {
         Group {
-            if module == .largeFiles {
+            if module == .largeFiles && !usesClassicPages {
+                CareStudioSpaceLensPage(result: Self.analysis, navigation: navigation,
+                    types: FileLightfieldPresentation.types(Self.analysis), largest: FileLightfieldPresentation.largest(Self.analysis.index),
+                    fileCount: FileLightfieldPresentation.fileCount(Self.analysis.index), surface: $surface,
+                    mapStyle: $spaceMapStyle, mapColorMode: $spaceMapColorMode, checkedPaths: selections,
+                    selectionState: { selections.contains($0.id) ? .selected : .available },
+                    selectedBytes: StorageTreemapPresentation.visibleEntries(from: navigation.last ?? Self.analysis.rootSnapshot)
+                        .filter { selections.contains($0.id) }.reduce(0) { $0 + $1.sizeBytes },
+                    selectionReclaim: selectionReclaim, isEstimatingReclaim: isEstimatingReclaim,
+                    status: L10n.text("演示索引 · 未执行扫描或移动", "Demo index · No scan or move performed"),
+                    canReview: !selections.isEmpty, onReview: {},
+                    onToggle: { if selections.contains($0.id) { selections.remove($0.id) } else { selections.insert($0.id) } },
+                    onOpen: { entry in openDirectory(entry) }, onBreadcrumb: { index in
+                        if navigation.indices.contains(index) { navigation = Array(navigation.prefix(index + 1)) }
+                    }, onOpenFromRoot: { entry in
+                        navigation = [Self.analysis.rootSnapshot]
+                        openDirectory(entry)
+                    })
+            } else if module == .largeFiles {
                 FeatureLightfieldPage(module: .largeFiles, phase: .result, title: ReviewFilter.largeFiles.sidebarTitle,
                     status: L10n.text("演示索引 · 未执行扫描或移动", "Demo index · No scan or move performed"),
                     safety: L10n.text("演示夹具 · 移到废纸篓前确认", "Demo fixture · Confirm before moving to Trash"),
-                    actionTitle: L10n.text("移到废纸篓 · 已选 \(selections.count)", "Move to Trash · \(selections.count) selected"),
+                    actionTitle: L10n.text("移到废纸篓 · 已选 \(ByteFormat.count(selections.count))", "Move to Trash · \(ByteFormat.count(selections.count)) selected"),
                     actionEnabled: !selections.isEmpty, showsArtwork: false, action: {}) {
                     LightfieldFileResults(summary: LightfieldSummary(module: .largeFiles,
                         label: StorageCapacityPresentation.summaryLabel(isComplete: Self.analysis.rootSnapshot.isComplete, path: Self.analysis.rootSnapshot.path), value: "185.4", unit: "GB",
@@ -32,9 +62,7 @@ struct FeatureLightfieldFileResultFixture: View {
                             fileCount: FileLightfieldPresentation.fileCount(Self.analysis.index), surface: $surface,
                             selectionState: { selections.contains($0.id) ? .selected : .available },
                             onToggle: { if selections.contains($0.id) { selections.remove($0.id) } else { selections.insert($0.id) } },
-                            onOpen: { entry in
-                                if let snapshot = Self.childSnapshot(path: entry.path) { navigation.append(snapshot) }
-                            }, onBreadcrumb: { index in
+                            onOpen: { entry in openDirectory(entry) }, onBreadcrumb: { index in
                                 if navigation.indices.contains(index) { navigation = Array(navigation.prefix(index + 1)) }
                             })
                     }
@@ -82,6 +110,21 @@ struct FeatureLightfieldFileResultFixture: View {
         }
         return .init(path: path, title: (path as NSString).lastPathComponent, entries: entries,
             measuredBytes: aggregate.sizeBytes, inspectedItemCount: children.count, omittedEntryCount: 0, isComplete: true)
+    }
+
+    private func openDirectory(_ entry: StorageTreemapEntry) {
+        guard entry.canDescend, let base = navigation.last?.path,
+              entry.path.hasPrefix(base == "/" ? "/" : base + "/") else { return }
+        var paths = [entry.path]
+        var parent = DiskScanner.storageMapParentPath(entry.path)
+        while parent != base {
+            guard parent != "/", parent.hasPrefix(base + "/") else { return }
+            paths.append(parent)
+            parent = DiskScanner.storageMapParentPath(parent)
+        }
+        let snapshots = paths.reversed().compactMap { Self.childSnapshot(path: $0) }
+        guard snapshots.count == paths.count else { return }
+        navigation.append(contentsOf: snapshots)
     }
     static let migrationEntries: [LightfieldMigrationEntry] = {
         // The approved r3 sample totals 17.3 GB; all paths remain fictitious.

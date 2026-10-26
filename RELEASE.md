@@ -68,6 +68,21 @@ real Sparkle update acceptance. This applies only to 2.0.0 and does not change
 hardware safety checks or future distribution defaults. See
 [the validation record](docs/RELEASE_VALIDATION_2.0.0.md).
 
+### 2.0.1 authorization (2026-10-26)
+
+After the hands-on check of the installed 2.0.1 beta, the owner asked to publish
+("发布吧") and chose a full public release of `2.0.1` under the same terms as
+2.0.0: Apple Development signing without notarization or stapling, disclosed in
+the GitHub Release, packaged README and appcast item. The owner chose to publish
+the source release, the update release with its appcast item and the sanitized
+open-source snapshot together, after being told that the source now names
+competitor products in code comments, tests and internal documents. Three small
+wording issues were fixed first (D228). The owner authorized using the local
+production install (`/Applications/存储清理助手.app`, public 2.0.0) for the real
+Sparkle update acceptance. This applies only to 2.0.1 and does not change
+hardware safety checks or future distribution defaults. See
+[the validation record](docs/RELEASE_VALIDATION_2.0.1.md).
+
 ## 4. Sparkle and publication
 
 After notarized artifacts exist:

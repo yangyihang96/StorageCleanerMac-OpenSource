@@ -9,7 +9,7 @@ struct UtilityListExportService {
         lines.append("# \(L10n.text("应用更新清单", "App Update List"))")
         lines.append("")
         lines.append("- \(L10n.text("生成时间", "Generated")): \(displayDate(generatedAt))")
-        lines.append("- \(L10n.text("项目数量", "Items")): \(apps.count)")
+        lines.append("- \(L10n.text("项目数量", "Items")): \(ByteFormat.count(apps.count))")
         lines.append("- \(L10n.text("安全边界", "Safety boundary")): \(L10n.text("这份清单只记录当前可见的更新候选，不代表已经完成更新。", "This list records the currently visible update candidates and does not mean updates have already completed."))")
         lines.append("- \(L10n.text("清单动作", "List action")): \(L10n.text("复制或导出只会生成复核清单，不会打开更新器、运行命令或确认版本变化。", "Copying or exporting only creates a review list; it does not open updaters, run commands, or confirm version changes."))")
         lines.append("")
@@ -46,9 +46,9 @@ struct UtilityListExportService {
         lines.append("# \(L10n.text("应用卸载清单", "App Uninstall List"))")
         lines.append("")
         lines.append("- \(L10n.text("生成时间", "Generated")): \(displayDate(generatedAt))")
-        lines.append("- \(L10n.text("项目数量", "Items")): \(apps.count)")
-        lines.append("- \(L10n.text("合计占用", "Total footprint")): \(ByteFormat.string(totalBytes))")
-        lines.append("- \(L10n.text("关联文件", "Associated files")): \(ByteFormat.string(relatedBytes))")
+        lines.append("- \(L10n.text("项目数量", "Items")): \(ByteFormat.count(apps.count))")
+        lines.append("- \(L10n.text("合计占用", "Total footprint")): \(ByteFormat.storageString(totalBytes))")
+        lines.append("- \(L10n.text("关联文件", "Associated files")): \(ByteFormat.storageString(relatedBytes))")
         lines.append("- \(L10n.text("安全边界", "Safety boundary")): \(L10n.text("卸载确认时可选择把应用文件和关联文件一起移到废纸篓，清空废纸篓前仍可恢复。", "Uninstall confirmation can move the app and associated files to Trash; they remain recoverable until Trash is emptied."))")
         lines.append("- \(L10n.text("清单动作", "List action")): \(L10n.text("复制或导出只会生成复核清单，不会卸载应用、移动关联文件或清空废纸篓。", "Copying or exporting only creates a review list; it does not uninstall apps, move associated files, or empty Trash."))")
         lines.append("")
@@ -61,7 +61,7 @@ struct UtilityListExportService {
         lines.append("| \(L10n.text("应用", "App")) | \(L10n.text("开发者", "Developer")) | \(L10n.text("版本", "Version")) | \(L10n.text("总占用", "Footprint")) | \(L10n.text("建议", "Recommendation")) | Bundle ID |")
         lines.append("| --- | --- | --- | ---: | --- | --- |")
         for app in apps {
-            lines.append("| \(tableText(app.name)) | \(tableText(app.developerName.nonEmpty ?? "-")) | \(tableText(app.versionDisplay)) | \(ByteFormat.string(app.totalFootprintBytes)) | \(tableText(app.uninstallRecommendation.title)) | \(tableText(app.bundleIdentifier)) |")
+            lines.append("| \(tableText(app.name)) | \(tableText(app.developerName.nonEmpty ?? "-")) | \(tableText(app.versionDisplay)) | \(ByteFormat.storageString(app.totalFootprintBytes)) | \(tableText(app.uninstallRecommendation.title)) | \(tableText(app.bundleIdentifier)) |")
         }
 
         let appsWithLeftovers = apps.filter { !$0.relatedItems.isEmpty }
@@ -72,7 +72,7 @@ struct UtilityListExportService {
             for app in appsWithLeftovers {
                 lines.append("### \(app.name)")
                 for item in app.relatedItems.prefix(5) {
-                    lines.append("- `\(item.path)` · \(ByteFormat.string(item.sizeBytes))")
+                    lines.append("- `\(item.path)` · \(ByteFormat.storageString(item.sizeBytes))")
                 }
                 if app.relatedItems.count > 5 {
                     lines.append("- \(L10n.text("另有 \(app.relatedItems.count - 5) 个路径未展开。", "\(app.relatedItems.count - 5) more paths are not expanded."))")

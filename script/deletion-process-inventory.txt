@@ -1,0 +1,207 @@
+# Every place in Sources that deletes, replaces, moves to the Trash or starts a
+# process, and every program the sources name. Checked by
+# script/check_deletion_process_inventory.py (BOARD L8, DECISIONS D100); D98
+# guards the cleanup flows themselves.
+# Format: kind | file | target | count | reviewed | reason
+# count is the number of uses in the file: a new use, a removed use or a
+# changed count fails verify until the entry is reviewed and updated.
+# User items leave only by moving to the Trash, except Empty Trash: the D23
+# smart-scan item and the legacy menu command (D101 L5) both delete only the
+# frozen entries, through FoundationCleanupPermanentDeleter. Simulator
+# devices and runtimes (D101 G2) are deleted only by simctl's own commands.
+# A vendor's own uninstaller (D101 G9) is only opened, on the user's click.
+# clone: creates an APFS copy without modifying its source (D184).
+clone | Sources/StorageCleanerMac/Features/DuplicateFiles/CloneMerge/APFSCloneReplacement.swift | clonefile | 1 | 2026-10-23 | D184 inventory extension: existing D-FP3 duplicate clone, beside the selected copy; source kept intact, verified before swap
+clone | Sources/StorageCleanerMac/Services/UniversalBinaryService.swift | clonefile | 1 | 2026-10-23 | D184: strict-validated, closed, user-owned third-party app only; whole-bundle APFS clone in the same parent and volume, no copy fallback
+delete | Sources/StorageCleanerMac/Services/UniversalBinarySafety.swift | removefile | 1 | 2026-10-23 | D184: only its tracked, just-created .storagecleaner-thin-UUID.app clone with matching dev/inode/birth; never the swapped-out original; failed rollback preserves both
+rename | Sources/StorageCleanerMac/Services/UniversalBinaryService.swift | renamex_np | 1 | 2026-10-23 | D184: RENAME_SWAP of the fully validated clone and identity-checked original, or swap back on failure; original is never edited in place
+rename | Sources/StorageCleanerMac/Services/UniversalMachO.swift | rename | 1 | 2026-10-23 | D184: atomically replace a fat file only inside its tracked app clone, with its native slice and preserved metadata
+trash | Sources/StorageCleanerMac/Services/UniversalBinaryService.swift | trashItem | 1 | 2026-10-23 | D184: swapped-out original app only, through RecordedTrashOperation with durable intent and restore authorization; Put Back retains a visible before-thinning copy
+# D188 signal (not a counted kind in this inventory):
+# signal | Sources/StorageCleanerMac/Features/RecentItems/RecentItemsProcessController.swift | Darwin.kill (function reference) | 1 | 2026-10-23 | SIGTERM only to the current user's sharedfilelistd after confirmed Trash moves; PID/name/UID rechecked; no launch. Guarded by RecentItemsSourceGuardTests.
+
+# delete: removes a file or directory
+delete | Sources/FileOperationShared/SystemCacheClearing.swift | unlinkat | 1 | 2026-10-23 | D182: only contents of the two allowlisted system cache folders; root file-operation helper, after administrator authorization, retaining the cache folders; descriptor-relative, no links or other volumes
+delete | Sources/FanControlHelper/main.swift | removeItem | 1 | 2026-10-15 | Root fan helper: clearCrashRecoveryMarker deletes its own crash-recovery marker once the fans are back under system control
+delete | Sources/FanControlShared/MacMiniPolicyStore.swift | remove | 4 | 2026-10-15 | Calls of the file's private remove(_ name:), not libc remove: it unlinkats policy.json or recovery.json in the helper-owned Mac mini policy directory when the policy is cleared
+delete | Sources/FanControlShared/MacMiniPolicyStore.swift | unlinkat | 2 | 2026-10-15 | Helper-owned Mac mini policy directory, by directory descriptor: the deferred removal of an atomic write's temporary file, and remove(_:) for policy.json or recovery.json
+delete | Sources/FileOperationShared/AuthenticatedBundleSwap.swift | removeItem | 6 | 2026-10-15 | App-update transaction shared with the privileged helper: after RENAME_SWAP and digest checks it removes the swapped-out bundle (the verified previous version, or the rejected candidate after a rollback), the staging copy and the journal; a failed rollback keeps both copies
+delete | Sources/FileOperationShared/UpdateAskpassChannel.swift | removeItem | 3 | 2026-10-15 | Its own private askpass socket directory, when setup fails or the channel stops
+delete | Sources/StorageCleanerMac/Features/AppUpdates/Coordination/ApplicationUpdateQueueRepository.swift | removeItem | 1 | 2026-10-15 | clear() deletes the app's own update-queue file
+delete | Sources/StorageCleanerMac/Features/AppUpdates/Providers/SparkleAutomaticUpdateAdapter.swift | removeItem | 2 | 2026-10-15 | Deferred removal of its own temporary workspace for one Sparkle appcast check or download
+delete | Sources/StorageCleanerMac/Features/AppUpdates/Providers/SparkleProvider.swift | removeItem | 2 | 2026-10-15 | Its own temporary Sparkle shadow host folder, when creation fails or the host is removed
+delete | Sources/StorageCleanerMac/Features/AppUpdates/Scanning/ApplicationInventoryMetadataCache.swift | removeItem | 1 | 2026-10-15 | discardFile() deletes the app's own inventory metadata cache file
+delete | Sources/StorageCleanerMac/Features/AppUpdates/Security/AuthenticatedUpdateArchive.swift | unlink | 1 | 2026-10-15 | Unlinks its own mkstemp file right after opening it, so the descriptor handed to hdiutil is anonymous scratch holding the authenticated image bytes
+delete | Sources/StorageCleanerMac/Features/AppUpdates/WebsiteUpdates/OfficialApplicationUpdateInstaller.swift | removeItem | 14 | 2026-10-15 | Website update installer: its own download, mount and staging work areas and transaction file; the backup of the previous version after the new one is verified, the rolled-back candidate, and after a crash the leftover copy whose version and digest identify it; the installed app is replaced only by RENAME_SWAP
+delete | Sources/StorageCleanerMac/Features/AppUpdates/WebsiteUpdates/SecureZipArchiveExtractor.swift | removeItem | 1 | 2026-10-15 | Its own extraction destination, when the extracted tree fails verification
+delete | Sources/StorageCleanerMac/Features/AppUpdates/WebsiteUpdates/WebsiteUpdateQueue.swift | removeItem | 1 | 2026-10-15 | remove() deletes the app's own website-update queue file
+delete | Sources/StorageCleanerMac/Features/BrowserPrivacy/Processing/BrowserPrivacyRecoveryBackupService.swift | removeItem | 1 | 2026-10-15 | Default removeTombstone: deletes the app's own browser-privacy recovery backup after it was renamed to a tombstone in the verified recovery root (a directory, owned by the user, on the root's device; no link followed)
+delete | Sources/StorageCleanerMac/Features/ChatFiles/ChatFilesCopyService.swift | removeItem | 1 | 2026-10-20 | Chat Files copy to another drive (D-FP3): removes only its own just-made copy on that drive when it does not read back identical by SHA-256; the originals are never touched here
+delete | Sources/StorageCleanerMac/Features/DuplicateFiles/CloneMerge/APFSCloneReplacement.swift | unlink | 1 | 2026-10-20 | Clone merge (D-FP3/D-FP4): unlinks its own hidden APFS clone beside the copy when anything fails before the swap; the copy is untouched
+delete | Sources/StorageCleanerMac/Features/DuplicateFiles/Stores/DuplicateFileResultStore.swift | removeItem | 1 | 2026-10-23 | Report §4 item 12 (Start Over): remove() deletes the app's own duplicate-scan result snapshot (result.json, a regular file in its own folder), so the next launch opens on the landing page
+delete | Sources/StorageCleanerMac/Features/DuplicateFiles/Stores/DuplicateFileResumeIndexStore.swift | removeItem | 1 | 2026-10-15 | clear() deletes the app's own duplicate-scan resume index file
+delete | Sources/StorageCleanerMac/Features/LargeFiles/Stores/LargeFilesStore.swift | removeItem | 1 | 2026-10-15 | analysis.removeItem(at:) drops an entry from the in-memory analysis after a Trash move; not a file-system call
+delete | Sources/StorageCleanerMac/Features/Maintenance/SystemMaintenanceRunners.swift | removeItem | 2 | 2026-10-20 | Speed up Mail (D-FP2): its own backup folder of the Mail index when the copy fails, and its own older backups beyond the newest two in the app's Backups/Mail Index folder; the Mail index itself is only compacted by SQLite
+delete | Sources/StorageCleanerMac/Features/PhotoLibrary/PhotoLibraryScanner.swift | removeItem | 1 | 2026-10-15 | clear() deletes the app's own photo-scan cache file
+delete | Sources/StorageCleanerMac/Models/StorageMapModels.swift | removeItem | 1 | 2026-10-15 | index.removeItem(at:) drops an entry from the in-memory storage map; not a file-system call
+delete | Sources/StorageCleanerMac/Services/Benchmark/BenchmarkV7HistoryRepository.swift | removeItem | 4 | 2026-10-15 | Benchmark history store: a staged cache file, the files of a write that failed, files a new index supersedes, and the legacy history file once its import is verified by digest
+delete | Sources/StorageCleanerMac/Services/Benchmark/DiskBenchmarkKernel.swift | unlinkat | 2 | 2026-10-15 | Disk benchmark: its own O_EXCL test file, by the descriptor of its scratch directory
+delete | Sources/StorageCleanerMac/Services/Benchmark/MSeries/MSeriesStorageKernel.swift | removeItem | 2 | 2026-10-15 | Storage benchmark: its own test file, after an identity snapshot confirms it is the file it created
+delete | Sources/StorageCleanerMac/Services/Benchmark/MSeries/MSeriesStorageKernel.swift | rmdir | 5 | 2026-10-15 | Storage benchmark: its own empty scratch directory; the resource receipt records the cleanup
+delete | Sources/StorageCleanerMac/Services/Benchmark/MacAcceleratorBenchmarkHistoryRepository.swift | unlinkat | 1 | 2026-10-15 | Its own temporary file, when an atomic history write fails
+delete | Sources/StorageCleanerMac/Services/Benchmark/MacBenchmarkHistoryRepository.swift | unlinkat | 1 | 2026-10-15 | Its own temporary file, when an atomic history write fails
+delete | Sources/StorageCleanerMac/Services/Benchmark/StorageRandomAccessBenchmarkV7.swift | unlinkat | 4 | 2026-10-15 | Random-access benchmark: its own test file and scratch directory, by directory descriptor
+delete | Sources/StorageCleanerMac/Services/ComputerHealthHistoryRepository.swift | removeItem | 1 | 2026-10-15 | Its own temporary file, when the atomic rename into the health history fails
+delete | Sources/StorageCleanerMac/Services/EnergyImpactService.swift | removeItem | 2 | 2026-10-15 | Its own temporary output directory for one ps run
+delete | Sources/StorageCleanerMac/Services/MigrationDurability.swift | unlinkat | 2 | 2026-10-15 | External-drive migration durability probe: a probe file it just created with O_EXCL
+delete | Sources/StorageCleanerMac/Services/ProjectArtifactScanner.swift | removeItem | 1 | 2026-10-15 | Its own temporary git output file
+delete | Sources/StorageCleanerMac/Services/SQLiteSnapshotService.swift | removeItem | 1 | 2026-10-15 | Its own SQLite backup copy, when writing the copy fails
+delete | Sources/StorageCleanerMac/Services/SQLiteSnapshotService.swift | rmdir | 3 | 2026-10-15 | Its own private snapshot directory, when it cannot be secured or after use
+delete | Sources/StorageCleanerMac/Services/SQLiteSnapshotService.swift | unlinkat | 1 | 2026-10-15 | Its own private snapshot directory: only owner-only regular files it holds, by directory descriptor, before the directory is removed
+delete | Sources/StorageCleanerMac/Services/SafeCleanupExecutor.swift | unlinkat | 1 | 2026-10-23 | D192 adds the exact home-relative root ~/Library/Mobile Documents/.Trash (trash.icloud-drive; all devices, two confirmations; includes dataless entries without downloading), beside ~/.Trash and D181 volume Trash; Empty Trash: FoundationCleanupPermanentDeleter unlinks only frozen Trash entries, without following links, for the D23 smart-scan item (frozen at scan time) and the legacy menu command (frozen when its confirmation opens, D101 L5) (D98, PermanentDeletionInvariantTests)
+delete | Sources/StorageCleanerMac/Services/Shell.swift | removeItem | 1 | 2026-10-15 | Shell.run's own temporary output directory for one command
+delete | Sources/StorageCleanerMac/Support/MenuBarDerivedCache.swift | remove | 3 | 2026-10-15 | Calls of the file's private remove(_ key:), which evicts an in-memory cache entry; not libc remove
+delete | Sources/StorageCleanerMac/Support/MigrationStagingDirectory.swift | unlinkat | 1 | 2026-10-15 | External-drive migration: its own staging entries, each identity-checked before removal
+delete | Sources/StorageCleanerMac/Views/ModulePresentation.swift | removeItem | 1 | 2026-10-15 | window.toolbar?.removeItem(at:) removes a toolbar item; not a file-system call
+
+# rename: can replace or swap the destination
+rename | Sources/FanControlShared/MacMiniPolicyStore.swift | renameat | 2 | 2026-10-15 | Helper-owned Mac mini policy directory: moves an unsafe policy.json aside without following a link, and publishes an atomic write
+rename | Sources/FileOperationHelper/main.swift | renameatx_np | 1 | 2026-10-15 | Privileged file-operation helper: RestrictedMove renames one verified item between the app and the Trash with RENAME_EXCL, never replacing (D98, FileOperationBoundaryTests)
+rename | Sources/FileOperationShared/AuthenticatedBundleSwap.swift | renamex_np | 1 | 2026-10-15 | RENAME_SWAP of the authenticated update candidate with the installed app, and back on rollback
+rename | Sources/StorageCleanerMac/Features/AppUpdates/WebsiteUpdates/OfficialApplicationUpdateInstaller.swift | renamex_np | 1 | 2026-10-15 | RENAME_SWAP of the authenticated update candidate with the installed app, and back on rollback
+rename | Sources/StorageCleanerMac/Features/BrowserPrivacy/Support/BrowserPrivacyRecoveryLease.swift | renameat | 1 | 2026-10-15 | Renames its own recovery backup directory to a tombstone name before removal, after a device and inode check
+rename | Sources/StorageCleanerMac/Features/DuplicateFiles/CloneMerge/APFSCloneReplacement.swift | renamex_np | 1 | 2026-10-20 | Clone merge (D-FP3/D-FP4): RENAME_SWAP of the checked APFS clone with a verified duplicate copy in the same folder, after both were hashed (SHA-256) and the copy's metadata was applied and compared; the swapped-out data goes to the Trash through the recorded operation
+rename | Sources/StorageCleanerMac/Features/DuplicateFiles/CloneMerge/DuplicateCloneMergeService.swift | renamex_np | 1 | 2026-10-20 | Clone merge (D-FP3/D-FP4): renames the swapped-out data from its hidden name to a visible “before merging” name with RENAME_EXCL, never replacing, before it is moved to the Trash
+rename | Sources/StorageCleanerMac/Services/Benchmark/BenchmarkV7HistoryRepository.swift | rename | 1 | 2026-10-15 | Atomic publish of its own history index file
+rename | Sources/StorageCleanerMac/Services/Benchmark/MacAcceleratorBenchmarkHistoryRepository.swift | renameat | 1 | 2026-10-15 | Atomic publish of its own history file
+rename | Sources/StorageCleanerMac/Services/Benchmark/MacBenchmarkHistoryRepository.swift | renameat | 1 | 2026-10-15 | Atomic publish of its own history file
+rename | Sources/StorageCleanerMac/Services/ComputerHealthHistoryRepository.swift | rename | 1 | 2026-10-15 | Atomic publish of its own health history file
+rename | Sources/StorageCleanerMac/Services/RecordedCleanupRecovery.swift | renameatx_np | 1 | 2026-10-15 | Put Back of a recorded Trash move: renames the item from the Trash to its original place with RENAME_EXCL after an identity check, never replacing
+rename | Sources/StorageCleanerMac/Services/SafeCleanupExecutor.swift | renameat | 1 | 2026-10-15 | moveToQuarantine: moves a selected cleanup item into the plan's quarantine folder inside the user's home (contained, no symbolic-link components); a move, not a deletion
+
+# trash: moves to the Trash
+trash | Sources/StorageCleanerMac/Features/AppLifecycle/Uninstaller/ApplicationRemovalService.swift | recycle | 1 | 2026-10-19 | Applications manager (the CleanMyMac uninstaller rebuilt): moves the selected app bundle to the Trash through the shared uninstall recycler, the administrator path as fallback; identity checked again before the move
+trash | Sources/StorageCleanerMac/Features/AppLifecycle/Uninstaller/ApplicationRemovalService.swift | trashItem | 1 | 2026-10-19 | Applications manager: moves each selected related item, leftover or installer to the Trash with a receipt; identity checked again before each move
+trash | Sources/StorageCleanerMac/Features/ChatFiles/ChatFilesOperations.swift | trashItem | 1 | 2026-10-20 | Chat Files (D-FP3): default move of the recorded Trash operation for chosen month folders of WeChat, QQ or WeCom; never preselected, the chat app must be closed, each folder checked again and inside that app's container
+trash | Sources/StorageCleanerMac/Features/DuplicateFiles/CloneMerge/DuplicateCloneMergeService.swift | trashItem | 1 | 2026-10-20 | Clone merge (D-FP3/D-FP4): default move of the recorded Trash operation for the data a merged copy replaced; can be put back from Operation History
+trash | Sources/StorageCleanerMac/Features/Extensions/ExtensionRemovalService.swift | trashItem | 1 | 2026-10-20 | Extensions (D-FP1): default move of the recorded Trash operation for bundles directly in the user's own Library extension folders; identity, folder and System Settings checked again before each move
+trash | Sources/StorageCleanerMac/Features/LargeFiles/Services/FileAnalysisTrashService.swift | trashItem | 1 | 2026-10-15 | File Analysis: moves the items the user selected to the Trash (D98 checks this file deletes nothing)
+trash | Sources/StorageCleanerMac/Services/AppUninstallService.swift | trashItem | 2 | 2026-10-15 | Uninstall: moves the app and the leftovers the user selected to the Trash
+trash | Sources/StorageCleanerMac/Services/CleanupService.swift | trashItem | 1 | 2026-10-15 | Cleanup: moves the selected items to the Trash, recorded for Put Back
+trash | Sources/StorageCleanerMac/Services/ExternalDriveMigrationService.swift | trashItem | 1 | 2026-10-15 | External-drive migration: the move step that sends the source to the Trash once the copy on the drive is verified, when no recorded Trash operation is injected
+trash | Sources/StorageCleanerMac/Services/RecordedTrashOperation.swift | trashItem | 1 | 2026-10-15 | The recorded Trash move behind cleanup receipts and Put Back
+trash | Sources/StorageCleanerMac/Services/SafeCleanupExecutor.swift | trashItem | 1 | 2026-10-15 | Smart-scan cleanup: moves the selected items to the Trash
+trash | Sources/StorageCleanerMac/Services/UninstallExecution.swift | recycle | 4 | 2026-10-15 | Uninstall: NSWorkspace.recycle moves an app bundle to the Trash; the other calls are of the same NativeApplicationRecycler.recycle wrapper
+
+# launch: starts a process or an app
+launch | Sources/FanControlHelper/PowermetricsProcessRunner.swift | posix_spawn | 1 | 2026-10-15 | Root fan helper: /usr/bin/powermetrics with fixed arguments for power sampling, in its own process group
+launch | Sources/FanControlHelper/main.swift | Process | 1 | 2026-10-15 | Root fan helper: /usr/bin/pmset, only with HelperPMSetWhitelist arguments (-g custom, sleepnow, disablesleep 0/1, power mode and low power mode) on an authenticated request
+launch | Sources/FileOperationHelper/BackgroundTaskInventory.swift | Process | 1 | 2026-10-23 | Root file-operation helper (D177): /usr/bin/sfltool dumpbtm with fixed arguments, read-only, 15 s limit and 16 MiB output cap; replies with only the caller's own and the system-wide records
+launch | Sources/FinderUninstallExtension/FinderUninstallExtension.swift | open(withApplicationAt:) | 1 | 2026-10-15 | Finder extension: hands the selected apps to the main app for uninstall review
+launch | Sources/StorageCleanerMac/Features/AppLifecycle/Uninstaller/ApplicationRemovalService.swift | Shell.run | 1 | 2026-10-19 | Applications manager: launchctl print and bootout of the user's own LaunchAgent that belongs to the app being removed, before its plist moves to the Trash
+launch | Sources/StorageCleanerMac/Features/AppUpdates/Coordination/ApplicationUpdateBatchRuntime.swift | openApplication | 1 | 2026-10-15 | Reopens an app that was running before its user-confirmed update
+launch | Sources/StorageCleanerMac/Features/AppUpdates/Providers/HomebrewBatchInstaller.swift | run(executableURL:) | 2 | 2026-10-15 | User-confirmed Homebrew upgrade and the brew list --versions check after it
+launch | Sources/StorageCleanerMac/Features/AppUpdates/Providers/HomebrewProvider.swift | Shell.captureCancellable | 1 | 2026-10-15 | Homebrew provider: runs the user-confirmed upgrade recipe (brew upgrade, arguments validated) with an allowlisted environment
+launch | Sources/StorageCleanerMac/Features/AppUpdates/Providers/MacAppStoreProvider.swift | Shell.captureCancellable | 1 | 2026-10-15 | Mac App Store provider's default commandCapture for its recipe (mas upgrade <id>, mas from isTrusted); stored but not called in this version: Mac App Store upgrades run through AppUpdateBatchAuthorization
+launch | Sources/StorageCleanerMac/Features/AppUpdates/Providers/VendorCommandUpdateAdapter.swift | run(executableURL:) | 1 | 2026-10-15 | Microsoft AutoUpdate msupdate (--list, and --install for a user-confirmed update) and Google ksadmin --update, only when the tool is signed by the app's own team
+launch | Sources/StorageCleanerMac/Features/AppUpdates/Scanning/HomebrewInventoryScanner.swift | Shell.captureCancellable | 1 | 2026-10-15 | Read-only Homebrew inventory: the runner behind the calls below
+launch | Sources/StorageCleanerMac/Features/AppUpdates/Scanning/HomebrewInventoryScanner.swift | run(executableURL:) | 4 | 2026-10-15 | Read-only brew --prefix, info --json=v2 and outdated --json=v2
+launch | Sources/StorageCleanerMac/Features/AppUpdates/WebsiteUpdates/OfficialApplicationUpdateInstaller.swift | Shell.run | 2 | 2026-10-15 | hdiutil attach -readonly -nobrowse of a downloaded update image, and detach afterwards
+launch | Sources/StorageCleanerMac/Features/AppUpdates/WebsiteUpdates/OfficialApplicationUpdateInstaller.swift | runSync(executableURL:) | 1 | 2026-10-15 | hdiutil attach -readonly -nobrowse of the authenticated image bytes through /dev/fd/0
+launch | Sources/StorageCleanerMac/Features/Extensions/PluginKitListing.swift | run(executableURL:) | 1 | 2026-10-20 | Extensions (D-FP1): runs /usr/bin/pluginkit -mAvvv read-only, 10 s timeout, 4 MiB output limit
+launch | Sources/StorageCleanerMac/Features/Maintenance/SystemMaintenanceRunners.swift | run(executableURL:) | 1 | 2026-10-20 | Refresh the Open With database (D-FP2): lsregister -gc, then lsregister -r -f -apps u,l,s, as the current user after the person confirms; never -kill or -delete
+launch | Sources/StorageCleanerMac/Features/StartupItems/Attribution/StartupApplicationSigningIdentityReader.swift | run(executableURL:) | 2 | 2026-10-15 | Read-only codesign verification and identity display for a startup item's app
+launch | Sources/StorageCleanerMac/Features/StartupItems/Management/LaunchctlStartupStateResolver.swift | run(executableURL:) | 2 | 2026-10-15 | Read-only launchctl print and print-disabled
+launch | Sources/StorageCleanerMac/Features/StartupItems/Management/StartupProcessRunner.swift | Shell.run | 1 | 2026-10-15 | Startup management's runner (StartupProcessRunning): launchctl and codesign, as passed by its callers
+launch | Sources/StorageCleanerMac/Features/StartupItems/Management/UserLaunchAgentManager.swift | run(executableURL:) | 1 | 2026-10-15 | User-confirmed enable or disable of the user's own LaunchAgent (launchctl bootout, disable, enable, bootstrap) after the plist and executable identity are checked again
+launch | Sources/StorageCleanerMac/Features/StartupItems/Scanning/BackgroundTaskManagementScanner.swift | run(executable:) | 1 | 2026-10-15 | Read-only sfltool dumpbtm
+launch | Sources/StorageCleanerMac/Features/StartupItems/Scanning/LaunchdRuntimeScanner.swift | run(executable:) | 5 | 2026-10-15 | Read-only launchctl list, print-disabled and print
+launch | Sources/StorageCleanerMac/Features/StartupItems/Scanning/LoginItemScanner.swift | run(executable:) | 1 | 2026-10-15 | Read-only system_profiler SPLoginItemDataType -json
+launch | Sources/StorageCleanerMac/Features/StartupItems/Scanning/StartupScanning.swift | Shell.run | 1 | 2026-10-15 | Startup scanners' runner (StartupCommandRunning): read-only launchctl, sfltool and system_profiler, as passed by the scanners
+launch | Sources/StorageCleanerMac/Services/AppUninstallService.swift | Shell.capture | 3 | 2026-10-15 | Read-only du -sk and mdls (last used date, description) for uninstall review
+launch | Sources/StorageCleanerMac/Services/AppUpdateBatchAuthorization.swift | run(executableURL:) | 5 | 2026-10-15 | Mac App Store updates: /usr/bin/sudo -A checks the password through the askpass channel, runs the frozen, verified mas upgrade the user confirmed, and resets the sudo timestamp (-k, -K)
+launch | Sources/StorageCleanerMac/Services/AppUpdateCommandRunner.swift | posix_spawn | 1 | 2026-10-15 | The update command runner: an executable path and argv (no shell), own process group, allowlisted environment, capped output
+launch | Sources/StorageCleanerMac/Services/AppUpdateCommandRunner.swift | runSync(executableURL:) | 1 | 2026-10-15 | run(executableURL:) calling its own synchronous body
+launch | Sources/StorageCleanerMac/Services/AppUpdateService.swift | Shell.capture | 1 | 2026-10-15 | User-confirmed brew upgrade --cask through the located brew
+launch | Sources/StorageCleanerMac/Services/AppUpdateService.swift | Shell.captureCancellable | 1 | 2026-10-15 | Read-only mas outdated --json
+launch | Sources/StorageCleanerMac/Services/AppUpdateService.swift | Shell.run | 1 | 2026-10-15 | Read-only brew info --cask --json=v2 --installed and brew outdated --cask --json=v2
+launch | Sources/StorageCleanerMac/Services/BatteryHealthService.swift | Shell.captureCancellable | 1 | 2026-10-15 | Read-only system_profiler SPPowerDataType and pmset -g custom
+launch | Sources/StorageCleanerMac/Services/Benchmark/BenchmarkV7HardwareProfile.swift | Shell.run | 2 | 2026-10-15 | Read-only system_profiler hardware, display, NVMe and storage data for the benchmark profile
+launch | Sources/StorageCleanerMac/Services/BrowserPrivacyCleanupRouter.swift | open(withApplicationAt:) | 1 | 2026-10-15 | Opens the browser's own data settings page in that browser when the user chooses to manage its data there
+launch | Sources/StorageCleanerMac/Services/BrowserPrivacyCleanupRouter.swift | openApplication | 1 | 2026-10-15 | Opens the browser itself when it has no settings page to open
+launch | Sources/StorageCleanerMac/Services/CodexArtifactScanner.swift | Shell.capture | 1 | 2026-10-15 | Read-only du -sk of a Codex artifact
+launch | Sources/StorageCleanerMac/Services/DiskHealthService.swift | Shell.captureCancellable | 1 | 2026-10-15 | Read-only diskutil info -plist and system_profiler SPNVMeDataType
+launch | Sources/StorageCleanerMac/Services/DiskScanner.swift | Shell.capture | 4 | 2026-10-15 | Read-only sw_vers, uname, sysctl and diskutil info / for the scan environment
+launch | Sources/StorageCleanerMac/Services/EnergyImpactService.swift | Process | 1 | 2026-10-15 | Read-only ps for per-process energy impact
+launch | Sources/StorageCleanerMac/Services/NativeNetworkProcessService.swift | Shell.run | 1 | 2026-10-15 | Read-only nettop sample of per-process network bytes
+launch | Sources/StorageCleanerMac/Services/NetworkSpeedTestService.swift | Process | 1 | 2026-10-15 | User-started networkQuality -c -M 20 speed test
+launch | Sources/StorageCleanerMac/Services/ProjectArtifactScanner.swift | Process | 2 | 2026-10-15 | Read-only xcode-select -p, and git ls-files and check-ignore with no optional locks, fsmonitor or untracked cache
+launch | Sources/StorageCleanerMac/Services/ScanHeavyWorkService.swift | Shell.captureCancellable | 1 | 2026-10-15 | User-confirmed Homebrew cask upgrade under the heavy-work lock, through the located brew
+launch | Sources/StorageCleanerMac/Services/Shell.swift | posix_spawn | 2 | 2026-10-15 | Shell's launcher: an executable path and argv (never a shell), started suspended in its own process group until it is tracked
+launch | Sources/StorageCleanerMac/Services/SimulatorCleanupService.swift | Shell.run | 1 | 2026-10-15 | D101 G2: xcrun simctl with an argument array: read-only list -j devices and runtime list -j; after two confirmations, delete <UDID> or runtime delete <identifier>, one UUID per command, only while Xcode and Simulator are closed
+launch | Sources/StorageCleanerMac/Services/SystemProtectionAudit.swift | Shell.run | 1 | 2026-10-15 | Read-only status of SIP, FileVault, Gatekeeper and the firewall (csrutil, fdesetup, spctl, socketfilterfw); callers pass a check, never an executable
+launch | Sources/StorageCleanerMac/Services/TimeMachineStatusService.swift | Shell.captureCancellable | 1 | 2026-10-15 | Read-only tmutil destinationinfo, status, listlocalsnapshotdates and latestbackup
+launch | Sources/StorageCleanerMac/Services/VPNControlService.swift | openApplication | 3 | 2026-10-15 | Opens the VPN provider's app or System Settings when the user asks
+launch | Sources/StorageCleanerMac/Services/VendorUninstallerService.swift | openApplication | 2 | 2026-10-15 | D101 G9: opens the developer's own uninstaller (an .app beside or inside the app being uninstalled, valid Apple-anchored signature with the app's Team ID, checked again first) only when the user clicks Open Uninstaller; the NSWorkspace opener and its one call; nothing is deleted afterwards
+launch | Sources/StorageCleanerMac/Stores/ScanStore.swift | openApplication | 2 | 2026-10-15 | relaunch(_:): reopens an app after its user-confirmed update, only if the installed identity still matches and it is not already running
+launch | Sources/StorageCleanerMac/Support/DisplayConfinement.swift | openApplication | 1 | 2026-10-16 | D106: only names the selector the display gate wraps, so an acceptance session or a test refuses app launches it cannot place; it starts nothing itself and calls the original unchanged when the gate is inactive
+launch | Sources/StorageCleanerMac/Views/FilesLightfield/PhotoLibraryLightfieldView.swift | openApplication | 1 | 2026-10-15 | The Open Photos button
+
+# executable: a program named in the source
+executable | Sources/FanControlHelper/PowermetricsProcessRunner.swift | /usr/bin/powermetrics | 1 | 2026-10-15 | Run by the root fan helper for power sampling
+executable | Sources/FanControlHelper/main.swift | /usr/bin/pmset | 1 | 2026-10-15 | Run by the root fan helper with whitelisted arguments only
+executable | Sources/FileOperationHelper/BackgroundTaskInventory.swift | /usr/bin/sfltool | 1 | 2026-10-23 | Run by the root file-operation helper for the read-only dumpbtm only (D177)
+executable | Sources/FileOperationShared/UpdateAskpassInvocationRegistry.swift | /usr/bin/sudo | 1 | 2026-10-15 | Compared, not run: the askpass helper answers only a caller whose parent is /usr/bin/sudo
+executable | Sources/FileOperationShared/UpdateAskpassTrust.swift | /usr/bin/sudo | 2 | 2026-10-15 | Compared, not run: the askpass helper answers only a caller whose parent is /usr/bin/sudo
+executable | Sources/StorageCleanerMac/Debug/LightfieldPerformanceFixture.swift | /usr/libexec/ | 1 | 2026-10-15 | DEBUG fixture text: fake process paths for view performance tests; never run
+executable | Sources/StorageCleanerMac/Debug/MainWindowSnapshotPipeline.swift | Contents/MacOS/Fixture | 1 | 2026-10-15 | DEBUG and Beta snapshot fixture text; never run
+executable | Sources/StorageCleanerMac/Features/AppLifecycle/Uninstaller/ApplicationRemovalService.swift | /bin/launchctl | 1 | 2026-10-19 | Applications manager: stops the app's own user LaunchAgent before removal
+executable | Sources/StorageCleanerMac/Features/AppUpdates/Providers/MacAppStoreProvider.swift | /opt/homebrew/bin/mas | 1 | 2026-10-15 | Where mas is looked for; run only after isTrusted
+executable | Sources/StorageCleanerMac/Features/AppUpdates/Providers/MacAppStoreProvider.swift | /usr/local/bin/mas | 1 | 2026-10-15 | Where mas is looked for; run only after isTrusted
+executable | Sources/StorageCleanerMac/Features/AppUpdates/Providers/VendorCommandUpdateAdapter.swift | /GoogleSoftwareUpdate/GoogleSoftwareUpdate.bundle/Contents/MacOS/ksadmin | 1 | 2026-10-15 | Google's update tool under /Library/Google or ~/Library/Google; run only when signed by the app's own team
+executable | Sources/StorageCleanerMac/Features/AppUpdates/Providers/VendorCommandUpdateAdapter.swift | /Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app/Contents/MacOS/msupdate | 1 | 2026-10-15 | Microsoft AutoUpdate's command-line tool; run only when signed by the app's own team
+executable | Sources/StorageCleanerMac/Features/AppUpdates/Scanning/HomebrewInventoryScanner.swift | /opt/homebrew/bin/brew | 2 | 2026-10-15 | Where brew is looked for, for the read-only inventory
+executable | Sources/StorageCleanerMac/Features/AppUpdates/Scanning/HomebrewInventoryScanner.swift | /usr/local/bin/brew | 2 | 2026-10-15 | Where brew is looked for, for the read-only inventory
+executable | Sources/StorageCleanerMac/Features/AppUpdates/WebsiteUpdates/OfficialApplicationUpdateInstaller.swift | /usr/bin/hdiutil | 3 | 2026-10-15 | Read-only attach and detach of downloaded update images
+executable | Sources/StorageCleanerMac/Features/Extensions/PluginKitListing.swift | /usr/bin/pluginkit | 1 | 2026-10-20 | Extensions (D-FP1): `pluginkit -mAvvv`, read-only listing of app and Safari extensions; nothing is elected or ignored
+executable | Sources/StorageCleanerMac/Features/Maintenance/SystemMaintenanceProbes.swift | /usr/sbin/periodic | 1 | 2026-10-20 | Maintenance tasks (D-FP2): only checks whether the program exists, to say the periodic scripts are gone from this macOS; never run
+executable | Sources/StorageCleanerMac/Features/StartupItems/Attribution/StartupApplicationSigningIdentityReader.swift | /usr/bin/codesign | 1 | 2026-10-15 | Read-only signature checks
+executable | Sources/StorageCleanerMac/Features/StartupItems/Management/LaunchctlStartupStateResolver.swift | /bin/launchctl | 1 | 2026-10-15 | Read-only print and print-disabled
+executable | Sources/StorageCleanerMac/Features/StartupItems/Management/UserLaunchAgentManager.swift | /bin/launchctl | 1 | 2026-10-15 | User-confirmed LaunchAgent enable and disable
+executable | Sources/StorageCleanerMac/Features/StartupItems/Scanning/BackgroundTaskManagementScanner.swift | /usr/bin/sfltool | 1 | 2026-10-15 | Read-only dumpbtm
+executable | Sources/StorageCleanerMac/Features/StartupItems/Scanning/LaunchdRuntimeScanner.swift | /bin/launchctl | 1 | 2026-10-15 | Read-only list, print and print-disabled
+executable | Sources/StorageCleanerMac/Features/StartupItems/Scanning/LoginItemScanner.swift | /usr/sbin/system_profiler | 1 | 2026-10-15 | Read-only login items
+executable | Sources/StorageCleanerMac/Services/AppUninstallService.swift | /usr/bin/du | 1 | 2026-10-15 | Read-only size
+executable | Sources/StorageCleanerMac/Services/AppUninstallService.swift | /usr/bin/mdls | 2 | 2026-10-15 | Read-only Spotlight metadata
+executable | Sources/StorageCleanerMac/Services/AppUpdateBatchAuthorization.swift | /usr/bin/sudo | 5 | 2026-10-15 | sudo -A for verified, user-confirmed mas upgrades and timestamp resets
+executable | Sources/StorageCleanerMac/Services/AppUpdateInstallationProcessSafety.swift | /bin/brew | 1 | 2026-10-15 | Suffix appended to Homebrew prefixes to recognize brew processes; never run
+executable | Sources/StorageCleanerMac/Services/AppUpdateService.swift | /opt/homebrew/bin/brew | 1 | 2026-10-15 | Where brew is looked for by the legacy update service
+executable | Sources/StorageCleanerMac/Services/AppUpdateService.swift | /opt/homebrew/bin/mas | 1 | 2026-10-15 | Where mas is looked for by the legacy update service
+executable | Sources/StorageCleanerMac/Services/AppUpdateService.swift | /usr/local/bin/brew | 1 | 2026-10-15 | Where brew is looked for by the legacy update service
+executable | Sources/StorageCleanerMac/Services/AppUpdateService.swift | /usr/local/bin/mas | 1 | 2026-10-15 | Where mas is looked for by the legacy update service
+executable | Sources/StorageCleanerMac/Services/BatteryHealthService.swift | /usr/bin/pmset | 2 | 2026-10-15 | Read-only pmset -g custom; BatteryPowerModeWriteCommand names pmset for power mode writes, which only the root helper runs after its whitelist
+executable | Sources/StorageCleanerMac/Services/BatteryHealthService.swift | /usr/sbin/system_profiler | 1 | 2026-10-15 | Read-only power data
+executable | Sources/StorageCleanerMac/Services/Benchmark/BenchmarkV7HardwareProfile.swift | /usr/sbin/system_profiler | 1 | 2026-10-15 | Read-only hardware profile
+executable | Sources/StorageCleanerMac/Services/CodexArtifactScanner.swift | /usr/bin/du | 1 | 2026-10-15 | Read-only size
+executable | Sources/StorageCleanerMac/Services/DiskHealthService.swift | /usr/sbin/diskutil | 2 | 2026-10-15 | Read-only diskutil info -plist
+executable | Sources/StorageCleanerMac/Services/DiskHealthService.swift | /usr/sbin/system_profiler | 1 | 2026-10-15 | Read-only NVMe data
+executable | Sources/StorageCleanerMac/Services/DiskScanner.swift | /usr/bin/sw_vers | 1 | 2026-10-15 | Read-only scan environment
+executable | Sources/StorageCleanerMac/Services/DiskScanner.swift | /usr/bin/uname | 1 | 2026-10-15 | Read-only scan environment
+executable | Sources/StorageCleanerMac/Services/DiskScanner.swift | /usr/sbin/diskutil | 1 | 2026-10-15 | Read-only scan environment
+executable | Sources/StorageCleanerMac/Services/DiskScanner.swift | /usr/sbin/sysctl | 1 | 2026-10-15 | Read-only scan environment
+executable | Sources/StorageCleanerMac/Services/EnergyImpactService.swift | /bin/ps | 1 | 2026-10-15 | Read-only process list
+executable | Sources/StorageCleanerMac/Services/NativeNetworkProcessService.swift | /usr/bin/nettop | 1 | 2026-10-15 | Read-only network sample
+executable | Sources/StorageCleanerMac/Services/NetworkSpeedTestService.swift | /usr/bin/networkQuality | 1 | 2026-10-15 | User-started speed test
+executable | Sources/StorageCleanerMac/Services/ProjectArtifactScanner.swift | /usr/bin/git | 1 | 2026-10-15 | Read-only ls-files and check-ignore
+executable | Sources/StorageCleanerMac/Services/ProjectArtifactScanner.swift | /usr/bin/xcode-select | 1 | 2026-10-15 | Read-only -p
+executable | Sources/StorageCleanerMac/Services/SimulatorCleanupService.swift | /usr/bin/xcrun | 1 | 2026-10-15 | Runs simctl from the selected developer tools, only after the files show that simctl is there (no tools, no run)
+executable | Sources/StorageCleanerMac/Services/SystemProtectionAudit.swift | /usr/bin/csrutil | 1 | 2026-10-15 | Read-only status
+executable | Sources/StorageCleanerMac/Services/SystemProtectionAudit.swift | /usr/bin/fdesetup | 1 | 2026-10-15 | Read-only status
+executable | Sources/StorageCleanerMac/Services/SystemProtectionAudit.swift | /usr/libexec/ApplicationFirewall/socketfilterfw | 1 | 2026-10-15 | Read-only --getglobalstate
+executable | Sources/StorageCleanerMac/Services/SystemProtectionAudit.swift | /usr/sbin/spctl | 1 | 2026-10-15 | Read-only --status
+executable | Sources/StorageCleanerMac/Services/TimeMachineStatusService.swift | /usr/bin/tmutil | 4 | 2026-10-15 | Read-only destinationinfo, status, listlocalsnapshotdates and latestbackup
+executable | Sources/StorageCleanerMac/Support/MiniWindowDemoData.swift | /Applications/ChatGPT.app/Contents/MacOS/ChatGPT | 1 | 2026-10-15 | Demo data text (a sample process path); never run
+executable | Sources/StorageCleanerMac/Support/MiniWindowDemoData.swift | /Applications/Google Chrome.app/Contents/MacOS/Google Chrome | 1 | 2026-10-15 | Demo data text (a sample process path); never run
+executable | Sources/StorageCleanerMac/Support/MiniWindowDemoData.swift | /Applications/WorkBuddy AI.app/Contents/MacOS/WorkBuddy AI | 1 | 2026-10-15 | Demo data text (a sample process path); never run
+executable | Sources/StorageCleanerMac/Support/MiniWindowDemoData.swift | /Applications/moomoo.app/Contents/MacOS/moomoo | 1 | 2026-10-15 | Demo data text (a sample process path); never run
+executable | Sources/StorageCleanerMac/Support/MiniWindowDemoData.swift | /opt/homebrew/bin/node | 1 | 2026-10-15 | Demo data text (a sample process path); never run

@@ -184,7 +184,8 @@ final class MenuBarTertiaryDetailTests: XCTestCase {
         ] {
             XCTAssertTrue(sources.contains(field), field)
         }
-        XCTAssertTrue(sources.contains("ByteFormat.storageString("))
+        // D128 (2026-10-19): iStat's disk space format (was `ByteFormat.storageString(`).
+        XCTAssertTrue(sources.contains("IStatNumberFormat.space("))
         XCTAssertFalse(sources.contains("Available for Important Usage"))
         XCTAssertFalse(sources.contains("Available for Opportunistic Usage"))
     }
@@ -196,13 +197,18 @@ final class MenuBarTertiaryDetailTests: XCTestCase {
         XCTAssertTrue(detail.contains("GeekNetworkTertiaryView("))
         XCTAssertFalse(network.contains("ScrollView"))
         XCTAssertTrue(network.contains("NetworkConnectionSnapshot.resolve"))
-        XCTAssertTrue(network.contains("connection.wifi?.phyMode"))
+        // D125 (2026-10-19): the Wi-Fi rows read the resolved connection's
+        // Wi-Fi details (was `connection.wifi?.phyMode` in a fixed card).
+        XCTAssertTrue(network.contains("if let wifi = connection.wifi"))
+        XCTAssertTrue(network.contains("wifi.phyMode"))
         XCTAssertTrue(network.contains("let topology: NetworkTopologySnapshot?"))
         XCTAssertTrue(network.contains("connection.activeInterface?.bsdName"))
         XCTAssertTrue(network.contains("connection.ipConfiguration.ipv4Router"))
         XCTAssertTrue(network.contains("connection.ipConfiguration.ipv6Router"))
         XCTAssertTrue(network.contains("connection.ipConfiguration.dnsServers"))
-        XCTAssertTrue(network.contains("GeekNetworkInspectorAddressRow"))
+        // D125 (2026-10-19): iStat's interface sections (were
+        // `GeekNetworkInspectorAddressRow` rows in fixed cards).
+        XCTAssertTrue(network.contains("GeekIStatInterfaceSections("))
         XCTAssertTrue(detail.contains("topology: networkTopologySnapshot"))
     }
 

@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ApplicationDescription</key>
+	<string>This app scans and cleans up your Mac on the Mac itself. It goes online only for its own updates, app update checks, the network speed test, the public IP display and the benchmark leaderboard. It does not upload scan results or file contents.</string>
+	<key>Connections</key>
+	<array>
+		<dict>
+			<key>Host</key>
+			<string>github.com, *.githubusercontent.com</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Checks for and downloads updates to this app, reads the signed list of official app download sources, and downloads the official GitHub releases of apps you update.</string>
+			<key>DenyConsequences</key>
+			<string>This app cannot check for or install its own updates, and apps released on GitHub cannot be updated.</string>
+		</dict>
+		<dict>
+			<key>Host</key>
+			<string>api.github.com</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Looks up the latest official release of apps that publish their updates on GitHub, when App Updates checks for updates.</string>
+			<key>DenyConsequences</key>
+			<string>Apps that publish their updates on GitHub are not checked for updates.</string>
+		</dict>
+		<dict>
+			<key>Host</key>
+			<string>itunes.apple.com</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Looks up the current App Store version of apps installed from the App Store, when App Updates checks for updates.</string>
+			<key>DenyConsequences</key>
+			<string>Apps installed from the App Store are not checked for updates.</string>
+		</dict>
+		<dict>
+			<key>Host</key>
+			<string>speed.cloudflare.com</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Downloads and uploads test data for the network speed test, only when you start the test and confirm it.</string>
+			<key>DenyConsequences</key>
+			<string>The network speed test cannot run.</string>
+		</dict>
+		<dict>
+			<key>Host</key>
+			<string>api.ipify.org, api6.ipify.org</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Shows your public IPv4 and IPv6 addresses in the Mini Window's network view while it is open. On by default; you can turn it off in Settings › Access.</string>
+			<key>DenyConsequences</key>
+			<string>Your public IP address is not shown.</string>
+		</dict>
+		<dict>
+			<key>Host</key>
+			<string>api.country.is</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Looks up the country or region of your public IP address, only after you allow it separately in Settings › Access. The address is sent to this service.</string>
+			<key>DenyConsequences</key>
+			<string>The country or region of your IP address is not shown.</string>
+		</dict>
+		<dict>
+			<key>Host</key>
+			<string>storage-cleaner-benchmark-leaderboard.yangyihang96.workers.dev</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Shows the benchmark leaderboard and, only after you confirm, publishes or removes your benchmark result.</string>
+			<key>DenyConsequences</key>
+			<string>The leaderboard cannot be shown, and benchmark results cannot be published or removed.</string>
+		</dict>
+		<dict>
+			<key>Host</key>
+			<string>*</string>
+			<key>Port</key>
+			<string>443</string>
+			<key>Purpose</key>
+			<string>Checks for and downloads updates of other apps from their developers' own update feeds and official download sites, when App Updates checks for or installs updates. The addresses come from each app or from the signed list of official sources.</string>
+			<key>DenyConsequences</key>
+			<string>Apps that update from their developer's own site cannot be checked or updated.</string>
+		</dict>
+	</array>
+</dict>
+</plist>

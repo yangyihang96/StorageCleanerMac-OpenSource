@@ -24,7 +24,7 @@ enum DuplicateFileStorageRelationship: String, Codable, Hashable, Sendable {
         case .independent:
             L10n.text("AppleArchive 未报告 clone 或硬链接簇。", "AppleArchive reported no clone or hard-link cluster.")
         case .apfsClone:
-            L10n.text("AppleArchive CLC 已确认这些文件属于同一 APFS clone 簇；物理释放空间仍须删除后确认。", "AppleArchive CLC confirms one APFS clone cluster; physical reclaimable space must be confirmed after deletion.")
+            L10n.text("AppleArchive CLC 已确认这些文件属于同一 APFS clone 簇，共用同一份数据；已是克隆，删除几乎不释放空间。", "AppleArchive CLC confirms one APFS clone cluster sharing one copy of the data; already clones, so deleting frees almost no space.")
         case .hardLink:
             L10n.text("AppleArchive HLC 已确认硬链接关系；同一 inode 已按扫描规则去重。", "AppleArchive HLC confirms a hard-link relationship; the shared inode is already deduplicated by the scanner.")
         case .unknown:
@@ -44,7 +44,9 @@ struct DuplicateFileGroup: Identifiable, Hashable, Sendable {
     let matchKind: MatchKind
     let relationship: DuplicateFileStorageRelationship
 
-    // Physical block savings stay unknown even when CLC proves a clone relation.
+    // D104 G1: what deleting every listed copy but one surely frees, whichever
+    // copy is kept; nil when a copy's sharing cannot be read. Clones of each
+    // other share their blocks, so a group of clones counts almost nothing.
     let estimatedPhysicalReclaimableBytes: Int64?
 
     init(
@@ -250,6 +252,19 @@ struct DuplicateFileScanCoverage: Codable, Hashable, Sendable {
     let reachedResultLimit: Bool
     // Optional for reports encoded before N6; absence means no reported I/O stall.
     var contentReadUnresponsive: Bool? = nil
+    var ignoredDuplicateFiles: Int? = nil
+    var ignoredSimilarFiles: Int? = nil
+    var ignoredOtherItems: Int? = nil
+    var excludedItemCount: Int {
+        Set(roots.flatMap { root in
+            root.skippedPaths.filter { $0.reason == .excluded }.map(\.path)
+                + (root.skipReason == .excluded ? [root.rootPath] : [])
+        }).count
+    }
+    func ignoredCount(for category: IgnoreCategory) -> Int {
+        (ignoredOtherItems ?? 0) + (category == .similar ? ignoredSimilarFiles ?? 0 : ignoredDuplicateFiles ?? 0)
+    }
+    func ignoredSummary(for category: IgnoreCategory) -> String { IgnoreListSnapshot.summary(ignoredCount(for: category)) }
 
     var cloudOnlyFileCount: Int { roots.reduce(0) { $0 + ($1.cloudOnlyFiles ?? 0) } }
     var cloudOnlyByteCount: Int64 { roots.reduce(0) { $0 + ($1.cloudOnlyBytes ?? 0) } }
@@ -258,10 +273,10 @@ struct DuplicateFileScanCoverage: Codable, Hashable, Sendable {
     /// must not read as "everything was compared".
     var cloudOnlySummary: String? {
         guard cloudOnlyFileCount > 0 else { return nil }
-        let size = ByteFormat.string(cloudOnlyByteCount)
+        let size = ByteFormat.storageString(cloudOnlyByteCount)
         return L10n.text(
-            "\(cloudOnlyFileCount) 个文件（\(size)）仅在云端，未下载、未比对；在访达中下载后重新扫描即可比对。",
-            "\(cloudOnlyFileCount) files (\(size)) are only in the cloud and were not downloaded or compared. Download them in Finder and scan again to include them."
+            "\(ByteFormat.count(cloudOnlyFileCount)) 个文件（\(size)）仅在云端，未下载、未比对；在访达中下载后重新扫描即可比对。",
+            "\(ByteFormat.count(cloudOnlyFileCount)) files (\(size)) are only in the cloud and were not downloaded or compared. Download them in Finder and scan again to include them."
         )
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CombinedStatusIcon
 import SwiftUI
 
 enum MenuBarPanelIdleReclamationPolicy {
@@ -60,9 +61,15 @@ final class MenuBarStatusController: NSObject, ObservableObject {
     private var renderedIdentity: MenuBarStatusRenderIdentity?
     private var renderedWidth: CGFloat?
     private var hasCreatedPanelSession = false
+    private var installedWithoutStatusItem = false
     /// Audit only: when the panel was last hidden.
     private var panelHiddenUptime: Double?
     private(set) var statusDisplayMode = MenuBarStatusDisplayMode.stored()
+    /// D153: the combined icon's monitors and live renderer, present only
+    /// while that mode is shown.
+    private let combinedStatus = CombinedStatusItemDriver()
+    /// D153: what the combined icon draws now, for the settings preview.
+    var combinedStatusSnapshot: StatusSnapshot? { combinedStatus.snapshot }
 
     private let fanControlProvider: @MainActor () -> FanControlCoordinator
     private lazy var fanControl = fanControlProvider()
@@ -93,6 +100,12 @@ final class MenuBarStatusController: NSObject, ObservableObject {
         self.computerHealthStore = computerHealthStore
         store.attachMenuBarResidentSampling(.shared)
         guard statusItem == nil else { return }
+        // D106: the system draws a status item in every display's menu bar,
+        // outside the one an acceptance session is confined to.
+        if AcceptanceLaunch.isActive {
+            installWithoutStatusItem(store: store)
+            return
+        }
         MenuBarSamplingContext.shared.beginStartup()
         scheduleStartupRounds(store: store)
         let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
@@ -135,6 +148,10 @@ final class MenuBarStatusController: NSObject, ObservableObject {
                 guard let self, let store else { return }
                 self.startRefreshLoop(store: store)
                 self.refreshDeviceStatus(force: true)
+                // D153: a hidden item stops the combined icon's monitors.
+                if self.statusDisplayMode == .combinedStatus {
+                    self.updateStatusItem(snapshot: store.menuBarMonitorSnapshot)
+                }
             }
         }
         samplingEnvironmentCancellable = Publishers.Merge(
@@ -144,6 +161,10 @@ final class MenuBarStatusController: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self, let store else { return }
                 self.startRefreshLoop(store: store)
+                // D153: Low Power Mode is part of the combined icon's battery.
+                if self.statusDisplayMode == .combinedStatus {
+                    self.updateStatusItem(snapshot: store.menuBarMonitorSnapshot)
+                }
             }
         }
         // Notifications pause the same resident clock. Separate flags prevent
@@ -169,6 +190,9 @@ final class MenuBarStatusController: NSObject, ObservableObject {
                         store.refreshMenuBarResidentSamples()
                         store.refreshMenuBarLiveStatus()
                     }
+                    if self.statusDisplayMode == .combinedStatus {
+                        self.updateStatusItem(snapshot: store.menuBarMonitorSnapshot)
+                    }
                 }
             })
         }
@@ -188,7 +212,10 @@ final class MenuBarStatusController: NSObject, ObservableObject {
                 // Published sends before mutation. Read the committed value on
                 // the next main-actor turn, including power-only/radio updates.
                 Task { @MainActor in
-                    guard let self, let store, self.statusDisplayMode == .deviceStatus else { return }
+                    // D153: the combined icon draws the same battery reading.
+                    guard let self, let store,
+                          self.statusDisplayMode == .deviceStatus || self.statusDisplayMode == .combinedStatus
+                    else { return }
                     self.updateStatusItem(snapshot: store.menuBarMonitorSnapshot)
                 }
             }
@@ -275,8 +302,42 @@ final class MenuBarStatusController: NSObject, ObservableObject {
 
     /// The menu command and status item share the exact same presentation path.
     func showMonitoringPanel() {
+        if AcceptanceLaunch.isActive {
+            presentPanelOnAcceptanceDisplay()
+            return
+        }
         guard let button = statusItem?.button else { return }
         presentPanel(from: button)
+    }
+
+    /// D106: the sampling a status item starts, without the status item. The
+    /// panel opens from the menu command or `--open-menu-bar-panel`.
+    private func installWithoutStatusItem(store: ScanStore) {
+        guard !installedWithoutStatusItem else { return }
+        installedWithoutStatusItem = true
+        MenuBarSamplingContext.shared.beginStartup()
+        scheduleStartupRounds(store: store)
+        updateSamplingContext(store: store)
+        startRefreshLoop(store: store)
+        store.refreshMenuBarLiveStatus(showLoadingWhenEmpty: false)
+        if ProcessInfo.processInfo.arguments.contains(AcceptanceLaunch.openPanelArgument) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.presentPanelOnAcceptanceDisplay()
+            }
+        }
+    }
+
+    /// D106: anchored where a status item would sit, at the right end of the
+    /// acceptance display's menu bar.
+    private func presentPanelOnAcceptanceDisplay() {
+        guard let store, computerHealthStore != nil,
+              let screen = DisplayConfinementGate.shared.targetScreen() else { return }
+        let openStartedAt = MenuBarPresentationTrace.uptime
+        beginPanelPresentation(store: store)
+        let menuBarHeight = max(screen.frame.maxY - screen.visibleFrame.maxY, 0)
+        let anchor = NSRect(x: screen.visibleFrame.maxX - 44, y: screen.visibleFrame.maxY,
+                            width: 28, height: menuBarHeight)
+        showPanel(anchor: anchor, screen: screen, startedAt: openStartedAt)
     }
 
     private func presentPanel(from sender: NSStatusBarButton) {
@@ -563,6 +624,11 @@ final class MenuBarStatusController: NSObject, ObservableObject {
 
     private func updateStatusItem(snapshot: SystemMonitorSnapshot?, force: Bool = false) {
         guard let statusItem, let button = statusItem.button else { return }
+        if statusDisplayMode == .combinedStatus {
+            updateCombinedStatusItem(statusItem, button: button)
+            return
+        }
+        tearDownCombinedStatus()
         let auxiliary = store?.menuBarAuxiliaryMonitorState
         let deviceStatus = MenuBarDeviceStatusSnapshot(
             batteryPercent: auxiliary?.batterySnapshot?.chargePercent,
@@ -606,6 +672,47 @@ final class MenuBarStatusController: NSObject, ObservableObject {
         button.setAccessibilityLabel(L10n.appName)
         button.setAccessibilityValue(summary)
         renderedIdentity = identity
+    }
+
+    /// D153: the combined icon draws itself (a template base, a colour layer
+    /// and the 20 fps charging effect, as Status Trio's status item); the
+    /// driver gets the app's battery, settings, item colour and state. The
+    /// item sizes to the icon like upstream's variable-length item.
+    private func updateCombinedStatusItem(_ statusItem: NSStatusItem, button: NSStatusBarButton) {
+        if statusItem.length != NSStatusItem.variableLength {
+            statusItem.length = NSStatusItem.variableLength
+        }
+        renderedWidth = nil
+        renderedIdentity = nil
+        let auxiliary = store?.menuBarAuxiliaryMonitorState
+        let defaults = UserDefaults.standard
+        let appearance = button.window?.effectiveAppearance ?? button.effectiveAppearance
+        let statusPreset = PanelStatusColorPreset(rawValue:
+            defaults.string(forKey: PanelPalettePreferences.statusThemeKey) ?? "") ?? .original
+        combinedStatus.update(button: button, context: CombinedStatusItemDriver.Context(
+            battery: CombinedStatusIconBattery.status(
+                snapshot: auxiliary?.batterySnapshot,
+                availability: auxiliary?.internalBatteryAvailability ?? .unknown,
+                lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled
+            ),
+            settings: CombinedStatusIconPreferences.stored(in: defaults),
+            foreground: statusPreset.ink(
+                dark: appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+                customDayHex: defaults.string(forKey: PanelPalettePreferences.statusCustomDayKey) ?? "",
+                customNightHex: defaults.string(forKey: PanelPalettePreferences.statusCustomNightKey) ?? ""
+            ),
+            isVisible: statusItem.isVisible,
+            isPaused: store?.isMenuBarRefreshPaused == true,
+            isSystemSleeping: systemSleeping,
+            isDisplaySleeping: displaySleeping
+        ))
+    }
+
+    private func tearDownCombinedStatus() {
+        guard combinedStatus.isActive else { return }
+        combinedStatus.tearDown()
+        renderedWidth = nil
+        renderedIdentity = nil
     }
 
     private func refreshDeviceStatus(force: Bool = false) {

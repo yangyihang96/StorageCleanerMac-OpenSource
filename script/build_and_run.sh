@@ -13,6 +13,7 @@ BETA_VERIFY=0
 BETA_SCREENSHOTS=0
 BETA_LOGS=0
 BETA_TELEMETRY=0
+BETA_NO_LAUNCH=0
 MODE="${1:-run}"
 
 if [ "${1:-}" = "--beta" ]; then
@@ -26,6 +27,7 @@ if [ "${1:-}" = "--beta" ]; then
       --screenshots) BETA_SCREENSHOTS=1 ;;
       --logs) BETA_LOGS=1 ;;
       --telemetry) BETA_TELEMETRY=1 ;;
+      --no-launch) BETA_NO_LAUNCH=1 ;;
       --help|-h) MODE="help" ;;
       *)
         echo "unknown beta option: $option" >&2
@@ -35,7 +37,15 @@ if [ "${1:-}" = "--beta" ]; then
   done
   if [ "$BETA_VERIFY" -eq 1 ] || [ "$BETA_SCREENSHOTS" -eq 1 ] ||
      [ "$BETA_LOGS" -eq 1 ] || [ "$BETA_TELEMETRY" -eq 1 ]; then
+    if [ "$BETA_NO_LAUNCH" -eq 1 ] && [ "$MODE" != "help" ]; then
+      echo "--no-launch never opens the app; it cannot be combined with --verify, --screenshots, --logs or --telemetry" >&2
+      exit 2
+    fi
     BETA_INSTALL=1
+  fi
+  if [ "$BETA_NO_LAUNCH" -eq 1 ] && [ "$BETA_INSTALL" -eq 0 ] && [ "$MODE" != "help" ]; then
+    echo "--no-launch is an install mode: use --beta --install --no-launch" >&2
+    exit 2
   fi
 fi
 
@@ -312,6 +322,8 @@ copy_resource_file() {
 
 usage() {
   echo "usage: $0 --beta [--install] [--verify] [--screenshots] [--logs|--telemetry]   (normal development loop)"
+  echo "       $0 --beta --install --no-launch   (D106: install without quitting or opening anything;"
+  echo "           refuses while the Beta or its helpers run; then script/launch_beta_acceptance.sh)"
   echo "       $0 [run|--debug|--logs|--telemetry|--verify|--bundle-only]   (release identity; shares the installed app's data)"
 }
 
@@ -471,9 +483,14 @@ fi
 copy_resource_file "$SPARKLE_LICENSE" "$APP_RESOURCES/Sparkle-LICENSE.txt"
 copy_resource_file "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$APP_RESOURCES/THIRD_PARTY_NOTICES.md"
 copy_resource_file "$ROOT_DIR/Resources/CleanupRules.v2.json" "$APP_RESOURCES/CleanupRules.v2.json"
+# D116: Little Snitch reads this policy (and the .lproj translations copied
+# below) to explain each connection; it is covered by the bundle signature.
+copy_resource_file "$ROOT_DIR/Resources/InternetAccessPolicy.plist" "$APP_RESOURCES/InternetAccessPolicy.plist"
 source "$ROOT_DIR/script/benchmark_resources.sh"
 copy_benchmark_resources
 if [ "$BETA_MODE" -eq 1 ]; then
+  # D102 L3: the same launch keys as Resources/$FAN_HELPER_PLIST, so the Beta
+  # helper also starts at boot to return the fans to system control.
   cat >"$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -483,6 +500,13 @@ if [ "$BETA_MODE" -eq 1 ]; then
   <string>$FAN_HELPER_LABEL</string>
   <key>BundleProgram</key>
   <string>Contents/Resources/$FAN_HELPER_NAME</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>MachServices</key>
   <dict>
     <key>$FAN_HELPER_LABEL</key>
@@ -709,12 +733,17 @@ verify_sparkle_bundle() {
   [ -d "$framework" ]
   [ -f "$APP_RESOURCES/Sparkle-LICENSE.txt" ]
   [ -f "$APP_RESOURCES/THIRD_PARTY_NOTICES.md" ]
+  cmp -s "$ROOT_DIR/Resources/InternetAccessPolicy.plist" "$APP_RESOURCES/InternetAccessPolicy.plist"
+  cmp -s "$ROOT_DIR/Resources/en.lproj/InternetAccessPolicy.strings" "$APP_RESOURCES/en.lproj/InternetAccessPolicy.strings"
+  cmp -s "$ROOT_DIR/Resources/zh-Hans.lproj/InternetAccessPolicy.strings" "$APP_RESOURCES/zh-Hans.lproj/InternetAccessPolicy.strings"
   [ -x "$APP_FAN_HELPER" ]
   [ -f "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST" ]
   [ ! -e "$APP_RESOURCES/$FAN_HELPER_LABEL.legacy.plist" ]
   [ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST")" = "$FAN_HELPER_LABEL" ]
   [ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST")" = "Contents/Resources/$FAN_HELPER_NAME" ]
   [ "$(/usr/libexec/PlistBuddy -c "Print :MachServices:$FAN_HELPER_LABEL" "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST")" = "true" ]
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :RunAtLoad' "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST")" = "true" ]
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :KeepAlive:SuccessfulExit' "$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST")" = "false" ]
   codesign --verify --strict --verbose=4 "$APP_FAN_HELPER"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :LeaderboardAPIURL' "$INFO_PLIST")" = "$LEADERBOARD_API_URL" ]
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")" = "$BUNDLE_ID" ]
@@ -939,6 +968,12 @@ install_beta() {
   # kickstart, bootout, signals or launch of the helper itself is performed.
   helper_before="$(python3 "$ROOT_DIR/script/helper_upgrade_status.py" capture "$FAN_HELPER_LABEL" "$target/Contents/Resources/$FAN_HELPER_NAME")"
   quit_existing_beta_safely "$target"
+  # The old helper exits by itself 15 s after its last client leaves. Wait for
+  # that (read-only, at most 30 s) so the new Beta's first connection starts the
+  # replaced executable instead of reattaching to the old process (D97).
+  python3 "$ROOT_DIR/script/helper_upgrade_status.py" wait-exit "$FAN_HELPER_LABEL" 30 || true
+  # D195: the file-operation helper follows the same idle-exit lifecycle.
+  python3 "$ROOT_DIR/script/helper_upgrade_status.py" wait-exit "$FILE_HELPER_LABEL" 30 || true
   # Remove stale staging bundles left behind by earlier interrupted installs;
   # each run stages under its own PID, so orphans are never reused.
   for stale in "$parent"/.测试版.staging.*.app; do
@@ -996,6 +1031,213 @@ install_beta() {
   helper_after="$(python3 "$ROOT_DIR/script/helper_upgrade_status.py" capture "$FAN_HELPER_LABEL" "$target/Contents/Resources/$FAN_HELPER_NAME")"
   python3 "$ROOT_DIR/script/helper_upgrade_status.py" compare "$helper_before" "$helper_after"
   echo "installed: $target"
+}
+
+# D106: what still runs from the installed Beta and blocks the exchange. The
+# app and the update askpass run with absolute paths inside the bundle;
+# launchd starts the two helpers through SMAppService with the relative path
+# Contents/Resources/<name>, so their command lines never name the bundle and
+# launchd is asked for their jobs instead. A job that cannot be read counts
+# as running. The Finder extension is listed by beta_extension_activity
+# instead: Finder keeps it while it is enabled, it holds no helper connection
+# and writes nothing, and the exchange leaves its files intact under the
+# backup name (install_beta likewise waits only for the app).
+beta_bundle_activity() {
+  local bundle="$1"
+  local label
+  local job
+  local status
+  # A UTF-8 locale keeps "测试版" intact in the matched command lines.
+  { LC_ALL=en_US.UTF-8 pgrep -lf "$bundle/Contents/" 2>/dev/null || true; } \
+    | { grep -vF "$bundle/Contents/PlugIns/" || true; }
+  for label in "$FAN_HELPER_LABEL" "$FILE_HELPER_LABEL"; do
+    status=0
+    job="$(/bin/launchctl print "system/$label" 2>&1)" || status=$?
+    if [ "$status" -eq 0 ]; then
+      if grep -Eq '^[[:space:]]*pid = [1-9][0-9]*[[:space:]]*$' <<<"$job"; then
+        echo "launchd job system/$label is running ($(grep -Em1 '^[[:space:]]*pid = ' <<<"$job" | tr -d '[:space:]'))"
+      fi
+    elif ! grep -q 'Could not find service' <<<"$job"; then
+      echo "launchd job system/$label could not be read (launchctl status $status)"
+    fi
+  done
+  if [ -e "/var/run/$FAN_HELPER_LABEL.active" ]; then
+    echo "a fan-control recovery is pending (/var/run/$FAN_HELPER_LABEL.active)"
+  fi
+}
+
+beta_extension_activity() {
+  { LC_ALL=en_US.UTF-8 pgrep -lf "$1/Contents/PlugIns/" 2>/dev/null || true; }
+}
+
+note_beta_extension() {
+  local extension
+  extension="$(beta_extension_activity "$1")"
+  [ -n "$extension" ] || return 0
+  echo "note: $2 (not quit; Finder keeps it while it is enabled):"
+  sed 's/^/  /' <<<"$extension"
+}
+
+refuse_beta_activity() {
+  echo "refusing to install: something still runs from the installed Beta, and --no-launch never quits it:" >&2
+  sed 's/^/  /' <<<"$1" >&2
+  echo "$2 was not changed. The Beta's normal quit may return the fans to automatic control and" >&2
+  echo "hand back its Mac mini sleep policy (hardware writes): quit it only when that is approved. A helper" >&2
+  echo "exits by itself about 15 s after its last client, unless Mac mini mode or fan control keeps it." >&2
+  exit 75
+}
+
+# D106: installs the Beta for acceptance without quitting, opening or
+# relaunching anything and without writing preferences. It refuses while
+# anything runs from the installed Beta, and exchanges the bundles in one
+# atomic rename (script/beta_install_swap.py), so the path never stops naming a
+# complete Beta signed by the same team: the helper's watch on it sees no
+# removal. The previous bundle is kept outside /Applications on the same
+# volume, renamed to *.app.previous so LaunchServices and PlugInKit do not
+# take it for a second Beta and Finder extension; backups are never deleted.
+# The backup folder is checked after resolving `..` and symbolic links, before
+# anything is copied or moved, and only the checked path is used (D106-R5).
+BETA_BACKUP_ROOT="${STORAGE_CLEANER_BETA_BACKUP_DIR:-$HOME/Developer/StorageCleanerMac-beta-backups.noindex}"
+
+install_beta_without_launch() {
+  local target
+  local parent
+  local staging
+  local backup_root
+  local backup_dir
+  local stale
+  local activity
+  local had_previous=0
+  local status
+  local helper_before
+  local helper_after
+  target="$(resolve_beta_install_path)"
+  parent="$(dirname "$target")"
+  staging="$parent/.测试版.staging.$$.app"
+
+  case "$target" in
+    "/Applications/测试版.app"|"$HOME/Applications/测试版.app") ;;
+    *)
+      echo "refusing unsafe Beta install target: $target" >&2
+      return 1
+      ;;
+  esac
+  case "$BETA_BACKUP_ROOT/" in
+    /*) ;;
+    *)
+      echo "STORAGE_CLEANER_BETA_BACKUP_DIR must be an absolute path: $BETA_BACKUP_ROOT" >&2
+      return 1
+      ;;
+  esac
+  if ! backup_root="$(python3 "$ROOT_DIR/script/beta_install_swap.py" backup-folder "$BETA_BACKUP_ROOT")"; then
+    echo "refusing Beta backup folder in Applications, a synced folder or /tmp: $BETA_BACKUP_ROOT" >&2
+    return 1
+  fi
+
+  activity="$(beta_bundle_activity "$target")"
+  [ -z "$activity" ] || refuse_beta_activity "$activity" "$target"
+  note_beta_extension "$target" "the Beta's Finder extension runs and keeps the previous build's files until Finder restarts it"
+  helper_before="$(python3 "$ROOT_DIR/script/helper_upgrade_status.py" capture "$FAN_HELPER_LABEL" "$target/Contents/Resources/$FAN_HELPER_NAME")"
+  backup_dir="$backup_root/$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+
+  # An interrupted earlier install may have left a staging bundle, possibly
+  # holding a previous Beta: keep it with the backups, never delete it.
+  for stale in "$parent"/.测试版.staging.*.app; do
+    [ -e "$stale" ] || continue
+    mkdir -p "$backup_dir"
+    python3 "$ROOT_DIR/script/beta_install_swap.py" backup-place "$stale" "$backup_dir/stale-staging-${stale##*.staging.}.previous"
+  done
+  if [ -e "$staging" ] || [ -L "$staging" ]; then
+    echo "refusing: staging path already exists: $staging" >&2
+    return 1
+  fi
+  /usr/bin/ditto --norsrc "$APP_BUNDLE" "$staging"
+  set +e
+  ( set -e; verify_beta_bundle_at "$staging" )
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    rm -rf -- "$staging"
+    echo "the new Beta failed verification; $target was not changed" >&2
+    return 1
+  fi
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if [ -L "$target" ] || [ ! -f "$target/Contents/Info.plist" ] ||
+       [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$target/Contents/Info.plist" 2>/dev/null)" != "$BUNDLE_ID" ]; then
+      rm -rf -- "$staging"
+      echo "refusing to replace a non-Beta app at $target; nothing was changed" >&2
+      return 1
+    fi
+    # The helper accepts the app by its signing team and identifier.
+    if ! python3 "$ROOT_DIR/script/beta_install_swap.py" same-signer "$target" "$staging"; then
+      rm -rf -- "$staging"
+      echo "refusing: the new Beta is not signed by the installed Beta's team with the same identifier; nothing was changed" >&2
+      return 1
+    fi
+    had_previous=1
+  elif ! python3 "$ROOT_DIR/script/beta_install_swap.py" signer "$staging"; then
+    rm -rf -- "$staging"
+    echo "refusing: the new Beta has no team signature; nothing was changed" >&2
+    return 1
+  fi
+
+  # Checked again right before the exchange.
+  activity="$(beta_bundle_activity "$target")"
+  if [ -n "$activity" ]; then
+    rm -rf -- "$staging"
+    refuse_beta_activity "$activity" "$target"
+  fi
+  if [ "$had_previous" -eq 1 ]; then
+    if ! python3 "$ROOT_DIR/script/beta_install_swap.py" swap "$staging" "$target"; then
+      echo "the exchange was not confirmed; nothing was deleted or opened. Inspect $target and $staging." >&2
+      return 1
+    fi
+  elif ! python3 "$ROOT_DIR/script/beta_install_swap.py" place "$staging" "$target"; then
+    echo "the move was not confirmed; nothing was deleted or opened. Inspect $target and $staging." >&2
+    return 1
+  fi
+
+  set +e
+  ( set -e; verify_beta_bundle_at "$target" )
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    if [ "$had_previous" -eq 1 ] && python3 "$ROOT_DIR/script/beta_install_swap.py" swap "$staging" "$target"; then
+      rm -rf -- "$staging"
+      echo "the installed Beta failed verification; the previous Beta was swapped back atomically and nothing was opened" >&2
+    elif [ "$had_previous" -eq 0 ] && python3 "$ROOT_DIR/script/beta_install_swap.py" place "$target" "$staging"; then
+      rm -rf -- "$staging"
+      echo "the installed Beta failed verification and was removed again; nothing was opened" >&2
+    else
+      echo "the installed Beta failed verification and could not be moved back; nothing was opened or deleted." >&2
+      echo "Inspect $target and $staging." >&2
+    fi
+    return 1
+  fi
+
+  RUNTIME_APP_BUNDLE="$target"
+  BETA_INSTALL_PATH="$target"
+  activity="$(beta_bundle_activity "$target")"
+  if [ -n "$activity" ]; then
+    echo "note: started from the Beta during the installation (nothing was quit):"
+    sed 's/^/  /' <<<"$activity"
+  fi
+  note_beta_extension "$target" "Finder extension processes after the exchange"
+  helper_after="$(python3 "$ROOT_DIR/script/helper_upgrade_status.py" capture "$FAN_HELPER_LABEL" "$target/Contents/Resources/$FAN_HELPER_NAME")"
+  python3 "$ROOT_DIR/script/helper_upgrade_status.py" compare "$helper_before" "$helper_after"
+  echo "installed without opening: $target (build $APP_BUILD)"
+  if [ "$had_previous" -eq 1 ]; then
+    mkdir -p "$backup_dir"
+    if ! python3 "$ROOT_DIR/script/beta_install_swap.py" backup-place "$staging" "$backup_dir/测试版.app.previous"; then
+      echo "the previous Beta could not be moved to $backup_dir and is still at $staging" >&2
+      return 1
+    fi
+    echo "previous Beta kept at: $backup_dir/测试版.app.previous"
+    echo "  to go back (with nothing running from the Beta):"
+    echo "  python3 script/beta_install_swap.py swap \"$backup_dir/测试版.app.previous\" \"$target\""
+  fi
+  echo "next (approved acceptance only): script/launch_beta_acceptance.sh --log <new absolute file> [--display NAME] [--panel]"
 }
 
 open_app() {
@@ -1615,7 +1857,9 @@ case "$MODE" in
     echo "verified: app bundle assembled without launching"
     ;;
   beta)
-    if [ "$BETA_INSTALL" -eq 1 ]; then
+    if [ "$BETA_INSTALL" -eq 1 ] && [ "$BETA_NO_LAUNCH" -eq 1 ]; then
+      install_beta_without_launch
+    elif [ "$BETA_INSTALL" -eq 1 ]; then
       install_beta
       if [ "$BETA_VERIFY" -eq 1 ] || [ "$BETA_SCREENSHOTS" -eq 1 ]; then
         verify_visible_window

@@ -128,7 +128,9 @@ struct LightfieldBubblePlacement: Equatable, Identifiable {
 
 enum LightfieldBubbleLayout {
     static let hoverScale: CGFloat = 1.04
-    static let labelThreshold: CGFloat = 100
+    /// D193③: bubbles from about 80 pt across show their name and size (was
+    /// 100 pt; the 92 pt "worktrees" bubble showed only its icon).
+    static let labelThreshold: CGFloat = 80
     /// Approved field: the largest bubble is at most 180 pt, with about 7 pt
     /// between bubbles at that size (0.08 of the largest radius).
     static let maximumDiameter: CGFloat = 180
@@ -140,6 +142,14 @@ enum LightfieldBubbleLayout {
     static let otherID = "lightfield.bubble.other"
     /// Bubbles this small are not useful AX targets (merged tail covers them).
     static let minimumAccessibleDiameter: CGFloat = 20
+
+    /// D154 batch 3N: a real icon (CleanMyMac's Space Lens bubbles) fills more
+    /// of the bubble than the option glyph and, when the name and size show,
+    /// leaves them their two lines; at most 56 pt.
+    static func pictureSide(diameter: CGFloat, labelled: Bool) -> CGFloat {
+        let room = labelled ? diameter * 0.7 - 44 : diameter * 0.62
+        return max(12, min(56, room.rounded(.down)))
+    }
 
     struct Merged: Equatable {
         /// Valid, de-duplicated, value-descending (id ascending on ties); the

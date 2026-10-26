@@ -109,7 +109,9 @@ final class BatteryChargeLimitPresentationTests: XCTestCase {
         XCTAssertTrue(details.contains("BatteryChargeLimitPresentation.manualTargetLabel(target)"))
         XCTAssertTrue(details.contains("BatteryChargeLimitPresentation.sourceCaption(chargeLimitState)"))
         XCTAssertTrue(details.contains("BatteryChargeLimitPresentation.fullChargeStatus("))
-        XCTAssertTrue(details.contains("if showsFullChargeAction && temporaryFullChargeStatus == nil {\n                    fullChargeButton"))
+        // D124: the action is a row of the charge-limit text section, one
+        // level shallower than the old group's stack.
+        XCTAssertTrue(details.contains("if showsFullChargeAction && temporaryFullChargeStatus == nil {\n                fullChargeButton"))
         XCTAssertTrue(details.contains(".disabled(!canRequestFullCharge)"))
         XCTAssertTrue(details.contains("打开电池设置"))
         let power = try String(contentsOf: root.appendingPathComponent(
@@ -234,16 +236,20 @@ final class BatteryChargeLimitPresentationTests: XCTestCase {
         for language in [true, false] {
             XCTAssertEqual(BatteryChargeLimitPresentation.energyModeCardTitle(
                 mode: .automatic, state: state(.optimized, effective: 80), usesChinese: language
-            ), language ? "自动 · 上限 80%" : "Auto · Limit 80%")
+            // D138: iStat's 'Power.Automatic' (was "Auto · Limit 80%").
+            ), language ? "自动 · 上限 80%" : "Automatic · Limit 80%")
             XCTAssertEqual(BatteryChargeLimitPresentation.energyModeCardTitle(
                 mode: .lowPower, state: state(.manual, effective: 80), usesChinese: language
-            ), language ? "低功耗 · 上限 80%" : "Low Power · Limit 80%")
+            // D124: iStat's and macOS's Chinese mode name (was 低功耗).
+            ), language ? "低能耗 · 上限 80%" : "Low Power · Limit 80%")
             XCTAssertEqual(BatteryChargeLimitPresentation.energyModeCardTitle(
                 mode: .automatic, state: state(.none, effective: 100), usesChinese: language
-            ), language ? "自动 · 无上限" : "Auto · No limit")
+            // D138: was "Auto · No limit".
+            ), language ? "自动 · 无上限" : "Automatic · No limit")
             XCTAssertEqual(BatteryChargeLimitPresentation.energyModeCardTitle(
                 mode: .automatic, state: nil, usesChinese: language
-            ), language ? "自动" : "Auto", "读不到上限时仍保留已知能源模式")
+            // D138: was "Auto".
+            ), language ? "自动" : "Automatic", "读不到上限时仍保留已知能源模式")
             XCTAssertEqual(BatteryChargeLimitPresentation.energyModeCardTitle(
                 mode: nil, state: state(.optimized, effective: 80), usesChinese: language
             ), language ? "上限 80%" : "Limit 80%", "未知能源模式不能编造自动")
@@ -259,7 +265,8 @@ final class BatteryChargeLimitPresentationTests: XCTestCase {
                                language ? "本次充满" : "Full this time")
                 XCTAssertEqual(BatteryChargeLimitPresentation.energyModeCardTitle(
                     mode: .automatic, state: value, usesChinese: language),
-                    language ? "自动 · 本次充满" : "Auto · Full this time")
+                    // D138: iStat's 'Power.Automatic' (was "Auto · Full this time").
+                    language ? "自动 · 本次充满" : "Automatic · Full this time")
                 XCTAssertEqual(BatteryChargeLimitPresentation.summary(value, usesChinese: language),
                                language ? "本次充到 100%" : "Charging to 100% this time")
             }
@@ -283,6 +290,7 @@ final class BatteryChargeLimitPresentationTests: XCTestCase {
         let start = try XCTUnwrap(details.range(of: "private struct GeekChargeTargetSetting"))
         let guardStart = try XCTUnwrap(details.range(of: "if chargeLimitState?.availableTargets.isEmpty == false {",
                                                    range: start.lowerBound..<details.endIndex))
+        // D149: the targets are one row of segments again (D124: tick rows).
         let picker = try XCTUnwrap(details.range(of: "chargeTargetSegments", range: guardStart.lowerBound..<details.endIndex))
         let explanation = try XCTUnwrap(details.range(of: "Text(BatteryChargeLimitPresentation.manualLimitUnavailableMessage())",
                                                     range: picker.lowerBound..<details.endIndex))

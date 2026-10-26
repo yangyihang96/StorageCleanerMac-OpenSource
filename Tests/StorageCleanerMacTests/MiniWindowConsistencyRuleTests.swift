@@ -120,9 +120,18 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         let overview = try source("GeekOverviewPresentation.swift")
         let disk = try XCTUnwrap(overview.components(separatedBy: "struct GeekDiskPresentation: View {").last?
             .components(separatedBy: "struct GeekBatteryPresentation").first)
-        XCTAssertTrue(disk.contains(".frame(width: proxy.size.width * storageSnapshot.userUsedRatio)"))
+        // D118 (2026-10-18): the bar became iStat's 26 pt ring, still filled
+        // to the used share; the card's rows are the volume name and
+        // "560 GB 可用", and VoiceOver reads the summary sentence. Were
+        // `.frame(width: proxy.size.width * storageSnapshot.userUsedRatio)` and
+        // `Text(Self.capacitySummary(storageSnapshot))`.
+        XCTAssertTrue(disk.contains("progress: Self.ringProgress(storageSnapshot)"))
+        let gigabyte: Int64 = 1_000_000_000
+        let fixture = StorageCapacitySnapshot(totalBytes: 1_000 * gigabyte, availableBytes: 560 * gigabyte)
+        XCTAssertEqual(GeekDiskPresentation.ringProgress(fixture), fixture.userUsedRatio, accuracy: 0.000_001)
         XCTAssertFalse(disk.contains("1 - storageSnapshot.userUsedRatio"))
-        XCTAssertTrue(disk.contains("Text(Self.capacitySummary(storageSnapshot))"))
+        XCTAssertTrue(disk.contains("Text(Self.availableText(storageSnapshot))"))
+        XCTAssertTrue(disk.contains(".accessibilityValue(Self.capacitySummary(storageSnapshot))"))
         XCTAssertFalse(disk.contains("Text(L10n.text(\"已用 \\(storagePercentText)\""))
         XCTAssertTrue(disk.contains(".help(GeekDiskCapacityWording.availableHelp)"))
         XCTAssertTrue(try source("GeekDiskView.swift").contains("GeekDiskCapacityWording.volumeSummary("))
@@ -131,7 +140,11 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         // Disk byte totals share the decimal file style of the capacities.
         XCTAssertFalse(detail.contains("ByteFormat.string(Int64(clamping: counters."))
         XCTAssertFalse(detail.contains("ByteFormat.string(Int64(clamping: mode == .read"))
-        XCTAssertTrue(detail.contains("ByteFormat.storageString(Int64(clamping: counters.readBytes))"))
+        // D121 (2026-10-18): the totals are rows below the graph card, "—"
+        // until read (was `ByteFormat.storageString(Int64(clamping: counters.readBytes))`).
+        // D128 (2026-10-19): iStat's transferred totals (was
+        // `counters.map { ByteFormat.storageString(Int64(clamping: $0.readBytes)) }`).
+        XCTAssertTrue(detail.contains("counters.map { IStatNumberFormat.space($0.readBytes, style: .totals) }"))
     }
 
     func testTertiaryHistoriesShowAxisFooterWithScaleAndUnrecordedLegend() throws {
@@ -149,7 +162,8 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         english.restore()
 
         XCTAssertEqual(GeekHistoryAxisFooter.rangeText(0...100, unit: .percent), "0–100%")
-        XCTAssertEqual(GeekHistoryAxisFooter.rangeText(0...100, unit: .temperature), "0–100°C")
+        // D128 (2026-10-19): iStat's whole degrees without the scale (was "0–100°C").
+        XCTAssertEqual(GeekHistoryAxisFooter.rangeText(0...100, unit: .temperature), "0–100°")
         XCTAssertEqual(GeekHistoryAxisFooter.rangeText(0...4_000, unit: .fanRPM), "0–4,000 rpm")
         XCTAssertNil(GeekHistoryAxisFooter.rangeText(0...1, unit: .bytesPerSecond))
 
@@ -157,8 +171,11 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         // through the plot block (no footer placed with a page's own row
         // spacing); the charts keep their built-in labels off (contract in
         // PanelChartNormalizationTests), so the footer is the only axis row.
-        for (file, count) in [("GeekHoverDetailTarget.swift", 7), ("GeekMemoryCompositionView.swift", 1),
-                              ("GeekSensorsPowerHoverDetails.swift", 3)] {
+        // D122 (2026-10-18): the CPU usage page is a history page (target was 7).
+        // D132 (2026-10-19): iStat's battery history page has no axis row
+        // (sensors was 3).
+        for (file, count) in [("GeekHoverDetailTarget.swift", 8), ("GeekMemoryCompositionView.swift", 1),
+                              ("GeekSensorsPowerHoverDetails.swift", 2)] {
             let text = try source(file)
             XCTAssertEqual(text.components(separatedBy: ".geekHistoryAxis(GeekHistoryAxisFooter(").count - 1, count, file)
             XCTAssertEqual(text.components(separatedBy: "GeekHistoryAxisFooter(").count - 1, count,
@@ -177,10 +194,14 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         // measures the rendered block.
         XCTAssertEqual(MiniWindowStyleTokens.historyChartHeight + GeekHistoryAxisFooter.height,
                        MiniWindowStyleTokens.historyPlotHeight)
-        XCTAssertEqual(MiniWindowStyleTokens.historyPlotHeight, 154, "The plot height before the axis row existed")
-        let cpuHistoryContent = MiniWindowStyleTokens.controlRowHeight + 2 * MiniWindowStyleTokens.cardSpacing
-            + MiniWindowStyleTokens.historyPlotHeight
-        XCTAssertLessThanOrEqual(cpuHistoryContent, MiniWindowStyleTokens.historyContentHeight)
+        // D121 (2026-10-18): iStat's plot, H − 33 in the 200 pt card, from 25
+        // to 8 pt above its bottom. Was 154 (the plot height before the axis
+        // row existed), below a 24 pt range row and two 7 pt gaps.
+        XCTAssertEqual(MiniWindowStyleTokens.historyPlotHeight, 167)
+        XCTAssertEqual(MiniWindowStyleTokens.historyPlotTop + MiniWindowStyleTokens.historyPlotHeight
+                           + MiniWindowStyleTokens.contentInset,
+                       MiniWindowStyleTokens.historyCardHeight)
+        XCTAssertEqual(MiniWindowStyleTokens.historyCardHeight, MiniWindowStyleTokens.historyContentHeight)
 
         // VoiceOver reads the gap legend's meaning, not only the tooltip.
         let chinese2 = RuleTestLanguageScope(.zhHans)
@@ -205,19 +226,70 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         }
     }
 
+    func testMirroredThroughputHistoriesSayTheirHalvesScaleSeparately() throws {
+        // D117: network upload/download and disk read/write halves each fit
+        // their own peak, so their axis row says so instead of "纵轴自动".
+        let chinese = RuleTestLanguageScope(.zhHans)
+        XCTAssertEqual(GeekHistoryAxisFooter.scaleLabel(nil, halvesScaleSeparately: true), "上下各自缩放")
+        XCTAssertEqual(GeekHistoryAxisFooter.scaleLabel(nil), "纵轴自动")
+        XCTAssertEqual(GeekHistoryAxisFooter.scaleLabel("0–100%", halvesScaleSeparately: true), "纵轴 0–100%")
+        XCTAssertEqual(GeekHistoryAxisFooter.centerLabel(valueRange: nil, isUpdating: true, halvesScaleSeparately: true),
+                       "更新中…")
+        XCTAssertTrue(GeekHistoryAxisFooter.accessibilitySummary(
+            duration: 3_600, valueRange: nil, showsGapLegend: true, halvesScaleSeparately: true
+        ).contains("上下各自缩放，两半的柱高不能直接比较"))
+        XCTAssertFalse(GeekHistoryAxisFooter.accessibilitySummary(duration: 3_600, valueRange: nil, showsGapLegend: true)
+            .contains("两半"))
+        XCTAssertTrue(GeekHistoryAxisFooter.halvesHelp.contains("悬停提示"))
+        chinese.restore()
+        let english = RuleTestLanguageScope(.english)
+        XCTAssertEqual(GeekHistoryAxisFooter.scaleLabel(nil, halvesScaleSeparately: true), "Each half auto-scaled")
+        english.restore()
+
+        let target = try source("GeekHoverDetailTarget.swift")
+        XCTAssertEqual(target.components(separatedBy: "halvesScaleSeparately: true").count - 1, 2,
+                       "The network history and the combined disk I/O history")
+        let network = try XCTUnwrap(target.components(separatedBy: "struct GeekNetworkHistoryHoverDetail: View {").last?
+            .components(separatedBy: "\n}\n").first)
+        XCTAssertTrue(network.contains("halvesScaleSeparately: true"))
+        let combinedDisk = try XCTUnwrap(target.components(separatedBy: "struct GeekDiskIOHoverDetail: View {").last?
+            .components(separatedBy: "\n}\n").first)
+        XCTAssertTrue(combinedDisk.contains("halvesScaleSeparately: true"))
+        let singleDisk = try XCTUnwrap(target.components(separatedBy: "struct GeekDiskThroughputHoverDetail: View {").last?
+            .components(separatedBy: "\n}\n").first)
+        XCTAssertFalse(singleDisk.contains("halvesScaleSeparately"), "A single-direction chart has one scale")
+
+        // The longer label keeps the axis row on one line and one row high.
+        for language in [AppLanguage.zhHans, .english] {
+            let scope = RuleTestLanguageScope(language)
+            defer { scope.restore() }
+            let footer = GeekHistoryAxisFooter(duration: 2_419_200, halvesScaleSeparately: true)
+            XCTAssertLessThanOrEqual(NSHostingView(rootView: footer).fittingSize.width,
+                                     MiniWindowStyleTokens.historyWidth - 2 * MiniWindowStyleTokens.contentInset,
+                                     "\(language)")
+            let host = NSHostingView(rootView: Color.clear.geekHistoryAxis(footer)
+                .frame(width: MiniWindowStyleTokens.historyWidth - 2 * MiniWindowStyleTokens.contentInset))
+            XCTAssertEqual(host.fittingSize.height, MiniWindowStyleTokens.historyPlotHeight, accuracy: 0.01, "\(language)")
+        }
+    }
+
     func testHeadingsKeepTheHeaderColorAndCPULoadColorsTheTotals() throws {
         // Review of batch 2b: state colors live on data and buttons only.
         let components = try source("GeekPanelComponents.swift")
         let header = try XCTUnwrap(components.components(separatedBy: "struct GeekModuleHeader<Trailing: View>: View {").last?
             .components(separatedBy: "struct GeekSectionTitle").first)
         XCTAssertFalse(header.contains("iconTint"), "The module icon always takes the section-header color")
-        XCTAssertTrue(header.contains("GeekModuleLabel(systemImage: systemImage, tint: metricColors.sectionHeader)"))
+        // D118 (2026-10-18): iStat titles are text only; the title takes the
+        // section-header color. Was
+        // `GeekModuleLabel(systemImage: systemImage, tint: metricColors.sectionHeader)`.
+        XCTAssertTrue(header.contains(".foregroundStyle(metricColors.sectionHeader)"))
+        XCTAssertFalse(header.contains("systemImage"))
         let overview = try source("GeekOverviewPresentation.swift")
         XCTAssertFalse(overview.contains("iconTint:"))
         XCTAssertFalse(overview.contains("GeekModuleLabel("), "Every overview card uses GeekModuleHeader")
         let battery = try XCTUnwrap(overview.components(separatedBy: "struct GeekBatteryPresentation: View {").last?
             .components(separatedBy: "struct GeekSensorsPresentation").first)
-        XCTAssertTrue(battery.contains("GeekModuleHeader(systemImage: AppSymbols.Monitor.battery"))
+        XCTAssertTrue(battery.contains("GeekModuleHeader(title: L10n.text(\"电池\", \"Battery\"))"))
         XCTAssertFalse(battery.contains("captionStrong"), "The battery title uses the 12 pt panel-title font")
         let cpuCard = try XCTUnwrap(overview.components(separatedBy: "struct GeekProcessorPresentation: View {").last?
             .components(separatedBy: "struct GeekMemoryPresentation").first)
@@ -227,11 +299,17 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         XCTAssertFalse(cpuCard.contains(".foregroundStyle(processorTint)"), "D43: no load-colored total in the title")
         XCTAssertTrue(cpuCard.contains("Self.headerReadout(frequency: headerFrequencyText, temperature: headerTemperatureText)"))
         let processor = try source("GeekProcessorView.swift")
-        let usage = try XCTUnwrap(processor.components(separatedBy: "private var geekProcessorUsageCard: some View {").last?
-            .components(separatedBy: "private var geekProcessorUsageHoverTarget").first)
-        XCTAssertTrue(usage.contains("GeekSectionTitle(title: L10n.text(\"CPU 占用\", \"CPU USAGE\"))"))
-        // D39: the total reads the current reading; it still carries the load color.
-        XCTAssertTrue(usage.contains("Text(percentText(cpuCurrentReading?.cpuTotal))\n                        .foregroundStyle(processorTint)"))
+        // D119: iStat's CPU menu has no total row; its LOAD row takes the
+        // place of the "CPU 占用" card, whose total carried the load color
+        // (was `GeekSectionTitle(title: L10n.text("CPU 占用", "CPU USAGE"))`
+        // and `Text(percentText(cpuCurrentReading?.cpuTotal)).foregroundStyle(processorTint)`).
+        // The title of the load row is a heading like any other.
+        XCTAssertFalse(processor.contains("private var geekProcessorUsageCard"))
+        let load = try XCTUnwrap(processor.components(separatedBy: "private var geekProcessorLoadCard: some View {").last?
+            .components(separatedBy: "private var geekProcessorLoadHoverTarget").first)
+        // D138: iStat's 'CPU.Load' (was "负载").
+        XCTAssertTrue(load.contains("GeekIStatSingleRowCard(title: L10n.text(\"平均负载量\", \"LOAD\"), value: geekProcessorLoadText)"))
+        XCTAssertFalse(load.contains("processorTint"))
         let advanced = try source("MenuBarAdvancedComponents.swift")
         XCTAssertTrue(advanced.contains("panelMetricColors.cpuLoad(cpuBreakdown?.totalPercent ?? numericValue(metricValue(.cpuUsage)))"))
 
@@ -262,12 +340,14 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
     }
 
     func testGPUMemoryHasOneName() throws {
+        // D138: iStat's 'GPU.Memory' and 'GPU.MEMShort' (were 显存, 显存 and
+        // GPU Memory).
         let chinese = RuleTestLanguageScope(.zhHans)
-        XCTAssertEqual(GeekGPUVocabulary.memory, "显存")
-        XCTAssertEqual(GeekGPUVocabulary.memoryRingTitle, "显存")
+        XCTAssertEqual(GeekGPUVocabulary.memory, "内存")
+        XCTAssertEqual(GeekGPUVocabulary.memoryRingTitle, "内存")
         chinese.restore()
         let english = RuleTestLanguageScope(.english)
-        XCTAssertEqual(GeekGPUVocabulary.memory, "GPU Memory")
+        XCTAssertEqual(GeekGPUVocabulary.memory, "Memory")
         XCTAssertEqual(GeekGPUVocabulary.memoryRingTitle, "MEM")
         english.restore()
         let processor = try source("GeekProcessorView.swift")
@@ -284,8 +364,9 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         // The axis row's scale is rounded from the readings (fanTrendMaximum),
         // so the columns below it say which range they are.
         let sensors = try source("GeekSensorsPowerHoverDetails.swift")
-        XCTAssertTrue(sensors.contains("rangeColumn(L10n.text(\"硬件最低\", \"Hardware Min\"), value: rangeValues[0])"))
-        XCTAssertTrue(sensors.contains("rangeColumn(L10n.text(\"硬件最高\", \"Hardware Max\"), value: rangeValues[1])"))
+        // D121 (2026-10-18): rows below the graph card (were `rangeColumn(…)`).
+        XCTAssertTrue(sensors.contains("GeekIStatRow(title: L10n.text(\"硬件最低\", \"Hardware Min\"), value: rangeValues[0])"))
+        XCTAssertTrue(sensors.contains("GeekIStatRow(title: L10n.text(\"硬件最高\", \"Hardware Max\"), value: rangeValues[1])"))
     }
 
     func testSelectedRowStrokeClearsRowTextAndStaysInsideTheCard() throws {
@@ -299,8 +380,13 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         let fanRow = try XCTUnwrap(sensors.components(separatedBy: "private func compactFanHistoryRow").last?
             .components(separatedBy: "private var helperSummaryTint").first)
         XCTAssertTrue(fanRow.contains("selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset"))
-        XCTAssertEqual(sensors.components(separatedBy: "selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset").count - 1, 3,
-                       "Fan, temperature and readout rows share the row outset")
+        // D119 (2026-10-18): the hardware probes list became the temperature
+        // group's last row (was a card of its own), so it takes the row outset.
+        let probeRow = try XCTUnwrap(sensors.components(separatedBy: "private var geekDetailedTemperatureRow").last?
+            .components(separatedBy: "private var geekDetailedTemperaturesPopoverSize").first)
+        XCTAssertTrue(probeRow.contains("selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset"))
+        XCTAssertEqual(sensors.components(separatedBy: "selectionOutset: GeekHoverDetailMetrics.rowSelectionOutset").count - 1, 4,
+                       "Fan, temperature, probe and readout rows share the row outset")
     }
 
     func testMiniWindowUsesSpacingTokensAndGlyphSlots() throws {
@@ -325,7 +411,9 @@ final class MiniWindowConsistencyRuleTests: XCTestCase {
         // with text keep following the text's font.
         let disk = try source("GeekDiskView.swift")
         XCTAssertFalse(disk.contains(".font(.system(size: 15, weight: .medium))"))
-        XCTAssertTrue(disk.contains("size: MiniWindowStyleTokens.moduleIconSlotSize"))
+        // D119 (2026-10-18): the network drive's globe sits in a 15 pt row
+        // (was the 16 pt module icon slot of the volume card).
+        XCTAssertTrue(disk.contains("size: GeekDiskVolumeLayout.rowGlyphSize"))
         let memory = try source("GeekMemoryView.swift")
         XCTAssertTrue(memory.contains("AppSymbolGlyph(systemImage: isSelected ? \"checkmark.circle.fill\" : \"circle\""))
     }

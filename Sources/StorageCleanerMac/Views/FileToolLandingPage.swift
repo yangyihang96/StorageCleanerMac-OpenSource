@@ -277,7 +277,10 @@ struct FeatureLandingTemplate<Accessory: View>: View {
                     }
                     .frame(maxWidth: .infinity, alignment: usesInlineNodes ? .leading : .center)
                 }
-                .frame(maxWidth: .infinity, minHeight: usesInlineNodes ? 28 : 80)
+                // 80 pt fitted the icon above the title. Since D64 a card holds
+                // one title, like the inline nodes, and the taller cards pushed
+                // the page's real controls below the fold.
+                .frame(maxWidth: .infinity, minHeight: 28)
                 }
                 .help(node.detail ?? node.title)
 #if DEBUG

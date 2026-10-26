@@ -433,7 +433,7 @@ struct BenchmarkV7DashboardView: View {
                             .accessibilityHidden(true)
                         Text(categoryTitle(category))
                             .font(AppDesignTokens.Typography.secondary)
-                        Text(measured.map { "\($0)/\(ids.count)" } ?? scoreText(score))
+                        Text(measured.map { "\($0)/\(ByteFormat.count(ids.count))" } ?? scoreText(score))
                             .font(.system(size: 24, weight: .medium))
                             .monospacedDigit()
                         Text(raw != nil ? L10n.text("项已测量", "Measured") : validScore(score) != nil
@@ -938,12 +938,12 @@ struct BenchmarkV7DashboardView: View {
                     if let gpuCoreCount = result.hardwareProfile?.gpuCoreCount {
                         detailRow(
                             L10n.text("GPU 核心数", "GPU cores"),
-                            "\(gpuCoreCount)"
+                            ByteFormat.count(gpuCoreCount)
                         )
                     }
                     detailRow(
                         L10n.text("处理器", "Processors"),
-                        "\(environment.activeProcessorCount)"
+                        ByteFormat.count(environment.activeProcessorCount)
                     )
                     detailRow(
                         L10n.text("内存", "Memory"),
@@ -1289,7 +1289,7 @@ struct BenchmarkV7DashboardView: View {
                 // BOARD N22: shown with the result (the preflight is kept with it).
                 L10n.text("开始前后台负载高，结果可能偏低。", "Background load was high before the test; results may read low.")
             case .lowAvailableMemory:
-                L10n.text("当前可用内存不足 1 GiB。", check.detail)
+                L10n.text("当前可用内存不足 1 GB。", check.detail)
             case .targetVolumeReadOnly:
                 L10n.text("测试资源所在卷为只读。", check.detail)
             case .storageSpaceInsufficient:

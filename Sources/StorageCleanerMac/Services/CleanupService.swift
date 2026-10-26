@@ -34,6 +34,45 @@ struct TrashSummary: Equatable, Sendable {
     }
 }
 
+/// D101 L5: the Trash as it was when the person asked to empty it. The
+/// confirmation shows this list's count and size, and only these entries are
+/// deleted; anything put in the Trash afterwards stays.
+struct FrozenTrash: Equatable, Sendable {
+    struct Entry: Equatable, Sendable {
+        /// The entry's own name directly inside the Trash.
+        let name: String
+        let identity: FileIdentity
+        let allocatedBytes: Int64
+    }
+
+    let trashURL: URL
+    let trashIdentity: FileIdentity
+    let entries: [Entry]
+
+    var summary: TrashSummary {
+        TrashSummary(
+            itemCount: entries.count,
+            totalBytes: entries.reduce(Int64(0)) { $0 + $1.allocatedBytes }
+        )
+    }
+}
+
+/// D101 L5: what emptying a frozen Trash did, entry by entry.
+struct FrozenTrashEmptyResult: Equatable, Sendable {
+    /// Deleted and gone afterwards; bytes are the frozen sizes.
+    var deletedCount = 0
+    var deletedBytes: Int64 = 0
+    /// Refused before anything was deleted: the entry, or the Trash folder,
+    /// is not the one frozen.
+    var skippedCount = 0
+    /// The deletion failed, the entry is still there afterwards, or reading
+    /// it back failed, so it is not known to be gone.
+    var failedCount = 0
+    /// The deleted entries' names, in frozen order: the scan result drops
+    /// only these (B-R3).
+    var deletedNames: [String] = []
+}
+
 struct TrashItemIdentity: Codable, Equatable, Sendable {
     let deviceID: UInt64
     let fileID: UInt64
@@ -121,8 +160,8 @@ struct TrashRestoreSummary: Equatable, Sendable {
 struct PartialTrashOperationError: LocalizedError, Sendable {
     let report: CleanReport
     var errorDescription: String? {
-        L10n.text("清理未全部完成：已移动 \(report.summary.movedItemCount) 条路径，请在可恢复操作中查看逐项结果。",
-                  "Cleanup was not fully completed: \(report.summary.movedItemCount) paths moved. Review individual results in Recoverable Operations.")
+        L10n.text("清理未全部完成：已移动 \(ByteFormat.count(report.summary.movedItemCount)) 条路径，请在可恢复操作中查看逐项结果。",
+                  "Cleanup was not fully completed: \(ByteFormat.count(report.summary.movedItemCount)) paths moved. Review individual results in Recoverable Operations.")
     }
 }
 
@@ -164,32 +203,80 @@ enum CleanupService {
         homeDirectory.appendingPathComponent(".Trash", isDirectory: true)
     }
 
-    static func trashSummary(
+    /// D101 L5: records the Trash folder and each entry with the identity the
+    /// permanent deleter compares, read without following links. Nil when
+    /// there is no Trash folder.
+    static func freezeTrash(
         at trashURL: URL = userTrashURL(),
         fileManager: FileManager = .default
-    ) throws -> TrashSummary {
+    ) throws -> FrozenTrash? {
         try validateTrashURL(trashURL)
-        let contents = try trashContents(at: trashURL, fileManager: fileManager)
-        return summary(for: contents, fileManager: fileManager)
+        guard let trashIdentity = try FoundationCleanupPermanentDeleter.identity(at: trashURL) else {
+            return nil
+        }
+        // The deleter refuses a Trash reached through a link; so does the freeze.
+        guard trashIdentity.entryKind == .directory,
+              !PathSafety.containsSymbolicLinkComponent(in: trashURL.path, fileManager: fileManager) else {
+            throw CleanupServiceError.invalidTrashLocation(trashURL.path)
+        }
+        let entries = try trashContents(at: trashURL, fileManager: fileManager).compactMap { url -> FrozenTrash.Entry? in
+            // An entry that is gone or unreadable now is not frozen, so it is never deleted.
+            guard let identity = try? FoundationCleanupPermanentDeleter.identity(at: url) else { return nil }
+            return FrozenTrash.Entry(
+                name: url.lastPathComponent,
+                identity: identity,
+                // Only a real folder is walked; a link's target is never measured.
+                allocatedBytes: identity.entryKind == .directory
+                    ? allocatedSize(of: url, fileManager: fileManager)
+                    : resourceAllocatedSize(url)
+            )
+        }
+        // A Trash folder swapped while it was listed is not the one frozen.
+        guard try FoundationCleanupPermanentDeleter.identity(at: trashURL) == trashIdentity else {
+            throw CleanupServiceError.invalidTrashLocation(trashURL.path)
+        }
+        return FrozenTrash(trashURL: trashURL, trashIdentity: trashIdentity, entries: entries)
     }
 
-    static func emptyUserTrash(
-        at trashURL: URL = userTrashURL(),
-        fileManager: FileManager = .default
-    ) throws -> TrashSummary {
-        try validateTrashURL(trashURL)
-        guard fileManager.fileExists(atPath: trashURL.path) else {
-            return .empty
+    /// D101 L5: permanently deletes only the frozen entries, each relative to
+    /// the frozen Trash folder (D23's deleter). An entry or a Trash folder
+    /// that changed after the freeze is refused and counted as skipped.
+    static func emptyFrozenTrash(
+        _ frozen: FrozenTrash,
+        deleter: any CleanupPermanentDeleting
+    ) async -> FrozenTrashEmptyResult {
+        var result = FrozenTrashEmptyResult()
+        for entry in frozen.entries {
+            do {
+                try await deleter.removeTrashEntry(CleanupTrashEntryDeletion(
+                    trashURL: frozen.trashURL,
+                    trashIdentity: frozen.trashIdentity,
+                    entryName: entry.name,
+                    entryIdentity: entry.identity
+                ))
+            } catch is CleanupTrashDeletionRefusal {
+                result.skippedCount += 1
+                continue
+            } catch {
+                result.failedCount += 1
+                continue
+            }
+            // As in D23: deleted only once the frozen entry is seen to be gone.
+            // B-R2: a readback that fails (EACCES, EIO) shows neither.
+            let entryURL = frozen.trashURL.appendingPathComponent(entry.name)
+            do {
+                if try FoundationCleanupPermanentDeleter.identity(at: entryURL) == entry.identity {
+                    result.failedCount += 1
+                } else {
+                    result.deletedCount += 1
+                    result.deletedBytes += entry.allocatedBytes
+                    result.deletedNames.append(entry.name)
+                }
+            } catch {
+                result.failedCount += 1
+            }
         }
-
-        let contents = try trashContents(at: trashURL, fileManager: fileManager)
-        let removedSummary = summary(for: contents, fileManager: fileManager)
-
-        for url in contents {
-            try fileManager.removeItem(at: url)
-        }
-
-        return removedSummary
+        return result
     }
 
     @discardableResult
@@ -645,15 +732,6 @@ enum CleanupService {
                 .totalFileAllocatedSizeKey
             ],
             options: []
-        )
-    }
-
-    private static func summary(for urls: [URL], fileManager: FileManager) -> TrashSummary {
-        TrashSummary(
-            itemCount: urls.count,
-            totalBytes: urls.reduce(Int64(0)) { total, url in
-                total + allocatedSize(of: url, fileManager: fileManager)
-            }
         )
     }
 

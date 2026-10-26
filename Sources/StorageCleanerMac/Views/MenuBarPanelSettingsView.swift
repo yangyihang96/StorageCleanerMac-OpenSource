@@ -14,14 +14,16 @@ final class MenuBarPanelSettingsState: ObservableObject {
     @Published private(set) var isGeekEditorPresented: Bool
     @Published private(set) var geekDashboardConfiguration: GeekDashboardConfiguration
     @Published private(set) var geekChartRanges: [String: GeekChartRange]
-    @Published private(set) var cascadeDirection = MenuBarCascadeDirection.left
+    // D123: iStat opens a submenu on the right when it fits (was left).
+    @Published private(set) var cascadeDirection = MenuBarCascadeDirection.right
     @Published private(set) var secondaryPresentationMode = MenuBarSecondaryPresentationMode.adjacent
     @Published private(set) var tertiaryPresentationMode = MenuBarTertiaryPresentationMode.column
     @Published private(set) var cascadeLayout: MenuBarCascadeLayout?
     @Published private(set) var refreshGeneration = 0
     private var configurationBeforeEditing: GeekDashboardConfiguration?
     private var configurationSubscription: AnyCancellable?
-    private let defaults: UserDefaults
+    /// The panel's preference store (the standard defaults outside tests).
+    let defaults: UserDefaults
 
     init(
         initialDensity: PanelDensity,
@@ -134,14 +136,21 @@ final class MenuBarPanelSettingsState: ObservableObject {
         let fallback = section == .power
             ? (geekDashboardConfiguration.powerChartRange ?? .oneHour)
             : geekDashboardConfiguration.chartRange
-        return geekChartRanges[section.rawValue] ?? fallback
+        return (geekChartRanges[section.rawValue] ?? fallback).normalized
     }
 
     func geekChartRange(
         for metric: GeekChartRangeMetric,
         fallbackTo section: PanelSection
     ) -> GeekChartRange {
-        geekChartRanges[metric.storageKey] ?? geekChartRange(for: section)
+        let stored = geekChartRanges[metric.storageKey]?.normalized
+        // D132: iStat's battery history offers its own seven windows, 1 day
+        // at first (`setInterval: 900`); one it lacks reads as the nearest.
+        // The battery followed the page's range (1 hour at first).
+        guard metric != .battery else {
+            return GeekIStatBatteryGraph.historyRange(stored ?? GeekIStatBatteryGraph.defaultHistoryRange)
+        }
+        return stored ?? geekChartRange(for: section)
     }
 
     func setGeekChartRange(_ range: GeekChartRange, for section: PanelSection) {

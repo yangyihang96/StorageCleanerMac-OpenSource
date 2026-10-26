@@ -441,12 +441,20 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
 
         let appearance = try sourceText("Sources/StorageCleanerMac/Support/PanelAppearanceEnvironment.swift")
         XCTAssertTrue(root.contains("PanelAppearanceEnvironment(forcedVisualMode: captureVisualMode)"))
-        XCTAssertTrue(appearance.contains("@AppStorage(PanelAppearancePreferences.miniWindowAppearanceKey)"))
+        // D135: the panel reads iStat's theme pair; was
+        // XCTAssertTrue(appearance.contains("@AppStorage(PanelAppearancePreferences.miniWindowAppearanceKey)")).
+        XCTAssertTrue(appearance.contains("@AppStorage(IStatMenuThemePreferences.darkThemeKey)"))
+        XCTAssertTrue(appearance.contains("@AppStorage(IStatMenuThemePreferences.lightThemeKey)"))
+        XCTAssertFalse(appearance.contains("@AppStorage(PanelAppearancePreferences.miniWindowAppearanceKey)"))
         XCTAssertFalse(appearance.contains(".id("))
         XCTAssertTrue(root.contains(".id(languageRawValue)"))
         XCTAssertFalse(root.contains(".id(languageRawValue + appearanceRawValue)"))
-        XCTAssertTrue(settings.contains("MiniWindowAppearance.allCases"))
-        XCTAssertTrue(settings.contains("小窗外观"))
+        // D135: were XCTAssertTrue for "MiniWindowAppearance.allCases" and
+        // "小窗外观" (the mini-window appearance control).
+        XCTAssertTrue(settings.contains("IStatMenuThemeChoice.all"))
+        XCTAssertTrue(settings.contains("深色外观主题"))
+        XCTAssertFalse(settings.contains("MiniWindowAppearance.allCases"))
+        XCTAssertFalse(settings.contains("小窗外观"))
     }
 
     func testComplexDemandTracksCurrentModuleAndGeekKeepsAttachedOverviewAlive() {
@@ -501,7 +509,8 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertTrue(geekNetwork.needsNetworkInterface)
         XCTAssertTrue(geekNetwork.needsPublicNetworkAddress)
         XCTAssertFalse(geekNetwork.needsNetworkProcesses)
-        XCTAssertTrue(PanelDensity.geek.auxiliaryDemand(for: .network, tertiaryVisible: true).needsNetworkProcesses)
+        // D167: the network page's first frame starts its app list (was `tertiaryVisible: true`).
+        XCTAssertTrue(PanelDensity.geek.auxiliaryDemand(for: .network, startsProcessLists: true).needsNetworkProcesses)
         XCTAssertTrue(geekNetwork.needsDiskIOSampling)
         XCTAssertTrue(geekNetwork.needsProcessorTelemetry)
         XCTAssertTrue(geekOverview.needsProcessorTelemetry)
@@ -683,10 +692,12 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertFalse(panel.contains("prefetchGeekDetailSnapshots"))
         XCTAssertFalse(panel.contains("store.refreshEnergyImpact("))
         XCTAssertFalse(panel.contains("store.refreshMemory("))
-        // r2-mini-sampling (D71④): process lists start only when the
-        // matching tertiary page is visible, not on the secondary page.
+        // D167: process lists start with the module page that shows them
+        // (was r2-mini-sampling: only with the matching tertiary page,
+        // "MenuBarProcessSamplingDemand.section(selectedSection, tertiaryVisible: tertiaryVisible)").
         XCTAssertTrue(view.contains("store.updateMenuBarProcessConsumer(consumerID, section: processSection)"))
-        XCTAssertTrue(view.contains("MenuBarProcessSamplingDemand.section(selectedSection, tertiaryVisible: tertiaryVisible)"))
+        XCTAssertTrue(view.contains("MenuBarProcessSamplingDemand.section(selectedSection)"))
+        XCTAssertFalse(view.contains("tertiaryVisible"))
         XCTAssertTrue(view.contains("store.updateMenuBarProcessConsumer(consumerID, section: nil)"))
     }
 
@@ -745,11 +756,16 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertTrue(availableRatio.contains("Double(userAvailableBytes) / Double(totalBytes)"))
         let diskCard = try r2SourceDeclaration("struct GeekDiskPresentation:", in: overview)
         XCTAssertTrue(diskCard.contains("usedPercent: storageSnapshot.userUsedPercent"))
-        XCTAssertTrue(diskCard.contains("ByteFormat.storageString(storageSnapshot.userAvailableBytes)"))
-        XCTAssertTrue(diskCard.contains("proxy.size.width * storageSnapshot.userUsedRatio"))
+        // D128 (2026-10-19): iStat's disk space format (was
+        // `ByteFormat.storageString(storageSnapshot.userAvailableBytes)`).
+        XCTAssertTrue(diskCard.contains("IStatNumberFormat.space(storageSnapshot.userAvailableBytes)"))
+        // D118 (2026-10-18): the bar became iStat's ring with the same used
+        // share (was `proxy.size.width * storageSnapshot.userUsedRatio`).
+        XCTAssertTrue(diskCard.contains("progress: Self.ringProgress(storageSnapshot)"))
+        XCTAssertTrue(diskCard.contains("storageSnapshot.userUsedRatio"))
         XCTAssertTrue(geekDisk.contains("capacity?.userUsedRatio"))
         let cleanupDisk = try r2SourceDeclaration("var geekCleanupDiskTile:", in: geek)
-        XCTAssertTrue(cleanupDisk.contains("ByteFormat.storageString($0.userAvailableBytes)"))
+        XCTAssertTrue(cleanupDisk.contains("IStatNumberFormat.space($0.userAvailableBytes)"), "D128: was ByteFormat.storageString")
         XCTAssertTrue(cleanupDisk.contains("progress: storageSnapshot?.userAvailableRatio"))
 
         let gigabyte: Int64 = 1_000_000_000
@@ -764,8 +780,9 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertEqual(snapshot.userUsedPercent, 44)
         XCTAssertEqual(snapshot.usedRatio, 0.70, accuracy: 1e-12)
         XCTAssertFalse(components.contains("func capacitySevenDayDeltaText("))
+        // D128: every capacity in iStat's disk space format (was `ByteFormat.storageString(`).
         for source in [overview, geek, geekDisk, cleanup, hover] {
-            XCTAssertTrue(source.contains("ByteFormat.storageString("))
+            XCTAssertTrue(source.contains("IStatNumberFormat.space("))
         }
         XCTAssertTrue(tertiary.contains("GeekDiskIOHoverDetail("))
         XCTAssertFalse(geekDisk.contains("storageSnapshot?.usedRatio"))
@@ -809,29 +826,38 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertEqual(GeekProcessorCoreLayout.valueFontSize, 8)
+        // D119 (2026-10-18): the core rings carry no number (iStat), so
+        // nothing inside them can truncate; the rows still grow with the
+        // core count. Was `valueFontSize == 8`, nine rings a row: rows 2 / 3
+        // / 4 and heights 102 / 133 / 164.
         XCTAssertTrue(components?.contains(".minimumScaleFactor(0.75)") == true)
         XCTAssertTrue(components?.contains("contentDiameter / sqrt(2)") == true)
         XCTAssertFalse(components?.contains(".fixedSize(horizontal: true, vertical: true)") == true)
+        XCTAssertEqual(GeekProcessorCoreLayout.columnCount(for: 32), 12)
+        XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 12), 1)
         XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 18), 2)
-        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 18), 102)
-        XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 19), 3)
-        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 27), 133)
-        XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 32), 4)
-        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 32), 164)
+        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 18), 90)
+        XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 25), 3)
+        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 27), 114)
+        XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: 32), 3)
+        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 32), 114)
     }
 
     func testGeekProcessorCoreGridFitsTheSharedDetailWidth() {
-        let gridWidth = CGFloat(GeekProcessorCoreLayout.columnCount) * GeekProcessorCoreLayout.ringSize
-            + CGFloat(GeekProcessorCoreLayout.columnCount - 1) * GeekProcessorCoreLayout.spacing
-        let requiredWidth = gridWidth
-            + GeekVisualTokens.cardHorizontalPadding * 2
-            + GeekPanelLayout.contentPadding * 2
-
-        XCTAssertGreaterThanOrEqual(
-            GeekPanelPresentationMetrics.detailWidth,
-            requiredWidth
-        )
+        // D119 (2026-10-18): the rings per row follow the CPU page's width
+        // (272), so every core count fits at the minimum spacing. Was a
+        // fixed nine-column grid checked against the shared 312 pt width.
+        XCTAssertEqual(GeekProcessorCoreLayout.contentWidth,
+                       GeekPanelPresentationMetrics.detailWidth(for: .processor)
+                           - GeekIStatCardGeometry.inset * 2 - GeekPanelLayout.contentPadding * 2)
+        for coreCount in 1...64 {
+            let columns = CGFloat(GeekProcessorCoreLayout.columnCount(for: coreCount))
+            let gridWidth = columns * GeekProcessorCoreLayout.ringSize
+                + (columns - 1) * GeekProcessorCoreLayout.minimumSpacing
+            XCTAssertLessThanOrEqual(gridWidth, GeekProcessorCoreLayout.contentWidth, "\(coreCount) cores")
+            XCTAssertEqual(GeekProcessorCoreLayout.rowCount(for: coreCount),
+                           (coreCount + Int(columns) - 1) / Int(columns), "\(coreCount) cores")
+        }
     }
 
     func testGeekPanelLocalizesNonTechnicalEnglishLabels() throws {
@@ -851,14 +877,18 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         for localizedLabel in [
             "L10n.text(\"风扇转速\", \"Fan Speed\")",
             "L10n.text(\"CPU 使用情况\", \"CPU Usage\")",
-            "L10n.text(\"交换内存\", \"Swap Memory\")",
-            "L10n.text(\"MAC 地址\", \"MAC Address\")",
+            // D138: iStat's 'Memory.Swap' and 'Power.HealthShort' (were
+            // "交换内存", "Swap Memory" and "电池健康", "HEALTH").
+            "L10n.text(\"已使用的交换\", \"Swap\")",
+            // D125 (2026-10-19): iStat's labels for the MAC address and the
+            // channel (were "MAC 地址" and "频道").
+            "L10n.text(\"MAC地址\", \"MAC Address\")",
             "L10n.text(\"GPU 温度\", \"GPU Temperature\")",
             "L10n.text(\"电池\", \"BATTERY\")",
-            "L10n.text(\"电池健康\", \"HEALTH\")",
+            "L10n.text(\"健康\", \"HEALTH\")",
             "L10n.text(\"左侧风扇\", \"Left Fan\")",
             "L10n.text(\"公共 IP 地址\", \"Public IP Addresses\")",
-            "L10n.text(\"频道\", \"Channel\")",
+            "L10n.text(\"频段\", \"Channel\")",
             "L10n.text(\"CPU 性能核心\", \"CPU P-Cores\")",
             "L10n.text(\"左侧雷雳\", \"Thunderbolt Left\")",
             "L10n.text(\"App 功耗\", \"APP POWER\")",

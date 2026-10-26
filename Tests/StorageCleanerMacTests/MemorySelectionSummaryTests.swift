@@ -136,7 +136,8 @@ final class MemorySelectionSummaryTests: XCTestCase {
             .components(separatedBy: "private struct MemoryAppSelectionTableHeader").first)
         XCTAssertTrue(row.contains("String(process.id)"))
         XCTAssertTrue(row.contains("process.availability == .available"))
-        XCTAssertTrue(row.contains("ByteFormat.string(process.residentBytes)"))
+        // D178: memory as Activity Monitor writes it (was `ByteFormat.string(process.residentBytes)`).
+        XCTAssertTrue(row.contains("ByteFormat.memoryString(process.residentBytes)"))
         XCTAssertTrue(row.contains("process.capturedAt.formatted"))
         XCTAssertFalse(row.contains("Button("))
         XCTAssertFalse(row.contains("Toggle("))

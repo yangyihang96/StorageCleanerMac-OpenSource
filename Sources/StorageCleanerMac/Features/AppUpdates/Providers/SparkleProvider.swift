@@ -89,12 +89,13 @@ final class SparkleProvider: ApplicationUpdateProvider, @unchecked Sendable {
                 return .init(status: .upToDate, availableVersion: nil, releaseDate: nil, releaseNotes: nil, downloadSize: nil, warning: nil)
             }
             guard ["zip", "dmg"].contains(release.downloadURL.pathExtension.lowercased()) else {
-                return .init(status: .applicationUpdateRequired, availableVersion: release.version, releaseDate: nil, releaseNotes: nil,
-                    downloadSize: release.byteCount, warning: SparkleAutomaticUpdateError.unsupportedArchive.localizedDescription)
+                return .init(status: .applicationUpdateRequired, availableVersion: release.version, releaseDate: release.releaseDate,
+                    releaseNotes: release.releaseNotes, downloadSize: release.byteCount,
+                    warning: SparkleAutomaticUpdateError.unsupportedArchive.localizedDescription)
             }
             stateLock.withLock { releases[application.id] = release }
-            return .init(status: .automaticallyUpdatable, availableVersion: release.version, releaseDate: nil, releaseNotes: nil,
-                downloadSize: release.byteCount, warning: nil)
+            return .init(status: .automaticallyUpdatable, availableVersion: release.version, releaseDate: release.releaseDate,
+                releaseNotes: release.releaseNotes, downloadSize: release.byteCount, warning: nil)
         }
         guard let configuration = ApplicationMetadataReader.sparkleConfiguration(at: application.bundleURL),
               configuration.isEligibleForReadOnlyProbe else {

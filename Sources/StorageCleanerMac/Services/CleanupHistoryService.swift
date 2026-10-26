@@ -208,7 +208,7 @@ enum CleanupHistoryService {
             "- \(L10n.text("批次", "Batch")): \(entry.title)",
             "- \(L10n.text("时间", "Time")): \(entry.date.formatted(date: .abbreviated, time: .shortened))",
             "- \(L10n.text("项目", "Items")): \(L10n.items(entry.itemCount))",
-            "- \(L10n.text("移入体积", "Moved Size")): \(ByteFormat.string(entry.totalBytes))",
+            "- \(L10n.text("移入体积", "Moved Size")): \(ByteFormat.storageString(entry.totalBytes))",
             "- \(L10n.text("安全边界", "Safety Boundary")): \(L10n.text("这些项目只是移到废纸篓，清空废纸篓前仍可恢复。", "These items were only moved to Trash and remain recoverable until Trash is emptied."))",
             "",
             "## \(L10n.text("路径", "Paths"))"

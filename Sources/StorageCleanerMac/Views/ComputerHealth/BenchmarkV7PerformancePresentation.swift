@@ -247,7 +247,7 @@ struct BenchmarkV7RunProgressView: View {
             )
             HStack(spacing: 12) {
                 if let repetition = state.repetition, repetition > 0 {
-                    Text(L10n.text("第 \(repetition) 次采样", "Sample \(repetition)"))
+                    Text(L10n.text("第 \(ByteFormat.count(repetition)) 次采样", "Sample \(ByteFormat.count(repetition))"))
                         .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -397,8 +397,8 @@ struct BenchmarkV7RunProgressView: View {
             return L10n.text("环境检查完成后，将依次运行 18 项 Core 并保存", "After the environment check, 18 Core workloads run and are saved")
         }
         return L10n.text(
-            "第 \(currentStage.rawValue + 1) / \(Stage.allCases.count) 阶段 · \(currentStage.title)",
-            "Stage \(currentStage.rawValue + 1) of \(Stage.allCases.count) · \(currentStage.title)"
+            "第 \(currentStage.rawValue + 1) / \(ByteFormat.count(Stage.allCases.count)) 阶段 · \(currentStage.title)",
+            "Stage \(currentStage.rawValue + 1) of \(ByteFormat.count(Stage.allCases.count)) · \(currentStage.title)"
         )
     }
 
@@ -713,7 +713,7 @@ struct BenchmarkSystemMonitor: View {
                         ),
                     ],
                     valueRange: 0...100,
-                    unit: .percent,
+                    unit: .percentWithTenths,
                     accessibilityLabel: L10n.text(
                         "CPU 与 GPU 实时负载",
                         "Live CPU and GPU load"
@@ -805,7 +805,7 @@ struct BenchmarkSystemMonitor: View {
 
     static func loadText(_ value: Double?) -> String {
         guard let value, value.isFinite, (0...100).contains(value) else { return "—" }
-        return GeekChartUnit.percent.formatted(value)
+        return GeekChartUnit.percentWithTenths.formatted(value)
     }
 
     static func temperatureText(_ value: Double?) -> String {

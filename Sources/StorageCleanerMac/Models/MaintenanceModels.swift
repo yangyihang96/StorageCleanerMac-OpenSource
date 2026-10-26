@@ -119,12 +119,12 @@ struct SmartMaintenancePlan: Equatable, Sendable {
         }
 
         let opportunity = opportunityBytes > 0
-            ? ByteFormat.string(opportunityBytes)
+            ? ByteFormat.storageString(opportunityBytes)
             : L10n.text("无明显空间收益", "no obvious space gain")
 
         return L10n.text(
-            "可从总览直接推进 \(quickStartTasks.count) 项，另有 \(reviewTasks.count) 项需要你确认；预计安全收益 \(opportunity)。",
-            "\(quickStartTasks.count) items can start from Overview, \(reviewTasks.count) need your review; estimated safe gain is \(opportunity)."
+            "可从总览直接推进 \(ByteFormat.count(quickStartTasks.count)) 项，另有 \(ByteFormat.count(reviewTasks.count)) 项需要你确认；预计安全收益 \(opportunity)。",
+            "\(ByteFormat.count(quickStartTasks.count)) items can start from Overview, \(ByteFormat.count(reviewTasks.count)) need your review; estimated safe gain is \(opportunity)."
         )
     }
 }

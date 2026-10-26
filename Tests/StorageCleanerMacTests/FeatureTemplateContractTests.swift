@@ -129,6 +129,8 @@ final class FeatureTemplateContractTests: XCTestCase {
                 if state.module == .startup { StartupItemsView(store: store) }
                 else { MemoryOptimizerView(store: store) }
             }
+            // D144: the D70 running page is the memory module's classic view.
+            .environment(\.careStudioClassicResults, true)
             .environment(\.featurePresentationIsFixture, true)
             .environment(\.moduleTheme, state.module.moduleTheme)
             let host = CalibrationAppKitLayoutHost(root: root, size: sizes[2], dark: true)

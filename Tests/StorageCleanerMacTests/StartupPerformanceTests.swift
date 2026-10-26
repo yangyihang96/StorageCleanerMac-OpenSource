@@ -295,8 +295,11 @@ final class ResidentStartupScheduleTests: XCTestCase {
         let at = Date(timeIntervalSince1970: 100_000)
         let context = MenuBarSamplingContext()
         context.beginStartup(now: at)
+        // D127: one loop at the selected interval (default 2 s) reads every
+        // source; the test names the interval instead of relying on the
+        // context's own default.
         context.configure(statusMode: .cpu, statusVisible: true, panelVisible: false,
-            customFanControlActive: false, paused: false, now: at)
+            customFanControlActive: false, paused: false, now: at, selectedInterval: 2)
         for source in ResidentStartupSchedule.Source.allCases {
             XCTAssertFalse(context.permitsStartupSource(source, now: at))
             XCTAssertFalse(context.permitsStartupSource(source, now: at.addingTimeInterval(source.offset - 0.01)))
@@ -304,13 +307,16 @@ final class ResidentStartupScheduleTests: XCTestCase {
             XCTAssertLessThanOrEqual(source.offset, 4)
         }
         XCTAssertEqual(context.plan?.primaryKinds, MenuBarMetricKind.defaultSelection)
-        XCTAssertEqual(context.plan?.cadence.expensive, 5)
-        XCTAssertEqual(context.plan?.cadence.processes, 15)
+        // D127: process lists share the selected tick (was expensive 5, processes 15).
+        XCTAssertEqual(context.plan?.cadence.expensive, 2)
+        XCTAssertEqual(context.plan?.cadence.processes, 2)
         XCTAssertEqual(context.plan?.cadence.helperPower, 60)
         context.configure(statusMode: .cpu, statusVisible: true, panelVisible: true,
-            customFanControlActive: false, paused: false, now: at)
+            customFanControlActive: false, paused: false, now: at, selectedInterval: 2)
         for source in ResidentStartupSchedule.Source.allCases { XCTAssertTrue(context.permitsStartupSource(source, now: at)) }
         XCTAssertTrue(context.plan?.permitsStartupHardware == true)
+        XCTAssertEqual(context.plan?.cadence.expensive, 2)
+        XCTAssertEqual(context.plan?.cadence.processes, 2)
     }
 
     @MainActor
@@ -361,8 +367,9 @@ final class ResidentStartupScheduleTests: XCTestCase {
     func testAuxiliaryPhysicalReadersAreStaggeredAndKeepAttemptFloors() async throws {
         let reads = StartupWorkCounter(), context = MenuBarSamplingContext()
         context.beginStartup(now: reads.now)
+        // D127: the default 2 s tick, named instead of the context's own default.
         context.configure(statusMode: .cpu, statusVisible: true, panelVisible: false,
-            customFanControlActive: false, paused: false, now: reads.now)
+            customFanControlActive: false, paused: false, now: reads.now, selectedInterval: 2)
         let state = MenuBarAuxiliaryMonitorState(collectionClock: { reads.now },
             batteryAvailabilityProvider: { .present }, diskCounterProvider: { reads.read("disk"); return nil },
             storageVolumeProvider: { reads.read("volumes"); return .empty },
@@ -387,23 +394,37 @@ final class ResidentStartupScheduleTests: XCTestCase {
         XCTAssertEqual(reads.count("power"), 0)
         reads.advance(1)
         state.refreshResidentSamples()
-        try await StartupTestWait.until { reads.count("nettop") == 1 && !state.isNetworkProcessRefreshActive }
+        await Task.yield()
+        // D127, D167: the network app list is read only while the network page
+        // is open, so its startup slot reads nothing with the panel closed
+        // (was: one nettop read here).
+        XCTAssertEqual(reads.count("nettop"), 0)
+        XCTAssertFalse(state.isNetworkProcessRefreshActive)
         XCTAssertEqual(reads.count("ioreport"), 0)
         reads.advance(0.5)
         state.refreshResidentSamples()
         try await StartupTestWait.until { reads.count("ioreport") == 1 && !state.isProcessorRefreshActive }
         reads.advance(0.5)
         state.refreshResidentSamples()
-        try await StartupTestWait.until { reads.count("power") == 1 && !state.isPowerTelemetryRefreshActive }
-        XCTAssertEqual(reads.count("disk"), 1, "No accelerated cheap reads from finite startup turns")
+        // D127: every 2 s tick reads the disk, so the turn at 3 s is its second
+        // read; the turns at 2 s and 2.5 s add none (was 1, against the old
+        // 5 s expensive floor).
+        try await StartupTestWait.until {
+            reads.count("power") == 1 && !state.isPowerTelemetryRefreshActive && reads.count("disk") == 2
+        }
+        XCTAssertEqual(reads.count("disk"), 2, "No accelerated cheap reads from finite startup turns")
         XCTAssertEqual(state.powerTelemetry?.generatedAt, reads.now, "Use the real source date")
-        reads.advance(2.99)
+        // D127: the next read is due one tick later, less the 0.1 s tolerance
+        // (was: still 1 after 2.99 s, 2 after 3 s, against the 5 s floor).
+        reads.advance(1.85)
         state.refreshResidentSamples()
         await Task.yield()
-        XCTAssertEqual(reads.count("disk"), 1)
-        reads.advance(0.01)
+        XCTAssertEqual(reads.count("disk"), 2)
+        reads.advance(0.1)
         state.refreshResidentSamples()
-        try await StartupTestWait.until { reads.count("disk") == 2 }
-        XCTAssertEqual(reads.count("nettop"), 1, "D75's separate hidden network floor remains")
+        try await StartupTestWait.until { reads.count("disk") == 3 }
+        // D127 replaced D75's hidden network reads (was 1, "D75's separate
+        // hidden network floor remains"): nothing reads nettop while closed.
+        XCTAssertEqual(reads.count("nettop"), 0, "D127: no network app list while its page is closed")
     }
 }

@@ -179,6 +179,85 @@ final class CleanupStoreFollowUpTests: XCTestCase {
         )
     }
 
+    // MARK: Studio result page (D141 revision, live check 2026-10-20)
+
+    /// "重新开始" on a result page, before anything is cleaned, leaves the
+    /// results for the start page of every cleanup route, and scans nothing.
+    /// Before, it called `resetSmartScanPresentation`, which only leaves a
+    /// terminal page, and the results stayed.
+    func testStartOverFromTheResultsReturnsToTheStartPages() async throws {
+        let fixture = try makeFixture(caches: ["com.example.idle"])
+        let store = try await fixture.scannedStore(for: self, route: .green)
+        XCTAssertEqual(store.scanPresentationState, .results)
+        XCTAssertNotNil(store.cleanupSession(for: .green))
+
+        store.startOverV2Results()
+
+        XCTAssertEqual(store.scanPresentationState, .idle)
+        XCTAssertNil(store.scanPresentationSessionID)
+        XCTAssertNil(store.cleanupScanSession)
+        XCTAssertEqual(store.cleanupWorkflowState, .idle)
+        XCTAssertNil(store.cleanupSession(for: .green))
+        XCTAssertNil(store.cleanupSession(for: .overview))
+        XCTAssertEqual(fixture.scanRequests.all.count, 1, "starting over does not scan")
+    }
+
+    /// "重新扫描" on a result page, before anything is cleaned, scans the
+    /// shown session's scope again on its page. Before, it called
+    /// `rescanAfterV2Cleanup`, which only runs after a terminal outcome.
+    func testScanAgainFromTheResultsScansTheSameScope() async throws {
+        let fixture = try makeFixture(caches: ["com.example.idle"])
+        let store = try await fixture.scannedStore(for: self, laterScans: 1, route: .green)
+        let firstSessionID = try XCTUnwrap(store.cleanupScanSession?.id)
+        XCTAssertEqual(store.scanPresentationState, .results)
+        store.selectedFilter = .privacy
+
+        store.rescanV2Results()
+
+        try await waitUntil {
+            store.scanPresentationState == .results && store.cleanupScanSession?.id != firstSessionID
+        }
+        XCTAssertEqual(store.selectedFilter, .green)
+        XCTAssertEqual(fixture.scanRequests.all.count, 2)
+        XCTAssertEqual(
+            fixture.scanRequests.all.last?.includedRuleIDs,
+            fixture.scanRequests.all.first?.includedRuleIDs,
+            "The second scan covers the same Safe Cleanup rules"
+        )
+    }
+
+    /// While a cleanup waits for its confirmation, neither leaves the results.
+    func testStartOverAndScanAgainWaitWhileACleanupIsBeingConfirmed() async throws {
+        let fixture = try makeFixture(caches: ["com.example.idle"])
+        let store = try await fixture.scannedStore(for: self, laterScans: 1)
+        let idle = try fixture.candidate("com.example.idle", in: store)
+        store.setCleanupCandidates([idle.id], selected: true)
+        store.requestV2Cleanup(disposition: .trash)
+        try await waitUntil { store.isV2CleanupConfirmationPresented }
+        let sessionID = store.cleanupScanSession?.id
+
+        store.startOverV2Results()
+        store.rescanV2Results()
+
+        XCTAssertEqual(store.cleanupScanSession?.id, sessionID)
+        XCTAssertTrue(store.isV2CleanupConfirmationPresented)
+        XCTAssertEqual(fixture.scanRequests.all.count, 1)
+    }
+
+    /// Report §4 item 12 (CleanMyMac 1:1): the studio result page starts over
+    /// from the title bar and has no Scan Again — CleanMyMac scans again from
+    /// the landing page. (Was `testTheStudioResultPageStartsOverAndScansAgainFromTheResults`,
+    /// which also required `store.rescanV2Results()` on the page; the store's
+    /// own rescan keeps its tests above.)
+    func testTheStudioResultPageStartsOverFromTheTitleBar() throws {
+        let page = try source("Sources/StorageCleanerMac/Views/CareStudio/CareStudioJunkResults.swift")
+        XCTAssertTrue(page.contains("titleBar: .startOver("))
+        XCTAssertTrue(page.contains("action: store.startOverV2Results"))
+        XCTAssertFalse(page.contains("store.rescanV2Results()"), "no Scan Again on the results")
+        XCTAssertFalse(page.contains("store.rescanAfterV2Cleanup()"), "that one only runs after a terminal outcome")
+        XCTAssertFalse(page.contains("store.resetSmartScanPresentation()"), "that one only leaves a terminal page")
+    }
+
     // MARK: Review follow-up (r2-live-fixes-1, P2-1 and P2-2)
 
     /// P2-1: "重新扫描" on the result page when the rules cannot be loaded.
@@ -452,6 +531,48 @@ final class CleanupStoreFollowUpTests: XCTestCase {
         XCTAssertTrue(store.canRequestV2Cleanup)
     }
 
+    /// D214: a cleanup refused before it starts (another task holds the work
+    /// lease) moves nothing, records its rows as not run rather than failed,
+    /// says “Could Not Start” and why, and keeps the selection for a retry;
+    /// Back returns to the same rows, still selected.
+    func testACleanupThatCouldNotStartKeepsTheSelectionAndRecordsNotRun() async throws {
+        let language = CalibrationLanguageScope(.zhHans)
+        defer { language.restore() }
+        let fixture = try makeFixture(caches: ["com.example.one", "com.example.two"])
+        let coordinator = HeavyWorkCoordinator()
+        let store = try await fixture.scannedStore(for: self, coordinator: coordinator)
+        let rows = try ["com.example.one", "com.example.two"].map { try fixture.candidate($0, in: store).id }
+        store.setCleanupCandidates(rows, selected: true)
+        let selected = store.cleanupSelection.selectedCandidateIDs
+        XCTAssertEqual(selected, Set(rows))
+        store.requestV2Cleanup(disposition: .trash)
+        try await waitUntil { store.isV2CleanupConfirmationPresented }
+        let held = try await coordinator.acquire(owner: .appUpdates)
+        store.confirmV2Cleanup()
+        try await waitUntil { store.lastCleanReport != nil && store.pendingCleanPlan == nil }
+        await coordinator.release(held)
+
+        let report = try XCTUnwrap(store.lastCleanReport)
+        XCTAssertEqual(report.startRefusal?.code, .coordinatorBusy)
+        XCTAssertEqual(report.summary.failedItemCount, 0)
+        XCTAssertEqual(report.summary.notProcessedItemCount, 2)
+        for name in ["com.example.one", "com.example.two"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.cacheURL(name).path), name)
+        }
+        XCTAssertEqual(store.cleanupSelection.selectedCandidateIDs, selected, "kept for a retry")
+        XCTAssertEqual(OperationResultPresentation(report: report).title, "没能开始")
+        let recorded = try CleanupReportJournal(directory: fixture.journalRoot).read(planID: report.planID)
+        XCTAssertEqual(recorded.startRefusal, report.startRefusal, "the record says not started too")
+        XCTAssertTrue(recorded.items.allSatisfy { $0.outcome == .notProcessed })
+
+        try await waitUntil { store.scanPresentationState == .failed }
+        store.dismissV2CleanupReport()
+        XCTAssertEqual(store.scanPresentationState, .results)
+        XCTAssertEqual(Set(store.cleanupScanSession?.candidates.map(\.id) ?? []), Set(rows))
+        XCTAssertEqual(store.cleanupSelection.selectedCandidateIDs, selected, "Back keeps the selection")
+        XCTAssertTrue(store.canRequestV2Cleanup)
+    }
+
     /// P2-2: the Developer Files page shares the result page and "完成";
     /// the rows left there can be cleaned right away, without a new scan.
     func testDoneOnTheDeveloperFilesPageKeepsTheRemainingRowsCleanable() async throws {
@@ -530,6 +651,63 @@ final class CleanupStoreFollowUpTests: XCTestCase {
         try await waitUntil { store.lastCleanReport != nil && store.pendingCleanPlan == nil }
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.trashURL("old.bin").path))
         XCTAssertEqual(store.lastCleanReport?.summary.deletedItemCount, 1)
+        XCTAssertEqual(store.lastCleanReport?.summary.movedItemCount, 1)
+    }
+
+    /// D101 G13: a run over half the volume's used space stops at the
+    /// confirmation until its summary is confirmed, and only that very
+    /// summary counts. Here the fake volume has 2 bytes in use.
+    func testAnUnusuallyLargeRunWaitsForItsSummaryToBeConfirmed() async throws {
+        let fixture = try makeFixture(caches: ["com.example.idle"])
+        let store = try await fixture.scannedStore(for: self, capacityReader: FixedUsedCapacityReader(usedBytes: 2))
+        let idle = try fixture.candidate("com.example.idle", in: store)
+        store.setCleanupCandidates([idle.id], selected: true)
+        store.requestV2Cleanup(disposition: .trash)
+        try await waitUntil { store.isV2CleanupConfirmationPresented }
+        let alert = try XCTUnwrap(store.pendingCleanPreflight?.scaleAlert)
+        XCTAssertEqual(alert.itemCount, 1)
+        XCTAssertFalse(alert.exceedsItemCount)
+        XCTAssertEqual(alert.largeVolumeShares.map(\.usedBytes), [2])
+        XCTAssertEqual(alert.largeVolumeShares.map(\.plannedBytes), [idle.estimatedSizeBytes])
+
+        store.confirmV2Cleanup()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotNil(store.pendingCleanPlan, "Not confirmed: the run waits")
+        XCTAssertNil(store.lastCleanReport)
+        XCTAssertNotNil(store.errorMessage)
+
+        // The summary a check again would give once the volume's use changed.
+        let plan = try XCTUnwrap(store.pendingCleanPlan)
+        let volume = try XCTUnwrap(plan.items.first).expectedSnapshot.volumeIdentifier
+        let titles = Dictionary(uniqueKeysWithValues: alert.largestRules.map { ($0.ruleID, $0.title) })
+        let other = try XCTUnwrap(CleanPlanScaleAlert(items: plan.items, usedBytes: [volume: 3]) { titles[$0] ?? $0 })
+        XCTAssertNotEqual(other, alert)
+        store.confirmV2Cleanup(scaleAcknowledged: other)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotNil(store.pendingCleanPlan, "Another summary does not confirm this one")
+        XCTAssertNil(store.lastCleanReport)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.cacheURL("com.example.idle").path))
+
+        store.confirmV2Cleanup(scaleAcknowledged: alert)
+        try await waitUntil { store.lastCleanReport != nil && store.pendingCleanPlan == nil }
+        XCTAssertEqual(store.lastCleanReport?.summary.movedItemCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.cacheURL("com.example.idle").path))
+    }
+
+    /// D101 G13: a run of a normal size gets no extra step; the volume here
+    /// has far more in use than the run.
+    func testANormalRunHasNoScaleConfirmation() async throws {
+        let fixture = try makeFixture(caches: ["com.example.idle"])
+        let store = try await fixture.scannedStore(
+            for: self, capacityReader: FixedUsedCapacityReader(usedBytes: 1 << 40)
+        )
+        let idle = try fixture.candidate("com.example.idle", in: store)
+        store.setCleanupCandidates([idle.id], selected: true)
+        store.requestV2Cleanup(disposition: .trash)
+        try await waitUntil { store.isV2CleanupConfirmationPresented }
+        XCTAssertNil(store.pendingCleanPreflight?.scaleAlert)
+        store.confirmV2Cleanup()
+        try await waitUntil { store.lastCleanReport != nil && store.pendingCleanPlan == nil }
         XCTAssertEqual(store.lastCleanReport?.summary.movedItemCount, 1)
     }
 
@@ -904,14 +1082,17 @@ final class CleanupStoreFollowUpTests: XCTestCase {
         /// from: Smart Scan by default, `.green` for a Safe Cleanup scan
         /// limited to the rules of its default scopes, `.devCaches` for
         /// Developer Files. `mover` replaces the fixture Trash mover;
-        /// `uninstall` gives the store an isolated Trash and uninstall mover.
+        /// `uninstall` gives the store an isolated Trash and uninstall mover;
+        /// `capacityReader` replaces the volume capacity the executor reads.
         /// The old full-disk scan is always a fake that fails.
         func scannedStore(
             for testCase: XCTestCase,
             laterScans: Int = 0,
             route: ReviewFilter = .overview,
             mover: (any CleanupMoving)? = nil,
-            uninstall: UninstallFixture? = nil
+            uninstall: UninstallFixture? = nil,
+            capacityReader: (any CleanupCapacityReading)? = nil,
+            coordinator: HeavyWorkCoordinator = HeavyWorkCoordinator()
         ) async throws -> ScanStore {
             let fileSystem = FoundationReadOnlyFileSystem()
             let safeCleanupRules = rules.rules.filter { rule in
@@ -972,8 +1153,9 @@ final class CleanupStoreFollowUpTests: XCTestCase {
                     metadataReader: fileSystem,
                     mover: mover ?? FixtureTrashMover(trashURL: home.appendingPathComponent(".Trash")),
                     runningApplicationChecker: FakeRunningChecker(apps: apps),
+                    capacityReader: capacityReader ?? FoundationCleanupCapacityReader(),
                     deleter: FixtureTrashDeleter(trashURL: home.appendingPathComponent(".Trash")),
-                    coordinator: HeavyWorkCoordinator()
+                    coordinator: coordinator
                 ),
                 cleanupUserHomeURL: home,
                 cleanupApplicationEnvironment: FakeApplicationEnvironment(apps: apps),
@@ -1276,6 +1458,14 @@ private struct FakeRunningChecker: CleanupRunningApplicationChecking {
     func isRunning(bundleIdentifier: String) async -> Bool {
         apps.isRunning(bundleIdentifier)
     }
+}
+
+/// D101 G13: every volume has `usedBytes` in use; free space is unknown.
+private struct FixedUsedCapacityReader: CleanupCapacityReading {
+    let usedBytes: Int64
+
+    func availableCapacity(at _: URL) async -> Int64? { nil }
+    func usedCapacity(at _: URL) async -> Int64? { usedBytes }
 }
 
 /// Moves into the fixture's own `.Trash`, never the real one.

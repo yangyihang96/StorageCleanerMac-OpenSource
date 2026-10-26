@@ -119,10 +119,13 @@ final class MenuBarPublishLoopTests: XCTestCase {
         XCTAssertEqual(count.value, 0)
         subscription.cancel()
         let deadline = ContinuousClock.now + .seconds(3)
-        while store.menuBarPreparedProcesses == nil, ContinuousClock.now < deadline {
+        // D171: the first read is listed at once; this waits for the first
+        // delta (was `store.menuBarPreparedProcesses == nil`).
+        while store.menuBarPreparedProcesses?.isFirstRead != false, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(2))
         }
         XCTAssertNotNil(store.menuBarPreparedProcesses)
+        XCTAssertEqual(store.menuBarPreparedProcesses?.isFirstRead, false)
         let reads = await reader.reads
         XCTAssertEqual(reads, 2, "One baseline and one delta; no restart for repeated demand")
     }
@@ -282,8 +285,9 @@ final class MenuBarPublishLoopTests: XCTestCase {
             return MenuBarAdvancedSamplingCoordinator(store: store,
                 monitorState: store.menuBarMonitorState,
                 auxiliaryState: store.menuBarAuxiliaryMonitorState, panelSettingsState: settings,
+                // D167: no `tertiaryVisible: true`; the module page starts its lists.
                 presentation: .geek, selectedSection: settings.selectedSection,
-                tertiaryVisible: true, samplingContext: context)
+                samplingContext: context)
                 .accessibilityIdentifier("publish-loop-\(revision)")
         }
     }

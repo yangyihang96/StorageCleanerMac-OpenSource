@@ -62,10 +62,11 @@ enum PanelChartClockEpochReason: Equatable, Sendable {
     case significantWallClockDrift(TimeInterval)
 }
 
-/// Holds a chart's already-quantized upper bound steady between live redraws.
-/// The caller supplies the target tier; expansion is immediate so peaks are
-/// never clipped, while a lower tier is reached over a short, deterministic
-/// interval to avoid an axis that visibly pumps with each sample.
+/// Holds a chart's upper bound steady between live redraws. The caller
+/// supplies the target (a quantized tier, or a throughput direction's visible
+/// peak, D120); expansion is immediate so peaks are never clipped, while a
+/// lower target is reached over a short, deterministic interval to avoid an
+/// axis that visibly pumps with each sample.
 struct PanelChartAxisScaleState {
     static let defaultDecayDuration: TimeInterval = 10
 
@@ -271,10 +272,14 @@ struct PanelChartTimeline<Content: View>: View {
 enum PanelChartDateFormatting {
     static let oneDay: TimeInterval = 86_400
 
+    fileprivate enum Style: Hashable {
+        case time, dateAndTime, date
+    }
+
     private struct FormatterKey: Hashable {
         let localeIdentifier: String
         let timeZoneIdentifier: String
-        let includesDate: Bool
+        let style: Style
     }
 
     private final class FormatterCache: @unchecked Sendable {
@@ -285,13 +290,13 @@ enum PanelChartDateFormatting {
             for date: Date,
             locale: Locale,
             timeZone: TimeZone,
-            includesDate: Bool
+            style: Style
         ) -> String {
             lock.withLock {
                 let key = FormatterKey(
                     localeIdentifier: locale.identifier,
                     timeZoneIdentifier: timeZone.identifier,
-                    includesDate: includesDate
+                    style: style
                 )
                 if let formatter = formatters[key] {
                     return formatter.string(from: date)
@@ -299,7 +304,7 @@ enum PanelChartDateFormatting {
                 let formatter = makeFormatter(
                     locale: locale,
                     timeZone: timeZone,
-                    includesDate: includesDate
+                    style: style
                 )
                 formatters[key] = formatter
                 return formatter.string(from: date)
@@ -309,20 +314,28 @@ enum PanelChartDateFormatting {
         private func makeFormatter(
             locale: Locale,
             timeZone: TimeZone,
-            includesDate: Bool
+            style: Style
         ) -> DateFormatter {
             let formatter = DateFormatter()
             formatter.locale = locale
             formatter.timeZone = timeZone
-            if includesDate {
-                if locale.identifier.lowercased().hasPrefix("zh") {
+            let chinese = locale.identifier.lowercased().hasPrefix("zh")
+            switch style {
+            case .dateAndTime:
+                if chinese {
                     formatter.dateFormat = "M月d日 a h:mm"
                 } else {
                     formatter.setLocalizedDateFormatFromTemplate("MMMdjmm")
                 }
-            } else {
+            case .time:
                 formatter.dateStyle = .none
                 formatter.timeStyle = .medium
+            case .date:
+                if chinese {
+                    formatter.dateFormat = "M月d日"
+                } else {
+                    formatter.setLocalizedDateFormatFromTemplate("MMMd")
+                }
             }
             return formatter
         }
@@ -344,7 +357,24 @@ enum PanelChartDateFormatting {
             for: date,
             locale: locale,
             timeZone: timeZone,
-            includesDate: includesDate(for: visibleDuration)
+            style: includesDate(for: visibleDuration) ? .dateAndTime : .time
+        )
+    }
+
+    /// D121: the history tooltip's header as iStat writes it: the time
+    /// (medium style) on one line and, from 3 days up (2160 s a bar), the
+    /// date on a second line.
+    static func tooltipLines(
+        for date: Date,
+        visibleDuration: TimeInterval,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> (time: String, date: String?) {
+        (
+            formatterCache.string(for: date, locale: locale, timeZone: timeZone, style: .time),
+            includesDate(for: visibleDuration)
+                ? formatterCache.string(for: date, locale: locale, timeZone: timeZone, style: .date)
+                : nil
         )
     }
 }

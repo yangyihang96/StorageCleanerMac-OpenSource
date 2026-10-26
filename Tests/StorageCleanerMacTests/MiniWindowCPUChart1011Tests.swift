@@ -162,15 +162,22 @@ final class MiniWindowCPUChart1011Tests: XCTestCase {
                 "A 100% stack should use at least 58 pt; the old compact plot only used 47 pt")
             let first = try XCTUnwrap(colors.first)
             let last = try XCTUnwrap(colors.last)
+            // D118 (2026-10-18): iStat's graph starts 5 pt below the 15 pt
+            // title row at y 5, at 25 (was padding + data row + 2 = 24).
             XCTAssertLessThanOrEqual(CGFloat(first.y) / scale,
-                GeekVisualTokens.cardVerticalPadding + MiniWindowStyleTokens.dataRowHeight + 2,
+                GeekIStatCardGeometry.processorGraphTop,
                 "The plot starts immediately after the header")
+            XCTAssertEqual(GeekIStatCardGeometry.processorGraphTop,
+                GeekIStatCardGeometry.titleTop + GeekIStatCardGeometry.titleHeight + 5)
             XCTAssertGreaterThan(first.color.redComponent, first.color.greenComponent,
                 "System is above user in a stack")
             XCTAssertGreaterThan(last.color.greenComponent, last.color.redComponent,
                 "User is the lower part of the stack")
             XCTAssertEqual(Set(frame.marks.map { $0.rect.width }).count, 1)
-            XCTAssertEqual(GeekChartWindow.barMetrics(displayScale: scale).spacing, 1 / scale)
+            // D120 (2026-10-18): iStat's 2 pt bar and 1 pt gap at 1x and 2x
+            // (was a one-physical-pixel gap, `1 / scale`).
+            XCTAssertEqual(GeekChartWindow.barMetrics(displayScale: scale).spacing, 1)
+            XCTAssertEqual(GeekChartWindow.barMetrics(displayScale: scale).width, 2)
         }
     }
 
@@ -212,15 +219,22 @@ final class MiniWindowCPUChart1011Tests: XCTestCase {
             gpu: .init(frequencyMHz: nil, activeRatio: 0, maximumFrequencyMHz: 1_000))
         let rows = GeekProcessorFrequencyPresentation.rows(telemetry: telemetry, sampledAt: end)
         XCTAssertEqual(rows.map(\.id), ["cpu-frequency", "cpu-cluster-zero", "cpu-cluster-active", "gpu-frequency"])
-        XCTAssertEqual(rows.map(\.value), ["3.40 GHz", "0.00 GHz", "3.40 GHz", "空闲"])
+        // D128 (2026-10-19): iStat's frequency, at most two decimals (was
+        // "3.40 GHz", "0.00 GHz", "3.40 GHz").
+        XCTAssertEqual(rows.map(\.value), ["3.4 GHz", "0 GHz", "3.4 GHz", "空闲"])
         XCTAssertTrue(rows.allSatisfy { $0.source == "IOReport" && $0.sampledAt == end })
         XCTAssertFalse(rows.contains { $0.value == "—" })
     }
 
     func testFrequencyMissingStateUsesTheExistingPassiveHelperCardsAndEnableEntry() throws {
-        let page = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekProcessorView.swift")
-        let card = try MiniWindowLogicFixtures.section(page, from: "private var geekProcessorFrequencyCard: some View {",
-            to: "private var geekProcessorActivityHoverTarget")
+        // D119 (2026-10-18): the frequency card moved from the CPU page to
+        // the sensors page's helper group (iStat); its missing state is the
+        // same passive helper card.
+        let processor = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekProcessorView.swift")
+        XCTAssertFalse(processor.contains("geekProcessorFrequencyCard"))
+        let page = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHelperPowerMetricsCards.swift")
+        let card = try MiniWindowLogicFixtures.section(page, from: "var geekHelperPowerMetricsCards: some View {",
+            to: "func geekHelperReadoutCard(")
         XCTAssertTrue(card.contains("if rows.isEmpty"))
         XCTAssertTrue(card.contains("GeekHelperPowerMetricsCards(monitor: store.helperPowerMetricsMonitor)"))
         XCTAssertTrue(card.contains("rows: presentation.frequencyRows"))

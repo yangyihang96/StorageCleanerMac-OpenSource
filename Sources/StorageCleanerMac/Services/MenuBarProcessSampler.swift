@@ -13,7 +13,11 @@ actor MenuBarProcessSampler {
         self.read = read
     }
 
-    func sample() async -> EnergyImpactSnapshot? {
+    /// `listingFirstRead` (D171): a fresh baseline is returned at once as
+    /// `EnergyImpactService.menuBarFirstReadSnapshot(of:)`, every rate 0,
+    /// instead of nil; the caller reads the first delta 0.5 s later. A reader
+    /// that recovers from giving nothing still takes its first delta here.
+    func sample(listingFirstRead: Bool = false) async -> EnergyImpactSnapshot? {
         guard !isReading, !Task.isCancelled else { return nil }
         isReading = true
         let capturedGeneration = generation
@@ -28,6 +32,7 @@ actor MenuBarProcessSampler {
         let before = previous
         previous = current
         guard let before else {
+            if listingFirstRead, !missedRead { return EnergyImpactService.menuBarFirstReadSnapshot(of: current) }
             // D71④ reads every 10 s; after a reader that gave nothing
             // recovers, take its first delta after the short N16-2 interval
             // instead of waiting a second full cadence with nothing shown.
@@ -67,6 +72,10 @@ struct MenuBarPreparedProcesses: Sendable {
     let cpu: [EnergyImpactApp]
     let disk: [EnergyImpactApp]
 
+    /// D171: a first read listed before any interval was measured (every
+    /// rate 0); the first delta replaces it.
+    var isFirstRead: Bool { snapshot.sampleSeconds <= 0 }
+
     static func fitsCache(_ snapshot: EnergyImpactSnapshot) -> Bool {
         guard snapshot.apps.count <= MenuBarPerformancePolicy.processCacheRowLimit else { return false }
         let bytes = snapshot.apps.reduce(0) { bytes, app in
@@ -78,15 +87,17 @@ struct MenuBarPreparedProcesses: Sendable {
     }
 
     /// D79: one sampled inventory, independent candidate sets; no provider reads.
+    /// D129: as iStat's `processesWithConfig:`, only the energy list has a
+    /// threshold; the CPU and disk lists are the top five of the measured
+    /// snapshot, idle apps included (was positive CPU% / read + write only).
     init(snapshot: EnergyImpactSnapshot, limit: Int = 5) {
         self.snapshot = snapshot
         let apps = snapshot.apps.filter(\.isApplication)
         let count = max(0, limit)
         energy = Self.top(apps.filter { $0.isSignificantCurrentEnergy && $0.currentPowerWatts.isFinite },
                           count: count, metric: { $0.currentPowerWatts })
-        cpu = Self.top(apps.filter { $0.cpuPercent.isFinite && $0.cpuPercent > 0 },
-                       count: count, metric: { $0.cpuPercent })
-        disk = Self.top(apps.filter { Self.diskRate($0) > 0 }, count: count, metric: Self.diskRate)
+        cpu = Self.top(apps.filter { $0.cpuPercent.isFinite }, count: count, metric: { $0.cpuPercent })
+        disk = Self.top(apps, count: count, metric: Self.diskRate)
     }
 
     private static func diskRate(_ app: EnergyImpactApp) -> Double {

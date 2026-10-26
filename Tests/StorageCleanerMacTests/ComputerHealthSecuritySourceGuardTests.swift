@@ -69,7 +69,8 @@ final class ComputerHealthSecuritySourceGuardTests: XCTestCase {
         XCTAssertTrue(rows.contains("FeatureLightfieldRowButtonStyle()"))
         XCTAssertTrue(smart.contains("FeatureLightfieldStatusRow("))
         XCTAssertFalse(smart.contains("FeatureFormRow("))
-        XCTAssertTrue(rows.contains("detail: finding?.evidenceSummary"))
+        XCTAssertTrue(rows.contains("detail: finding?.evidenceRowSummary"))
+        XCTAssertTrue(rows.contains("Text(finding.evidenceSummary)"), "The command stays in the expanded detail")
         for text in [health, smart] {
             XCTAssertTrue(text.contains("HealthSecurityChecksView(snapshot:"))
             XCTAssertTrue(text.contains("HealthRecentChangesView(events:"))

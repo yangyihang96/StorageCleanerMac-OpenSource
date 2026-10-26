@@ -174,8 +174,8 @@ struct OverviewView: View {
 
             if cleanupProjection.hasCleanableItems {
                 Text(L10n.text(
-                        "建议选择 \(ByteFormat.string(cleanupProjection.cleanableBytes)) · \(cleanupProjection.cleanableCount) 项",
-                        "\(ByteFormat.string(cleanupProjection.cleanableBytes)) recommended · \(L10n.items(cleanupProjection.cleanableCount))"
+                        "建议选择 \(ByteFormat.storageString(cleanupProjection.cleanableBytes)) · \(ByteFormat.count(cleanupProjection.cleanableCount)) 项",
+                        "\(ByteFormat.storageString(cleanupProjection.cleanableBytes)) recommended · \(L10n.items(cleanupProjection.cleanableCount))"
                     ))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .foregroundStyle(AppDesignTokens.Palette.success)
@@ -205,10 +205,10 @@ struct OverviewView: View {
             SmartCareResultTaskTile(
                 title: L10n.text("可安全清理", "Safe Cleanup"),
                 value: cleanupProjection.hasCleanableItems
-                    ? ByteFormat.string(cleanupProjection.cleanableBytes)
+                    ? ByteFormat.storageString(cleanupProjection.cleanableBytes)
                     : L10n.text("无可清理项", "Nothing to Clean"),
                 detail: cleanupProjection.hasCleanableItems
-                    ? L10n.text("\(cleanupProjection.cleanableCount) 项可移到废纸篓", "\(cleanupProjection.cleanableCount) items can move to Trash")
+                    ? L10n.text("\(ByteFormat.count(cleanupProjection.cleanableCount)) 项可移到废纸篓", "\(ByteFormat.count(cleanupProjection.cleanableCount)) items can move to Trash")
                     : L10n.text("未发现可安全清理项目", "No safe cleanup items found"),
                 systemImage: "sparkles",
                 tint: AppDesignTokens.Palette.success,
@@ -224,10 +224,10 @@ struct OverviewView: View {
                 title: ReviewFilter.devCaches.title,
                 value: developerCacheItems.isEmpty
                     ? L10n.text("无开发产物", "No Artifacts")
-                    : ByteFormat.string(developerCacheBytes),
+                    : ByteFormat.storageString(developerCacheBytes),
                 detail: developerCacheItems.isEmpty
                     ? L10n.text("未发现 Codex 或开发中间产物", "No Codex or development artifacts found")
-                    : L10n.text("\(developerCacheItems.count) 组候选可复核", "\(developerCacheItems.count) candidate groups to review"),
+                    : L10n.text("\(ByteFormat.count(developerCacheItems.count)) 组候选可复核", "\(ByteFormat.count(developerCacheItems.count)) candidate groups to review"),
                 systemImage: "hammer.fill",
                 tint: AppDesignTokens.Palette.freshness,
                 isReady: !developerCacheItems.isEmpty,
@@ -240,7 +240,7 @@ struct OverviewView: View {
             SmartCareResultTaskTile(
                 title: ReviewFilter.largeFiles.title,
                 value: store.largeFilesWorkspace.storageAnalysis.map {
-                    ByteFormat.string($0.rootSnapshot.measuredBytes)
+                    ByteFormat.storageString($0.rootSnapshot.measuredBytes)
                 } ?? L10n.text("尚未分析", "Not Analyzed"),
                 detail: store.largeFilesWorkspace.storageAnalysis.map {
                     L10n.text(
@@ -274,7 +274,7 @@ struct OverviewView: View {
             SmartCareResultTaskTile(
                 title: L10n.text("相似照片", "Similar Photos"),
                 value: duplicateFilesWorkspace.hasScanned
-                    ? L10n.text("\(similarImageGroupCount) 组候选", "\(similarImageGroupCount) candidate groups")
+                    ? L10n.text("\(ByteFormat.count(similarImageGroupCount)) 组候选", "\(ByteFormat.count(similarImageGroupCount)) candidate groups")
                     : L10n.text("尚未扫描", "Not Scanned"),
                 detail: "",
                 systemImage: "photo.on.rectangle.angled",
@@ -319,7 +319,7 @@ struct OverviewView: View {
                 ? L10n.text("无重复文件", "No Duplicates")
                 : L10n.text("尚未扫描", "Not Scanned")
         }
-        return ByteFormat.string(duplicateItems.reduce(0) { $0 + $1.sizeBytes })
+        return ByteFormat.storageString(duplicateItems.reduce(0) { $0 + $1.sizeBytes })
     }
 
     private var duplicateTileDetail: String {
@@ -328,7 +328,7 @@ struct OverviewView: View {
                 ? L10n.text("没有重复候选", "No duplicate candidates")
                 : ""
         }
-        return L10n.text("\(duplicateItems.count) 组待复核", "\(duplicateItems.count) groups to review")
+        return L10n.text("\(ByteFormat.count(duplicateItems.count)) 组待复核", "\(ByteFormat.count(duplicateItems.count)) groups to review")
     }
 
     private var resultHeadingTitle: String {
@@ -699,7 +699,7 @@ private struct TierSummaryCard: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                Text(ByteFormat.string(bytes))
+                Text(ByteFormat.storageString(bytes))
                     .font(AppDesignTokens.Typography.metricValue)
                     .fixedSize(horizontal: false, vertical: true)
 

@@ -326,6 +326,8 @@ struct DiskScanner {
     private let fileManager = FileManager.default
     private let home = FileManager.default.homeDirectoryForCurrentUser.path
     private let excludedPaths: [String]
+    private let ignoreList: IgnoreListSnapshot
+    private let ignoredPaths = IgnoreListScanCounter()
     private let directorySizeTimeout: TimeInterval = 0.8
     private let directoryReadTimeout: TimeInterval = 1
     private let scanMode: ScanMode
@@ -338,9 +340,11 @@ struct DiskScanner {
         scanMode: ScanMode = .fallback,
         progressHandler: DiskScanProgressHandler? = nil,
         largeFileRoots: [String]? = nil,
-        largeFileThreshold: LargeFileThreshold = .standard
+        largeFileThreshold: LargeFileThreshold = .standard,
+        ignoreList: IgnoreListSnapshot = .empty
     ) {
         self.excludedPaths = excludedPaths
+        self.ignoreList = ignoreList
         self.scanMode = scanMode
         self.progressHandler = progressHandler
         largeFileRootOverrides = largeFileRoots
@@ -470,14 +474,21 @@ struct DiskScanner {
         return targets.filter { seen.insert($0.id).inserted }
     }
 
+    /// Paths under `/` that show the same files a second time: the data
+    /// volume's own mount point, and (D189) the special lookup directories
+    /// `/.nofollow`, `/.resolve` and `/.vol`, which reach every file of the
+    /// volume again by path or ID. 10-23 the map walked `/.nofollow` and
+    /// measured 660.79 GB there, so "Macintosh HD" came to 1.31 TB with
+    /// 667 GB in use.
+    static let logicalMirrorPaths = ["/System/Volumes/Data", "/.nofollow", "/.resolve", "/.vol"]
+
     static func shouldSkipLogicalDataMirror(
         path: String,
         rootPath: String,
         targetKind: StorageMapScanTarget.Kind
     ) -> Bool {
         guard targetKind == .internalVolume, rootPath == "/" else { return false }
-        return path == "/System/Volumes/Data"
-            || path.hasPrefix("/System/Volumes/Data/")
+        return logicalMirrorPaths.contains { path == $0 || path.hasPrefix($0 + "/") }
     }
 
     static func storageMapPath(_ path: String, isWithinRoot rootPath: String) -> Bool {
@@ -563,25 +574,23 @@ struct DiskScanner {
         return (path, parentPath)
     }
 
+    /// D193: the local usage (allocated size) everywhere, the logical size
+    /// only where it is missing. `path` stays for the callers' sake.
     static func storageMapPreferredSize(
         logicalSize: Int?,
         allocatedSize: Int?,
         path: String
     ) -> Int? {
-        switch storageMapSizeBasis(path: path) {
-        case .logical:
-            logicalSize ?? allocatedSize
-        default:
-            allocatedSize ?? logicalSize
-        }
+        allocatedSize ?? logicalSize
     }
 
-    /// D84（只加说明，不改算法）：空间分析对 /Applications 中应用包里的内容
-    /// 优先取逻辑大小，其他位置优先取本地占用（分配大小）。
+    /// D193 (user 10-23: "改成实际占用"): app bundles in /Applications are
+    /// measured by local usage like everything else, as Finder's "on disk"
+    /// and CleanMyMac show them (this Mac: /Applications 64.36 GB by the D84
+    /// logical size against 53.9 GB in CleanMyMac). D84 took their logical
+    /// size.
     static func storageMapSizeBasis(path: String) -> StorageCapacityBasis {
-        let isApplicationBundleContent = path.hasPrefix("/Applications/")
-            && path.range(of: ".app/", options: .caseInsensitive) != nil
-        return isApplicationBundleContent ? .logical : .allocated
+        .allocated
     }
 
     /// D46: a 32-bit fingerprint of which item this is and, for a file, its
@@ -628,21 +637,19 @@ struct DiskScanner {
     /// What the walk needs to know about an item's cloud state.
     struct StorageMapCloudState: Equatable, Sendable {
         var isUbiquitous: Bool
-        /// The downloading status is `.current`.
+        /// `.current` in the reference walk; has local data in whereNeeded.
         var isCurrent: Bool
     }
 
-    /// How the storage-map walk uses the machine. No setting changes the
-    /// index the walk builds (N21).
+    /// N21 traversal options. D192's local flags and the reference cloud
+    /// query agree for current files and dataless placeholders; downloaded
+    /// but non-current files now correctly count their local allocation.
     struct StorageMapAnalysisOptions: Sendable {
         enum UbiquityLookup: Sendable {
             /// Ask File Provider about every item, as the walk always did.
             case everyItem
-            /// Ask only where a cloud item can be: folders, dataless files,
-            /// files in a folder File Provider reports as ubiquitous, and
-            /// files in the iCloud Drive, CloudStorage, Desktop and Documents
-            /// locations. Elsewhere the answer is "not ubiquitous" without
-            /// the per-item File Provider lookup that dominated local walks.
+            /// Use local lstat SF_DATALESS flags, with cloud location hints.
+            /// No per-item (or root) FileProvider queries (D192).
             case whereNeeded
         }
 
@@ -650,8 +657,8 @@ struct DiskScanner {
         enum CloudStateSource: Sendable {
             /// File Provider, through URL resource values (the app).
             case fileProvider
-            /// A stand-in asked wherever the walk would ask File Provider, so
-            /// tests can put cloud folders anywhere (review P2-1).
+            /// A stand-in for the every-item reference's FileProvider queries.
+            /// The production where-needed walk never calls this source.
             case custom(@Sendable (URL) throws -> StorageMapCloudState)
         }
 
@@ -660,6 +667,10 @@ struct DiskScanner {
         var concurrency: Int
         var ubiquityLookup: UbiquityLookup
         var cloudState: CloudStateSource = .fileProvider
+        /// Local attributes, injectable so tests simulate dataless files without
+        /// creating/materializing a real FileProvider placeholder.
+        var fileStatus: @Sendable (URL) -> stat? = DiskScanner.storageMapFileStatus
+
         /// 共用的应用探测器；夹具可记录实际探测了哪些包。
         var applicationBundleProbe: @Sendable (String) -> Bool = {
             FileAnalysisApplicationBundleProbe.isApplication(atPath: $0)
@@ -736,6 +747,7 @@ struct DiskScanner {
             exclusionRoots: excludedPaths.map(PathSafety.lexicalPath),
             ubiquityLookup: options.ubiquityLookup,
             cloudStateSource: options.cloudState,
+            fileStatus: options.fileStatus,
             applicationBundleProbe: options.applicationBundleProbe,
             homePath: home,
             cancellation: StorageMapCancellation(),
@@ -744,7 +756,7 @@ struct DiskScanner {
         )
 
         let rootIsUbiquitous = options.ubiquityLookup == .whereNeeded
-            && (try? context.cloudState(of: rootURL, prefetched: nil))?.isUbiquitous == true
+            && Self.storageMapIsCloudLocation(path: rootPath, cloudHomePrefixes: context.cloudHomePrefixes)
 
         // Workers start right away and take sub-folders as the calling thread
         // hands them out; the calling thread walks the root level itself.
@@ -948,13 +960,17 @@ struct DiskScanner {
             omittedItemCount: omittedItemCount,
             scanSeconds: elapsed,
             index: index,
-            rootSnapshot: rootSnapshot
+            rootSnapshot: rootSnapshot,
+            // D193②: no second reading; the same snapshot's estimate.
+            volumePurgeableBytes: capacity?.reclaimableEstimateBytes ?? 0
         )
     }
 
     // MARK: - Storage-map walk (N21)
 
-    /// Whether the walk asks File Provider about an item's cloud state in
+    /// D192: retained for FileContentReadGuard's content-reading safety policy;
+    /// storageMapAnalysis(.whereNeeded) no longer calls this predicate.
+    /// Whether the old walk asks File Provider about an item's cloud state in
     /// `.whereNeeded` mode. Links never use it; folders always do, since a
     /// cloud-only folder is not walked into. A file can only be in the cloud
     /// when it is dataless, its folder is ubiquitous, or it sits where File
@@ -999,6 +1015,22 @@ struct DiskScanner {
             || storageMapPathContains(path, "/Library/Mobile Documents/")
             || storageMapPathContains(path, "/Library/CloudStorage/")
             || cloudHomePrefixes.contains { path.hasPrefix($0) }
+    }
+
+    static func storageMapIsCloudLocation(path: String, cloudHomePrefixes: [String]) -> Bool {
+        storageMapPathContains(path, "/Library/Mobile Documents/")
+            || path.hasSuffix("/Library/Mobile Documents")
+            || storageMapPathContains(path, "/Library/CloudStorage/")
+            || path.hasSuffix("/Library/CloudStorage")
+            || cloudHomePrefixes.contains { path == String($0.dropLast()) || path.hasPrefix($0) }
+    }
+
+    static func storageMapFileStatus(at url: URL) -> stat? {
+        var metadata = stat()
+        let result = url.withUnsafeFileSystemRepresentation { path in
+            path.map { Darwin.lstat($0, &metadata) } ?? -1
+        }
+        return result == 0 ? metadata : nil
     }
 
     /// Byte search in the path's UTF-8. For an ASCII pattern it finds every
@@ -1048,6 +1080,7 @@ struct DiskScanner {
         let exclusionRoots: [String]
         let ubiquityLookup: StorageMapAnalysisOptions.UbiquityLookup
         let cloudStateSource: StorageMapAnalysisOptions.CloudStateSource
+        let fileStatus: @Sendable (URL) -> stat?
         let applicationBundleProbe: @Sendable (String) -> Bool
         let cloudHomePrefixes: [String]
         let cancellation: StorageMapCancellation
@@ -1065,6 +1098,7 @@ struct DiskScanner {
             exclusionRoots: [String],
             ubiquityLookup: StorageMapAnalysisOptions.UbiquityLookup,
             cloudStateSource: StorageMapAnalysisOptions.CloudStateSource,
+            fileStatus: @escaping @Sendable (URL) -> stat?,
             applicationBundleProbe: @escaping @Sendable (String) -> Bool,
             homePath: String,
             cancellation: StorageMapCancellation,
@@ -1077,6 +1111,7 @@ struct DiskScanner {
             self.exclusionRoots = exclusionRoots
             self.ubiquityLookup = ubiquityLookup
             self.cloudStateSource = cloudStateSource
+            self.fileStatus = fileStatus
             self.applicationBundleProbe = applicationBundleProbe
             cloudHomePrefixes = DiskScanner.storageMapCloudHomePrefixes(homePath: homePath)
             self.cancellation = cancellation
@@ -1165,6 +1200,14 @@ struct DiskScanner {
         }
 
         func walk(rootURL: URL, cancelledByTask: () -> Bool) throws {
+            if context.ubiquityLookup == .whereNeeded,
+               let status = context.fileStatus(rootURL), status.st_flags & UInt32(SF_DATALESS) != 0 {
+                // A selected placeholder root must not be enumerated either.
+                directories[0].isComplete = false
+                blockedDirectoryPaths.insert(walkRootPath)
+                omittedItemCount += 1
+                return
+            }
             let enumerator = FileManager.default.enumerator(
                 at: rootURL,
                 includingPropertiesForKeys: Array(context.itemKeys),
@@ -1256,15 +1299,6 @@ struct DiskScanner {
             }
         }
 
-        private static func fileStatus(at url: URL) -> stat? {
-            var metadata = stat()
-            let status = url.withUnsafeFileSystemRepresentation { path in
-                guard let path else { return Int32(-1) }
-                return Darwin.lstat(path, &metadata)
-            }
-            return status == 0 ? metadata : nil
-        }
-
         private static func hardLinkIdentity(from status: stat?) -> (identity: FileIdentity?, succeeded: Bool) {
             guard let metadata = status, (metadata.st_mode & S_IFMT) == S_IFREG else {
                 return (nil, false)
@@ -1330,28 +1364,24 @@ struct DiskScanner {
 
             let values: URLResourceValues
             var cloudState: StorageMapCloudState?
-            var regularFileStatus: stat?
+            var itemStatus: stat?
             do {
                 values = try itemURL.resourceValues(forKeys: context.itemKeys)
                 switch context.ubiquityLookup {
                 case .everyItem:
                     cloudState = try context.cloudState(of: itemURL, prefetched: values)
                 case .whereNeeded:
-                    let isDirectory = values.isDirectory == true
-                    let isSymbolicLink = values.isSymbolicLink == true
-                    if !isDirectory && !isSymbolicLink {
-                        regularFileStatus = Self.fileStatus(at: itemURL)
+                    guard let status = context.fileStatus(itemURL) else {
+                        throw StorageMapAnalysisError.unreadable
                     }
-                    if DiskScanner.storageMapNeedsCloudState(
-                        isDirectory: isDirectory,
-                        isSymbolicLink: isSymbolicLink,
-                        parentIsUbiquitous: directories[parentID].isUbiquitous,
-                        isDataless: regularFileStatus.map { $0.st_flags & UInt32(SF_DATALESS) != 0 } ?? false,
-                        path: itemPath,
-                        cloudHomePrefixes: context.cloudHomePrefixes
-                    ) {
-                        cloudState = try context.cloudState(of: itemURL, prefetched: nil)
-                    }
+                    itemStatus = status
+                    let isDataless = status.st_flags & UInt32(SF_DATALESS) != 0
+                    cloudState = StorageMapCloudState(
+                        isUbiquitous: isDataless || directories[parentID].isUbiquitous
+                            || DiskScanner.storageMapIsCloudLocation(
+                                path: itemPath, cloudHomePrefixes: context.cloudHomePrefixes),
+                        isCurrent: !isDataless
+                    )
                 }
             } catch {
                 appendEntry(
@@ -1451,8 +1481,8 @@ struct DiskScanner {
                 let canDescend = !package && !cloudPlaceholder
                 // D46: which folder this is, so a later move can tell it is
                 // still the folder the analysis saw. An lstat never downloads.
-                let directoryStamp = Self.fileStatus(at: itemURL)
-                    .map(DiskScanner.storageMapChangeStamp) ?? 0
+                let directoryStatus = itemStatus ?? context.fileStatus(itemURL)
+                let directoryStamp = directoryStatus.map(DiskScanner.storageMapChangeStamp) ?? 0
                 // 第 4 轮：没有可执行文件的 .app 按内容分类；外层已是应用
                 // 时内部整体汇总，不再探测嵌套的 .app。云端占位不读取。
                 let labelledByContents = package && !cloudPlaceholder
@@ -1509,7 +1539,9 @@ struct DiskScanner {
                     ))
                 }
             } else {
-                let measuredSize = DiskScanner.storageMapPreferredSize(
+                // A placeholder's logical length and metadata blocks are not
+                // downloaded content. Keep zero in both index and summaries.
+                let measuredSize = cloudPlaceholder ? 0 : DiskScanner.storageMapPreferredSize(
                     logicalSize: values.fileSize,
                     allocatedSize: values.totalFileAllocatedSize
                         ?? values.fileAllocatedSize,
@@ -1523,8 +1555,8 @@ struct DiskScanner {
                     isDirectory: false
                 )
                 let fileStatus = context.ubiquityLookup == .whereNeeded
-                    ? regularFileStatus
-                    : Self.fileStatus(at: itemURL)
+                    ? itemStatus
+                    : context.fileStatus(itemURL)
                 appendEntry(
                     StorageMapIndexedEntry(
                         name: itemURL.lastPathComponent,
@@ -2305,7 +2337,8 @@ struct DiskScanner {
                 ? []
                 : target.key == "applications"
                 ? scanApplications(at: target.path, minimumBytes: target.minimumBytes, limit: target.limit, deadline: deadline)
-                : scanChildren(at: target.path, minimumBytes: target.minimumBytes, limit: target.limit, deadline: deadline)
+                : scanChildrenReport(at: target.path, minimumBytes: target.minimumBytes, limit: target.limit, deadline: deadline,
+                    ignoreCategory: target.key == "downloads" ? .downloads : .other).entries
             groups.append(StorageGroup(id: target.key, title: target.title, entries: entries))
             reportProgress(currentGroupTitle: target.title, groups: groups)
         }
@@ -2445,6 +2478,7 @@ struct DiskScanner {
             items: items,
             deniedPaths: denied
         )
+        result.ignoredCounts = ignoredPaths.counts
         result.largeFileListing = largeFileSummary
         return result
     }
@@ -2830,12 +2864,15 @@ struct DiskScanner {
                 reachedTimeLimit = true
                 break
             }
-            guard !isExcluded(root) else { continue }
+            if isExcluded(root) || ignoreList.ignores(path: root, category: .largeAndOld) {
+                ignoredPaths.record(root, category: .largeAndOld); continue
+            }
             let report = scanChildrenReport(
                 at: root,
                 minimumBytes: minimumBytes ?? largeFileThreshold.bytes,
                 limit: modeAdjustedLimit(40),
-                deadline: deadline
+                deadline: deadline,
+                ignoreCategory: .largeAndOld
             )
             candidates.append(contentsOf: report.entries)
             reachedTimeLimit = reachedTimeLimit || report.reachedTimeLimit
@@ -2849,7 +2886,8 @@ struct DiskScanner {
             resultLimit: resultLimit ?? scanMode.largeFileResultLimit,
             reachedTimeLimit: reachedTimeLimit,
             reachedFolderLimit: reachedFolderLimit,
-            lowerBoundPaths: lowerBoundPaths
+            lowerBoundPaths: lowerBoundPaths,
+            ignoredItemCount: ignoredPaths.counts[.largeAndOld] ?? 0
         )
     }
 
@@ -2872,7 +2910,7 @@ struct DiskScanner {
     }
 
     /// 与 `scanChildren` 相同的读取与测量；另外记下截断与下限（D84/D85）。
-    func scanChildrenReport(at path: String, minimumBytes: Int64, limit: Int, deadline: Date) -> ChildScanReport {
+    func scanChildrenReport(at path: String, minimumBytes: Int64, limit: Int, deadline: Date, ignoreCategory: IgnoreCategory = .other) -> ChildScanReport {
         var report = ChildScanReport()
         guard Date() < deadline else {
             report.reachedTimeLimit = true
@@ -2895,7 +2933,10 @@ struct DiskScanner {
                     report.reachedTimeLimit = true
                     break
                 }
-                if shouldSkipChild(url, parentPath: path) || isExcluded(url.path) {
+                if isExcluded(url.path) || ignoreList.ignores(path: url.path, category: ignoreCategory, includingDescendants: true) {
+                    ignoredPaths.record(url.path, category: ignoreCategory); continue
+                }
+                if shouldSkipChild(url, parentPath: path) {
                     continue
                 }
 

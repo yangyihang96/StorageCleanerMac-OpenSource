@@ -344,6 +344,10 @@ struct StorageMapAnalysisResult: Equatable, Sendable {
     let target: StorageMapScanTarget
     let volumeTotalBytes: Int64
     let volumeAvailableBytes: Int64
+    /// D193②: the space macOS frees by itself when it needs it (purgeable),
+    /// from the same capacity reading as `volumeAvailableBytes` (it asks for
+    /// the important-usage figure once a scan, D173); 0 when not known.
+    let volumePurgeableBytes: Int64
     private(set) var inspectedItemCount: Int
     let omittedItemCount: Int
     let scanSeconds: TimeInterval
@@ -359,11 +363,13 @@ struct StorageMapAnalysisResult: Equatable, Sendable {
         omittedItemCount: Int,
         scanSeconds: TimeInterval,
         index: StorageMapAnalysisIndex,
-        rootSnapshot: StorageMapDirectorySnapshot
+        rootSnapshot: StorageMapDirectorySnapshot,
+        volumePurgeableBytes: Int64 = 0
     ) {
         self.target = target
         self.volumeTotalBytes = volumeTotalBytes
         self.volumeAvailableBytes = volumeAvailableBytes
+        self.volumePurgeableBytes = max(0, volumePurgeableBytes)
         self.inspectedItemCount = inspectedItemCount
         self.omittedItemCount = omittedItemCount
         self.scanSeconds = scanSeconds

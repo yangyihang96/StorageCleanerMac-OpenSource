@@ -10,6 +10,7 @@ protocol CloudLocalCopyProvider: Sendable {
 
 enum CloudCopyProvider: Equatable, Sendable {
     case iCloud, external(String), local, unknown
+    var isExternal: Bool { if case .external = self { return true }; return false }
     var title: String {
         switch self {
         case .iCloud: return "iCloud Drive"
@@ -72,13 +73,19 @@ struct CloudLocalCopyState: Equatable, Sendable, Identifiable {
         guard download != .placeholder, allocatedBytes > 0 else { return .placeholder }
         return nil
     }
+    /// Third-party failures always leave an actionable Finder fallback.
+    var blockTitle: String? {
+        guard let block else { return nil }
+        guard provider.isExternal, block != .unsupported else { return block.title }
+        return block.title + " · " + CloudCopyBlock.unsupported.title
+    }
     static func unreadable(_ path: String) -> Self {
         var state = Self(path: path); state.unreadable = true; return state
     }
 }
 
 enum CloudCopyResultStatus: Equatable, Sendable {
-    case released, blocked(CloudCopyBlock), failed, readbackFailed, unchanged, cancelled, limit, busy
+    case released, blocked(CloudCopyBlock), failed, readbackFailed, unchanged, providerDeclined, cancelled, limit, busy
     var title: String {
         switch self {
         case .released: return L10n.text("已确认释放", "Release confirmed")
@@ -86,6 +93,7 @@ enum CloudCopyResultStatus: Equatable, Sendable {
         case .failed: return L10n.text("释放调用失败", "Release call failed")
         case .readbackFailed: return L10n.text("无法回读，释放量未确认", "Readback failed; release unconfirmed")
         case .unchanged: return L10n.text("未确认：多次回读仍未见占位和大小下降，请稍后重新分析", "Unconfirmed: repeated readback did not show a placeholder with a smaller size; analyze again later")
+        case .providerDeclined: return L10n.text("这个云盘没有让本应用释放本机副本，请在访达中右键选『移除下载』", "This cloud provider did not let this app release the local copy; in Finder, Control-click the file and choose Remove Download")
         case .cancelled: return L10n.text("已取消，未执行", "Cancelled; not executed")
         case .busy: return L10n.text("其他操作正在进行，未执行释放", "Another operation is active; release not executed")
         case .limit: return L10n.text("超过批量上限，未执行", "Batch limit exceeded; not executed")
@@ -225,7 +233,8 @@ struct CloudLocalCopyService: Sendable {
             }
             do { try await provider.evict(before) }
             catch {
-                outcome.items.append(.init(path: selected.path, status: .failed, detail: CloudCopyErrorText.describe(error))); continue
+                outcome.items.append(.init(path: selected.path, status: before.provider.isExternal ? .providerDeclined : .failed,
+                                           detail: before.provider.isExternal ? nil : CloudCopyErrorText.describe(error))); continue
             }
             outcome.items.append(await readBack(before))
         }
@@ -235,7 +244,11 @@ struct CloudLocalCopyService: Sendable {
     /// Success needs the same safe file, now a placeholder, with a measured allocation drop.
     private func readBack(_ before: CloudLocalCopyState) async -> CloudCopyResult {
         var lastError: (any Error)?
-        for attempt in 0..<max(1, readbackAttempts) {
+        // D185: third parties get one request and the same bounded readbacks as
+        // iCloud (a provider may evict a moment later); never a second request
+        // or another API. Was one readback for third parties.
+        let attempts = max(1, readbackAttempts)
+        for attempt in 0..<attempts {
             if attempt > 0 {
                 // Detached so cancelling later items cannot shorten an accepted request's readback.
                 let interval = readbackInterval
@@ -251,6 +264,7 @@ struct CloudLocalCopyService: Sendable {
                 }
             } catch { lastError = error }
         }
+        if before.provider.isExternal { return .init(path: before.path, status: .providerDeclined) }
         if let lastError {
             return .init(path: before.path, status: .readbackFailed, detail: CloudCopyErrorText.describe(lastError))
         }
@@ -310,8 +324,8 @@ struct CloudSyncMetadata: Sendable {
 
 /// Only metadata is read. No enumeration, file coordination, opening or download requests.
 /// NSFileProviderManager is limited to a provider's own extension/app (SDK header contract).
-/// This app has no such domains, so every provider other than positively identified iCloud
-/// fails closed as unsupported.
+/// D185 additionally permits home CloudStorage files only when every D90 metadata field
+/// is positively known. No File Provider domain management or alternative eviction API.
 actor NativeCloudLocalCopyProvider: CloudLocalCopyProvider {
     typealias MetadataReader = @Sendable (URL) throws -> CloudSyncMetadata
     typealias Evictor = @Sendable (URL) throws -> Void
@@ -339,23 +353,39 @@ actor NativeCloudLocalCopyProvider: CloudLocalCopyProvider {
         state.identity = "\(info.st_dev):\(info.st_ino)"
         state.revision = "\(info.st_mtimespec.tv_sec):\(info.st_mtimespec.tv_nsec):\(info.st_size)"
         state.allocatedBytes = max(0, Int64(info.st_blocks) * 512)
-        // CloudStorage path names are display hints, never proof of provider capability.
-        if let name = Self.externalProviderName(path) {
-            state.provider = .external(name); state.supported = false; return state
+        let external = Self.externalProviderName(path)
+        if let external { state.provider = .external(external) }
+        // Names alone never grant capability: the actual location must be in this home,
+        // and all ancestors and the ordinary file have already passed the no-link gate.
+        let cloudStorage = home + "/Library/CloudStorage/"
+        let relative = path.hasPrefix(cloudStorage) ? String(path.dropFirst(cloudStorage.count)) : ""
+        let parts = relative.split(separator: "/")
+        let externalLocation = external != nil && parts.count >= 2 && !parts[0].hasPrefix(".")
+        if external != nil, !externalLocation { return state }
+        let values: CloudSyncMetadata
+        do { values = try metadata(URL(fileURLWithPath: path)) }
+        catch {
+            if externalLocation { return state } // Keep the Finder fallback when metadata cannot be read.
+            throw error
         }
-        let values = try metadata(URL(fileURLWithPath: path))
-        var homeInfo = stat()
-        let homeDevice: dev_t? = lstat(home, &homeInfo) == 0 ? homeInfo.st_dev : nil
-        let iCloudLocation = Self.isICloudLocation(path, home: home, fileDevice: info.st_dev, homeDevice: homeDevice)
-        // Foundation reports no ubiquity value for plain local files; inside an iCloud location
-        // a missing value stays unknown. Either way the file is not selectable.
-        guard let ubiquitous = values.isUbiquitous else { state.provider = iCloudLocation ? .unknown : .local; return state }
-        guard ubiquitous else { state.provider = .local; return state }
-        guard iCloudLocation else {
-            state.provider = .external(L10n.text("其他云提供商", "Other cloud provider")); state.supported = false
-            return state
+        if externalLocation {
+            state.supported = values.isUbiquitous == true && values.download != .unknown &&
+                values.uploaded != nil && values.conflicts != nil && values.uploading != nil &&
+                values.downloading != nil && values.excludedFromSync != nil && values.syncError != nil
+        } else {
+            var homeInfo = stat()
+            let homeDevice: dev_t? = lstat(home, &homeInfo) == 0 ? homeInfo.st_dev : nil
+            let iCloudLocation = Self.isICloudLocation(path, home: home, fileDevice: info.st_dev, homeDevice: homeDevice)
+            // Foundation reports no ubiquity value for plain local files; inside an iCloud location
+            // a missing value stays unknown. Either way the file is not selectable.
+            guard let ubiquitous = values.isUbiquitous else { state.provider = iCloudLocation ? .unknown : .local; return state }
+            guard ubiquitous else { state.provider = .local; return state }
+            guard iCloudLocation else {
+                state.provider = .external(L10n.text("其他云提供商", "Other cloud provider")); state.supported = false
+                return state
+            }
+            state.provider = .iCloud; state.supported = true
         }
-        state.provider = .iCloud; state.supported = true
         state.download = values.download
         state.uploaded = values.uploaded
         state.conflicts = values.conflicts
@@ -369,7 +399,7 @@ actor NativeCloudLocalCopyProvider: CloudLocalCopyProvider {
     func evict(_ expected: CloudLocalCopyState) async throws {
         // Defense in depth for direct callers; the service also checks the review identity.
         let fresh = try await state(at: expected.path)
-        guard fresh.provider == .iCloud, fresh.block == nil, fresh.identity == expected.identity,
+        guard fresh.provider == expected.provider, fresh.block == nil, fresh.identity == expected.identity,
               fresh.revision == expected.revision else { throw CloudCopyGateError.recheckFailed }
         try evictor(URL(fileURLWithPath: expected.path))
     }
@@ -398,9 +428,6 @@ actor NativeCloudLocalCopyProvider: CloudLocalCopyProvider {
         guard let i = components.firstIndex(of: "CloudStorage"), i > 0,
               components[i - 1] == "Library", components.count > i + 1 else { return nil }
         let name = String(components[i + 1])
-        if name.hasPrefix("OneDrive") { return "OneDrive" }
-        if name.hasPrefix("GoogleDrive") { return "Google Drive" }
-        if name.hasPrefix("Dropbox") { return "Dropbox" }
-        return name
+        return CloudDriveScanner.Provider(folderName: name, path: path).name
     }
 }

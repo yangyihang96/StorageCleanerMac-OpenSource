@@ -32,15 +32,12 @@ enum AppUpdateHelperCapabilityGate {
             AppUpdateBundledCodeTrust.matchesApplication(helper, identifier: FileOperationIdentity.helper) else { throw AuthorizedMoveError.unavailable }
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
         try await Self.boundedRefresh { try await AuthorizedApplicationMover.shared.prepareHelper(refreshRegisteredBuild: false) }
-        openConnection()
         do {
             try await AppUpdateHelperCapabilityGate.ensure(build: build, trusted: true, probe: { [self] in
-                let data = try await exchange(timeout: 2) { proxy, reply in proxy.applicationReplacementCapabilities?(reply: reply) }
-                return try JSONDecoder().decode(ApplicationReplacementCapabilities.self, from: data)
+                try await capabilities()
             }, refresh: { [self] in
                 await MainActor.run { self.connection?.invalidate(); self.connection = nil }
                 try await Self.boundedRefresh { try await AuthorizedApplicationMover.shared.prepareHelper(forceRefresh: true) }
-                await MainActor.run { self.openConnection() }
             })
             // Commit this lifecycle cache only after the resident signed helper
             // proved its build. Later move/restore clients then keep this worker.
@@ -80,6 +77,16 @@ enum AppUpdateHelperCapabilityGate {
         connection.setCodeSigningRequirement(requirement)
         connection.remoteObjectInterface = NSXPCInterface(with: FileOperationHelperProtocol.self)
         connection.resume(); self.connection = connection
+    }
+    private func capabilities() async throws -> ApplicationReplacementCapabilities {
+        try await FileOperationReadRetry.perform {
+            self.connection?.invalidate(); self.connection = nil
+            self.openConnection()
+            let data = try await self.exchange(timeout: 2) { proxy, reply in
+                proxy.applicationReplacementCapabilities?(reply: reply)
+            }
+            return try JSONDecoder().decode(ApplicationReplacementCapabilities.self, from: data)
+        }
     }
     private func authorizeWithoutSecondDialog(_ password: UpdatePasswordBuffer) throws -> Data {
         var reference: AuthorizationRef?
@@ -134,13 +141,16 @@ enum AppUpdateHelperCapabilityGate {
         if reply.errorCode == Int(ECANCELED) { throw AppUpdateCommandError.cancelled }
         if let error = reply.error { throw NSError(domain: "ApplicationReplacementHelper", code: 1, userInfo: [NSLocalizedDescriptionKey: AppUpdateErrorRedaction.text(error)]) }
     }
-    private func exchange(timeout: TimeInterval, _ send: (any FileOperationHelperProtocol, @escaping (Data) -> Void) -> Void) async throws -> Data {
+    // D192 hotfix: the handlers and the reply run on XPC's queue; @Sendable
+    // keeps them off this class's main-actor isolation, whose runtime check
+    // traps there (beta #10 crashed this way in SystemCacheService).
+    private func exchange(timeout: TimeInterval, _ send: (any FileOperationHelperProtocol, @escaping @Sendable (Data) -> Void) -> Void) async throws -> Data {
         guard let connection else { throw AuthorizedMoveError.unavailable }
         return try await withCheckedThrowingContinuation { continuation in
             let gate = AppUpdateHelperReplyGate(continuation)
-            connection.invalidationHandler = { gate.fail() }; connection.interruptionHandler = { gate.fail() }
-            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in gate.fail() }) as? any FileOperationHelperProtocol else { gate.fail(); return }
-            send(proxy) { gate.complete($0) }
+            connection.invalidationHandler = { @Sendable in gate.fail() }; connection.interruptionHandler = { @Sendable in gate.fail() }
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ @Sendable _ in gate.fail() }) as? any FileOperationHelperProtocol else { gate.fail(); return }
+            send(proxy) { @Sendable reply in gate.complete(reply) }
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { gate.fail() }
         }
     }

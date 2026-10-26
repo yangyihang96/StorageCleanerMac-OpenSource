@@ -9,6 +9,21 @@ struct MenuBarCardFingerprint: Equatable {
     var labels: [String] = []
 }
 
+extension MenuBarCardFingerprint {
+    /// D119: the hardware-control card hosts the sensors page's fan group,
+    /// whose speeds, fan state and thermal row come from the sensor sample.
+    /// The card redraws when one of them changes, not on every sample.
+    mutating func appendFanGroupReadings(_ snapshot: SystemMonitorSnapshot?) {
+        let fans = FanTelemetryState.resolve(snapshot: snapshot)
+        values += fans.readings.flatMap { reading in
+            [reading.index, reading.actualRPM, reading.minimumRPM ?? -1,
+             reading.maximumRPM ?? -1, reading.targetRPM ?? -1].map(Double.init)
+        }
+        flags += [fans.isFanless, fans.isSampling]
+        labels.append(snapshot?.thermalState.rawValue ?? "")
+    }
+}
+
 enum MenuBarCardDomain {
     case cpu, memory, capacity, diskIO, network, networkInterface
     case sensors, battery, energyProcesses, memoryProcesses, controls, availability
@@ -231,6 +246,7 @@ extension MenuBarAdvancedStatusView {
                             String(describing: computerHealthStore.batterySettingsAdjustmentState)]
             value.values = [fanControl.manualFraction] + fanControl.manualFractionByFan.sorted { $0.key < $1.key }.flatMap { [Double($0.key), $0.value] }
             value.flags += [fanControl.isApplying, fanControl.isSwitchingMode, fanControl.isHelperReachable]
+            value.appendFanGroupReadings(monitorSnapshot)
         case .availability:
             value.labels = [String(describing: auxiliaryState.internalBatteryAvailability)]
         case .levelThree:

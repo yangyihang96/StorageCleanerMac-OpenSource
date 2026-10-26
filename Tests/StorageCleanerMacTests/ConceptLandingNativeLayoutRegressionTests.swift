@@ -459,9 +459,14 @@ final class ConceptLandingNativeLayoutRegressionTests: XCTestCase {
                             // D62① allows the options to scroll while the primary stays fixed.
                             try host.scrollOptionsToBottom(matching: viewport)
                             let after = try await host.frames(required: landingRequired.union(["landing.optionsEnd"]), size: size)
+                            // Frames land on whole device pixels. Allow one
+                            // pixel: 0.5 pt on 2x as before, 1 pt on 1x, where
+                            // the English devCaches list rounds 0.66 pt wider
+                            // than the 329.34 pt viewport at 655 wide.
+                            let pixel = host.devicePixel
                             if let end = after["landing.optionsEnd"],
-                               !viewport.insetBy(dx: -0.5, dy: -0.5).contains(end) {
-                                problems.append("\(tag): final option is unreachable")
+                               !viewport.insetBy(dx: -pixel, dy: -pixel).contains(end) {
+                                problems.append("\(tag): final option is unreachable (end \(end), viewport \(viewport), pixel \(pixel) pt)")
                             }
                         }
                         try assertLandingReachability(frames, size: size)
@@ -677,6 +682,10 @@ final class CalibrationAppKitLayoutHost {
         _ = NSApplication.shared
         let content = root
             .environment(\.colorScheme, dark ? .dark : .light)
+            // D141: this host calibrates the D67–D77 layouts, which are now
+            // the classic view; the studio pages have their own tests
+            // (`CareStudioRenderReviewTests`, `CareStudioWindowReviewTests`).
+            .environment(\.careStudioClassicResults, true)
             // Enable the public assistive-technology environment for this
             // inert component host, without changing any macOS preference.
             // The resulting AX tree and actions still come from SwiftUI.
@@ -722,6 +731,11 @@ final class CalibrationAppKitLayoutHost {
         window.orderFront(nil)
         layoutNativeHierarchy()
     }
+
+    /// One device pixel in points on the screen the fixture is on now. The
+    /// fixture can sit mostly above the displays at short sizes (2x, the
+    /// main display's scale) and reach a 1x screen when it grows.
+    var devicePixel: CGFloat { 1 / max(1, window.backingScaleFactor) }
 
     func orbitAnimationStates() -> [Bool] {
         func collect(_ view: NSView) -> [Bool] {

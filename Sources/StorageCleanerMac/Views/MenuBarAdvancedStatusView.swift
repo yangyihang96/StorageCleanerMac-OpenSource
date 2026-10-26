@@ -35,7 +35,7 @@ extension PanelDensity {
     func auxiliaryDemand(
         for section: PanelSection,
         geekConfiguration: GeekDashboardConfiguration = .defaultValue,
-        tertiaryVisible: Bool = false
+        startsProcessLists: Bool = false
     ) -> MenuBarAuxiliaryMonitorDemand {
         let isOverview = self == .geek || (self == .complex && section == .overview)
         let visibleGeekModules = Set(
@@ -74,13 +74,17 @@ extension PanelDensity {
                 || (self == .complex && section == .overview && visibleGeekModules.contains(.network)),
             needsPublicNetworkAddress: self == .geek
                 && section == .network,
+            // D167: the network page's app list, once its first frame is
+            // drawn (was: only while a level-3 page was open).
             needsNetworkProcesses: self == .geek
-                && section == .network && tertiaryVisible,
+                && section == .network && startsProcessLists,
             needsStorageVolumes: section == .disk,
-            needsPowerTelemetry: section == .power,
+            // D119: the sensors page shows the power, current and voltage rows.
+            needsPowerTelemetry: section == .power || section == .sensors,
             needsChargeLimit: usesGeekLayout && section == .power,
             needsStorageCapacity: section == .disk || needsGeekOverviewDisk,
-            needsBattery: section == .power || (isOverview && visibleGeekModules.contains(.power)),
+            needsBattery: section == .power || section == .sensors
+                || (isOverview && visibleGeekModules.contains(.power)),
             primaryKinds: primaryKinds
         )
     }
@@ -119,6 +123,9 @@ struct MenuBarAdvancedStatusView: View {
     @State private var isChartDisplayAwake = true
     @State private var isChartLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
     @State private var chartThermalState = ProcessInfo.processInfo.thermalState
+    // D136: the volumes hidden from the disk page (iStat's `Disks.Menu.Filtering`),
+    // in the panel's preference store.
+    @AppStorage(MiniWindowHiddenItems.disksKey) var hiddenDiskKeysRaw = ""
 
     init(
         store: ScanStore,
@@ -135,6 +142,8 @@ struct MenuBarAdvancedStatusView: View {
         monitorState = store.menuBarMonitorState
         auxiliaryState = store.menuBarAuxiliaryMonitorState
         _panelSettingsState = ObservedObject(wrappedValue: panelSettingsState)
+        _hiddenDiskKeysRaw = AppStorage(wrappedValue: "", MiniWindowHiddenItems.disksKey,
+                                        store: panelSettingsState.defaults)
         _panelCoordinator = ObservedObject(
             wrappedValue: panelCoordinator
                 ?? GeekPanelCoordinator(initialSection: initialSection)
@@ -598,6 +607,8 @@ struct MenuBarAdvancedStatusView: View {
             \.geekPanelHoverEnvelopeActive,
             panelCoordinator.isPointerWithinHoverEnvelope
         )
+        .environment(\.geekKeyboardHighlight, panelCoordinator.keyboardHighlight)
+        .environment(\.geekKeyboardRowOpenRequest, panelCoordinator.rowOpenRequest)
         .environment(
             \.menuBarTertiaryPresentationMode,
             panelSettingsState.tertiaryPresentationMode
@@ -627,8 +638,7 @@ struct MenuBarAdvancedStatusView: View {
                 auxiliaryState: auxiliaryState,
                 panelSettingsState: panelSettingsState,
                 presentation: presentation,
-                selectedSection: selectedSection,
-                tertiaryVisible: hasActiveTertiary
+                selectedSection: selectedSection
             )
         }
         .task(id: displayHistoryDurations) {
@@ -876,7 +886,10 @@ struct MenuBarAdvancedStatusView: View {
             guard activeInlineTertiaryRequest?.id == id else { return false }
             guard !panelCoordinator.isHistoryPinned else { return false }
             activeInlineTertiaryRequest = nil
-            panelCoordinator.dismissUnpinnedHierarchy()
+            // D123: a row's page closes alone (was the whole unpinned
+            // hierarchy); the module column follows its own rules, as a
+            // submenu does in iStat Menus 7.30.
+            panelCoordinator.dismissHistory()
         case let .updateSourceOffset(id, offset):
             guard GeekInlineTertiaryRequest.updateSourceOffset(
                 id: id,
@@ -890,6 +903,16 @@ struct MenuBarAdvancedStatusView: View {
         synchronizeTertiaryPresentation()
         reconcileGeekPanelDismissal()
         return true
+    }
+
+    /// D136: iStat's hide button appends the volume's key, rebuilds the
+    /// menu and closes the submenu (`closeSubmenu`), pinned or not.
+    func hideDiskVolume(_ key: String) {
+        activeInlineTertiaryRequest = nil
+        panelCoordinator.dismissHistory()
+        synchronizeTertiaryPresentation()
+        reconcileGeekPanelDismissal()
+        hiddenDiskKeysRaw = MiniWindowHiddenItems.raw(appending: key, to: hiddenDiskKeysRaw)
     }
 
     private func synchronizeTertiaryPresentation() {
@@ -988,10 +1011,10 @@ struct MenuBarAdvancedStatusView: View {
                 currentValue: metricValue(.gpuUsage),
                 memoryValue: nil,
                 temperatureValue: geekGPUTemperature.map {
-                    String(format: "%.1f°C", $0)
+                    IStatNumberFormat.temperature($0)
                 }
             ))
-            preferredSize = GeekHoverDetailMetrics.historySize
+            preferredSize = GeekGPUHoverDetail.popoverSize
             chartMetric = .gpu
             accessibilityLabel = L10n.text("GPU 活动历史", "GPU Activity History")
         case .cpuUsageInspector:
@@ -1009,22 +1032,27 @@ struct MenuBarAdvancedStatusView: View {
             let poweredOnAt = monitorSnapshot?.systemBootAt.map {
                 PanelTimestampFormat.monthDayAndTime($0)
             } ?? "—"
-            content = AnyView(GeekProcessorUptimeHoverDetail(
-                uptime: uptimeText,
-                poweredOnAt: poweredOnAt
-            ))
-            preferredSize = GeekHoverDetailMetrics.uptimeSize
+            let durations = uptimeBreakdownTexts
+            let detail = GeekProcessorUptimeHoverDetail(
+                poweredOnAt: poweredOnAt,
+                awake: durations.awake,
+                asleep: durations.asleep
+            )
+            content = AnyView(detail)
+            preferredSize = detail.popoverSize
             chartMetric = nil
             accessibilityLabel = L10n.text("运行时间", "Uptime")
         case .diskVolumeInspector:
             let smartStatus = healthSummary?.diskSMARTStatus ?? .unavailable
-            content = AnyView(GeekDiskVolumeHoverDetail(
+            let detail = GeekDiskVolumeHoverDetail(
                 snapshot: storageSnapshot,
                 volumeName: volumeName,
                 status: diskSMARTStatusText(smartStatus),
-                temperature: nil
-            ))
-            preferredSize = GeekHoverDetailMetrics.volumeSize
+                temperature: nil,
+                actions: .inert
+            )
+            content = AnyView(detail)
+            preferredSize = detail.popoverSize
             chartMetric = nil
             accessibilityLabel = L10n.text("磁盘卷详情", "Disk Volume Detail")
         case .networkHistory:
@@ -1034,7 +1062,7 @@ struct MenuBarAdvancedStatusView: View {
                 uploadValue: networkUpText,
                 downloadValue: networkDownText
             ))
-            preferredSize = GeekHoverDetailMetrics.compactHistorySize
+            preferredSize = GeekNetworkHistoryHoverDetail.popoverSize
             chartMetric = .network
             accessibilityLabel = L10n.text("网络活动历史", "Network Activity History")
         case .networkVPNPPP, .networkVPNThirdParty, .networkVPNSystem,
@@ -1054,14 +1082,13 @@ struct MenuBarAdvancedStatusView: View {
             let presentation = ControlPalettePresentationState()
             presentation.present(.fan)
             let snapshotFanControl = makeDebugFanControlCoordinator()
-            let isExpanded = scenario == .fanControlFull
+            // D152: both scenarios show the one palette (no expanded details).
             content = AnyView(
                 FanControlPaletteView(
                     presentation: presentation,
                     fanControl: snapshotFanControl,
                     telemetry: FanTelemetryState.resolve(snapshot: MiniWindowDemoData.fixture.snapshot),
-                    thermalState: MiniWindowDemoData.hardwareControlProfile.thermalState,
-                    showsExpandedControls: isExpanded
+                    thermalState: MiniWindowDemoData.hardwareControlProfile.thermalState
                 )
                 .controlSize(.small)
                 .padding(GeekPanelLayout.contentPadding)
@@ -1072,9 +1099,7 @@ struct MenuBarAdvancedStatusView: View {
             // measures the production content after layout.
             preferredSize = ControlPaletteMetrics.fanSize
             chartMetric = nil
-            accessibilityLabel = isExpanded
-                ? L10n.text("完整风扇控制", "Full Fan Control")
-                : L10n.text("紧凑风扇控制", "Compact Fan Control")
+            accessibilityLabel = L10n.text("风扇控制", "Fan Control")
         case .powerModeAndChargeTarget:
             content = AnyView(
                 GeekEnergyModeHoverDetail(
@@ -1099,16 +1124,16 @@ struct MenuBarAdvancedStatusView: View {
                 )
                 .controlSize(.small)
                 .padding(GeekPanelLayout.contentPadding)
-                .frame(width: 270, height: 440, alignment: .top)
+                .frame(width: ControlPaletteMetrics.powerSize.width, height: 440, alignment: .top)
             )
-            preferredSize = CGSize(width: 270, height: 440)
+            preferredSize = CGSize(width: ControlPaletteMetrics.powerSize.width, height: 440)
             chartMetric = nil
             accessibilityLabel = L10n.text("电源模式与充电目标", "Power Modes and Charge Target")
         case .sensorGPUTemperature:
             content = AnyView(GeekSensorMetricHoverDetail(
                 title: L10n.text("GPU 温度", "GPU Temperature"),
                 currentValue: geekGPUTemperature.map {
-                    String(format: "%.1f°C", $0)
+                    IStatNumberFormat.temperature($0)
                 } ?? "--",
                 points: geekChartHistory,
                 channel: .gpuTemperature,
@@ -1123,7 +1148,10 @@ struct MenuBarAdvancedStatusView: View {
                     ? metricValue(.gpuUsage)
                     : nil
             ))
-            preferredSize = GeekSensorPowerHoverDetailMetrics.sensorHistorySize
+            preferredSize = GeekSensorMetricHoverDetail.popoverSize(
+                extraRowCount: metricAvailable(.gpuUsage) ? 1 : 0,
+                hasNote: false
+            )
             chartMetric = .temperature
             accessibilityLabel = L10n.text("GPU 温度历史", "GPU Temperature History")
         case .sensorCPUTemperature:
@@ -1142,7 +1170,7 @@ struct MenuBarAdvancedStatusView: View {
                     .max()
                     .map(processorFrequencyText) ?? "--"
             ))
-            preferredSize = GeekSensorPowerHoverDetailMetrics.sensorHistorySize
+            preferredSize = GeekSensorMetricHoverDetail.popoverSize(extraRowCount: 1, hasNote: false)
             chartMetric = .temperature
             accessibilityLabel = L10n.text("CPU 温度历史", "CPU Temperature History")
         case .powerChipBreakdown, .powerBacklightDetail, .powerBatteryRowDetail,
@@ -1167,11 +1195,11 @@ struct MenuBarAdvancedStatusView: View {
             }
             guard let readout = readouts.first(where: { $0.id == id }) else { return }
             content = AnyView(GeekSensorReadoutDetail(readout: readout))
-            preferredSize = GeekSensorReadoutLayout.detailSize(extraRowCount: readout.detailRows.count)
+            preferredSize = GeekSensorReadoutLayout.detailSize(readout)
             chartMetric = nil
             accessibilityLabel = readout.title
         case .powerBatteryDetail:
-            content = AnyView(GeekBatteryElectricalHoverDetail(
+            let detail = GeekBatteryElectricalHoverDetail(
                 electrical: batteryElectricalSnapshot,
                 cycleCount: healthSummary?.batteryCycleCount ?? batteryElectricalSnapshot?.cycleCount,
                 condition: healthSummary?.batteryCondition.map(batteryConditionText),
@@ -1182,8 +1210,9 @@ struct MenuBarAdvancedStatusView: View {
                 chargeTargetPercent: batteryChargeLimitState?.target.rawValue,
                 remainingTimeMinutes: batterySnapshot?.remainingTimeMinutes,
                 runtimeEstimate: batteryRuntimeEstimate
-            ))
-            preferredSize = GeekSensorPowerHoverDetailMetrics.batterySize
+            )
+            content = AnyView(detail)
+            preferredSize = detail.popoverSize
             chartMetric = nil
             accessibilityLabel = L10n.text("电池与充电三级详情", "Battery and Charging Deep Detail")
         case .sensorCPURowDetail, .sensorPalmRestDetail:
@@ -1202,7 +1231,7 @@ struct MenuBarAdvancedStatusView: View {
         case .sensorAmbientLightDetail:
             guard let readout = geekDebugAmbientLightReadout else { return }
             content = AnyView(GeekSensorReadoutDetail(readout: readout))
-            preferredSize = GeekSensorReadoutLayout.detailSize(extraRowCount: 0)
+            preferredSize = GeekSensorReadoutLayout.detailSize(readout)
             chartMetric = nil
             accessibilityLabel = readout.title
         case .sensorFanSpeedHistory:
@@ -1215,7 +1244,8 @@ struct MenuBarAdvancedStatusView: View {
                 valueRange: 0...fanTrendMaximum,
                 selectedFanIndex: readings.first?.index
             ))
-            preferredSize = GeekSensorPowerHoverDetailMetrics.sensorHistorySize
+            preferredSize = GeekFanHoverDetail.popoverSize(selectedFanIndex: readings.first?.index,
+                                                           readingCount: readings.count)
             chartMetric = .fan
             accessibilityLabel = L10n.text("风扇转速历史", "Fan Speed History")
         default:
@@ -1380,13 +1410,12 @@ struct MenuBarAdvancedSamplingCoordinator: View {
     @ObservedObject var panelSettingsState: MenuBarPanelSettingsState
     let presentation: PanelDensity
     let selectedSection: PanelSection
-    let tertiaryVisible: Bool
     let samplingContext: MenuBarSamplingContext
 
     init(store: ScanStore, monitorState: MenuBarMonitorState,
          auxiliaryState: MenuBarAuxiliaryMonitorState,
          panelSettingsState: MenuBarPanelSettingsState, presentation: PanelDensity,
-         selectedSection: PanelSection, tertiaryVisible: Bool,
+         selectedSection: PanelSection,
          samplingContext: MenuBarSamplingContext = .shared) {
         self.store = store
         self.monitorState = monitorState
@@ -1394,14 +1423,15 @@ struct MenuBarAdvancedSamplingCoordinator: View {
         self.panelSettingsState = panelSettingsState
         self.presentation = presentation
         self.selectedSection = selectedSection
-        self.tertiaryVisible = tertiaryVisible
         self.samplingContext = samplingContext
     }
 
+    /// D167: the open module page's process list (was: only with a level-3
+    /// page open too).
     private var processSection: PanelSection? {
         guard hasPresentedFirstFrame,
               samplingContext.plan?.panelVisible != false else { return nil }
-        return MenuBarProcessSamplingDemand.section(selectedSection, tertiaryVisible: tertiaryVisible)
+        return MenuBarProcessSamplingDemand.section(selectedSection)
     }
 
     @State private var consumerID = UUID()
@@ -1412,7 +1442,7 @@ struct MenuBarAdvancedSamplingCoordinator: View {
         presentation.auxiliaryDemand(
             for: selectedSection,
             geekConfiguration: panelSettingsState.geekDashboardConfiguration,
-            tertiaryVisible: tertiaryVisible && hasPresentedFirstFrame
+            startsProcessLists: hasPresentedFirstFrame
         )
     }
 
@@ -1437,8 +1467,8 @@ struct MenuBarAdvancedSamplingCoordinator: View {
 #endif
                 let appearStartedAt = MenuBarPresentationTrace.uptime
                 defer { MenuBarPresentationTrace.span("sampling.onAppear", from: appearStartedAt) }
-                // Declared after the first frame; it is nil unless a level-3
-                // process page is already open.
+                // Declared after the first frame (D167: for the open module
+                // page; was: only when a level-3 page was already open).
                 scheduleFirstFrameDemand()
                 MenuBarPresentationTrace.measure("aux.consumer") {
                     auxiliaryState.registerConsumer(
@@ -1482,8 +1512,7 @@ struct MenuBarAdvancedSamplingCoordinator: View {
                     return
                 }
                 store.updateMenuBarProcessConsumer(consumerID,
-                    section: plan.panelVisible ? MenuBarProcessSamplingDemand.section(
-                        selectedSection, tertiaryVisible: tertiaryVisible) : nil)
+                    section: plan.panelVisible ? MenuBarProcessSamplingDemand.section(selectedSection) : nil)
             }
             .onChange(of: monitorState.snapshot?.generatedAt) {
 #if DEBUG || STORAGE_CLEANER_BETA
@@ -1506,13 +1535,6 @@ struct MenuBarAdvancedSamplingCoordinator: View {
                 if selectedSection == .sensors {
                     store.refreshMenuBarMonitor()
                 }
-            }
-            .onChange(of: tertiaryVisible) {
-#if DEBUG || STORAGE_CLEANER_BETA
-                guard !MiniWindowDemoData.isEnabled else { return }
-#endif
-                store.updateMenuBarProcessConsumer(consumerID, section: processSection)
-                auxiliaryState.updateConsumer(consumerID, demand: demand)
             }
             .onChange(of: presentation) {
 #if DEBUG || STORAGE_CLEANER_BETA

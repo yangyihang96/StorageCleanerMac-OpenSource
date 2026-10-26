@@ -1,33 +1,52 @@
 import SwiftUI
 
-/// The main window sidebar (D53, UI-V2-SPEC §2.2, §3.2.2): gradient icon
-/// tiles, one selection block that slides between rows, a fixed title area
-/// with the list fading beneath it, and an icon rail below 960 pt.
+/// The main window sidebar, laid out as CleanMyMac 5.7.2's (D154): its ten
+/// modules in its order, eight at the top and My Tools / My Activity at the
+/// foot, without group titles. A row opens the module's first page and
+/// stays selected on every page of the module (`CareStudioFamily`). On a
+/// studio page the sidebar sits on the module gradient (D141); pages not yet
+/// moved to the studio keep the classic surface. Below 960 pt, and while a
+/// studio page scans or shows results, it folds to icons.
 struct SidebarView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The classic pages keep the classic sidebar.
+    @Environment(\.careStudioClassicResults) private var usesClassicPages
     @AppStorage(AppCanvasTheme.defaultsKey) private var canvasThemeRawValue = AppCanvasTheme.defaultTheme.rawValue
     @ObservedObject var store: ScanStore
     @ObservedObject private var navigationState: AppNavigationState
     @ObservedObject private var largeFilesWorkspace: LargeFilesStore
     @ObservedObject private var duplicateFilesWorkspace: DuplicateFilesStore
+    /// Report §4 item 16: what the module marks read besides the store.
+    @ObservedObject private var smartCare: SmartCareCoordinator
+    @ObservedObject private var privacy: BrowserPrivacyStore
+    @ObservedObject private var malware: MalwareScanStore
+    @ObservedObject private var cloud: CloudCleanupModel
+    /// Report §4 item 20: the new tools opened from My Tools.
+    @AppStorage(MyToolsCatalog.triedDefaultsKey) private var triedToolsRaw = ""
     @Binding var selection: ReviewFilter
     private let presentation: SidebarPresentation
     private let onTogglePresentation: (() -> Void)?
     @Namespace private var selectionNamespace
     /// The drawn selection. It follows the real selection inside an
     /// animation so the block slides; Reduce Motion places it at once.
-    @State private var highlightedKey: String?
+    @State private var highlightedFamily: CareStudioFamily?
 
     init(
         store: ScanStore,
         selection: Binding<ReviewFilter>,
         presentation: SidebarPresentation = .full,
-        onTogglePresentation: (() -> Void)? = nil
+        onTogglePresentation: (() -> Void)? = nil,
+        privacy: BrowserPrivacyStore? = nil,
+        malware: MalwareScanStore? = nil
     ) {
         self.store = store
         _navigationState = ObservedObject(wrappedValue: store.navigationState)
         _largeFilesWorkspace = ObservedObject(wrappedValue: store.largeFilesWorkspace)
         _duplicateFilesWorkspace = ObservedObject(wrappedValue: store.duplicateFilesWorkspace)
+        _smartCare = ObservedObject(wrappedValue: SmartCareCoordinator.of(store))
+        _privacy = ObservedObject(wrappedValue: privacy ?? BrowserPrivacyStore())
+        _malware = ObservedObject(wrappedValue: malware ?? MalwareScanStore())
+        _cloud = ObservedObject(wrappedValue: CloudCleanupModel.shared)
         _selection = selection
         self.presentation = presentation
         self.onTogglePresentation = onTogglePresentation
@@ -35,62 +54,54 @@ struct SidebarView: View {
 
     private var isRail: Bool { presentation == .rail }
 
+    /// The module of the page on screen; a page Smart Care's Review opened
+    /// is Smart Care's (D202).
+    private var currentFamily: CareStudioFamily {
+        if navigationState.smartCareReview != nil { return .smartCare }
+        return CareStudioFamily(route: navigationState.selectedFilter, utility: navigationState.selectedUtilityFilter)
+    }
+
+    /// The gradient under the sidebar: the module's, on a studio page.
+    private var studioFamily: CareStudioFamily? {
+        guard !usesClassicPages else { return nil }
+        return CareStudioModule(route: navigationState.selectedFilter,
+                                utility: navigationState.selectedUtilityFilter)?.family
+    }
+
     var body: some View {
-        SidebarChrome(isRail: isRail, usesLightfield: FeatureLightfield.owns(selection)) {
-            VStack(spacing: 0) {
-                // The traffic lights sit in the 52 pt toolbar band, which the
-                // sidebar already clears; the old extra 44 pt left about
-                // 96 pt empty above the title (audit 2.16).
-                Color.clear
-                    .frame(height: AppDesignTokens.Layout.sidebarTopInset)
-                    .accessibilityHidden(true)
-
-                workspaceHeader
-
-                ScrollView(.vertical) {
-                    VStack(alignment: isRail ? .center : .leading, spacing: isRail ? 2 : 4) {
-                        navigationRow(.overview)
-
-                        ForEach(SidebarGroup.allCases) { group in
-                            if isRail {
-                                SidebarRailSeparator()
-                                ForEach(ReviewFilter.sidebarItems(in: group)) { filter in
-                                    rows(for: filter)
-                                }
-                            } else {
-                                SidebarSectionView(
-                                    group: group,
-                                    isCurrent: isCurrent(group)
-                                ) {
-                                    VStack(spacing: 2) {
-                                        ForEach(sidebarItems(in: group)) { filter in
-                                            rows(for: filter)
-                                        }
-                                    }
-                                }
-                            }
-                        }
+        SidebarChrome(isRail: isRail, family: studioFamily,
+                      usesLightfield: FeatureLightfield.owns(navigationState.selectedFilter)) {
+            GeometryReader { proxy in
+                let metrics = SidebarRowMetrics(height: proxy.size.height, isRail: isRail)
+                VStack(spacing: 0) {
+                    // The rows fit at any supported window height; a window
+                    // tiled below the minimum scrolls them instead, with the
+                    // list fading above the foot (§2.2).
+                    ViewThatFits(in: .vertical) {
+                        moduleList(metrics)
+                        ScrollView(.vertical) { moduleList(metrics) }
+                            .scrollIndicators(.never)
+                            .mask { SidebarScrollFade() }
                     }
-                    .padding(.horizontal, isRail ? 8 : 10)
-                    .padding(.top, 10)
-                    .padding(.bottom, 14)
-                    .frame(maxWidth: .infinity, alignment: isRail ? .center : .leading)
-                }
-                // §2.2: the title stays put; the list fades beneath it and
-                // above the footer instead of being clipped mid-row.
-                .mask { SidebarScrollFade() }
-                .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+                    .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
 
-                SidebarFooter(isRail: isRail)
-                    .padding(.horizontal, isRail ? 8 : 10)
-                    .padding(.vertical, AppDesignTokens.Spacing.small)
+                    VStack(alignment: isRail ? .center : .leading, spacing: metrics.spacing) {
+                        ForEach(CareStudioFamily.allCases.filter(\.isFooter)) { family in
+                            row(family, metrics: metrics)
+                        }
+                        footerLine
+                    }
+                    .padding(.horizontal, isRail ? 8 : 12)
+                    .padding(.bottom, 10)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             }
         }
         .environment(\.canvasTheme, AppCanvasTheme.resolve(rawValue: canvasThemeRawValue))
-        .onAppear { highlightedKey = currentSelectionKey }
-        .onChange(of: currentSelectionKey) { _, key in
+        .onAppear { highlightedFamily = currentFamily }
+        .onChange(of: currentFamily) { _, family in
             withAnimation(AppMotion.selection(reduceMotion: reduceMotion)) {
-                highlightedKey = key
+                highlightedFamily = family
             }
         }
 #if DEBUG
@@ -98,78 +109,54 @@ struct SidebarView: View {
 #endif
     }
 
-    @ViewBuilder
-    private func rows(for filter: ReviewFilter) -> some View {
-        navigationRow(filter)
-        if filter == .duplicates {
-            SidebarNavigationRow(
-                filter: .duplicates,
-                isSelected: isSelected(.duplicates)
-                    && duplicateFilesWorkspace.resultFilter == .similarImage,
-                isHighlighted: highlightedKey == Self.similarPhotosKey,
-                isActivityActive: false,
-                detail: L10n.text(
-                    "只读对照视觉相似的照片，逐张人工确认",
-                    "Read-only comparison of visually similar photos"
-                ),
-                title: L10n.text("相似照片", "Similar Photos"),
-                systemImage: "photo.on.rectangle.angled",
-                isRail: isRail,
-                namespace: selectionNamespace
-            ) {
-                selectSimilarPhotos()
+    private func moduleList(_ metrics: SidebarRowMetrics) -> some View {
+        VStack(alignment: isRail ? .center : .leading, spacing: metrics.spacing) {
+            ForEach(CareStudioFamily.allCases.filter { !$0.isFooter }) { family in
+                row(family, metrics: metrics)
             }
         }
+        .padding(.horizontal, isRail ? 8 : 12)
+        .padding(.top, 4)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity, alignment: isRail ? .center : .leading)
     }
 
-    private func navigationRow(_ filter: ReviewFilter) -> some View {
-        SidebarNavigationRow(
-            filter: filter,
-            isSelected: isSelected(filter)
-                && (filter != .duplicates
-                    || duplicateFilesWorkspace.resultFilter != .similarImage),
-            isHighlighted: highlightedKey == filter.rawValue,
-            isActivityActive: isActivityActive(for: filter),
-            detail: accessibilityDetail(for: filter),
+    private func row(_ family: CareStudioFamily, metrics: SidebarRowMetrics) -> some View {
+        SidebarModuleRow(
+            family: family,
+            isSelected: currentFamily == family,
+            isHighlighted: highlightedFamily == family,
+            badge: badge(family),
+            showsNewTag: family == .myTools
+                && MyToolsCatalog.hasUntriedNewTool(tried: MyToolsCatalog.ids(from: triedToolsRaw)),
+            onStudio: studioFamily != nil,
             isRail: isRail,
+            rowHeight: metrics.rowHeight,
             namespace: selectionNamespace
         ) {
-            select(filter)
+            select(family)
         }
     }
 
-    private static let similarPhotosKey = "similarPhotos"
-
-    /// The row that is selected now: the sidebar anchor of the route, or the
-    /// similar-photos row of the duplicates page.
-    private var currentSelectionKey: String? {
-        let selected = navigationState.selectedFilter == .utilityHub
-            ? navigationState.selectedUtilityFilter
-            : navigationState.selectedFilter
-        if selected == .duplicates, duplicateFilesWorkspace.resultFilter == .similarImage {
-            return Self.similarPhotosKey
-        }
-        return selected.rawValue
-    }
-
+    /// The version line, with the fold button (CleanMyMac has no fold
+    /// button; ours stays at the foot, out of the module list).
     @ViewBuilder
-    private var workspaceHeader: some View {
+    private var footerLine: some View {
         if isRail {
             sidebarToggleButton
                 .frame(maxWidth: .infinity)
-                .padding(.bottom, 4)
         } else {
-            HStack(spacing: AppDesignTokens.Spacing.small) {
-                Text(L10n.productName)
-                    .font(AppDesignTokens.TypeScale.bodyEmphasis)
-                    .foregroundStyle(AppDesignTokens.Palette.sidebarPrimaryText)
-                    .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(SidebarVersionLabel.text)
+                    .font(AppDesignTokens.TypeScale.caption)
+                    .foregroundStyle(studioFamily != nil ? CareStudioInk.tertiary : AppDesignTokens.Palette.sidebarSecondaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(SidebarVersionLabel.text)
                 Spacer(minLength: 0)
                 sidebarToggleButton
             }
-            .padding(.leading, 17)
-            .padding(.trailing, 8)
-            .padding(.bottom, 4)
+            .padding(.leading, 10)
         }
     }
 
@@ -182,145 +169,55 @@ struct SidebarView: View {
             AppIconButton(
                 title: title,
                 systemImage: isRail ? "sidebar.leading" : "sidebar.squares.leading",
-                tint: AppDesignTokens.Palette.sidebarSecondaryText
+                tint: studioFamily != nil ? CareStudioInk.secondary : AppDesignTokens.Palette.sidebarSecondaryText
             ) {
                 onTogglePresentation()
             }
+            .help(title)
+            .accessibilityLabel(title)
         }
     }
 
-    private func isSelected(_ filter: ReviewFilter) -> Bool {
-        if ReviewFilter.utilityToolCases.contains(filter) {
-            return navigationState.selectedFilter == .utilityHub
-                && navigationState.selectedUtilityFilter == filter
-        }
-        return navigationState.selectedFilter.sidebarGroupAnchor == filter
-    }
-
-    private func sidebarItems(in group: SidebarGroup) -> [ReviewFilter] {
-        ReviewFilter.sidebarItems(in: group)
-    }
-
-    private func isCurrent(_ group: SidebarGroup) -> Bool {
-        let activeFilter = navigationState.selectedFilter == .utilityHub
-            ? navigationState.selectedUtilityFilter
-            : navigationState.selectedFilter
-        return activeFilter.sidebarGroup == group
-    }
-
-    private func select(_ filter: ReviewFilter) {
+    private func select(_ family: CareStudioFamily) {
         Task { @MainActor in
-            selection = filter
-            if filter == .duplicates {
+            let route = family.primaryRoute
+            // D202: a row ends Smart Care's Review, its own page's row too.
+            navigationState.endSmartCareReview()
+            if route == .duplicates {
                 duplicateFilesWorkspace.resultFilter = .all
             }
+            selection = route
         }
     }
 
-    private func selectSimilarPhotos() {
-        Task { @MainActor in
-            duplicateFilesWorkspace.resultFilter = .similarImage
-            selection = .duplicates
-        }
-    }
-
-    private func isActivityActive(for filter: ReviewFilter) -> Bool {
-        switch filter {
-        case .largeFiles:
-            return largeFilesWorkspace.isAnalyzingStorage
-        case .migration:
-            return largeFilesWorkspace.isScanning
-        case .duplicates:
-            return duplicateFilesWorkspace.isScanning
-        default:
-            break
-        }
-        return store.isScanning && store.scanPresentationRoute == filter
-    }
-
-    private func accessibilityDetail(for filter: ReviewFilter) -> String {
-        switch filter {
-        case .overview:
-            if let result = store.result {
-                return L10n.usedSpace(ByteFormat.string(result.system.diskUsedBytes))
-            }
-        case .green:
-            if let result = store.result {
-                return L10n.itemBytes(result.items(for: .green).count, ByteFormat.string(result.greenBytes))
-            }
-        case .privacy:
-            return L10n.text(
-                "读取本机全部浏览记录，逐页列出网站和页面；删除前确认",
-                "Reads all local browsing history and lists every site and page; deletion requires confirmation"
-            )
-        case .devCaches:
-            if let session = store.cleanupScanSession,
-               let category = session.categories.first(where: { $0.id == "developer" }) {
-                return L10n.itemBytes(
-                    category.candidates.count,
-                    ByteFormat.string(category.candidates.reduce(0) {
-                        CleanupByteCount.adding($1.estimatedSizeBytes, to: $0)
-                    })
-                )
-            }
-            return filter.sidebarTitle
-        case .largeFiles:
-            if largeFilesWorkspace.isAnalyzingStorage {
-                let count = largeFilesWorkspace.storageAnalysisProgress?.inspectedItemCount ?? 0
-                return L10n.text("正在分析磁盘 · 已读取 \(count) 项", "Analyzing disk · \(count) items read")
-            }
-            if let analysis = largeFilesWorkspace.storageAnalysis {
-                return L10n.itemBytes(
-                    analysis.inspectedItemCount,
-                    ByteFormat.string(analysis.rootSnapshot.measuredBytes)
-                )
-            }
-        case .migration:
-            let items = largeFilesWorkspace.items
-            if largeFilesWorkspace.isScanning {
-                return L10n.text("正在扫描可搬移文件", "Scanning movable files")
-            }
-            if largeFilesWorkspace.hasScanned {
-                return L10n.itemBytes(
-                    items.count,
-                    ByteFormat.string(items.reduce(0) { $0 + $1.sizeBytes })
-                )
-            }
-            return L10n.text("迁移文件或应用到外接硬盘", "Move files or applications to an external drive")
-        case .duplicates:
-            if duplicateFilesWorkspace.isScanning, let progress = duplicateFilesWorkspace.scanProgress {
-                return L10n.text(
-                    "已扫描 \(progress.scannedFiles) 个文件，已完整哈希 \(progress.hashedFiles) 个",
-                    "\(progress.scannedFiles) files scanned; \(progress.hashedFiles) fully hashed"
-                )
-            }
-            if duplicateFilesWorkspace.hasScanned || !duplicateFilesWorkspace.items.isEmpty {
-                return L10n.itemBytes(
-                    duplicateFilesWorkspace.items.count,
-                    ByteFormat.string(duplicateFilesWorkspace.items.reduce(0) { $0 + $1.sizeBytes })
-                )
-            }
-        case .healthHub:
-            return L10n.text("磁盘与硬件状态", "Disk and hardware status")
-        case .performance:
-            return L10n.text("CPU、图形、媒体与持续性能测试", "CPU, graphics, media, and sustained performance tests")
-        case .startup:
-            return L10n.text("登录项、后台代理和系统守护进程", "Login apps, background agents, and system daemons")
-        case .memory:
-            return L10n.text("进程内存与安全优化建议", "Process memory and safe optimization guidance")
-        case .energy:
-            return L10n.text("能耗、热状态与续航影响", "Energy, thermal state, and battery impact")
-        case .uninstall:
-            return L10n.text("审阅应用与关联文件", "Review apps and related files")
-        case .updater:
-            return L10n.text("可信来源的可用更新", "Available updates from trusted sources")
-        case .utilityHub:
-            break
-        }
-        return filter.sidebarTitle
+    /// Report §4 item 16: CleanMyMac's marks on the module icons — how far a
+    /// scan is, Smart Scan's results waiting, a module's results (was: a
+    /// turning ring while a module scanned).
+    private func badge(_ family: CareStudioFamily) -> SidebarBadge? {
+        SidebarBadge.badge(for: family, SidebarBadgeInputs(store: store, smartCare: smartCare, privacy: privacy,
+                                                           malware: malware, cloud: cloud))
     }
 }
 
+/// Row height and spacing: CleanMyMac's 50 pt pitch where the window is tall
+/// enough, tighter in short windows so all ten modules stay visible.
+struct SidebarRowMetrics: Equatable {
+    let rowHeight: CGFloat
+    let spacing: CGFloat
+
+    static let pitch: CGFloat = 50
+    static let minimumPitch: CGFloat = 36
+
+    init(height: CGFloat, isRail: Bool) {
+        // The foot keeps the version line (or the fold button) and padding.
+        let reserved: CGFloat = isRail ? 64 : 52
+        let rows = CGFloat(CareStudioFamily.allCases.count)
+        let available = max(0, height - reserved) / rows
+        let pitch = min(Self.pitch, max(Self.minimumPitch, available.rounded(.down)))
+        spacing = pitch >= 44 ? 6 : 2
+        rowHeight = pitch - spacing
+    }
+}
 
 /// Sidebar canvas and its trailing edge.
 private struct SidebarChrome<Content: View>: View {
@@ -328,6 +225,8 @@ private struct SidebarChrome<Content: View>: View {
     @Environment(\.canvasTheme) private var canvasTheme
     @AppSurfaces private var surfaces
     let isRail: Bool
+    /// D141/D154: the module whose gradient the sidebar sits on.
+    let family: CareStudioFamily?
     /// D67 pages always use the light-field sidebar tokens. V1 pages follow
     /// the chosen canvas theme, so pure black keeps its own sidebar colour.
     var usesLightfield = true
@@ -340,14 +239,22 @@ private struct SidebarChrome<Content: View>: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background {
                 Group {
-                    if followsPureBlack { surfaces.sidebar }
+                    if let family {
+                        // CleanMyMac's sidebar is transparent over the module
+                        // colour; a light veil keeps its rows apart from the page.
+                        ZStack {
+                            CareStudioBackdrop(family: family)
+                            CareStudioInk.sidebarVeil
+                        }
+                    } else if followsPureBlack { surfaces.sidebar }
                     else { FeatureLightfieldPalette.color(FeatureLightfieldPalette.resolve(scheme).sidebar) }
                 }
                 .ignoresSafeArea(.container, edges: .top)
             }
             .overlay(alignment: .trailing) {
                 Rectangle()
-                    .fill(followsPureBlack ? surfaces.divider
+                    .fill(family != nil ? Color.white.opacity(0.08)
+                        : followsPureBlack ? surfaces.divider
                         : FeatureLightfieldPalette.color(scheme == .dark ? 0xFFFFFF : 0x162850).opacity(FeatureLightfieldPalette.resolve(scheme).sidebarLine))
                     .frame(width: 1)
                     .accessibilityHidden(true)
@@ -355,194 +262,81 @@ private struct SidebarChrome<Content: View>: View {
     }
 }
 
-/// Fades the list under the fixed title and above the footer (§2.2).
+/// Fades the list above the foot (§2.2).
 private struct SidebarScrollFade: View {
     var body: some View {
         VStack(spacing: 0) {
             LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
-                .frame(height: 12)
+                .frame(height: 6)
             Rectangle().fill(.black)
             LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 16)
+                .frame(height: 14)
         }
         .accessibilityHidden(true)
     }
 }
 
-/// In the icon rail, group titles become separators (§2.2).
-private struct SidebarRailSeparator: View {
-    @AppSurfaces private var surfaces
-
-    var body: some View {
-        Rectangle()
-            .fill(surfaces.divider)
-            .frame(width: 28, height: 1)
-            .padding(.vertical, 6)
-            .accessibilityHidden(true)
-    }
-}
-
-private struct SidebarSectionView<Content: View>: View {
+/// One module: its glossy mark and name. CleanMyMac draws the idle marks as
+/// pale glass and the current one in colour, on a translucent block.
+private struct SidebarModuleRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppSurfaces private var surfaces
-    let group: SidebarGroup
-    let isCurrent: Bool
-    private let content: Content
-    @AppStorage private var isExpanded: Bool
-    @State private var isHovered = false
-
-    init(
-        group: SidebarGroup,
-        isCurrent: Bool,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.group = group
-        self.isCurrent = isCurrent
-        _isExpanded = AppStorage(
-            wrappedValue: false,
-            group.expansionDefaultsKey
-        )
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Button {
-                withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {
-                    isExpanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    // A group title is a neutral label (UI-V2-SPEC 1.3:
-                    // 11 pt semibold, +0.3 tracking); module pigments stay
-                    // with the destinations inside it.
-                    Text(group.title)
-                        .font(AppDesignTokens.TypeScale.sidebarGroup)
-                        .tracking(AppDesignTokens.TypeScale.sidebarGroupTracking)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Spacer(minLength: 0)
-
-                    Image(systemName: "chevron.right")
-                        .font(.system(
-                            size: AppDesignTokens.Icon.sidebarDisclosureGlyph,
-                            weight: .bold
-                        ))
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        .frame(width: 12, height: 14)
-                        .opacity(isHovered || !isExpanded ? 1 : 0.55)
-                        .accessibilityHidden(true)
-                }
-                .foregroundStyle(isCurrent ? surfaces.textPrimary : surfaces.textSecondary)
-                .padding(.leading, 8)
-                .padding(.trailing, 6)
-                .padding(.top, 8)
-                .frame(
-                    maxWidth: .infinity,
-                    minHeight: 26,
-                    alignment: .leading
-                )
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(ResponsivePlainButtonStyle())
-            .onHover { isHovered = $0 }
-            .accessibilityLabel(group.title)
-            .accessibilityValue(
-                isExpanded
-                    ? L10n.text("已展开", "Expanded")
-                    : L10n.text("已收起", "Collapsed")
-            )
-
-            if isExpanded {
-                content
-                    .transition(AppMotion.rowTransition(reduceMotion: reduceMotion))
-            }
-        }
-        .onAppear {
-            if isCurrent {
-                isExpanded = true
-            }
-        }
-        .onChange(of: isCurrent) { _, isCurrent in
-            if isCurrent {
-                withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {
-                    isExpanded = true
-                }
-            }
-        }
-    }
-}
-
-private struct SidebarNavigationRow: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @AppSurfaces private var surfaces
 
-    let filter: ReviewFilter
+    let family: CareStudioFamily
     /// The real selection (accessibility).
     let isSelected: Bool
     /// The drawn selection, which slides in an animation.
     let isHighlighted: Bool
-    let isActivityActive: Bool
-    let detail: String
-    var title: String? = nil
-    var systemImage: String? = nil
-    var isRail = false
+    let badge: SidebarBadge?
+    /// Report §4 item 20: CleanMyMac's "New" on My Tools while a new tool
+    /// is untried (`cmm/09`).
+    let showsNewTag: Bool
+    let onStudio: Bool
+    let isRail: Bool
+    let rowHeight: CGFloat
     let namespace: Namespace.ID
     let action: () -> Void
 
     @State private var isHovered = false
 
-    private var rowTitle: String { title ?? filter.sidebarTitle }
-    private var pigment: ModulePigment { filter.moduleTheme.pigment }
+    private var textColor: Color {
+        if onStudio { return CareStudioInk.primary }
+        return isHighlighted ? .white : surfaces.textPrimary
+    }
 
     var body: some View {
         Button(action: action) {
             Group {
                 if isRail {
-                    FeatureLightfieldArtwork(art: systemImage == GeneratedArt.similarPhotosSystemImage
-                        ? .similarPhotos : GeneratedArt.module(for: filter), variant: .header)
-                    .frame(width: 20, height: 20)
-                    .frame(width: 44, height: 36)
+                    markedGlyph
+                        .frame(width: 44, height: rowHeight)
                 } else {
-                    HStack(spacing: 10) {
-                        FeatureLightfieldArtwork(art: systemImage == GeneratedArt.similarPhotosSystemImage
-                            ? .similarPhotos : GeneratedArt.module(for: filter), variant: .header)
-                            .frame(width: 20, height: 20)
-
-                        Text(rowTitle)
-                            .font(isHighlighted
-                                  ? AppDesignTokens.TypeScale.sidebarItemSelected
-                                  : AppDesignTokens.TypeScale.sidebarItem)
+                    HStack(spacing: 12) {
+                        markedGlyph
+                        Text(family.title)
+                            .font(.system(size: 15, weight: isHighlighted ? .medium : .regular))
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                             .layoutPriority(1)
-
                         Spacer(minLength: 0)
-
-                        if isActivityActive {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(isHighlighted ? .white : pigment.brightColor)
-                                .accessibilityHidden(true)
-                        }
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .frame(minHeight: AppDesignTokens.Layout.sidebarRowHeight)
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: rowHeight)
                 }
             }
-            .foregroundStyle(isHighlighted ? Color.white : surfaces.textPrimary)
-            .contentShape(RoundedRectangle(cornerRadius: AppDesignTokens.Corner.row, style: .continuous))
+            .foregroundStyle(textColor)
+            .contentShape(RoundedRectangle(cornerRadius: SidebarModuleRow.corner, style: .continuous))
         }
         .buttonStyle(ResponsivePlainButtonStyle())
         .background {
             ZStack {
                 if !isHighlighted {
-                    RoundedRectangle(cornerRadius: AppDesignTokens.Corner.row, style: .continuous)
-                        .fill(isHovered ? surfaces.hover : .clear)
+                    RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+                        .fill(isHovered ? (onStudio ? CareStudioInk.sidebarHover : surfaces.hover) : .clear)
                 }
                 if isHighlighted {
-                    SidebarSelectionBlock(pigment: pigment)
+                    SidebarSelectionBlock(family: family, onStudio: onStudio)
                         .matchedGeometryEffect(id: "sidebar.selection", in: namespace)
                 }
             }
@@ -550,41 +344,95 @@ private struct SidebarNavigationRow: View {
         .frame(maxWidth: isRail ? nil : .infinity, alignment: .leading)
         .animation(AppMotion.resolved(.hover, reduceMotion: reduceMotion), value: isHovered)
         .onHover { isHovered = $0 }
-        .help(isRail ? rowTitle : detail)
-        .accessibilityLabel(rowTitle)
-        .accessibilityHint(detail)
-        .accessibilityValue(isSelected ? L10n.text("已选择", "Selected") : "")
+        .help(isRail ? family.title : family.summary)
+        .accessibilityLabel(family.title)
+        .accessibilityHint(family.summary)
+        .accessibilityValue(accessibilityStatus)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    /// The selection and the mark, as VoiceOver reads them.
+    private var accessibilityStatus: String {
+        [isSelected ? L10n.text("已选择", "Selected") : nil, badge?.accessibilityText,
+         showsNewTag ? L10n.text("有新工具", "New tools") : nil]
+            .compactMap { $0 }
+            .joined(separator: L10n.text("，", ", "))
+    }
+
+    static let corner: CGFloat = 12
+    static let glyphSide: CGFloat = 26
+
+    /// Our D58 mark turned to the module colour; idle marks drop most of
+    /// their colour on the dark gradient, as CleanMyMac's do.
+    private var glyph: some View {
+        let idleOnNight = onStudio && colorScheme == .dark
+        return FeatureLightfieldArtwork(art: family.art, variant: .header)
+            .hueRotation(family.artHueRotation)
+            .saturation(isHighlighted ? 1 : (idleOnNight ? 0.18 : 0.75))
+            .brightness(isHighlighted || !idleOnNight ? 0 : 0.06)
+            .frame(width: Self.glyphSide, height: Self.glyphSide)
+            .accessibilityHidden(true)
+    }
+
+    /// The mark with its badge on the corner, in the rail and the full
+    /// sidebar alike (CleanMyMac, `cmm/15`–`24`): the badge's centre on the
+    /// mark's trailing edge, 6 pt above its top. "New" is centred on the
+    /// mark's top-leading corner (`cmm/09`).
+    private var markedGlyph: some View {
+        glyph
+            .overlay(alignment: .topTrailing) {
+                if let badge {
+                    SidebarBadgeMark(badge: badge)
+                        .offset(x: SidebarBadgeMark.diameter / 2, y: -(SidebarBadgeMark.diameter / 2 + 6))
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if showsNewTag {
+                    CareStudioNewTag()
+                        .alignmentGuide(.leading) { $0.width / 2 }
+                        .alignmentGuide(.top) { $0.height / 2 }
+                        .accessibilityHidden(true)
+                }
+            }
     }
 }
 
-/// DECISIONS D3: the selection follows its module's color, drawn as the
-/// module gradient with white text (UI-V2-SPEC 1.2).
+/// The current module. On a studio gradient it is CleanMyMac's translucent
+/// block; on the classic surface it keeps D3's module-colour block.
 private struct SidebarSelectionBlock: View {
     @AppSurfaces private var surfaces
-    let pigment: ModulePigment
+    let family: CareStudioFamily
+    let onStudio: Bool
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: AppDesignTokens.Corner.row, style: .continuous)
-        shape
-            .fill(LinearGradient(colors: pigment.gradientStops, startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay {
-                shape.strokeBorder(
-                    LinearGradient(colors: [.white.opacity(0.28), .white.opacity(0.04)],
-                                   startPoint: .top, endPoint: .bottom),
-                    lineWidth: 1
-                )
+        let shape = RoundedRectangle(cornerRadius: SidebarModuleRow.corner, style: .continuous)
+        Group {
+            if onStudio {
+                shape
+                    .fill(CareStudioInk.sidebarSelection)
+                    .overlay { shape.strokeBorder(CareStudioInk.hairline, lineWidth: 1) }
+            } else {
+                let pigment = family.primaryRoute.moduleTheme.pigment
+                shape
+                    .fill(LinearGradient(colors: pigment.gradientStops, startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay {
+                        shape.strokeBorder(
+                            LinearGradient(colors: [.white.opacity(0.28), .white.opacity(0.04)],
+                                           startPoint: .top, endPoint: .bottom),
+                            lineWidth: 1
+                        )
+                    }
+                    .shadow(color: surfaces.isNight ? pigment.brightColor.opacity(0.32) : .black.opacity(0.10),
+                            radius: surfaces.isNight ? 10 : 4, y: surfaces.isNight ? 0 : 1)
             }
-            .shadow(color: surfaces.isNight ? pigment.brightColor.opacity(0.32) : .black.opacity(0.10),
-                    radius: surfaces.isNight ? 10 : 4, y: surfaces.isNight ? 0 : 1)
-            .accessibilityHidden(true)
+        }
+        .accessibilityHidden(true)
     }
 }
 
 /// The Settings sidebar row surface (DECISIONS D3 补充): a themed fill and
-/// stroke when selected, the shared hover fill otherwise. The settings window
-/// moves to the v2 rows in V4. `isEmphasized` marks the selection of a
-/// sidebar that has keyboard focus.
+/// stroke when selected, the shared hover fill otherwise. `isEmphasized`
+/// marks the selection of a sidebar that has keyboard focus.
 struct SidebarRowBackground: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -608,63 +456,6 @@ struct SidebarRowBackground: View {
         } else {
             shape.fill(isHovered ? AppDesignTokens.Palette.sidebarHover : .clear)
         }
-    }
-}
-
-private struct SidebarFooter: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppSurfaces private var surfaces
-    @State private var isHovered = false
-    var isRail = false
-
-    private var versionLabel: String { SidebarVersionLabel.text }
-
-    var body: some View {
-        VStack(alignment: isRail ? .center : .leading, spacing: 4) {
-            SettingsLink {
-                Group {
-                    if isRail {
-                        IconTile(systemImage: AppSymbols.Action.settings, side: 26, pigment: .neutral)
-                            .frame(width: 44, height: 36)
-                    } else {
-                        HStack(spacing: 10) {
-                            IconTile(systemImage: AppSymbols.Action.settings, side: 22, pigment: .neutral)
-                            Text(L10n.text("设置", "Settings"))
-                                .font(AppDesignTokens.TypeScale.sidebarItem)
-                                .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .layoutPriority(1)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
-                        .frame(minHeight: AppDesignTokens.Layout.sidebarRowHeight)
-                    }
-                }
-                .foregroundStyle(surfaces.textPrimary)
-                .contentShape(RoundedRectangle(cornerRadius: AppDesignTokens.Corner.row, style: .continuous))
-            }
-            .buttonStyle(ResponsivePlainButtonStyle())
-            .background(
-                RoundedRectangle(cornerRadius: AppDesignTokens.Corner.row, style: .continuous)
-                    .fill(isHovered ? surfaces.hover : .clear)
-            )
-            .animation(AppMotion.resolved(.hover, reduceMotion: reduceMotion), value: isHovered)
-            .onHover { isHovered = $0 }
-            .help(L10n.text("设置", "Settings"))
-            .accessibilityLabel(L10n.text("设置", "Settings"))
-            .accessibilityHint(L10n.text("打开独立设置窗口", "Open the separate settings window"))
-
-            if !isRail {
-                Text(versionLabel)
-                    .font(AppDesignTokens.TypeScale.caption)
-                    .foregroundStyle(surfaces.textTertiary)
-                    .padding(.horizontal, 8)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel(versionLabel)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: isRail ? .center : .leading)
     }
 }
 

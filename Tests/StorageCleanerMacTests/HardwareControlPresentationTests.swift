@@ -100,7 +100,9 @@ final class HardwareControlPresentationTests: XCTestCase {
     /// A relaunched app starts with `isHelperReachable == false`, so an
     /// approved helper reads "connection interrupted" until something pings
     /// it. Reconnect on opening, while registration stays an explicit Helper
-    /// action and curve drafting remains available without write access.
+    /// action. D152: the toggles switch at once through the shared gate
+    /// (was a draft previewed until Apply, an expand toggle and the RPM and
+    /// per-fan readback in the palette; the readback is the sensors page's).
     func testFanPaletteSelfHealsAfterRelaunchInsteadOfDeadDisabling() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -116,19 +118,54 @@ final class HardwareControlPresentationTests: XCTestCase {
         XCTAssertTrue(palette.contains(".task(id: presentation.kind)"))
         XCTAssertTrue(palette.contains("await fanControl.refreshConnection()"))
 
-        let gate = try XCTUnwrap(palette.range(of: "private var applyDisabledReason").map {
-            String(palette[$0.lowerBound...].prefix(2_200))
-        })
-        XCTAssertTrue(gate.contains("if fanControl.helperState != .enabled"), "Unconnected hardware must not appear writable")
-        XCTAssertTrue(gate.contains("if fanControl.isDataOnlyFixture"))
-        XCTAssertTrue(palette.contains("draft.selectMode(mode)"), "Mode selection previews a draft without submitting")
+        // D152: the gate is the static disabledReason every toggle reads (was
+        // `private var applyDisabledReason` checking the helper and the fixture).
+        XCTAssertFalse(palette.contains("private var applyDisabledReason"))
+        let gate = try r2SourceDeclaration("static func disabledReason(", in: palette)
+        XCTAssertTrue(gate.contains("if isDataOnlyFixture { return previewNote }"))
+        XCTAssertTrue(gate.contains("FanControlPaletteAvailability.disabledReason("))
+        XCTAssertTrue(gate.contains("helperState: helperState"))
+        let availability = try r2SourceDeclaration("enum FanControlPaletteAvailability", in: Self.hardwareControlSource())
+        XCTAssertTrue(availability.contains("if helperState != .enabled { return FanControlSetupPresentation.reason(helperState) }"),
+                      "Unconnected hardware must not appear writable")
+        XCTAssertTrue(palette.contains(".disabled(disabledReason(choice.mode) != nil)"))
+        // D152: a toggle switches at once (was `draft.selectMode(mode)`, a preview until Apply).
+        XCTAssertFalse(palette.contains("draft.selectMode(mode)"))
+        XCTAssertTrue(palette.contains("await fanControl.selectMode(mode)"))
+        XCTAssertTrue(palette.contains("await fanControl.applyFanCurveDraft()"))
         XCTAssertTrue(palette.contains("enable: { Task { await fanControl.registerHelper() } }"))
-        XCTAssertTrue(palette.contains("fan-control-layout-toggle"))
+        // D152: no expand toggle (was `fan-control-layout-toggle`).
+        XCTAssertFalse(palette.contains("fan-control-layout-toggle"))
         XCTAssertFalse(palette.contains("if showsExpandedControls, fanControl.helperState == .enabled"))
-        let rpmPosition = try XCTUnwrap(palette.range(of: "Text(currentFanRPM)")).lowerBound
-        let helperGate = try XCTUnwrap(palette.range(of: "if fanControl.helperState != .enabled", range: rpmPosition..<palette.endIndex)).lowerBound
-        XCTAssertLessThan(rpmPosition, helperGate, "Read-only RPM remains above the Helper-only action")
-        XCTAssertTrue(palette.contains("fanReadbackRows"), "Per-fan readback stays available in Details")
+        // D152: the sections stay above the helper's setup (was the read-only
+        // `Text(currentFanRPM)` above it; the palette shows no RPM now).
+        let view = try r2SourceDeclaration("struct FanControlPaletteView: View", in: palette)
+        XCTAssertFalse(view.contains("Text(currentFanRPM)"))
+        let sectionsPosition = try XCTUnwrap(view.range(of: "ForEach(sections)")).lowerBound
+        let notesPosition = try XCTUnwrap(view.range(of: "notes", range: sectionsPosition..<view.endIndex)).lowerBound
+        let helperGate = try XCTUnwrap(view.range(of: "if fanControl.helperState != .enabled", range: notesPosition..<view.endIndex)).lowerBound
+        XCTAssertLessThan(sectionsPosition, helperGate, "The read-only sections remain above the Helper-only action")
+        // D152: per-fan readback is the sensors page's rows and hover detail (was `fanReadbackRows` in Details).
+        XCTAssertFalse(palette.contains("fanReadbackRows"))
+        let sensors = try String(
+            contentsOf: root.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(sensors.contains("ForEach(geekFanTelemetry.readings.prefix(2)) { reading in"), "Per-fan readback stays on the sensors page")
+        XCTAssertTrue(sensors.contains("readings: geekFanTelemetry.readings,"))
+    }
+
+    private static func hardwareControlSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHardwareControlView.swift"
+            ),
+            encoding: .utf8
+        )
     }
 
     func testConnectedHelperDoesNotTurnReadOnlyTelemetryOrUnknownModeIntoControl() {
@@ -138,12 +175,36 @@ final class HardwareControlPresentationTests: XCTestCase {
         let capability = FanControlCapability.resolve(telemetry: telemetry, helperState: .enabled)
         XCTAssertEqual(capability, .readOnly)
         XCTAssertEqual(FanStatusPresentation.controlTitle(capability), L10n.text("只读", "Read Only"))
-        XCTAssertEqual(FanStatusPresentation.connectionTitle(.enabled), L10n.text("已连接", "Connected"))
-        XCTAssertEqual(FanStatusPresentation.approvalTitle(.enabled), L10n.text("已批准", "Approved"))
+        // D152: the palette's details that showed the connection and the
+        // approval left with F7 (were connectionTitle(.enabled) 已连接 /
+        // Connected, approvalTitle(.enabled) 已批准 / Approved and
+        // approvalTitle(.requiresApproval) 等待批准 / Awaiting Approval). A
+        // connected helper still turns read-only telemetry into no control:
+        // every toggle but Automatic stays off-limits.
+        for mode in [GeekFanControlMode.customCurve, .manual, .maximum] {
+            XCTAssertEqual(
+                FanControlPaletteView.disabledReason(
+                    mode: mode, telemetry: telemetry, helperState: .enabled, thermalState: .nominal,
+                    isDataOnlyFixture: false, curveIsAvailable: true
+                ),
+                L10n.text("风扇量程不可用 · 仅监测", "Fan Range Unavailable · Monitoring Only"),
+                "\(mode)"
+            )
+        }
+        XCTAssertNil(FanControlPaletteView.disabledReason(
+            mode: .systemAutomatic, telemetry: telemetry, helperState: .enabled, thermalState: .nominal,
+            isDataOnlyFixture: false, curveIsAvailable: true
+        ))
+        XCTAssertEqual(
+            FanControlPaletteView.disabledReason(
+                mode: .manual, telemetry: telemetry, helperState: .requiresApproval, thermalState: .nominal,
+                isDataOnlyFixture: false, curveIsAvailable: true
+            ),
+            FanControlSetupPresentation.reason(.requiresApproval)
+        )
         XCTAssertEqual(FanStatusPresentation.confirmedModeTitle(nil), "—")
         XCTAssertEqual(FanStatusPresentation.confirmedModeTitle(.manual), FanControlMode.manual.title)
         XCTAssertEqual(FanStatusPresentation.controlTitle(.controllable), L10n.text("可提交控制", "Ready to Submit"))
-        XCTAssertEqual(FanStatusPresentation.approvalTitle(.requiresApproval), L10n.text("等待批准", "Awaiting Approval"))
     }
 
     /// Two GUI instances fighting over the single privileged helper made the
@@ -164,7 +225,21 @@ final class HardwareControlPresentationTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(app.contains("init() {\n        Self.terminateIfDuplicateInstance()"))
+        // D106: only the Beta's acceptance check may come first. It exits
+        // when any other copy runs, without activating it, and creates no
+        // store or helper connection.
+        XCTAssertTrue(app.contains(
+            "init() {\n#if STORAGE_CLEANER_BETA\n        // D106: first, so a refused acceptance launch exits before any\n        // window, status item, store or helper connection exists.\n        AcceptanceLaunch.configureOrExit()\n#endif\n        Self.terminateIfDuplicateInstance()"
+        ))
+        let acceptance = SwiftSourceScanning.code(try String(
+            contentsOf: root.appendingPathComponent("Sources/StorageCleanerMac/Support/AcceptanceLaunch.swift"),
+            encoding: .utf8
+        ))
+        let check = try SwiftSourceScanning.body(of: "static func configureOrExit()", in: acceptance)
+        for touched in ["Coordinator", "Store", "NSXPCConnection", "SMAppService", ".activate()", "activate(options"] {
+            XCTAssertFalse(check.contains(touched), touched)
+        }
+        XCTAssertTrue(check.contains("runningApplications(withBundleIdentifier: identifier)"))
         XCTAssertTrue(app.contains("private static func terminateIfDuplicateInstance()"))
         XCTAssertTrue(app.contains("runningApplications("))
         // Startup races keep exactly one instance: only the newer one exits.

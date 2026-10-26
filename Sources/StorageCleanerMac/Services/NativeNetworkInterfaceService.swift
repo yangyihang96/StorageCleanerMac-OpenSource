@@ -2,6 +2,7 @@ import CoreWLAN
 import Combine
 import Darwin
 import Foundation
+import IOKit
 import SystemConfiguration
 
 struct NativeNetworkInterfaceSnapshot: Equatable, Sendable {
@@ -27,7 +28,17 @@ struct NativeNetworkInterfaceSnapshot: Equatable, Sendable {
     let ipv6Router: String?
     let dnsServers: [String]
     let interfaceMTU: Int?
+    /// D134: the controller's `IOLinkSpeed` in Mb/s, iStat's source; nil
+    /// when the interface has none.
     let linkSpeedMbps: Int?
+    /// D134: the active media (`SCNetworkInterfaceCopyMediaOptions`), as
+    /// iStat reads it for the interface: the subtype ("1000baseT") and the
+    /// options ("full-duplex", "flow-control") in the system's order.
+    var mediaSubType: String? = nil
+    var mediaOptions: [String] = []
+    /// D140: the interface's addresses as iStat lists them
+    /// (`NetworkAddressListing`); nil when not read.
+    var listedAddresses: [String]? = nil
 
     var signalToNoiseDB: Int? {
         guard let rssiDBm, let noiseDBm else { return nil }
@@ -83,13 +94,15 @@ enum NativeNetworkInterfaceService {
         let globalDetails = globalNetworkDetails(for: interfaceName)
         let selectedWiFiInterface = interface?.interfaceName == interfaceName ? interface : nil
         let channel = selectedWiFiInterface?.wlanChannel()
+        let media = activeMedia(bsdName: interfaceName)
 
         return NativeNetworkInterfaceSnapshot(
             generatedAt: now,
             interfaceName: interfaceName,
             wiFiInterfaceName: interface?.interfaceName,
             isWiFiPoweredOn: interface.map { $0.powerOn() },
-            hardwareAddress: selectedWiFiInterface?.hardwareAddress() ?? addresses.hardwareAddress,
+            hardwareAddress: meaningfulHardwareAddress(selectedWiFiInterface?.hardwareAddress())
+                ?? meaningfulHardwareAddress(addresses.hardwareAddress),
             ssid: selectedWiFiInterface?.ssid(),
             bssid: selectedWiFiInterface?.bssid(),
             countryCode: selectedWiFiInterface?.countryCode(),
@@ -109,7 +122,10 @@ enum NativeNetworkInterfaceService {
             ipv6Router: globalDetails.ipv6Router,
             dnsServers: globalDetails.dnsServers,
             interfaceMTU: addresses.mtu,
-            linkSpeedMbps: addresses.linkSpeedMbps
+            linkSpeedMbps: interfaceName.flatMap(linkSpeedMbps(bsdName:)),
+            mediaSubType: media.subType,
+            mediaOptions: media.options,
+            listedAddresses: addresses.listed
         )
     }
 
@@ -171,7 +187,7 @@ enum NativeNetworkInterfaceService {
         ipv4SubnetMask: String?,
         hardwareAddress: String?,
         mtu: Int?,
-        linkSpeedMbps: Int?
+        listed: [String]?
     ) {
         guard let interfaceName else { return ([], [], nil, nil, nil, nil) }
         var firstAddress: UnsafeMutablePointer<ifaddrs>?
@@ -179,13 +195,15 @@ enum NativeNetworkInterfaceService {
             return ([], [], nil, nil, nil, nil)
         }
         defer { freeifaddrs(firstAddress) }
+        let flagsSocket = socket(AF_INET6, SOCK_DGRAM, 0)
+        defer { if flagsSocket >= 0 { close(flagsSocket) } }
 
         var ipv4: [String] = []
         var ipv6: [String] = []
+        var listing: [NetworkAddressListing.Entry] = []
         var ipv4SubnetMask: String?
         var hardwareAddress: String?
         var mtu: Int?
-        var linkSpeedMbps: Int?
         var cursor: UnsafeMutablePointer<ifaddrs>? = firstAddress
 
         while let address = cursor {
@@ -198,10 +216,6 @@ enum NativeNetworkInterfaceService {
                 let interfaceData = rawData.assumingMemoryBound(to: if_data.self).pointee
                 if interfaceData.ifi_mtu > 0 {
                     mtu = mtu ?? Int(interfaceData.ifi_mtu)
-                }
-                if interfaceData.ifi_baudrate > 0 {
-                    linkSpeedMbps = linkSpeedMbps
-                        ?? Int(interfaceData.ifi_baudrate / 1_000_000)
                 }
             }
 
@@ -221,6 +235,7 @@ enum NativeNetworkInterfaceService {
             } else {
                 ipv6.append(value.components(separatedBy: "%").first ?? value)
             }
+            listing.append(listingEntry(address.pointee, value: value, socket: flagsSocket, interfaceName: interfaceName))
         }
 
         return (
@@ -229,8 +244,112 @@ enum NativeNetworkInterfaceService {
             ipv4SubnetMask,
             hardwareAddress,
             mtu,
-            linkSpeedMbps
+            NetworkAddressListing.listed(listing)
         )
+    }
+
+    /// D140: what iStat reads about an address for its list: the family, a
+    /// point-to-point destination and, for IPv6, the kernel's flags; the
+    /// address as the page shows it (an IPv6 scope removed).
+    static func listingEntry(
+        _ entry: ifaddrs,
+        value: String,
+        socket: Int32,
+        interfaceName: String
+    ) -> NetworkAddressListing.Entry {
+        let isIPv6 = entry.ifa_addr.map { Int32($0.pointee.sa_family) == AF_INET6 } ?? false
+        return NetworkAddressListing.Entry(
+            address: isIPv6 ? (value.components(separatedBy: "%").first ?? value) : value,
+            isIPv6: isIPv6,
+            hasDestination: NetworkAddressListing.hasDestination(entry),
+            ipv6Flags: isIPv6
+                ? entry.ifa_addr.flatMap {
+                    NetworkAddressListing.ipv6Flags(socket: socket, interfaceName: interfaceName, address: $0)
+                }
+                : nil
+        )
+    }
+
+    /// D134: iStat's link speed (`-[BBRStatisticsNetwork infoForService:]`):
+    /// for each registry entry matching the BSD name, the `IOLinkSpeed` (bits
+    /// per second, `kIOLinkSpeed`) of its parent in the service plane, the
+    /// network controller, in Mb/s; the last entry with one wins. Nil without
+    /// one (a bridge, a tunnel), so there is no row. The property is 64-bit;
+    /// `if_data.ifi_baudrate`, the source before, stops at 4.29 Gb/s.
+    static func linkSpeedMbps(bsdName: String) -> Int? {
+        guard let matching = IOBSDNameMatching(kIOMainPortDefault, 0, bsdName) else { return nil }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return nil
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var linkSpeed: Int?
+        while true {
+            let entry = IOIteratorNext(iterator)
+            guard entry != 0 else { break }
+            defer { IOObjectRelease(entry) }
+            var controller: io_registry_entry_t = 0
+            guard IORegistryEntryGetParentEntry(entry, kIOServicePlane, &controller) == KERN_SUCCESS else {
+                continue
+            }
+            defer { IOObjectRelease(controller) }
+            let value = IORegistryEntryCreateCFProperty(
+                controller,
+                "IOLinkSpeed" as CFString,
+                kCFAllocatorDefault,
+                0
+            )?.takeRetainedValue() as? NSNumber
+            if let value {
+                linkSpeed = megabits(fromLinkSpeed: value.doubleValue)
+            }
+        }
+        return linkSpeed
+    }
+
+    /// Bits per second in whole Mb/s, truncated like iStat's
+    /// `integerValue` of the speed it stores (`IOLinkSpeed` / 1 000 000).
+    static func megabits(fromLinkSpeed bitsPerSecond: Double) -> Int {
+        guard bitsPerSecond.isFinite, bitsPerSecond > 0 else { return 0 }
+        return Int(bitsPerSecond / 1_000_000)
+    }
+
+    /// D134: the active media as iStat reads it
+    /// (`-[BBRStatisticsNetwork updateMediaOptions:]`): the system interface
+    /// with this BSD name (`SCNetworkInterfaceCopyAll`), then the active
+    /// dictionary of `SCNetworkInterfaceCopyMediaOptions` (unfiltered).
+    static func activeMedia(bsdName: String?) -> (subType: String?, options: [String]) {
+        guard let bsdName,
+              let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface],
+              let interface = interfaces.first(where: {
+                  SCNetworkInterfaceGetBSDName($0) as String? == bsdName
+              }) else {
+            return (nil, [])
+        }
+        var active: Unmanaged<CFDictionary>?
+        guard SCNetworkInterfaceCopyMediaOptions(interface, nil, &active, nil, false),
+              let media = active?.takeRetainedValue() as? [String: Any] else {
+            return (nil, [])
+        }
+        return activeMedia(from: media)
+    }
+
+    /// The active media dictionary's subtype and options
+    /// (`kSCPropNetEthernetMediaSubType`, `kSCPropNetEthernetMediaOptions`).
+    static func activeMedia(from media: [String: Any]) -> (subType: String?, options: [String]) {
+        (
+            media[kSCPropNetEthernetMediaSubType as String] as? String,
+            media[kSCPropNetEthernetMediaOptions as String] as? [String] ?? []
+        )
+    }
+
+    /// iStat drops an all-zero MAC address ("00:00:00:00:00:00",
+    /// `-[BBRStatisticsNetwork updateMACAddresses]`): such an interface has
+    /// no MAC row.
+    static func meaningfulHardwareAddress(_ address: String?) -> String? {
+        guard let address,
+              address.contains(where: { $0.isHexDigit && $0 != "0" }) else { return nil }
+        return address
     }
 
     private static func topologyServiceRecords() -> [NetworkTopologyServiceRecord] {
@@ -282,12 +401,15 @@ enum NativeNetworkInterfaceService {
         var firstAddress: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&firstAddress) == 0, let firstAddress else { return [] }
         defer { freeifaddrs(firstAddress) }
+        let flagsSocket = socket(AF_INET6, SOCK_DGRAM, 0)
+        defer { if flagsSocket >= 0 { close(flagsSocket) } }
 
         struct Accumulator {
             var isUp = false
             var isPointToPoint = false
             var ipv4: [String] = []
             var ipv6: [String] = []
+            var listing: [NetworkAddressListing.Entry] = []
         }
 
         var records: [String: Accumulator] = [:]
@@ -305,8 +427,12 @@ enum NativeNetworkInterfaceService {
                 let family = Int32(socketAddress.pointee.sa_family)
                 if family == AF_INET, let value = numericHost(from: socketAddress) {
                     record.ipv4.append(value)
+                    record.listing.append(listingEntry(address.pointee, value: value,
+                                                       socket: flagsSocket, interfaceName: interfaceName))
                 } else if family == AF_INET6, let value = numericHost(from: socketAddress) {
                     record.ipv6.append(value.components(separatedBy: "%").first ?? value)
+                    record.listing.append(listingEntry(address.pointee, value: value,
+                                                       socket: flagsSocket, interfaceName: interfaceName))
                 }
             }
             records[interfaceName] = record
@@ -319,7 +445,8 @@ enum NativeNetworkInterfaceService {
                 isUp: record.isUp,
                 isPointToPoint: record.isPointToPoint,
                 ipv4Addresses: Array(Set(record.ipv4)).sorted(),
-                ipv6Addresses: Array(Set(record.ipv6)).sorted()
+                ipv6Addresses: Array(Set(record.ipv6)).sorted(),
+                listedAddresses: NetworkAddressListing.listed(record.listing)
             )
         }
     }

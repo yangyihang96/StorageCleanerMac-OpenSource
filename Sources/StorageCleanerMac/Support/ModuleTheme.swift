@@ -305,12 +305,14 @@ extension ReviewFilter {
             .protection
         case .utilityHub:
             .settings
-        case .performance, .startup, .memory, .energy:
+        case .performance, .startup, .memory, .energy, .maintenance:
             .performance
-        case .uninstall, .updater:
+        case .uninstall, .updater, .extensions:
             .applications
-        case .largeFiles, .migration, .duplicates:
+        case .largeFiles, .migration, .duplicates, .cloudCleanup, .chatFiles:
             .files
+        case .myTools, .myActivity:
+            .settings
         }
     }
 
@@ -324,7 +326,8 @@ extension ReviewFilter {
             .hero
         case .performance:
             .dashboard
-        case .devCaches, .largeFiles, .migration, .duplicates, .utilityHub, .startup, .memory, .energy, .uninstall, .updater:
+        case .devCaches, .largeFiles, .migration, .duplicates, .utilityHub, .startup, .memory, .energy, .uninstall, .updater,
+             .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             .management
         }
     }
@@ -341,7 +344,8 @@ extension ReviewFilter {
             .applications
         case .largeFiles, .migration, .duplicates:
             .files
-        case .overview, .utilityHub:
+        // D154: the module list is the sidebar; these pages are not rows.
+        case .overview, .utilityHub, .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             nil
         }
     }

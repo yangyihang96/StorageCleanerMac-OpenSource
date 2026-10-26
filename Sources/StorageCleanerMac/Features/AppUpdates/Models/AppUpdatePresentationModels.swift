@@ -9,6 +9,10 @@ struct LastAppScanSummary: Hashable, Sendable {
     let manualCount: Int
     let currentCount: Int
     let unknownCount: Int
+    /// D190: apps with a confirmed newer version, what "N apps have a new
+    /// version" counts (the four categories above also hold in-app updaters
+    /// whose latest version is unknown).
+    let confirmedUpdateCount: Int
 
     init(summary: AppScanSummary) {
         completedAt = summary.generatedAt
@@ -19,6 +23,7 @@ struct LastAppScanSummary: Hashable, Sendable {
         manualCount = summary.manualCount
         currentCount = summary.currentCount
         unknownCount = summary.unknownCount
+        confirmedUpdateCount = summary.confirmedUpdateCount
     }
 }
 
@@ -57,6 +62,8 @@ struct AppScanSummary: Hashable, Sendable {
     let applications: [InstalledApplication]
 
     var scannedCount: Int { applications.count }
+    var ignoredCount: Int { applications.count { $0.updateStatus == .ignored } }
+    var ignoredSummary: String { IgnoreListSnapshot.summary(ignoredCount) }
     var eligibleAutomaticApps: [InstalledApplication] {
         applications.filter { $0.appUpdatePresentationCategory == .automatic }
     }
@@ -83,6 +90,9 @@ struct AppScanSummary: Hashable, Sendable {
     }
     var systemManagedCount: Int {
         applications.count { $0.appUpdatePresentationCategory == .systemManaged }
+    }
+    var confirmedUpdateCount: Int {
+        applications.count(where: \.hasConfirmedPresentableUpdate)
     }
     var completionState: AppScanCompletionState {
         if applications.contains(where: \.hasConfirmedPresentableUpdate) {
@@ -134,7 +144,7 @@ struct AppUpdateCatalogEntry: Identifiable, Hashable, Sendable {
     let category: AppUpdateCatalogCategory
 
     var id: String { application.id }
-    var isUpdateAvailable: Bool { application.hasPresentableUpdate }
+    var isUpdateAvailable: Bool { application.hasConfirmedPresentableUpdate }
     var canJoinAutomaticUpdatePlan: Bool { application.canJoinAutomaticUpdatePlan }
     var canJoinAutomaticUpdateBatch: Bool { application.canJoinAutomaticUpdateBatch }
     var canJoinSelectedUpdateBatch: Bool { application.canJoinSelectedUpdateBatch }
@@ -154,12 +164,19 @@ struct AppUpdateCatalogSnapshot: Hashable, Sendable {
         self.generatedAt = generatedAt
         entries = applications.compactMap {
             guard $0.hasConfirmedPresentableUpdate
-                || $0.hasActionableInApplicationPath else { return nil }
+                || $0.hasActionableInApplicationPath
+                || $0.hasManualHomebrewVersionChange || $0.updateStatus == .ignored else { return nil }
             return AppUpdateCatalogEntry(
                 application: $0,
                 category: $0.appUpdatePresentationCategory
             )
         }
+    }
+
+    /// D190: the rows with a confirmed newer version (in-app updaters whose
+    /// latest version is unknown are rows too, but no update).
+    var confirmedUpdateCount: Int {
+        entries.count(where: \.application.hasConfirmedPresentableUpdate)
     }
 
     init(summary: AppScanSummary) {
@@ -551,7 +568,7 @@ private enum AppUpdateSummaryCategory {
     case systemManaged
 }
 
-private extension InstalledApplication {
+extension InstalledApplication {
     var isPresentationSystemManaged: Bool {
         isSystemApplication
             || effectiveUpdateCapability == .systemManaged
@@ -560,6 +577,7 @@ private extension InstalledApplication {
     }
 
     var hasPresentableUpdate: Bool {
+        guard updateStatus != .ignored else { return false }
         if effectiveVersionCheckState == .updateAvailable { return true }
         switch updateStatus {
         case .updateAvailable, .automaticallyUpdatable, .officialInstallerAvailable,
@@ -575,23 +593,29 @@ private extension InstalledApplication {
     }
 
     var hasConfirmedPresentableUpdate: Bool {
+        guard updateStatus != .ignored else { return false }
         if !isPresentationSystemManaged, !isDuplicate, canJoinAutomaticUpdateBatch { return true }
         guard !isPresentationSystemManaged,
               !isDuplicate,
               hasPresentableUpdate,
               effectiveSourceResolutionState == .resolved,
               effectiveVersionCheckState == .updateAvailable,
-              let availableVersion,
-              installedVersion < availableVersion else {
+              let availableVersion else {
             return false
         }
+        if primaryUpdateProvider != .homebrew, !(installedVersion < availableVersion) { return false }
 
         switch primaryUpdateProvider {
         case .macAppStore:
             return sourceEvidence.contains("verified-app-store-receipt")
         case .homebrew:
-            return homebrewMetadata?.isOutdated == true
-                && sourceEvidence.contains("homebrew-cli-json-v2")
+            // Homebrew's verified outdated evidence includes formula revision
+            // bumps whose stable version is unchanged. Its safety gate rejects
+            // lower formula targets and self-updated casks (D190/D192).
+            guard let metadata = homebrewMetadata,
+                  sourceEvidence.contains("homebrew-cli-json-v2") else { return false }
+            return HomebrewAutomaticUpdateSafety.batchTargetVersion(
+                metadata: metadata, installedVersion: installedVersion) != nil
         case .sparkle:
             return sourceEvidence.contains("sparkle-framework")
                 && sourceEvidence.contains("sparkle-feed")
@@ -600,6 +624,20 @@ private extension InstalledApplication {
         case .systemManaged, .vendorUpdater, .manual:
             return false
         }
+    }
+
+    /// D190's lower formula target is actionable information, not a newer
+    /// version. Keep it visible in Manage Updates without admitting a batch.
+    var hasManualHomebrewVersionChange: Bool {
+        guard !isPresentationSystemManaged, !isDuplicate,
+              primaryUpdateProvider == .homebrew,
+              effectiveSourceResolutionState == .resolved,
+              effectiveVersionCheckState == .updateAvailable,
+              sourceEvidence.contains("homebrew-cli-json-v2"),
+              let metadata = homebrewMetadata, metadata.kind == .formula,
+              metadata.hasOutdatedEvidence else { return false }
+        return HomebrewAutomaticUpdateSafety.targetIsNotNewer(
+            metadata: metadata, installedVersion: installedVersion)
     }
 
     /// Apps whose updates are delivered by their own trusted updater —
@@ -627,7 +665,8 @@ private extension InstalledApplication {
         }
     }
 
-    var appUpdateSummaryCategory: AppUpdateSummaryCategory {
+    fileprivate var appUpdateSummaryCategory: AppUpdateSummaryCategory {
+        if updateStatus == .ignored { return .unknown }
         if isPresentationSystemManaged { return .systemManaged }
         if effectiveVersionCheckState == .upToDate
             || updateStatus == .upToDate
@@ -660,6 +699,7 @@ private extension InstalledApplication {
 
     var appUpdatePresentationCategory: AppUpdateCatalogCategory {
         if isPresentationSystemManaged { return .systemManaged }
+        if hasManualHomebrewVersionChange { return .manual }
         switch ApplicationUpdatePlanBuilder.destination(for: self) {
         case .automatic:
             return .automatic

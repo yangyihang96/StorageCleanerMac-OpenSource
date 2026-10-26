@@ -8,6 +8,7 @@ public enum FileOperationIdentity {
 #endif
     public static var helper: String { application + ".FileOperationHelper" }
     public static var authorizationRight: String { helper + ".move-to-trash" }
+    public static var systemCacheRight: String { helper + ".clear-system-cache" }
 }
 
 public struct AuthorizedFileMove: Codable, Sendable, Equatable {
@@ -59,6 +60,14 @@ public struct AuthorizedFileReply: Codable, Sendable {
     @objc optional func prepareApplicationReplacements(_ request: Data, authorization: Data, reply: @escaping (Data) -> Void)
     @objc optional func replaceAuthenticatedApplication(_ request: Data, reply: @escaping (Data) -> Void)
     @objc optional func finishApplicationReplacements(_ sessionID: String, reply: @escaping (Data) -> Void)
+    /// D177: the macOS login-item and background-task list, which
+    /// `sfltool dumpbtm` shows only after an administrator password. The
+    /// helper runs that one fixed command as root and replies with a
+    /// `BackgroundTaskInventoryReply`; nothing from the client reaches it.
+    @objc optional func backgroundTaskInventory(reply: @escaping (Data) -> Void)
+    @objc optional func systemCacheInventory(reply: @escaping (Data) -> Void)
+    @objc optional func prepareSystemCacheClear(_ request: Data, authorization: Data, reply: @escaping (Data) -> Void)
+    @objc optional func commitSystemCacheClear(_ request: Data, reply: @escaping (Data) -> Void)
 }
 
 // NSXPC enforces this requirement for every message (public API, macOS 13+),
@@ -75,9 +84,25 @@ public enum FileOperationPeerRequirement {
               let values = info as? [String: Any],
               let certificates = values[kSecCodeInfoCertificates as String] as? [SecCertificate],
               let leaf = certificates.first else { return nil }
-        let fingerprint = Insecure.SHA1.hash(data: SecCertificateCopyData(leaf) as Data)
-            .map { String(format: "%02x", $0) }.joined()
-        let expression = "anchor apple generic and identifier \"\(peerIdentifier)\" and certificate leaf = H\"\(fingerprint)\""
+        return expression(identifier: peerIdentifier, leafCertificate: SecCertificateCopyData(leaf) as Data,
+                          teamIdentifier: values[kSecCodeInfoTeamIdentifier as String] as? String ?? "")
+    }
+
+    /// The requirement text: the peer's identifier, the leaf certificate pin
+    /// and (D102 L2) the signer's Team ID. Without a Team ID (Apple's own
+    /// system code) that clause is left out. Nil when the identifier or Team ID
+    /// holds anything but the characters they are made of, so a quote can
+    /// never end a string early, or when Security cannot parse the result.
+    /// FanControlPeerRequirement builds the same text for the fan channel.
+    public static func expression(identifier: String, leafCertificate: Data, teamIdentifier: String) -> String? {
+        guard !identifier.isEmpty,
+              identifier.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }),
+              teamIdentifier.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
+        let fingerprint = Insecure.SHA1.hash(data: leafCertificate).map { String(format: "%02x", $0) }.joined()
+        var expression = "anchor apple generic and identifier \"\(identifier)\" and certificate leaf = H\"\(fingerprint)\""
+        if !teamIdentifier.isEmpty {
+            expression += " and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
+        }
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(expression as CFString, [], &requirement) == errSecSuccess else { return nil }
         return expression
@@ -132,6 +157,7 @@ public struct AuthorizedFileCommitGate: Sendable {
     private var pending: AuthorizedFileMove?
     private var deadline = Date.distantPast
     public init() {}
+    public var approvalExpiration: Date? { pending == nil ? nil : deadline }
     public mutating func invalidate() { pending = nil }
     public mutating func approve(_ request: AuthorizedFileMove, receivedAt: Date? = nil, now: Date = Date()) throws {
         invalidate()

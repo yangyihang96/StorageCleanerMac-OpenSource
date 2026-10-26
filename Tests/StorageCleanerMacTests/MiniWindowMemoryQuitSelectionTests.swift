@@ -105,7 +105,9 @@ final class MiniWindowMemoryQuitSelectionTests: XCTestCase {
         }
         let button = try MiniWindowLogicFixtures.section(
             view, from: "struct GeekMemoryQuitSelectedButton: View {", to: "private struct GeekMemoryQuitResultCard: View {")
-        XCTAssertTrue(button.contains("Button(GeekMemoryQuitSelection.title) {\n                GeekMemoryQuitSelection.request(store: store)"))
+        // D139: the header form shows the short title where the full one
+        // does not fit (was `Button(GeekMemoryQuitSelection.title) {`).
+        XCTAssertTrue(button.contains("Button(presentation == .header ? GeekMemoryQuitSelection.title : GeekMemoryQuitSelection.shortTitle) {\n                GeekMemoryQuitSelection.request(store: store)"))
         // U1 066/068 (BOARD N19): the full-width form requests the same way.
         XCTAssertEqual(button.components(separatedBy: "GeekMemoryQuitSelection.request(store: store)").count - 1, 2)
         XCTAssertTrue(button.contains(".accessibilityLabel(GeekMemoryQuitSelection.title)"))
@@ -120,11 +122,14 @@ final class MiniWindowMemoryQuitSelectionTests: XCTestCase {
 /// The renamed button is wider than "内存清理". The header's actions (查看全部,
 /// the selection menu, 退出所选应用) are laid out at their natural width, on
 /// the title's row or on their own row (`ViewThatFits`), so they must fit the
-/// card's content width in both languages, also with apps selected.
+/// card's content width in both languages, also with apps selected. D119:
+/// the row is iStat's 15 pt on the 270 pt memory page.
 @MainActor
 final class MiniWindowMemoryQuitHeaderLayoutTests: XCTestCase {
     func testHeaderActionsFitTheCardInBothLanguagesWithAndWithoutASelection() throws {
-        let cardWidth = MiniWindowStyleTokens.detailWidth - 2 * MiniWindowStyleTokens.contentInset
+        // D119: the memory page is iStat's 270 pt (was the shared 312 pt
+        // `MiniWindowStyleTokens.detailWidth`).
+        let cardWidth = MiniWindowStyleTokens.memoryDetailWidth - 2 * MiniWindowStyleTokens.contentInset
             - 2 * MiniWindowStyleTokens.cardHorizontalInset
         let processes = (0..<12).map { index in
             MiniWindowLogicFixtures.memoryProcess(
@@ -142,19 +147,27 @@ final class MiniWindowMemoryQuitHeaderLayoutTests: XCTestCase {
                 XCTAssertEqual(store.selectedMemoryAppCount, selectedCount)
                 // The composition of `memoryProcessActions` (asserted below):
                 // the header keeps the small button until apps are selected.
-                let actions = HStack(spacing: 6) {
+                // D119: 12 pt text on iStat's 15 pt row (was the 11 pt caption).
+                let controls = HStack(spacing: 6) {
                     Button(L10n.text("查看全部", "View all")) {}
                         .buttonStyle(ResponsivePlainButtonStyle())
-                        .font(AdvancedPanelTypography.caption)
+                        .font(.system(size: GeekIStatCardGeometry.textFontSize))
                     GeekMemoryProcessSelectionMenu(store: store, tint: .blue)
                     if store.selectedMemoryAppCount == 0 {
                         GeekMemoryQuitSelectedButton(store: store, tint: .blue)
                     }
                 }
-                .fixedSize(horizontal: true, vertical: false)
+                let actions = controls
+                    .frame(height: GeekIStatSectionGeometry.rowHeight)
+                    .fixedSize(horizontal: true, vertical: false)
                 let natural = NSHostingView(rootView: actions).fittingSize.width
                 XCTAssertLessThanOrEqual(natural, cardWidth,
                     "\(language.rawValue), \(selectedCount) selected: the actions need \(natural) pt of \(cardWidth) pt")
+                // D119: the controls stand on the 15 pt row without spilling
+                // onto the process rows 2 pt below.
+                let height = NSHostingView(rootView: controls.fixedSize()).fittingSize.height
+                XCTAssertLessThanOrEqual(height, GeekIStatSectionGeometry.rowHeight + 0.5,
+                    "\(language.rawValue), \(selectedCount) selected: the actions are \(height) pt tall")
                 let button = NSHostingView(rootView: GeekMemoryQuitSelectedButton(store: store, tint: .blue)).fittingSize.width
                 let label = ceil((GeekMemoryQuitSelection.title as NSString)
                     .size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width)
@@ -176,17 +189,33 @@ final class MiniWindowMemoryQuitHeaderLayoutTests: XCTestCase {
         let view = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift")
         let production = try MiniWindowLogicFixtures.section(
             view, from: "private var memoryProcessActions: some View {", to: "private var geekMemoryPagesCard")
+        // D139: the quit button comes in the form the header picks (was
+        // `GeekMemoryQuitSelectedButton(store: store, tint: memoryTint)`).
         let order = try ["HStack(spacing: 6) {", "Button(L10n.text(\"查看全部\", \"View all\"))",
                          "GeekMemoryProcessSelectionMenu(store: store, tint: memoryTint)",
                          "if store.selectedMemoryAppCount == 0 {",
-                         "GeekMemoryQuitSelectedButton(store: store, tint: memoryTint)",
+                         "GeekMemoryQuitSelectedButton(store: store, tint: memoryTint, presentation: quitHint)",
                          ".fixedSize(horizontal: true, vertical: false)"].map {
             try XCTUnwrap(production.range(of: $0), "memoryProcessActions no longer contains \($0)").lowerBound
         }
         XCTAssertEqual(order, order.sorted(), "the measured composition is the production composition")
+        // D139: the header is built per quit-button form (was the end marker
+        // "private var memoryProcessHeader").
         let card = try MiniWindowLogicFixtures.section(
-            view, from: "private var geekMemoryProcessesCard: some View {", to: "private var memoryProcessHeader")
-        XCTAssertTrue(card.contains("if store.selectedMemoryAppCount > 0 {\n                    GeekMemoryQuitSelectedButton(store: store, tint: memoryTint, presentation: .prominent)"),
-                      "with apps selected the full-width button is below the list")
+            view, from: "private var geekMemoryProcessesCard: some View {", to: "private func memoryProcessHeader(")
+        // D126: the full-width button is iStat's button item, its own 31 pt
+        // item after the process card (was inside the card, below the list:
+        // XCTAssertTrue(card.contains("if store.selectedMemoryAppCount > 0 {\n
+        // GeekMemoryQuitSelectedButton(…, presentation: .prominent)"))).
+        XCTAssertFalse(card.contains("presentation: .prominent"), "the process card holds no quit button")
+        let page = try MiniWindowLogicFixtures.section(
+            view, from: "var geekMemoryPage: some View {", to: "private var geekMemoryHistoryHoverTarget")
+        XCTAssertTrue(page.contains("geekMemoryProcessesCard\n"
+            + "                        // D126: with apps selected, iStat's destructive button\n"
+            + "                        // item follows the list as its own 31 pt item (was a\n"
+            + "                        // full-width bordered button inside the process card).\n"
+            + "                        if store.selectedMemoryAppCount > 0 {\n"
+            + "                            GeekMemoryQuitSelectedButton(store: store, tint: memoryTint, presentation: .prominent)"),
+                      "with apps selected the full-width button follows the list")
     }
 }

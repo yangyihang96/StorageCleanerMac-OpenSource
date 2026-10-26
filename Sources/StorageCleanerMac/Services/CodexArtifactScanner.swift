@@ -197,8 +197,8 @@ struct CodexArtifactScanner {
             append(
                 DirectoryEntry(
                     name: L10n.text(
-                        "Codex 生成图片 · \(files.count) 项",
-                        "Codex Generated Images · \(files.count) items"
+                        "Codex 生成图片 · \(ByteFormat.count(files.count)) 项",
+                        "Codex Generated Images · \(ByteFormat.count(files.count)) items"
                     ),
                     path: PathSafety.normalizedPath(directory.path),
                     sizeBytes: bytes,
@@ -398,8 +398,8 @@ struct CodexArtifactScanner {
                 append(
                     DirectoryEntry(
                         name: L10n.text(
-                            "自动化截图与运行记录 · \(runtimeFiles.count) 项",
-                            "Automation Screenshots & Runtime Records · \(runtimeFiles.count) items"
+                            "自动化截图与运行记录 · \(ByteFormat.count(runtimeFiles.count)) 项",
+                            "Automation Screenshots & Runtime Records · \(ByteFormat.count(runtimeFiles.count)) items"
                         ),
                         path: PathSafety.normalizedPath(directory.path),
                         sizeBytes: runtimeBytes,
@@ -415,8 +415,8 @@ struct CodexArtifactScanner {
                 append(
                     DirectoryEntry(
                         name: L10n.text(
-                            "自动化目录安装包 · \(installerFiles.count) 项",
-                            "Automation Folder Installers · \(installerFiles.count) items"
+                            "自动化目录安装包 · \(ByteFormat.count(installerFiles.count)) 项",
+                            "Automation Folder Installers · \(ByteFormat.count(installerFiles.count)) items"
                         ),
                         path: PathSafety.normalizedPath(representative.path),
                         sizeBytes: installerBytes
@@ -490,9 +490,9 @@ struct CodexArtifactScanner {
             let name: String
             switch kind {
             case .release:
-                name = L10n.text("\(project) · \(count) 个发布安装包", "\(project) · \(count) release packages")
+                name = L10n.text("\(project) · \(ByteFormat.count(count)) 个发布安装包", "\(project) · \(ByteFormat.count(count)) release packages")
             case .dist:
-                name = L10n.text("\(project) · \(count) 个构建应用", "\(project) · \(count) built apps")
+                name = L10n.text("\(project) · \(ByteFormat.count(count)) 个构建应用", "\(project) · \(ByteFormat.count(count)) built apps")
             }
             append(
                 DirectoryEntry(
@@ -539,8 +539,8 @@ struct CodexArtifactScanner {
         append(
             DirectoryEntry(
                 name: L10n.text(
-                    "\(project) · \(files.count) 张验证截图",
-                    "\(project) · \(files.count) verification screenshots"
+                    "\(project) · \(ByteFormat.count(files.count)) 张验证截图",
+                    "\(project) · \(ByteFormat.count(files.count)) verification screenshots"
                 ),
                 path: PathSafety.normalizedPath(directory.path),
                 sizeBytes: bytes,

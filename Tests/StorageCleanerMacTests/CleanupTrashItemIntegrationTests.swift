@@ -468,7 +468,11 @@ final class CleanupTrashItemIntegrationTests: XCTestCase {
         )
         try require(firstExecution.summary.movedItemCount == 1, "first execution did not move")
         try require(secondExecution.outcome == .failed, "repeated plan was not rejected")
-        try require(secondExecution.summary.failedItemCount == 1, "repeat failure not reported")
+        // D214＋旧值：was `secondExecution.summary.failedItemCount == 1`. The refused
+        // repeat records its item as not run, with the refusal kept on the report.
+        try require(secondExecution.summary.failedItemCount == 0
+            && secondExecution.summary.notProcessedItemCount == 1
+            && secondExecution.startRefusal?.code == .planIntegrityFailed, "repeat refusal not reported")
         pass(24, "repeated-plan-rejected")
 
         try require(

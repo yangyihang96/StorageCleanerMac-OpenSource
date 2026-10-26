@@ -6,16 +6,20 @@ import XCTest
 final class MenuBarSamplingPlanTests: XCTestCase {
     private func plan(_ mode: MenuBarStatusDisplayMode = .memory, visible: Bool = false,
                       kinds: Set<MenuBarMetricKind> = [], fan: Bool = false,
-                      status: Bool = true, paused: Bool = false) -> MenuBarSamplingPlan {
+                      status: Bool = true, paused: Bool = false,
+                      selected: TimeInterval = 1) -> MenuBarSamplingPlan {
         .resolve(statusMode: mode, statusVisible: status, panelVisible: visible,
-                 visibleKinds: kinds, customFanControlActive: fan, paused: paused)
+                 visibleKinds: kinds, customFanControlActive: fan, paused: paused,
+                 selectedInterval: selected)
     }
 
     func testHiddenPlanContainsOnlyTheSelectedStatusSource() {
         for mode in MenuBarStatusDisplayMode.allCases {
             let value = plan(mode, kinds: MenuBarMetricKind.defaultSelection)
             XCTAssertEqual(value.primaryKinds, MenuBarMetricKind.defaultSelection)
-            XCTAssertEqual(value.needsStatusBattery, mode == .deviceStatus)
+            // D153: the combined icon draws the same status battery (was
+            // `mode == .deviceStatus`); its Wi-Fi comes from its own monitor.
+            XCTAssertEqual(value.needsStatusBattery, mode == .deviceStatus || mode == .combinedStatus)
             XCTAssertEqual(value.needsStatusWiFi, mode == .deviceStatus)
         }
     }
@@ -30,21 +34,30 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         XCTAssertTrue(plan(visible: true, kinds: MenuBarMetricKind.defaultSelection, paused: true).primaryKinds.isEmpty)
     }
 
+    /// D127: sensors and the GPU follow the 1/2/3 s tick (was 5 s whatever
+    /// the setting); custom fan control still reads sensors at least every
+    /// 2 s, so only the 3 s tick is capped (was always 2 s).
     func testCustomFanDemandPreservesSafetyCadenceWithoutAddingUnrelatedSources() {
         let value = plan(.cpu, fan: true)
         XCTAssertEqual(value.primaryKinds, MenuBarMetricKind.defaultSelection)
-        XCTAssertEqual(value.thermalInterval, 2)
-        XCTAssertEqual(plan(visible: true, kinds: [.chipTemperature]).thermalInterval, 5)
-        XCTAssertEqual(plan(.temperature).thermalInterval, 5)
-        XCTAssertEqual(plan(visible: true).gpuInterval, 5)
+        for selected in [1.0, 2, 3] {
+            XCTAssertEqual(plan(.cpu, fan: true, selected: selected).thermalInterval, min(2, selected))
+            XCTAssertEqual(plan(visible: true, kinds: [.chipTemperature], selected: selected).thermalInterval, selected)
+            XCTAssertEqual(plan(.temperature, selected: selected).thermalInterval, selected)
+            XCTAssertEqual(plan(visible: true, selected: selected).gpuInterval, selected)
+        }
+        XCTAssertEqual(MenuBarSamplingPlan.resolve(statusMode: .cpu, statusVisible: true, panelVisible: true,
+            visibleKinds: [], customFanControlActive: true, paused: false, lowPower: true,
+            selectedInterval: 3).thermalInterval, 30, "Low Power keeps its own tier")
     }
 
     func testHiddenStatusVisibilityAndLowPowerDoNotChangeTheSelectedVisibleSetting() {
         for interval in MenuBarRefreshInterval.allCases {
             XCTAssertEqual(interval.sleepNanoseconds(panelVisible: true, statusDisplayMode: .memory,
                 customFanControlActive: false, lowPowerMode: true), 30_000_000_000)
+            // D127: the closed panel keeps the selected tick (was 5 s).
             XCTAssertEqual(interval.sleepNanoseconds(panelVisible: false, statusDisplayMode: .cpu,
-                customFanControlActive: false, lowPowerMode: false, statusVisible: false), 5_000_000_000)
+                customFanControlActive: false, lowPowerMode: false, statusVisible: false), interval.sleepNanoseconds)
             XCTAssertEqual(interval.sleepNanoseconds(panelVisible: false, statusDisplayMode: .cpu,
                 customFanControlActive: false, lowPowerMode: true), 30_000_000_000)
         }
@@ -59,7 +72,13 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         XCTAssertEqual(MenuBarPerformancePolicy.processSampleTimeout, 5)
     }
 
-    func testOverviewConfigurationAndSecondaryDemandDoNotStartProcessLists() {
+    /// D167: the module page (level 2) starts its process list once its first
+    /// frame is drawn; the overview and pages without a process card never do.
+    /// Was `testOverviewConfigurationAndSecondaryDemandDoNotStartProcessLists`:
+    /// every section returned nil without a level-3 page
+    /// (`section(_, tertiaryVisible: false)`), and the network list needed
+    /// `tertiaryVisible: true`.
+    func testOverviewDoesNotStartProcessListsButModulePagesDo() {
         var configuration = GeekDashboardConfiguration.defaultValue
         for module in GeekDashboardModule.allCases {
             configuration.setModule(module, isVisible: module == .network)
@@ -68,15 +87,16 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         XCTAssertEqual(overview.primaryKinds, [.networkSpeed])
         XCTAssertFalse(overview.needsStorageCapacity)
         XCTAssertFalse(overview.needsBattery)
+        let processPages: [PanelSection] = [.processor, .memory, .disk, .power]
         for section in PanelSection.allCases {
+            // Before the first frame no page starts the network list.
             XCTAssertFalse(PanelDensity.geek.auxiliaryDemand(for: section).needsNetworkProcesses)
-            XCTAssertNil(MenuBarProcessSamplingDemand.section(section, tertiaryVisible: false))
+            XCTAssertEqual(PanelDensity.geek.auxiliaryDemand(for: section, startsProcessLists: true).needsNetworkProcesses,
+                           section == .network, section.rawValue)
+            XCTAssertEqual(MenuBarProcessSamplingDemand.section(section),
+                           processPages.contains(section) ? section : nil, section.rawValue)
         }
-        XCTAssertTrue(PanelDensity.geek.auxiliaryDemand(for: .network, tertiaryVisible: true).needsNetworkProcesses)
-        for section in [PanelSection.processor, .memory, .disk, .power] {
-            XCTAssertEqual(MenuBarProcessSamplingDemand.section(section, tertiaryVisible: true), section)
-        }
-        XCTAssertNil(MenuBarProcessSamplingDemand.section(.network, tertiaryVisible: true))
+        XCTAssertFalse(PanelDensity.complex.auxiliaryDemand(for: .network, startsProcessLists: true).needsNetworkProcesses)
     }
 
     @MainActor
@@ -239,8 +259,9 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         let accumulator = SystemEnergyAccumulator(fileURL: nil, now: clock.date,
             samplingGaps: MenuBarSamplingGaps(defaults: TestPreferenceDomain.make(for: self)), sampleProvider: { nil })
         let context = MenuBarSamplingContext()
+        // D127: the slowest tick, 3 s (reads followed D74's 5 s before).
         context.configure(statusMode: .cpu, statusVisible: true, panelVisible: false,
-                          customFanControlActive: false, paused: false)
+                          customFanControlActive: false, paused: false, selectedInterval: 3)
         let state = MenuBarAuxiliaryMonitorState(
             collectionClock: { clock.date },
             batteryAvailabilityProvider: { .present },
@@ -259,43 +280,45 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         state.refreshResidentSamples()
         try await waitUntil { electrical.count == 1 && !state.isLocalDataRefreshActive && !state.isDiskIOSamplingActive }
         XCTAssertEqual(callbacks, 1, "Energy integration continues while hidden")
-        clock.advance(4)
+        clock.advance(2)
         state.refreshResidentSamples()
         try await waitUntil { !state.isLocalDataRefreshActive && !state.isDiskIOSamplingActive }
-        XCTAssertEqual(electrical.count, 1, "D74 every five seconds, not every call")
+        XCTAssertEqual(electrical.count, 1, "D127 every tick (3 s here), not every call (D74: 5 s)")
         clock.advance(1)
         state.refreshResidentSamples()
         try await waitUntil { electrical.count == 2 && !state.isLocalDataRefreshActive && !state.isDiskIOSamplingActive }
         XCTAssertEqual(callbacks, 2)
-        XCTAssertEqual(state.powerHistory.count, 2, "Each actual five-second read is retained in D39 history")
+        XCTAssertEqual(state.powerHistory.count, 2, "Each actual read is retained in D39 history")
         XCTAssertEqual(accumulator.snapshot.batteryWattHours, 0,
                        "The existing accumulator keeps its independent 30-second integration gate")
-        for index in 2...6 {
-            clock.advance(5)
+        // D127: ten 3 s ticks span the same 30 s (D74: six 5 s ticks).
+        for index in 2...10 {
+            clock.advance(3)
             state.refreshResidentSamples()
             try await waitUntil { electrical.count == index + 1 && !state.isLocalDataRefreshActive && !state.isDiskIOSamplingActive }
         }
-        XCTAssertEqual(callbacks, 7)
-        XCTAssertEqual(state.powerHistory.count, 7)
+        XCTAssertEqual(callbacks, 11)
+        XCTAssertEqual(state.powerHistory.count, 11)
         XCTAssertEqual(state.powerHistory.last?.date.timeIntervalSince(state.powerHistory[0].date), 30)
         XCTAssertEqual(accumulator.snapshot.batteryWattHours, 20 * 30 / 3_600, accuracy: 0.000_001,
                        "Actual hidden reads must still integrate after the unchanged accumulator gate")
         XCTAssertEqual(charge.count, 0, "Hidden sampling never reads the charge limit")
-        XCTAssertEqual(disk.count, 7)
+        XCTAssertEqual(disk.count, 11)
         state.setPaused(true)
         clock.advance(60)
         state.refreshResidentSamples()
         state.refreshBackgroundBatteryHistory(force: true)
         try await waitUntil { !state.isLocalDataRefreshActive && !state.isDiskIOSamplingActive }
-        XCTAssertEqual(electrical.count, 7, "Paused sampling reads nothing")
+        XCTAssertEqual(electrical.count, 11, "Paused sampling reads nothing")
     }
 
     @MainActor
     func testFailedResidentBatteryReadKeepsValueAndDateWithoutAcceleratingRetries() async throws {
         let clock = SamplingProbe(), reads = SamplingProbe()
         let context = MenuBarSamplingContext()
+        // D127: attempts follow the 3 s tick here (D74: a 5 s floor).
         context.configure(statusMode: .cpu, statusVisible: true, panelVisible: true,
-            customFanControlActive: false, paused: false)
+            customFanControlActive: false, paused: false, selectedInterval: 3)
         let state = MenuBarAuxiliaryMonitorState(collectionClock: { clock.date },
             batteryAvailabilityProvider: { .present }, diskCounterProvider: { nil },
             batterySnapshotProvider: {
@@ -308,7 +331,7 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         try await waitUntil { reads.count == 1 && !state.isLocalDataRefreshActive }
         let storedDate = state.batteryRefreshedAt
         let storedBattery = state.batterySnapshot
-        clock.advance(5)
+        clock.advance(3)
         state.refreshResidentSamples()
         try await waitUntil { reads.count == 2 && !state.isLocalDataRefreshActive }
         XCTAssertEqual(state.batterySnapshot, storedBattery)
@@ -317,8 +340,8 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         clock.advance(1)
         state.refreshResidentSamples()
         try await waitUntil { !state.isLocalDataRefreshActive }
-        XCTAssertEqual(reads.count, 2, "a failure cannot bypass the five-second attempt floor")
-        clock.advance(4)
+        XCTAssertEqual(reads.count, 2, "a failure cannot bypass the tick's attempt floor")
+        clock.advance(2)
         state.refreshResidentSamples()
         try await waitUntil { reads.count == 3 && !state.isLocalDataRefreshActive }
         XCTAssertEqual(state.batteryRefreshedAt, storedDate)
@@ -432,7 +455,8 @@ final class MenuBarSamplingPlanTests: XCTestCase {
 
         gate.signal()
         try await Self.waitForHardware(sampler)
-        let fresh = await read(visible, 4)
+        // D127: within the 1 s tick of the replacement (was 4 s within 5 s).
+        let fresh = await read(visible, 3.5)
         XCTAssertEqual(gpu.count, 2)
         XCTAssertEqual(timeouts.count, 0, "Gates, not provider timeouts, control the test sequence")
         XCTAssertEqual(fresh.gpuMemoryUsedBytes, 2_048)
@@ -483,7 +507,9 @@ final class MenuBarSamplingPlanTests: XCTestCase {
             return .init(gpuUsagePercent: nil, chipTemperatureCelsius: 55,
                          fanSpeedRPM: 0, fanCount: 1, fanSpeedsRPM: [0])
         })
-        let visible = plan(.cpu, visible: true, kinds: [.gpuUsage, .chipTemperature, .fanSpeed])
+        // D127: the slowest tick, 3 s; the cached read at 2 s stays inside it
+        // (D74: 4 s inside 5 s).
+        let visible = plan(.cpu, visible: true, kinds: [.gpuUsage, .chipTemperature, .fanSpeed], selected: 3)
         let start = Date(timeIntervalSinceReferenceDate: 70_000)
         func read(_ seconds: TimeInterval) async -> SystemMonitorSnapshot {
             await sampler.snapshot(enabledKinds: MenuBarMetricKind.defaultSelection,
@@ -493,8 +519,8 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         _ = await read(0)
         try await Self.waitForHardware(sampler)
         let first = await read(1)
-        let cached = await read(4)
-        XCTAssertEqual(cached.generatedAt, start.addingTimeInterval(4))
+        let cached = await read(2)
+        XCTAssertEqual(cached.generatedAt, start.addingTimeInterval(2))
         XCTAssertEqual(cached.sensorReadingDate, start)
         XCTAssertEqual(cached.gpuReadingDate, start)
         let history = MenuBarTelemetryPoint(snapshot: cached).replacingMemory(with: nil)
@@ -621,13 +647,14 @@ final class MenuBarSamplingPlanTests: XCTestCase {
                          fanSpeedRPM: 0, fanCount: 1, fanSpeedsRPM: [0])
         })
         let start = Date()
+        // D127: the slowest tick, 3 s (D74: a 5 s floor whatever the setting).
         _ = await sampler.snapshot(enabledKinds: MenuBarMetricKind.defaultSelection,
             memorySnapshot: nil, previousNetworkSample: nil, resolvesMissingMemorySnapshot: false,
-            samplingPlan: plan(.memory), now: start)
+            samplingPlan: plan(.memory, selected: 3), now: start)
         try await Self.waitForHardware(sampler)
         XCTAssertEqual(gpu.count, 1)
         XCTAssertEqual(sensors.count, 1)
-        let visible = plan(.memory, visible: true, kinds: [.gpuUsage, .chipTemperature, .fanSpeed])
+        let visible = plan(.memory, visible: true, kinds: [.gpuUsage, .chipTemperature, .fanSpeed], selected: 3)
         func read(_ time: Date) async -> SystemMonitorService.SnapshotResult {
             await sampler.snapshot(enabledKinds: MenuBarMetricKind.defaultSelection,
                 memorySnapshot: nil, previousNetworkSample: nil, resolvesMissingMemorySnapshot: false,
@@ -648,13 +675,13 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         XCTAssertEqual(gpu.count, 1)
         XCTAssertEqual(sensors.count, 1)
         XCTAssertEqual(result.snapshot.fanSpeedsRPM, [0], "Zero RPM remains a measured stop")
-        let cachedAtFour = await read(start.addingTimeInterval(4))
+        let cachedAtFour = await read(start.addingTimeInterval(2))
         try await Self.waitForHardware(sampler)
         XCTAssertEqual(cachedAtFour.snapshot.sensorSampledAt, start,
                        "Cheap publication must not retimestamp the SMC cache")
         XCTAssertEqual(gpu.count, 1)
         XCTAssertEqual(sensors.count, 1)
-        _ = await read(start.addingTimeInterval(5.2))
+        _ = await read(start.addingTimeInterval(3.2))
         let secondDeadline = ContinuousClock.now + .seconds(5)
         while gpu.count < 2 || sensors.count < 2, ContinuousClock.now < secondDeadline {
             try await Task.sleep(for: .milliseconds(2))
@@ -723,7 +750,8 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         let coordinator = try r2ProductionSource(at: root.appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift"))
         XCTAssertTrue(coordinator.contains("await MenuBarSamplingContext.awaitPresentationTurn()"))
         XCTAssertTrue(coordinator.contains("planChanges.removeDuplicates()"))
-        XCTAssertTrue(coordinator.contains("tertiaryVisible: tertiaryVisible && hasPresentedFirstFrame"))
+        // D167: was "tertiaryVisible: tertiaryVisible && hasPresentedFirstFrame".
+        XCTAssertTrue(coordinator.contains("startsProcessLists: hasPresentedFirstFrame"))
         let nettop = try r2ProductionSource(at: root.appendingPathComponent("Sources/StorageCleanerMac/Services/NativeNetworkProcessService.swift"))
         XCTAssertTrue(nettop.contains("timeout: 4"))
         XCTAssertTrue(nettop.contains("outputByteLimit: 2 * 1_024 * 1_024"))
@@ -764,9 +792,10 @@ final class MenuBarSamplingPlanTests: XCTestCase {
     @MainActor
     func testVisibleConnectionReadsCoalesceAcrossRapidOpensAndStopWhenHidden() async throws {
         let context = MenuBarSamplingContext(), probe = SamplingProbe()
+        // D127: visible reads share the 3 s tick here (D74: a 5 s floor).
         func visible(_ value: Bool) {
             context.configure(statusMode: .cpu, statusVisible: true, panelVisible: value,
-                customFanControlActive: false, paused: false, now: probe.date)
+                customFanControlActive: false, paused: false, now: probe.date, selectedInterval: 3)
         }
         func request() {
             context.refreshVisibleRead("helper.connection", now: probe.date) { probe.increment() }
@@ -777,14 +806,14 @@ final class MenuBarSamplingPlanTests: XCTestCase {
         try await waitUntil { probe.count == 1 && context.activeVisibleReadCount == 0 }
         visible(false)
         visible(true)
-        probe.advance(4)
+        probe.advance(2)
         request()
         try await waitUntil { context.activeVisibleReadCount == 0 }
         XCTAssertEqual(probe.count, 1)
         probe.advance(1)
         request()
         try await waitUntil { probe.count == 2 && context.activeVisibleReadCount == 0 }
-        probe.advance(5)
+        probe.advance(3)
         request()
         visible(false)
         try await waitUntil { context.activeVisibleReadCount == 0 }

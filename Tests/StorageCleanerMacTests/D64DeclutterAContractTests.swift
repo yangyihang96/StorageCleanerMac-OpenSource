@@ -98,8 +98,10 @@ final class D64DeclutterAContractTests: XCTestCase {
     func testSettingsKeepSevenNavigationCategoriesWithoutDecoratedHeadingsOrTutorial() throws {
         let settings = try source("Views/SettingsView.swift")
         let category = try segment(settings, from: "enum SettingsCategory:", to: "struct SettingsView:")
-        XCTAssertEqual(SettingsCategory.allCases.map(\.rawValue), ["general", "miniWindow", "scanAndSafety", "accessAndSetup", "systemControl", "updates", "about"])
-        for name in ["general", "miniWindow", "scanAndSafety", "accessAndSetup", "systemControl", "updates", "about"] {
+        // D207＋旧值：七类，没有 "ignoreList"。D207 照 CleanMyMac 加了第八页“忽略列表”；
+        // 不加装饰标题、不加教程的要求不变，新页签同样用插画（D207 补）。
+        XCTAssertEqual(SettingsCategory.allCases.map(\.rawValue), ["general", "miniWindow", "scanAndSafety", "ignoreList", "accessAndSetup", "systemControl", "updates", "about"])
+        for name in ["general", "miniWindow", "scanAndSafety", "ignoreList", "accessAndSetup", "systemControl", "updates", "about"] {
             XCTAssertTrue(category.contains("    case " + name), name)
         }
         XCTAssertFalse(category.contains("var subtitle:"))
@@ -112,9 +114,11 @@ final class D64DeclutterAContractTests: XCTestCase {
         XCTAssertTrue(header.contains(".frame(width: 48, height: 48)"))
         XCTAssertFalse(header.contains("AppSymbolIcon("))
         XCTAssertFalse(header.contains("category.subtitle"))
-        let sidebar = try r2SourceDeclaration("private var settingsSidebar:", in: settings)
+        // D154 batch 3I: the top tabs show each page's picture (was
+        // `private var settingsSidebar:` in SettingsView.swift, at 20 × 20).
+        let sidebar = try r2SourceDeclaration("struct SettingsTabBar", in: lightfield)
         XCTAssertTrue(sidebar.contains("FeatureLightfieldArtwork("))
-        XCTAssertTrue(sidebar.contains(".frame(width: 20, height: 20)"))
+        XCTAssertTrue(sidebar.contains(".frame(width: 28, height: 28)"))
         XCTAssertFalse(settings.contains("Image(systemName: \"gearshape.fill\")"))
         XCTAssertNil(settings.range(of: #"\bLabel\s*(?:\(|\{)"#, options: .regularExpression))
         XCTAssertFalse(sidebar.contains("Image(systemName:"))
@@ -135,6 +139,8 @@ final class D64DeclutterAContractTests: XCTestCase {
     }
 
     func testPermissionsKeepRequirementsPathsActionsAndSafetyWithoutArtwork() throws {
+        // D154 batch 3J: the guide's pages each show one main picture, which
+        // D64 keeps; the decorations below stay out of it.
         let onboarding = try source("Views/FirstLaunchOnboardingView.swift")
         let settings = try source("Views/SettingsView.swift")
         for decoration in ["Image(systemName:", "AppSymbolIcon(", "artworkIsActive", "repeatForever", "Label(L10n.text", "circle.fill"] {
@@ -182,7 +188,7 @@ final class D64DeclutterAContractTests: XCTestCase {
         XCTAssertTrue(view.contains("if notice.showsWarningSymbol {\n                AppSymbolIcon("))
         XCTAssertTrue(view.contains("Text(notice.text)"))
         XCTAssertTrue(view.contains(".accessibilityElement(children: .combine)"))
-        let row = try segment(settings, from: "struct ExclusionPathRow:", to: "private struct SettingsWindowConfigurator:")
+        let row = try segment(settings, from: "struct ExclusionPathRow:", to: "struct SettingsWindowConfigurator:")
         XCTAssertFalse(row.contains("AppSymbolIcon("))
         XCTAssertTrue(row.contains("LightfieldPathText(path: path)"))
         XCTAssertTrue(row.contains("Button(L10n.text(\"移除\", \"Remove\"), action: remove)"))
@@ -406,7 +412,9 @@ final class D64DeclutterAContractTests: XCTestCase {
         }
         let settings = try source("Views/SettingsView.swift")
         let pane = try r2SourceDeclaration("private func settingsPane(", in: settings)
-        XCTAssertTrue(pane.contains("SettingsLightfieldPane(category: category)"))
+        // D154 batch 3I: the window draws the backdrop behind the tabs and the
+        // pane (was `SettingsLightfieldPane(category: category)`).
+        XCTAssertTrue(pane.contains("SettingsLightfieldPane(category: category, drawsBackdrop: false)"))
         XCTAssertTrue(pane.contains("settingsForm(for: category)"))
         let lightfield = try source("Views/Settings/SettingsLightfield.swift")
         let shell = try r2SourceDeclaration("struct SettingsLightfieldPane", in: lightfield)

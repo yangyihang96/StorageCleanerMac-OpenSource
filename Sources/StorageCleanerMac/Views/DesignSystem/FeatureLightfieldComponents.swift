@@ -73,14 +73,25 @@ struct LightfieldOptionRow: View {
     private var row: some View {
         HStack(spacing: 14) {
             if let selection { FeatureLightfieldCheck(selected: selection.wrappedValue, module: module) }
-            else if isIncluded { FeatureLightfieldCheck(selected: true, module: module).accessibilityHidden(true) }
+            // An always-included scope is a fact, not a control: a bare
+            // checkmark, unlike the boxed check of a row that can be toggled.
+            else if isIncluded {
+                Image(systemName: "checkmark").font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg3)
+                    .frame(width: FeatureLightfield.checkSide, height: FeatureLightfield.checkSide)
+                    .accessibilityHidden(true)
+            }
             LightfieldOptionIconView(icon: icon).lightfieldComponentProbe(probeID + ".icon")
             Text(title).font(.system(size: 16)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
                 .lineLimit(1).truncationMode(.tail).help(title).frame(maxWidth: .infinity, alignment: .leading)
                 .lightfieldComponentProbe(probeID + ".title")
             if !metadata.isEmpty {
+                // The note hugs its text and the stack gives it at most half of
+                // the width it shares with the title. A fixed 140 pt column cut
+                // notes such as “3 项 · 复制/三数组运算/指针追逐” in the middle even
+                // on wide rows, and took 140 pt from the title for short notes.
                 Text(metadata).font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg3)
-                    .lineLimit(1).truncationMode(.middle).help(metadata).frame(maxWidth: 140, alignment: .trailing)
+                    .lineLimit(1).truncationMode(.middle).help(metadata)
                     .lightfieldComponentProbe(probeID + ".metadata")
             }
         }.padding(.trailing, 6).frame(height: FeatureLightfield.optionHeight).contentShape(Rectangle())

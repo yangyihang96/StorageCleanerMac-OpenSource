@@ -298,13 +298,28 @@ final class DaylightRefinementTests: XCTestCase {
     }
 
     func testHoverAndSelectionDoNotChangeBorderGeometryAtEitherScale() {
+        // D118 (2026-10-18): iStat draws hover and selection as a 1 pt accent
+        // line inset by 1 over the card at every scale (spec §3.3); the
+        // resting border keeps the one-pixel hairline. Was `1 / scale` in
+        // every state. The highlight is an overlay, so the card's size, and
+        // with it the content, never moves.
         for scale: CGFloat in [1, 2] {
             for active in [false, true] {
                 for selected in [false, true] {
-                    XCTAssertEqual(GeekVisualTokens.cardBorderLineWidth(isActive: active, isSelected: selected, displayScale: scale), 1 / scale)
+                    XCTAssertEqual(GeekVisualTokens.cardBorderLineWidth(isActive: active, isSelected: selected, displayScale: scale),
+                                   active || selected ? GeekVisualTokens.cardHighlightLineWidth : 1 / scale)
                 }
             }
         }
+        XCTAssertEqual(GeekVisualTokens.cardHighlightLineWidth, 1)
+        XCTAssertEqual(GeekVisualTokens.cardHighlightInset, 1)
+        let sizes = [(false, false), (true, false), (false, true)].map { active, selected in
+            NSHostingView(rootView: GeekCombinedCard(height: 40) { Text("CPU") }
+                .environment(\.geekCombinedCardIsActive, active)
+                .environment(\.geekCombinedCardIsSelected, selected)
+                .frame(width: 285)).fittingSize
+        }
+        XCTAssertEqual(Set(sizes.map { "\($0.width)x\($0.height)" }).count, 1, "\(sizes)")
     }
 
     func testParentOwnedInsetIsAppliedExactlyOnceForInlineHistory() {

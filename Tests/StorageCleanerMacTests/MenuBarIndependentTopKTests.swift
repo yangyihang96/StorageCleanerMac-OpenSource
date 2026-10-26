@@ -9,7 +9,10 @@ final class MenuBarIndependentTopKTests: XCTestCase {
         let prepared = MenuBarPreparedProcesses(snapshot: snapshot(energy + [cpu, disk]))
         XCTAssertEqual(prepared.energy.map(\.name), energy.map(\.name))
         XCTAssertEqual(prepared.cpu.first?.id, cpu.id)
-        XCTAssertEqual(prepared.disk.map(\.id), [disk.id])
+        // D129 (2026-10-19): the disk list keeps idle apps after the leader,
+        // in name order, as iStat's top five has no threshold (was
+        // `[disk.id]` alone).
+        XCTAssertEqual(prepared.disk.map(\.id), [disk.id, cpu.id] + energy.prefix(3).map(\.id))
         XCTAssertFalse(prepared.energy.contains { $0.id == cpu.id || $0.id == disk.id })
         XCTAssertEqual(prepared.cpu.count, 5)
         XCTAssertEqual(prepared.snapshot.apps.count, 7)
@@ -50,10 +53,37 @@ final class MenuBarIndependentTopKTests: XCTestCase {
     func testZeroActivityAndNonApplicationsAreExcludedAndLimitIsIndependent() {
         let apps = [app(name: "Idle", pid: 1, cpu: 0, watts: 0, read: 0),
                     app(name: "Standalone", pid: 2, isApplication: false), app(name: "Active", pid: 3)]
+        // D129 (2026-10-19): a limit of one leaves "Active" because it ranks
+        // first; idle apps stay in the CPU and disk lists below it
+        // (`testCPUAndDiskListsKeepIdleAppsBelowActiveOnes`).
         let prepared = MenuBarPreparedProcesses(snapshot: snapshot(apps), limit: 1)
         for list in [prepared.energy, prepared.cpu, prepared.disk] { XCTAssertEqual(list.map(\.name), ["Active"]) }
         let empty = MenuBarPreparedProcesses(snapshot: snapshot(apps), limit: 0)
         XCTAssertTrue(empty.energy.isEmpty && empty.cpu.isEmpty && empty.disk.isEmpty)
+    }
+
+    /// D129: iStat's `processesWithConfig:` filters only the energy list
+    /// (power threshold, apps); the CPU and disk lists are the top five of
+    /// the measured snapshot, zeros included. Non-finite CPU is no reading.
+    func testCPUAndDiskListsKeepIdleAppsBelowActiveOnes() {
+        let apps = [app(name: "Idle", pid: 1, cpu: 0, watts: 0, read: 0),
+                    app(name: "Standalone", pid: 2, isApplication: false),
+                    app(name: "Active", pid: 3),
+                    app(name: "Broken", pid: 4, cpu: .nan, watts: 0, read: 0),
+                    app(name: "Writer", pid: 5, cpu: 0, watts: 0, read: 0, write: 4_096)]
+        let prepared = MenuBarPreparedProcesses(snapshot: snapshot(apps))
+        XCTAssertEqual(prepared.energy.map(\.name), ["Active"])
+        XCTAssertEqual(prepared.cpu.map(\.name), ["Active", "Idle", "Writer"])
+        XCTAssertEqual(prepared.disk.map(\.name), ["Writer", "Active", "Broken", "Idle"])
+        for list in [prepared.energy, prepared.cpu, prepared.disk] {
+            XCTAssertFalse(list.contains { $0.name == "Standalone" })
+        }
+        let idleOnly = MenuBarPreparedProcesses(snapshot: snapshot((1...7).map {
+            app(name: "Idle \($0)", pid: Int32($0), cpu: 0, watts: 0, read: 0)
+        }))
+        XCTAssertTrue(idleOnly.energy.isEmpty)
+        XCTAssertEqual(idleOnly.cpu.map(\.name), (1...5).map { "Idle \($0)" })
+        XCTAssertEqual(idleOnly.disk.map(\.name), (1...5).map { "Idle \($0)" })
     }
 
     private func app(name: String, pid: Int32, cpu: Double = 10, watts: Double = 1,

@@ -34,7 +34,7 @@ struct BrowserPrivacyDisclosurePolicy: Equatable, Sendable {
     }
 
     static func sensitiveSummary(_ count: Int) -> String {
-        L10n.text("敏感网站 · \(count) 条", "Sensitive websites · \(count) records")
+        L10n.text("敏感网站 · \(ByteFormat.count(count)) 条", "Sensitive websites · \(ByteFormat.count(count)) records")
     }
 }
 

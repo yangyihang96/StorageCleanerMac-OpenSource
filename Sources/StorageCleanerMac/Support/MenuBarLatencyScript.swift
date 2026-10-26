@@ -42,7 +42,8 @@ enum MenuBarLatencyScript {
         var iterations = 20
         var rangeIterations = 20
         var rangeSections: [PanelSection] = [.processor, .memory]
-        var ranges: [GeekChartRange] = [.oneMinute, .fifteenMinutes, .oneHour, .oneDay, .sevenDays, .twentyEightDays]
+        // D130: 60 s is no longer a window (read as 10 minutes).
+        var ranges: [GeekChartRange] = [.tenMinutes, .oneHour, .oneDay, .sevenDays, .twentyEightDays]
         var settleSeconds = 20.0
         var maximumLoad = 4.0
         var steadySeconds = 60.0

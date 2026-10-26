@@ -427,6 +427,7 @@ struct DiskHealthService {
         let isTRIMEnabled = diskTRIM ?? profilerMetrics?.isTRIMEnabled
         let remainingLifePercent = smartDetails.flatMap(Self.remainingLifePercent)
         let temperatureCelsius = smartDetails.flatMap(Self.temperatureCelsius)
+        let smartCounters = smartDetails.flatMap(Self.smartCounters)
 
         let hasAnyData = fileSystem != nil
             || capacity != nil
@@ -451,7 +452,9 @@ struct DiskHealthService {
             smartStatus: smartStatus,
             isTRIMEnabled: isTRIMEnabled,
             isFileVaultEnabled: isFileVaultEnabled,
-            capacity: capacity
+            capacity: capacity,
+            criticalWarning: smartCounters?.criticalWarning,
+            remainingLifePercent: remainingLifePercent
         )
         return DiskHealthSnapshot(
             availability: availability,
@@ -466,10 +469,13 @@ struct DiskHealthService {
             availableBytes: capacity?.availableBytes,
             remainingLifePercent: remainingLifePercent,
             temperatureCelsius: temperatureCelsius,
+            smartDetails: smartCounters,
             summaryText: summary(
                 availability: availability,
                 status: proposedStatus,
-                smartStatus: smartStatus
+                smartStatus: smartStatus,
+                criticalWarning: smartCounters?.criticalWarning,
+                remainingLifePercent: remainingLifePercent
             ),
             checkedAt: checkedAt
         )
@@ -609,6 +615,52 @@ struct DiskHealthService {
         return celsius
     }
 
+    /// D100 G8: the counters shown with the disk evidence; nil when the drive
+    /// reports none of them.
+    private static func smartCounters(from smartDetails: [String: Any]) -> DiskSMARTDetails? {
+        let details = DiskSMARTDetails(
+            dataUnitsWritten: counter(in: smartDetails, named: "DATA_UNITS_WRITTEN"),
+            dataUnitsRead: counter(in: smartDetails, named: "DATA_UNITS_READ"),
+            powerOnHours: counter(in: smartDetails, named: "POWER_ON_HOURS"),
+            powerCycles: counter(in: smartDetails, named: "POWER_CYCLES"),
+            unsafeShutdowns: counter(in: smartDetails, named: "UNSAFE_SHUTDOWNS"),
+            mediaErrors: counter(in: smartDetails, named: "MEDIA_ERRORS"),
+            availableSparePercent: percentValue(in: smartDetails, key: "AVAILABLE_SPARE"),
+            availableSpareThresholdPercent: percentValue(in: smartDetails, key: "AVAILABLE_SPARE_THRESHOLD"),
+            criticalWarning: unsignedValue(value(in: smartDetails, keys: ["CRITICAL_WARNING"]))
+                .flatMap { Int(exactly: $0) }
+        )
+        return details.isEmpty ? nil : details
+    }
+
+    /// A 128-bit NVMe counter: `<name>_0` holds the low and `<name>_1` the
+    /// high 64 bits. A non-numeric half makes the whole counter unknown.
+    private static func counter(in smartDetails: [String: Any], named name: String) -> Double? {
+        guard let low = unsignedValue(value(in: smartDetails, keys: [name + "_0"])) else { return nil }
+        let rawHigh = value(in: smartDetails, keys: [name + "_1"])
+        let high = rawHigh == nil ? 0 : unsignedValue(rawHigh)
+        guard let high else { return nil }
+        return Double(high) * 18_446_744_073_709_551_616 + Double(low)
+    }
+
+    private static func percentValue(in smartDetails: [String: Any], key: String) -> Int? {
+        guard let value = unsignedValue(value(in: smartDetails, keys: [key])), value <= 100 else { return nil }
+        return Int(value)
+    }
+
+    /// A nonnegative integer, never a Boolean or a fraction.
+    private static func unsignedValue(_ value: Any?) -> UInt64? {
+        if let number = value as? NSNumber {
+            guard CFGetTypeID(number) == CFNumberGetTypeID(), !CFNumberIsFloatType(number) else { return nil }
+            if number.int64Value >= 0 { return UInt64(number.int64Value) }
+            return String(cString: number.objCType) == "Q" ? number.uint64Value : nil
+        }
+        if let string = value as? String {
+            return UInt64(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
     private struct NVMEMetrics {
         let smartStatus: DiskSMARTStatus
         let isTRIMEnabled: Bool?
@@ -669,13 +721,19 @@ struct DiskHealthService {
         return []
     }
 
+    /// D100 G8: of the SMART counters, only what the drive concludes itself
+    /// counts: a critical warning, or a used-up rated life. Available spare is
+    /// never compared with its threshold here; drives report values (100
+    /// against 99) where that comparison would raise false alarms.
     private static func status(
         smartStatus: DiskSMARTStatus,
         isTRIMEnabled: Bool?,
         isFileVaultEnabled: Bool?,
-        capacity: StorageCapacitySnapshot?
+        capacity: StorageCapacitySnapshot?,
+        criticalWarning: Int?,
+        remainingLifePercent: Int?
     ) -> HealthStatus {
-        if smartStatus == .failing {
+        if smartStatus == .failing || (criticalWarning ?? 0) != 0 {
             return .actionRequired
         }
         if capacity?.pressure == .critical {
@@ -685,7 +743,8 @@ struct DiskHealthService {
             || smartStatus == .unsupported
             || smartStatus == .unavailable
             || isTRIMEnabled == false
-            || isFileVaultEnabled == false {
+            || isFileVaultEnabled == false
+            || remainingLifePercent == 0 {
             return .attention
         }
         return .healthy
@@ -694,13 +753,21 @@ struct DiskHealthService {
     private static func summary(
         availability: HealthAvailability,
         status: HealthStatus,
-        smartStatus: DiskSMARTStatus
+        smartStatus: DiskSMARTStatus,
+        criticalWarning: Int?,
+        remainingLifePercent: Int?
     ) -> String {
         if smartStatus == .failing {
             return L10n.text("SMART 报告需要处理", "SMART reports an issue")
         }
+        if (criticalWarning ?? 0) != 0 {
+            return L10n.text("硬盘报告了严重警告", "The drive reports a critical warning")
+        }
         if status == .actionRequired {
             return L10n.text("可用容量偏低", "Available storage is low")
+        }
+        if remainingLifePercent == 0 {
+            return L10n.text("硬盘已达到额定写入寿命", "The drive has reached its rated endurance")
         }
         if availability == .partial {
             return partialSummary

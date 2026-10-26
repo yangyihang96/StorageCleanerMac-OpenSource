@@ -52,10 +52,10 @@ struct CloudLocalCopySheet: View {
                     }
                 }
             } else {
-                Text(L10n.text("本目录 \(files.count) 个文件，已跳过 \(placeholders) 个云端占位；最多检查 \(CloudLocalCopyService.reviewLimit) 项，单批最多 \(CloudLocalCopyService.batchLimit) 项。文件夹请进入后逐个文件选择。",
-                               "\(files.count) files in this folder, \(placeholders) cloud placeholders skipped; checks up to \(CloudLocalCopyService.reviewLimit), releases up to \(CloudLocalCopyService.batchLimit) per batch. Enter folders to select individual files."))
+                Text(L10n.text("本目录 \(ByteFormat.count(files.count)) 个文件，已跳过 \(ByteFormat.count(placeholders)) 个云端占位；最多检查 \(ByteFormat.count(CloudLocalCopyService.reviewLimit)) 项，单批最多 \(ByteFormat.count(CloudLocalCopyService.batchLimit)) 项。文件夹请进入后逐个文件选择。",
+                               "\(ByteFormat.count(files.count)) files in this folder, \(ByteFormat.count(placeholders)) cloud placeholders skipped; checks up to \(ByteFormat.count(CloudLocalCopyService.reviewLimit)), releases up to \(ByteFormat.count(CloudLocalCopyService.batchLimit)) per batch. Enter folders to select individual files."))
                     .font(.system(size: 13)).foregroundStyle(palette.fg2).fixedSize(horizontal: false, vertical: true)
-                Text(L10n.text("已选 \(chosen.count) 项 · 预计本地占用减少 ", "\(chosen.count) selected · Estimated local usage reduction ") + ByteFormat.storageString(estimated))
+                Text(L10n.text("已选 \(ByteFormat.count(chosen.count)) 项 · 预计本地占用减少 ", "\(ByteFormat.count(chosen.count)) selected · Estimated local usage reduction ") + ByteFormat.storageString(estimated))
                     .font(.system(size: 15, weight: .semibold))
                 if confirming {
                     Text(L10n.text("请确认以下对象与提供商。执行前会逐项复查状态。", "Confirm these files and providers. Each state will be checked again before release."))
@@ -124,8 +124,8 @@ struct CloudLocalCopySheet: View {
                     .lineLimit(1).truncationMode(.middle).help(state.path)
                 Text(state.provider.title + " · " + ByteFormat.storageString(state.allocatedBytes))
                     .font(.system(size: 13)).foregroundStyle(palette.fg2)
-                if let block = state.block {
-                    Text(block.title).font(.system(size: 13)).foregroundStyle(palette.fg2)
+                if let blockTitle = state.blockTitle {
+                    Text(blockTitle).font(.system(size: 13)).foregroundStyle(palette.fg2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)

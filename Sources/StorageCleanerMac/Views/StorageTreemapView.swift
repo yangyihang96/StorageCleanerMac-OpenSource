@@ -346,12 +346,12 @@ struct LargeFileStorageMap: View {
     }
 
     private var listMatchCount: some View {
-        Text(L10n.text("\(filteredEntries.count) / \(entries.count) 项", "\(filteredEntries.count) / \(entries.count) items"))
+        Text(L10n.text("\(ByteFormat.count(filteredEntries.count)) / \(ByteFormat.count(entries.count)) 项", "\(ByteFormat.count(filteredEntries.count)) / \(ByteFormat.count(entries.count)) items"))
             .font(AppDesignTokens.Typography.metadata)
             .foregroundStyle(.secondary)
             .monospacedDigit()
             .fixedSize()
-            .accessibilityLabel(L10n.text("匹配 \(filteredEntries.count) 项，共 \(entries.count) 项", "\(filteredEntries.count) matches out of \(entries.count) items"))
+            .accessibilityLabel(L10n.text("匹配 \(ByteFormat.count(filteredEntries.count)) 项，共 \(ByteFormat.count(entries.count)) 项", "\(ByteFormat.count(filteredEntries.count)) matches out of \(ByteFormat.count(entries.count)) items"))
     }
 
     private var clearListFilterButton: some View {
@@ -598,8 +598,8 @@ struct LargeFileStorageMap: View {
 
     private var mapHeaderDetail: String {
         return L10n.text(
-            "文件夹 \(directoryCount) · 文件 \(fileCount)",
-            "\(directoryCount) folders · \(fileCount) files"
+            "文件夹 \(ByteFormat.count(directoryCount)) · 文件 \(ByteFormat.count(fileCount))",
+            "\(ByteFormat.count(directoryCount)) folders · \(ByteFormat.count(fileCount)) files"
         )
     }
 
@@ -920,8 +920,8 @@ struct LargeFileStorageMap: View {
         if snapshot.isComplete {
             if snapshot.omittedEntryCount > 0 {
                 return L10n.text(
-                    "目录索引已完成；当前显示 \(snapshot.entries.count) 项，另有 \(snapshot.omittedEntryCount) 项未列出",
-                    "Directory index complete; showing \(snapshot.entries.count) items, with \(snapshot.omittedEntryCount) more not listed"
+                    "目录索引已完成；当前显示 \(ByteFormat.count(snapshot.entries.count)) 项，另有 \(ByteFormat.count(snapshot.omittedEntryCount)) 项未列出",
+                    "Directory index complete; showing \(ByteFormat.count(snapshot.entries.count)) items, with \(ByteFormat.count(snapshot.omittedEntryCount)) more not listed"
                 )
             }
             return L10n.text(
@@ -931,8 +931,8 @@ struct LargeFileStorageMap: View {
         }
         let omitted = workspace.storageAnalysis?.omittedItemCount ?? snapshot.omittedEntryCount
         return L10n.text(
-            "已索引所有可访问项目；另有 \(omitted) 项受权限、排除设置或云端状态限制，容量按至少占用显示",
-            "All accessible items were indexed; \(omitted) were limited by access, exclusions, or cloud state"
+            "已索引所有可访问项目；另有 \(ByteFormat.count(omitted)) 项受权限、排除设置或云端状态限制，容量按至少占用显示",
+            "All accessible items were indexed; \(ByteFormat.count(omitted)) were limited by access, exclusions, or cloud state"
         )
     }
 

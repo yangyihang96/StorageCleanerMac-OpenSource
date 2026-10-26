@@ -1215,7 +1215,11 @@ final class CleanupExecutionSafetyTests: XCTestCase {
         )
         XCTAssertEqual(first.summary.movedItemCount, 1)
         XCTAssertEqual(second.outcome, .failed)
-        XCTAssertEqual(second.summary.failedItemCount, 1)
+        // D214＋旧值：was `XCTAssertEqual(second.summary.failedItemCount, 1)`. A plan
+        // refused before it starts records its items as not run, not failed.
+        XCTAssertEqual(second.summary.failedItemCount, 0)
+        XCTAssertEqual(second.summary.notProcessedItemCount, 1)
+        XCTAssertEqual(second.startRefusal?.code, .planIntegrityFailed)
         let firstCallCount = await mover.paths.count
         XCTAssertEqual(firstCallCount, 1)
 
@@ -2180,6 +2184,79 @@ private actor FixedCapacityReader: CleanupCapacityReading {
     }
 }
 
+/// D101 G13: every volume has `usedBytes` in use; each reading is recorded.
+private actor RecordingUsedCapacityReader: CleanupCapacityReading {
+    private let usedBytes: Int64?
+    private(set) var readURLs: [URL] = []
+
+    init(usedBytes: Int64?) {
+        self.usedBytes = usedBytes
+    }
+
+    func availableCapacity(at _: URL) async -> Int64? { nil }
+
+    func usedCapacity(at url: URL) async -> Int64? {
+        readURLs.append(url)
+        return usedBytes
+    }
+}
+
+extension CleanupExecutionSafetyTests {
+    /// D101 G13: the check judges the items that will run, reads each
+    /// volume's used space once, and leaves a normal run alone.
+    func testPreflightFlagsAnUnusuallyLargeRunFromTheItemsThatWillRun() async throws {
+        let fixture = makeFixture(count: 3)
+        let plan = try makePlan(fixture)
+        XCTAssertEqual(plan.items.map(\.estimatedSizeBytes).reduce(0, +), 6_144)
+        func preflight(used: Int64?, vanished: Set<Int> = []) async -> (CleanPreflightReport, [URL]) {
+            var states = [String: FixtureMetadataState]()
+            for (index, candidate) in fixture.candidates.enumerated() {
+                states[candidate.sourceURL.path] = vanished.contains(index)
+                    ? .error(.vanished) : .snapshot(candidate.snapshot)
+            }
+            let reader = RecordingUsedCapacityReader(usedBytes: used)
+            let executor = SafeCleanupExecutor(
+                metadataReader: FixtureMetadataReader(states: states),
+                mover: RecordingCleanupMover(),
+                volumeChecker: FixedVolumeChecker(available: true),
+                runningApplicationChecker: FixedRunningApplicationChecker(running: false),
+                capacityReader: reader,
+                coordinator: HeavyWorkCoordinator()
+            )
+            let report = await executor.preflight(plan: plan, context: context(for: fixture))
+            return (report, await reader.readURLs)
+        }
+
+        let (normal, reads) = await preflight(used: 12_288)
+        XCTAssertEqual(normal.readyCount, 3)
+        XCTAssertNil(normal.scaleAlert, "6 KiB is exactly half of 12 KiB in use")
+        XCTAssertEqual(reads.count, 1, "One volume, read once")
+        XCTAssertTrue(plan.items.map(\.sourceURL).contains(try XCTUnwrap(reads.first)))
+
+        let (large, _) = await preflight(used: 12_287)
+        let alert = try XCTUnwrap(large.scaleAlert)
+        XCTAssertEqual(alert.itemCount, 3)
+        XCTAssertEqual(alert.bytes, 6_144)
+        XCTAssertFalse(alert.exceedsItemCount)
+        XCTAssertEqual(alert.largeVolumeShares, [
+            .init(volumeIdentifier: "fixture-volume", plannedBytes: 6_144, usedBytes: 12_287)
+        ])
+        XCTAssertEqual(alert.largestRules, [.init(
+            ruleID: "system.user-caches", title: CleanupRuleCopy.title(for: fixture.rules.rules[0]),
+            itemCount: 3, bytes: 6_144
+        )])
+
+        // The vanished 3 KiB item is skipped and not counted: 3 KiB of 8 KiB.
+        let (skipped, _) = await preflight(used: 8_192, vanished: [2])
+        XCTAssertEqual(skipped.readyCount, 2)
+        XCTAssertNil(skipped.scaleAlert)
+
+        // Without the volume's use only the count is judged.
+        let (unknown, _) = await preflight(used: nil)
+        XCTAssertNil(unknown.scaleAlert)
+    }
+}
+
 extension CleanupExecutionSafetyTests {
     func testPostJournalReplacementIsRecheckedBeforeMove() async throws {
         for change in 0..<3 {
@@ -2231,6 +2308,66 @@ extension CleanupExecutionSafetyTests {
         XCTAssertTrue(paths.isEmpty)
         XCTAssertEqual(report.outcome, .failed)
         XCTAssertEqual(report.summary.movedItemCount, 0)
+    }
+
+    /// D214: another task holds the work lease — nothing is tried, every item
+    /// is not run (not failed), and the report says what held the lease, for
+    /// the result pages and the operation records alike.
+    @MainActor
+    func testABusyLeaseRefusesTheRunBeforeItsFirstItem() async throws {
+        let language = CalibrationLanguageScope(.zhHans)
+        defer { language.restore() }
+        let fixture = makeFixture(count: 2)
+        let plan = try makePlan(fixture)
+        let mover = RecordingCleanupMover()
+        let coordinator = HeavyWorkCoordinator()
+        let executor = SafeCleanupExecutor(
+            metadataReader: FixtureMetadataReader(states: fixture.states), mover: mover,
+            volumeChecker: FixedVolumeChecker(available: true),
+            runningApplicationChecker: FixedRunningApplicationChecker(running: false),
+            capacityReader: FixedCapacityReader(values: []), coordinator: coordinator,
+            persistReport: { _, _ in XCTFail("A refused run writes no intent") }
+        )
+        let held = try await coordinator.acquire(owner: .appUpdates)
+        let report = await executor.execute(plan: plan,
+            context: context(for: fixture, approvedPlanItemIDs: Set(plan.items.map(\.id))), progress: { _ in })
+        await coordinator.release(held)
+        let paths = await mover.paths
+        XCTAssertTrue(paths.isEmpty)
+        XCTAssertEqual(report.outcome, .failed)
+        XCTAssertEqual(report.summary.failedItemCount, 0)
+        XCTAssertEqual(report.summary.notProcessedItemCount, 2)
+        XCTAssertEqual(report.summary.movedItemCount, 0)
+        XCTAssertTrue(report.items.allSatisfy { $0.outcome == .notProcessed })
+        XCTAssertEqual(report.startRefusal, CleanFailure(code: .coordinatorBusy, detailCode: "lease-busy:appUpdates"))
+        let refusal = try XCTUnwrap(report.startRefusal)
+        XCTAssertEqual(CleanStartRefusalPresentation.reason(refusal),
+                       HeavyWorkActivityStore.conflictMessage(activeOwner: .appUpdates))
+        XCTAssertEqual(CleanStartRefusalPresentation.message(refusal),
+                       "正在进行应用更新，请等待完成或取消后再试。没有移动任何文件，选中的项目都还在。")
+
+        let presentation = OperationResultPresentation(report: report)
+        XCTAssertEqual(presentation.title, "没能开始")
+        XCTAssertEqual(presentation.failedCount, 0)
+        XCTAssertEqual(presentation.notRunCount, 2)
+        XCTAssertFalse(presentation.summary.contains("失败"), presentation.summary)
+        XCTAssertTrue(presentation.summary.contains("未执行 2"), presentation.summary)
+        let tally = OperationCompletionTally(report: report)
+        XCTAssertEqual(tally.count(.failed), 0)
+        XCTAssertEqual(tally.count(.skipped), 2)
+        // The operation records list reads the index.
+        let index = CleanupReportIndex(report: report, orderingDate: Date())
+        XCTAssertEqual(index.presentation?.title, "没能开始")
+        XCTAssertEqual(index.summary.failedItemCount, 0)
+
+        // Receipts keep the refusal; an older receipt without it reads as a run.
+        let data = try JSONEncoder().encode(report)
+        XCTAssertEqual(try JSONDecoder().decode(CleanReport.self, from: data), report)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "startRefusal")
+        let older = try JSONDecoder().decode(CleanReport.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertNil(older.startRefusal)
+        XCTAssertEqual(OperationResultPresentation(report: older).title, "未完成")
     }
 
     func testJournalFailureAfterMoveKeepsReceiptAndStopsNextMove() async throws {

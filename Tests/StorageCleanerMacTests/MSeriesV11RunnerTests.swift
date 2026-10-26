@@ -122,7 +122,7 @@ final class MSeriesV11RunnerTests: XCTestCase {
         await leaseCoordinator.release(lease)
     }
 
-    func testAtomicHistoryCountsWholeJSONAndRejectsBudgetWithoutChangingOldBytes() async throws {
+    func testAtomicHistoryCountsOwnCommitAndAcceptsResultBesideLargeHistory() async throws {
         let root = try TestFileSystem.makeHome(for: self)
         let output = await run(V11RunSubstitute())
         let core = try XCTUnwrap(output.core)
@@ -134,13 +134,19 @@ final class MSeriesV11RunnerTests: XCTestCase {
         let url = root.appendingPathComponent("v11.json")
         let repo = BenchmarkV7HistoryRepository(storageURL: url)
         try await repo.save(result)
-        let bytes = try Data(contentsOf: url)
+        // D95: a save writes its own record file and the index, each through
+        // an atomic temporary copy; nothing else is rewritten.
+        let commit = try BenchmarkV7HistoryStoreProbe.commitBytes(for: url, recordID: result.recordID)
         let records = await repo.load()
         let saved = try XCTUnwrap(records.first?.mSeriesV11)
-        XCTAssertEqual(saved.metadataWrittenBytes, UInt64(bytes.count * 2))
-        XCTAssertEqual(saved.writtenBytes, core.writtenBytes + UInt64(bytes.count * 2))
+        XCTAssertEqual(saved.metadataWrittenBytes, UInt64(commit * 2))
+        XCTAssertEqual(saved.writtenBytes, core.writtenBytes + UInt64(commit * 2))
         XCTAssertEqual(saved.rawPayloadSHA256, output.envelope.rawPayloadSHA256)
         XCTAssertTrue(records.first?.isComplete == true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "no single-file history is written")
+
+        // 2026-10-13: once the history passed 1 MiB, every new v11 result was
+        // refused. Older records no longer count against a new result.
         let largeURL = root.appendingPathComponent("old-history.json")
         let largeRepo = BenchmarkV7HistoryRepository(storageURL: largeURL)
         let legacy = MSeriesV11TestFixtures.result()
@@ -148,52 +154,65 @@ final class MSeriesV11RunnerTests: XCTestCase {
             versions: legacy.versions, metrics: [], coreScore: nil, runtimeWarnings: [String(repeating: "x", count: 1_100_000)],
             completedAt: legacy.completedAt, failure: nil)
         try await largeRepo.save(large)
-        let before = try Data(contentsOf: largeURL)
-        do { try await largeRepo.save(result); XCTFail("v11 must reject an over-budget atomic rewrite") } catch {}
-        XCTAssertEqual(try Data(contentsOf: largeURL), before)
-        let preserved = await largeRepo.load()
-        XCTAssertEqual(preserved.count, 1)
+        let largeBytes = try BenchmarkV7HistoryStoreProbe.recordData(for: largeURL, recordID: large.recordID)
+        XCTAssertGreaterThan(largeBytes.count, 1_048_576)
+        try await largeRepo.save(result)
+        let both = await largeRepo.load()
+        XCTAssertEqual(Set(both.compactMap(\.recordID)), Set([large.recordID, result.recordID].compactMap { $0 }))
+        XCTAssertEqual(try BenchmarkV7HistoryStoreProbe.recordData(for: largeURL, recordID: large.recordID), largeBytes,
+            "the older record is not rewritten")
+        let besideLarge = try XCTUnwrap(both.first { $0.recordID == result.recordID }?.mSeriesV11)
+        XCTAssertEqual(besideLarge.metadataWrittenBytes,
+            UInt64(try BenchmarkV7HistoryStoreProbe.commitBytes(for: largeURL, recordID: result.recordID) * 2))
 
-        // Pin the SPEC boundary rather than deriving it from the implementation.
-        // All other gates pass: each record is small, raw SHA remains valid,
-        // and the incoming envelope's ledger is exactly the allowed 2 MiB.
+        // Pin the SPEC boundary rather than deriving it from the implementation:
+        // one result's commit (record + index) with its atomic copies ≤ 2 MiB,
+        // beside an older record that is itself larger than 1 MiB.
         let limit = 1_048_576
+        XCTAssertEqual(BenchmarkV7HistoryRepository.maximumV11ResultBytes, limit)
         XCTAssertGreaterThan(BenchmarkV7HistoryRepository.maximumFileBytes, limit)
-        var boundaryEnvelope = output.envelope
-        boundaryEnvelope.metadataWrittenBytes = UInt64(limit * 2)
-        boundaryEnvelope.writtenBytes = core.writtenBytes + UInt64(limit * 2)
-        let incoming = result.replacingV11Envelope(boundaryEnvelope)
-        XCTAssertTrue(incoming.isPersistable)
-        let oldID = UUID()
-        func oldRecord(padding: Int) -> BenchmarkV7Result {
-            BenchmarkV7Result(recordID: oldID, mSeries: legacy.mSeries, session: legacy.session,
-                preflight: legacy.preflight, versions: legacy.versions, metrics: [], coreScore: nil,
-                runtimeWarnings: [String(repeating: "x", count: padding)], completedAt: legacy.completedAt, failure: nil)
+        func padded(_ count: Int) -> BenchmarkV7Result {
+            BenchmarkV7Result(recordID: result.recordID, mSeries: core, mSeriesV11: output.envelope, session: result.session,
+                preflight: preflight, versions: result.versions, metrics: [], coreScore: nil,
+                runtimeWarnings: [String(repeating: "x", count: count)], completedAt: result.completedAt, failure: nil)
         }
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let baseCount = try encoder.encode([oldRecord(padding: 0), incoming]).count
-        XCTAssertLessThan(baseCount, limit)
+        var probeCount = 0
+        func probeCommit(padding: Int) async throws -> Int {
+            probeCount += 1
+            let probeURL = root.appendingPathComponent("probe-\(probeCount).json")
+            let probeRepo = BenchmarkV7HistoryRepository(storageURL: probeURL)
+            try await probeRepo.save(large)
+            try await probeRepo.save(padded(padding))
+            return try BenchmarkV7HistoryStoreProbe.commitBytes(for: probeURL, recordID: result.recordID)
+        }
+        // Approach the boundary from below: the ledger's own digits grow.
+        var padding = 0
+        let unpadded = try await probeCommit(padding: padding)
+        padding += limit - unpadded - 64
+        let nearLimit = try await probeCommit(padding: padding)
+        padding += limit - nearLimit
+        let atLimit = try await probeCommit(padding: padding)
+        XCTAssertEqual(atLimit, limit)
         for extraByte in [0, 1] {
-            let targetBytes = limit + extraByte
-            let old = oldRecord(padding: targetBytes - baseCount)
-            XCTAssertTrue(old.isPersistable)
-            XCTAssertEqual(try encoder.encode([old, incoming]).count, targetBytes)
+            let incoming = padded(padding + extraByte)
+            XCTAssertTrue(incoming.isPersistable)
             let boundaryURL = root.appendingPathComponent("boundary-\(extraByte).json")
             let boundaryRepo = BenchmarkV7HistoryRepository(storageURL: boundaryURL)
-            try await boundaryRepo.save(old)
-            let oldBytes = try Data(contentsOf: boundaryURL)
+            try await boundaryRepo.save(large)
+            let before = try BenchmarkV7HistoryStoreProbe.files(for: boundaryURL)
             var rejected = false
             do { try await boundaryRepo.save(incoming) } catch { rejected = true }
-            let stored = try Data(contentsOf: boundaryURL)
             let remaining = await boundaryRepo.load()
             if extraByte == 0 {
-                XCTAssertFalse(rejected, "exactly 1 MiB must remain writable")
-                XCTAssertEqual(stored.count, limit)
+                XCTAssertFalse(rejected, "exactly 2 MiB of commit writes must remain writable")
+                XCTAssertEqual(try BenchmarkV7HistoryStoreProbe.commitBytes(for: boundaryURL, recordID: incoming.recordID), limit)
                 XCTAssertEqual(remaining.count, 2)
-                XCTAssertEqual(remaining.first(where: { $0.recordID == incoming.recordID })?.mSeriesV11?.metadataWrittenBytes, UInt64(limit * 2))
+                XCTAssertEqual(remaining.first(where: { $0.recordID == incoming.recordID })?.mSeriesV11?.metadataWrittenBytes,
+                    UInt64(limit * 2))
             } else {
-                XCTAssertTrue(rejected, "1 MiB + 1 byte must reject before any atomic write")
-                XCTAssertEqual(stored, oldBytes, "rejection must preserve the complete old history bytes")
+                XCTAssertTrue(rejected, "1 byte over must reject before any write")
+                XCTAssertEqual(try BenchmarkV7HistoryStoreProbe.files(for: boundaryURL), before,
+                    "rejection must leave every history file unchanged")
                 XCTAssertEqual(remaining.count, 1)
             }
         }
@@ -235,11 +254,12 @@ final class MSeriesV11RunnerTests: XCTestCase {
             let url = root.appendingPathComponent("fast-\(mode).json")
             let repository = BenchmarkV7HistoryRepository(storageURL: url)
             try await repository.save(result)
-            let bytes = try Data(contentsOf: url)
+            let bytes = try BenchmarkV7HistoryStoreProbe.recordData(for: url, recordID: result.recordID)
             XCTAssertLessThanOrEqual(bytes.count, 1_048_576)
+            let commit = try BenchmarkV7HistoryStoreProbe.commitBytes(for: url, recordID: result.recordID)
             let records = await repository.load()
             let saved = try XCTUnwrap(records.first?.mSeriesV11)
-            XCTAssertEqual(saved.metadataWrittenBytes, UInt64(bytes.count * 2))
+            XCTAssertEqual(saved.metadataWrittenBytes, UInt64(commit * 2))
             XCTAssertEqual(saved.workloadBatches, output.envelope.workloadBatches)
             XCTAssertEqual(saved.perStageEnvironment, output.envelope.perStageEnvironment)
             XCTAssertEqual(saved.sustainedCPU, output.envelope.sustainedCPU)
@@ -295,7 +315,7 @@ final class MSeriesV11RunnerTests: XCTestCase {
         XCTAssertEqual(saved.workloadBatches, output.envelope.workloadBatches)
         XCTAssertEqual(saved.perStageEnvironment, output.envelope.perStageEnvironment)
         XCTAssertTrue(MSeriesV11RawPayload.validates(core: nil, envelope: saved))
-        XCTAssertLessThanOrEqual(try Data(contentsOf: url).count, 1_048_576)
+        XCTAssertLessThanOrEqual(try BenchmarkV7HistoryStoreProbe.recordData(for: url, recordID: result.recordID).count, 1_048_576)
     }
 
     private func record(_ output: MSeriesV11Runner.Output, session: UUID, mode: String) -> BenchmarkV7Result {
@@ -495,6 +515,40 @@ final class MSeriesV11PersistenceTests: XCTestCase {
         let stoppedPresentation = MSeriesV11PagePresentation.ResultDisposition(result: stopped, history: [], saveState: store.v11SaveState)
         XCTAssertEqual(stoppedPresentation.failure, .cancelled, "outer stop failure remains authoritative even if inner measurement state is completed")
         XCTAssertTrue(stoppedPresentation.completionText.contains(L10n.text("已取消", "Cancelled")))
+    }
+
+    func testFullHistoryIsShownAsCapacityRatherThanAWriteFailure() async throws {
+        let repository = V11MemoryHistory(saveError: .capacityReached)
+        let store = try store(control: V11RunSubstitute(), repository: repository, validate: { $0.isPersistable })
+        store.startV11Benchmark()
+        await store.waitUntilIdle()
+        let result = try XCTUnwrap(store.v7LatestResult)
+        XCTAssertNil(result.failure, "a full history is not a measurement failure")
+        XCTAssertEqual(store.v11SaveState?.state, .failed)
+        XCTAssertEqual(store.v11SaveState?.historyFull, true)
+        let disposition = MSeriesV11PagePresentation.ResultDisposition(result: result, history: store.v7History, saveState: store.v11SaveState)
+        XCTAssertTrue(disposition.saveFailed)
+        XCTAssertTrue(disposition.historyFull)
+        XCTAssertFalse(disposition.savedLocally)
+        let text = try XCTUnwrap(disposition.saveFailureText)
+        // D178: counts are grouped, "1,000" (was "\(maximumRecordCount)", "1000").
+        XCTAssertTrue(text.contains(ByteFormat.count(BenchmarkV7HistoryRepository.maximumRecordCount)), text)
+        XCTAssertTrue(text.contains(L10n.text("历史已满", "history is full")))
+        XCTAssertTrue(text.contains(L10n.text("删除不需要的旧记录", "Delete records you no longer need")))
+        // Any other refused write keeps the generic text, and a saved state
+        // can never carry the capacity flag.
+        let generic = MSeriesV11PagePresentation.ResultDisposition(result: result, history: [],
+            saveState: .init(result: result, state: .failed))
+        XCTAssertFalse(generic.historyFull)
+        XCTAssertEqual(generic.saveFailureText, L10n.text("测量结果未能安全保存；仅当前应用会话可查看。",
+            "Measurements were not safely saved; available only in the current app session."))
+        XCTAssertFalse(MSeriesV11SaveState(result: result, state: .saved, historyFull: true).historyFull)
+        let other = V11MemoryHistory(saveError: .invalidResult)
+        let otherStore = try self.store(control: V11RunSubstitute(), repository: other, validate: { $0.isPersistable })
+        otherStore.startV11Benchmark()
+        await otherStore.waitUntilIdle()
+        XCTAssertEqual(otherStore.v11SaveState?.state, .failed)
+        XCTAssertEqual(otherStore.v11SaveState?.historyFull, false)
     }
 
     func testMissingReadbackCannotBePresentedAsSaved() async throws {
@@ -810,15 +864,17 @@ private final class V11ValidationProbe: @unchecked Sendable {
 private actor V11MemoryHistory: BenchmarkV7HistoryPersisting {
     private(set) var records: [BenchmarkV7Result] = []
     let throwsOnSave: Bool
+    let saveError: BenchmarkV7HistoryError?
     let hidesReadback: Bool
     let saveGate: V11AsyncGate?
-    init(throwsOnSave: Bool = false, hidesReadback: Bool = false, saveGate: V11AsyncGate? = nil) {
-        self.throwsOnSave = throwsOnSave; self.hidesReadback = hidesReadback; self.saveGate = saveGate
+    init(throwsOnSave: Bool = false, saveError: BenchmarkV7HistoryError? = nil, hidesReadback: Bool = false, saveGate: V11AsyncGate? = nil) {
+        self.throwsOnSave = throwsOnSave; self.saveError = saveError; self.hidesReadback = hidesReadback; self.saveGate = saveGate
     }
     func load() -> [BenchmarkV7Result] { hidesReadback ? [] : records }
     func save(_ result: BenchmarkV7Result) async throws {
         if let saveGate { await saveGate.wait() }
         if throwsOnSave { throw CocoaError(.fileWriteUnknown) }
+        if let saveError { throw saveError }
         records.append(result)
     }
     func replace(recordID: UUID, with result: BenchmarkV7Result) { records = records.map { $0.recordID == recordID ? result : $0 } }

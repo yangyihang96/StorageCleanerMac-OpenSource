@@ -71,8 +71,25 @@ struct PanelChromePalette {
     let selection: Color
     let accent: Color
     let controlScheme: ColorScheme
+    // D135: an iStat theme's extras (`IStatMenuTheme.chromePalette`); the
+    // presets below leave them unset.
+    /// A card's 1 pt outer and 0.5 pt inner strokes.
+    var cardBorder1: Color? = nil
+    var cardBorder2: Color? = nil
+    /// Ring and switch tracks (`menuItemGraphBorder`).
+    var graphBorder: Color? = nil
+    /// Tooltips and Reduce Transparency when the shell is the material.
+    var opaqueSurface: Color? = nil
+    /// The menu material's appearance; nil for an opaque theme.
+    var menuMaterialAppearance: NSAppearance.Name? = nil
+    /// Cards show their own material (`vibrantMenuItems`).
+    var cardMaterial = false
+    var accentColors: PanelAccentColors? = nil
+    var themeID: String? = nil
 }
 
+/// D135: no longer offered or read by the panel; its surface is the iStat
+/// theme's (`IStatMenuTheme.chromePalette`).
 enum PanelSurfacePreset: String, CaseIterable, Identifiable {
     case original, ivory, white, graphite, black, navy, blue, teal, indigo, purple
 
@@ -398,7 +415,8 @@ private struct PanelPalettePreviewData: View {
                 ], valueRange: 0...100, unit: .percent,
                 accessibilityLabel: L10n.text("模拟 CPU 配色", "Simulated CPU colors"),
                 style: .stackedBars, duration: 3_600, showsLegend: false,
-                showsTimelineLabels: false, horizontalInset: 0, showsSamplingDetails: false)
+                showsTimelineLabels: false, horizontalInset: 0, showsSamplingDetails: false,
+                bucketing: .samples)
                 .frame(height: 40)
             HStack(spacing: 4) {
                 Circle().fill(colors.cpuUser).frame(width: 5, height: 5)

@@ -62,8 +62,8 @@ struct ResidualFileEvidenceView: View {
 
             if let result {
                 Text(L10n.text(
-                    "已检查 \(result.inspectedEntryCount) 项 · \(result.candidates.count) 条待复核线索",
-                    "\(result.inspectedEntryCount) inspected · \(result.candidates.count) leads for review"
+                    "已检查 \(ByteFormat.count(result.inspectedEntryCount)) 项 · \(ByteFormat.count(result.candidates.count)) 条待复核线索",
+                    "\(ByteFormat.count(result.inspectedEntryCount)) inspected · \(ByteFormat.count(result.candidates.count)) leads for review"
                 ))
                 .font(AppDesignTokens.Typography.secondary)
                 .foregroundStyle(.secondary)

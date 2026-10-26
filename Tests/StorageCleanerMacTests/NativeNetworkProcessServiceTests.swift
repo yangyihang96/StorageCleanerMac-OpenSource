@@ -23,6 +23,9 @@ final class NativeNetworkProcessServiceTests: XCTestCase {
             NativeNetworkProcessService.parse(output, generatedAt: generatedAt)
         )
 
+        // D129 (2026-10-19): seven processes transfer, so the idle one is
+        // below the top five; with fewer it fills the list
+        // (`testIdleProcessesFillTheListBelowTransferringOnes`).
         XCTAssertEqual(snapshot.generatedAt, generatedAt)
         XCTAssertEqual(snapshot.processes.count, 5)
         XCTAssertEqual(
@@ -45,6 +48,33 @@ final class NativeNetworkProcessServiceTests: XCTestCase {
         }))
         XCTAssertEqual(Set(resolved), Set((1...7).map(Int32.init)))
         XCTAssertEqual(snapshot.processes.last?.processIdentifier, 7, "Localized display name decides the complete numeric tie")
+    }
+
+    /// D129: iStat's network list is the top five without a threshold, so
+    /// idle processes fill the rows the transferring ones leave. Only those
+    /// rows are resolved, not every idle process nettop lists.
+    func testIdleProcessesFillTheListBelowTransferringOnes() throws {
+        let idle = (1...50).reversed().map { "idle\(String(format: "%02d", $0)).\(100 + $0),0,0," }
+        let output = ",bytes_in,bytes_out,\nbase.9000,1,0,\n,bytes_in,bytes_out,\n"
+            + (idle + ["browser.1,400,100,", "mail.2,0,20,"]).joined(separator: "\n")
+        var resolved: [Int32] = []
+        let snapshot = try XCTUnwrap(NativeNetworkProcessService.parse(output, generatedAt: Date(), metadataResolver: { pid, _ in
+            resolved.append(pid)
+            return nil
+        }))
+        XCTAssertEqual(snapshot.processes.map(\.processIdentifier), [1, 2, 101, 102, 103])
+        XCTAssertEqual(snapshot.processes.map(\.name), ["browser", "mail", "idle01", "idle02", "idle03"])
+        XCTAssertEqual(snapshot.processes.last?.totalBytesPerSecond, 0)
+        XCTAssertEqual(Set(resolved), [1, 2, 101, 102, 103])
+
+        resolved = []
+        let quiet = ",bytes_in,bytes_out,\nbase.9000,1,0,\n,bytes_in,bytes_out,\n" + idle.joined(separator: "\n")
+        let idleOnly = try XCTUnwrap(NativeNetworkProcessService.parse(quiet, generatedAt: Date(), metadataResolver: { pid, _ in
+            resolved.append(pid)
+            return nil
+        }))
+        XCTAssertEqual(idleOnly.processes.map(\.name), (1...5).map { "idle0\($0)" })
+        XCTAssertEqual(resolved.count, 5)
     }
 
     func testExitedProcessRetainsSampleIdentityWithoutAnIcon() throws {

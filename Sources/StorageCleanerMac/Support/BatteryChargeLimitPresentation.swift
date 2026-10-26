@@ -1,6 +1,7 @@
 import Foundation
 
 /// D59、D73：分段高亮只来自实际回读；测试可指定语言，无需写全局偏好。
+/// D149：高亮的是系统回读的手动上限，实际生效值另起一行说明。
 enum BatteryChargeLimitPresentation {
     static func cardSummary(
         _ state: BatteryChargeLimitState?, usesChinese: Bool = L10n.usesChinese
@@ -16,6 +17,9 @@ enum BatteryChargeLimitPresentation {
         return usesChinese ? "上限 \(limit)%" : "Limit \(limit)%"
     }
 
+    /// The power page's energy-mode row: the mode and our short limit. D124:
+    /// the Chinese mode names are iStat's and macOS's (低能耗, 高能耗; were
+    /// 低功耗, 高功率).
     static func energyModeCardTitle(
         mode: BatteryPowerMode?, state: BatteryChargeLimitState?,
         usesChinese: Bool = L10n.usesChinese
@@ -23,9 +27,11 @@ enum BatteryChargeLimitPresentation {
         guard let mode else { return cardSummary(state, usesChinese: usesChinese) }
         let modeText: String
         switch mode {
-        case .automatic: modeText = usesChinese ? "自动" : "Auto"
-        case .lowPower: modeText = usesChinese ? "低功耗" : "Low Power"
-        case .highPower: modeText = usesChinese ? "高功率" : "High Power"
+        // D138: iStat's 'Power.Automatic' (was Auto); the row's title gives
+        // way to MODE instead (`GeekEnergyModeTitle`).
+        case .automatic: modeText = usesChinese ? "自动" : "Automatic"
+        case .lowPower: modeText = usesChinese ? "低能耗" : "Low Power"
+        case .highPower: modeText = usesChinese ? "高能耗" : "High Power"
         }
         guard let limit = cardSummary(state, usesChinese: usesChinese) else { return modeText }
         return "\(modeText) · \(limit)"
@@ -67,10 +73,42 @@ enum BatteryChargeLimitPresentation {
         target.displayText
     }
 
-    /// 不用存储的手动目标或发送中的目标代替实际生效值，也不吸附到最近档位。
+    /// D149（用户 2026-10-19：“充电上限选择没做好”）：分段跟系统回读的手动上限
+    /// 走（未开手动上限即 100%），不用存储的偏好或发送中的请求代替。D73、D124
+    /// 原为跟实际生效值：本机 macOS 优化充电把实际上限压在 80% 时，选哪一档
+    /// 都停在 80%。实际生效值由 `effectiveLimitNote` 另行说明。
     static func selectedSegment(_ state: BatteryChargeLimitState?) -> BatteryChargeTarget? {
-        guard let state, let effective = state.effectiveLimit else { return nil }
-        return state.availableTargets.first { $0.rawValue == effective }
+        guard let state, state.availableTargets.contains(state.target) else { return nil }
+        return state.target
+    }
+
+    /// D149：实际生效的上限与分段显示的手动上限不同时，说明是什么压住了它；
+    /// 两者一致，或本次临时满充进行中（另有状态行）时为 nil。
+    static func effectiveLimitNote(
+        _ state: BatteryChargeLimitState?, usesChinese: Bool = L10n.usesChinese
+    ) -> String? {
+        guard let state, let effective = state.effectiveLimit, effective != state.target.rawValue,
+              !state.smartChargingTemporarilyDisabled, !state.manualLimitTemporarilyDisabled else { return nil }
+        switch state.source {
+        case .optimized, .manualAndOptimized:
+            return usesChinese ? "实际 \(effective)% · macOS 优化充电暂时压住"
+                : "Actual \(effective)% · held by macOS optimized charging"
+        case .manual, .none, .unknown:
+            return usesChinese ? "实际 \(effective)%" : "Actual \(effective)%"
+        }
+    }
+
+    /// D149：分段组的读屏值同时给出手动上限和实际上限。
+    static func segmentsAccessibilityValue(
+        _ state: BatteryChargeLimitState?, usesChinese: Bool = L10n.usesChinese
+    ) -> String {
+        guard let state else { return usesChinese ? "实际充电上限未知" : "Effective charge limit unknown" }
+        let manual = state.target == .full
+            ? (usesChinese ? "不设手动上限" : "No manual limit")
+            : (usesChinese ? "手动上限 \(state.target.rawValue)%" : "Manual limit \(state.target.rawValue)%")
+        let effective = state.effectiveLimit.map { usesChinese ? "实际 \($0)%" : "actual \($0)%" }
+            ?? (usesChinese ? "实际上限未知" : "actual limit unknown")
+        return usesChinese ? "\(manual)，\(effective)" : "\(manual), \(effective)"
     }
 
     /// D73：只在非手动来源显示一行说明，安全操作详情保留在提示和失败信息中。

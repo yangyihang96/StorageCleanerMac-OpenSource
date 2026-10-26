@@ -114,14 +114,31 @@ enum GeekPanelPresentationMetrics {
     /// without letting history pages grow into ordinary document windows.
     static let secondaryWidth = MiniWindowStyleTokens.overviewSize.width
     static let detailWidth = MiniWindowStyleTokens.detailWidth
+    static let processorDetailWidth = MiniWindowStyleTokens.processorDetailWidth
+    static let memoryDetailWidth = MiniWindowStyleTokens.memoryDetailWidth
     static let powerDetailWidth = MiniWindowStyleTokens.powerDetailWidth
+
+    /// D119: each module page has iStat's width for that module.
+    static func detailWidth(for section: PanelSection) -> CGFloat {
+        switch section {
+        case .overview: 0
+        case .processor: processorDetailWidth
+        case .memory: memoryDetailWidth
+        case .power: powerDetailWidth
+        case .disk, .network, .sensors, .cleanup: detailWidth
+        }
+    }
     static let overviewSize = MiniWindowStyleTokens.overviewSize
     /// Generic deep-detail pages keep the legacy full-column size. Inline
     /// hover details supply their own preferred size and are normalized below.
     static let tertiarySize = CGSize(width: MiniWindowStyleTokens.historyWidth, height: 480)
     static let tertiaryMaximumSize = CGSize(width: MiniWindowStyleTokens.historyWidth, height: 520)
     static let tertiaryMinimumDimension: CGFloat = 1
-    static let sensorsDetailHeight: CGFloat = 390
+    /// D119: the initial size of the sensors page (the page is measured and
+    /// scrolls past the screen, D76): the rings 88, nine temperature rows
+    /// 177, two fans with the control entry 75, current 41, six power rows
+    /// 126, voltage 41 and four frequencies 92, 7 pt apart; was 390.
+    static let sensorsDetailHeight: CGFloat = 698
 
     static func normalizedOverviewSize(_ preferredSize: CGSize?) -> CGSize {
         guard let preferredSize,
@@ -175,15 +192,29 @@ enum GeekPanelPresentationMetrics {
     static func detailSize(for section: PanelSection) -> CGSize {
         switch section {
         case .overview: .zero
-        case .processor: CGSize(width: detailWidth, height: 708)
-        case .memory: CGSize(width: detailWidth, height: 465)
-        case .disk: CGSize(width: detailWidth, height: 400)
-        case .network: CGSize(width: detailWidth, height: 483)
-        // Temperature and fan monitoring stay in the sensor column; battery
-        // electrical data and clock frequencies live in their own modules.
+        // D119: CPU graph 120, cores 66 (twelve cores, two types), five
+        // processes 110, GPU 87, load 25 and uptime 25, 7 pt apart; was 708.
+        case .processor: CGSize(width: processorDetailWidth, height: 484)
+        // D119: rings 112, composition 76, five processes 110, swap
+        // activity 42, swap 40 and the data row 25; was 465. D139: the
+        // actions share the processes' title row (was 473, the card 127).
+        case .memory: CGSize(width: memoryDetailWidth, height: 456)
+        // D119: one volume 42, the activity 130 and five processes 110,
+        // 7 pt apart; was 400.
+        case .disk: CGSize(width: detailWidth, height: 312)
+        // D119: the bandwidth 150, the interface 25, the public and the
+        // local IP sections and four processes 93, 7 pt apart; was 483.
+        // D140: iStat's IP sections while reading, 27 each (was 378: 25
+        // and 41).
+        case .network: CGSize(width: detailWidth, height: 366)
+        // D119: iStat's sensor menu, every reading grouped by kind (the
+        // battery electrical, power and frequency readings moved here).
         case .sensors: CGSize(width: detailWidth, height: sensorsDetailHeight)
+        // D119: the battery card 112, the charge chart 80, the energy mode
+        // 25 and three apps 76, 7 pt apart; was 599 with the electrical,
+        // power and helper cards.
         case .power: CGSize(width: powerDetailWidth, height: GeekPowerLayout.secondaryContentHeight
-            + GeekPanelLayout.detailSpacing + 33 + 2 * GeekPanelLayout.contentPadding)
+            + 2 * GeekPanelLayout.contentPadding)
         case .cleanup: CGSize(width: detailWidth, height: 420)
         }
     }
@@ -192,14 +223,21 @@ enum GeekPanelPresentationMetrics {
         guard density == .complex else { return detailSize(for: section) }
         return switch section {
         case .overview: .zero
-        case .processor: CGSize(width: detailWidth, height: 515)
-        case .memory: CGSize(width: detailWidth, height: 334)
-        case .disk: CGSize(width: detailWidth, height: 281)
-        // Detailed keeps the shared interface/address/details stack while
-        // omitting the public-address card and the extended session rows.
-        case .network: CGSize(width: detailWidth, height: 367)
-        case .sensors: CGSize(width: detailWidth, height: 370)
-        case .power: CGSize(width: powerDetailWidth, height: 392)
+        // D119: the CPU graph, the cores and three processes; was 515.
+        case .processor: CGSize(width: processorDetailWidth, height: 292)
+        // D119: the rings, the composition, three processes (76) and the
+        // data row; was 334. D139: the actions share the title row (was
+        // 343, the card 93).
+        case .memory: CGSize(width: memoryDetailWidth, height: 326)
+        // D119: one volume and the activity; was 281.
+        case .disk: CGSize(width: detailWidth, height: 195)
+        // D119: the same sections with two processes (59); was 367. D140:
+        // the IP sections 27 each (was 344).
+        case .network: CGSize(width: detailWidth, height: 332)
+        // D119: the sensors page has no density variant; was 370.
+        case .sensors: CGSize(width: detailWidth, height: sensorsDetailHeight)
+        // D119: the battery card and the charge chart; was 392.
+        case .power: CGSize(width: powerDetailWidth, height: 215)
         // Initial size only; the complete action grid is measured after layout.
         case .cleanup: CGSize(width: detailWidth, height: 360)
         }
@@ -238,7 +276,16 @@ enum GeekPanelPresentationMetrics {
             density: density
         ).height
         let maximumOffset = max(0, requestedOverviewSize.height - detailHeight)
-        return min(overviewAnchorOffset(for: section), maximumOffset)
+        // D123: above the card's top, as the registered offsets (was at it).
+        let cardTop = overviewAnchorOffset(for: section)
+        return min(max(0, submenuTopOffset(forItemTop: cardTop)), maximumOffset)
+    }
+
+    /// D123 (iStat Menus 7.30 `-[BBRMenu updateFrame]`): a submenu opens 8 pt
+    /// above the card or row it belongs to, its own inset, so its first card
+    /// lines up with that item.
+    static func submenuTopOffset(forItemTop itemTop: CGFloat) -> CGFloat {
+        itemTop - MiniWindowStyleTokens.contentInset
     }
 
     static func expandedSize(for section: PanelSection) -> CGSize {
@@ -308,7 +355,11 @@ enum GeekPanelPresentationMetrics {
             detailSize: requestedDetailSize,
             overviewSize: requestedOverviewSize
         )
-        let triggerOffset = normalizedTertiarySourceOffset(sourceOffset) ?? 0
+        // D123: the history page opens above its row (`submenuTopOffset`;
+        // was at the row's top).
+        let triggerOffset = normalizedTertiarySourceOffset(sourceOffset).map {
+            max(0, submenuTopOffset(forItemTop: $0))
+        } ?? 0
         return resolvedDetailTopOffset + triggerOffset
     }
 
@@ -393,6 +444,9 @@ enum MenuBarMetricKind: String, CaseIterable, Identifiable, Codable, Sendable {
 /// hover panel is unchanged; this only selects the always-visible summary.
 enum MenuBarStatusDisplayMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case deviceStatus
+    /// D153: Status Trio's combined icon (battery ring, network glyph,
+    /// volume), drawn by the CombinedStatusIcon target.
+    case combinedStatus
     case memory
     case cpu
     case cpuAndMemory
@@ -407,6 +461,8 @@ enum MenuBarStatusDisplayMode: String, CaseIterable, Identifiable, Codable, Send
         switch self {
         case .deviceStatus:
             L10n.text("设备状态（自动）", "Device Status (Auto)")
+        case .combinedStatus:
+            L10n.text("组合状态（电量·网络·音量）", "Combined Status (Battery · Network · Volume)")
         case .memory:
             L10n.text("内存占用", "Memory Usage")
         case .cpu:
@@ -430,12 +486,34 @@ enum MenuBarStatusDisplayMode: String, CaseIterable, Identifiable, Codable, Send
     }
 }
 
+/// D127: iStat Menus 7.30's main loop (`-[Statistics update]`, `UpdateFrequency`
+/// 0 → 3 s, 1 → 2 s, 2 → 1 s, default 1): one tick for every reading, open or not.
 enum MenuBarRefreshInterval: String, CaseIterable, Identifiable, Codable, Sendable {
     case oneSecond
     case twoSeconds
-    case fiveSeconds
+    case threeSeconds
 
     var id: String { rawValue }
+
+    /// The value written by 2.0.0 and earlier for the 5 s option, which iStat
+    /// does not have; it reads as the slowest remaining option.
+    static let legacyFiveSecondsRawValue = "fiveSeconds"
+
+    /// Reads a stored setting, including the retired 5 s value.
+    static func stored(_ rawValue: String?) -> MenuBarRefreshInterval? {
+        guard let rawValue else { return nil }
+        if rawValue == legacyFiveSecondsRawValue { return .threeSeconds }
+        return MenuBarRefreshInterval(rawValue: rawValue)
+    }
+
+    init(from decoder: Decoder) throws {
+        let rawValue = try decoder.singleValueContainer().decode(String.self)
+        guard let value = Self.stored(rawValue) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                debugDescription: "Unknown refresh interval \(rawValue)"))
+        }
+        self = value
+    }
 
     var title: String {
         switch self {
@@ -443,8 +521,8 @@ enum MenuBarRefreshInterval: String, CaseIterable, Identifiable, Codable, Sendab
             "1s"
         case .twoSeconds:
             "2s"
-        case .fiveSeconds:
-            "5s"
+        case .threeSeconds:
+            "3s"
         }
     }
 
@@ -454,8 +532,8 @@ enum MenuBarRefreshInterval: String, CaseIterable, Identifiable, Codable, Sendab
             L10n.text("1 秒", "1 second")
         case .twoSeconds:
             L10n.text("2 秒", "2 seconds")
-        case .fiveSeconds:
-            L10n.text("5 秒", "5 seconds")
+        case .threeSeconds:
+            L10n.text("3 秒", "3 seconds")
         }
     }
 
@@ -465,8 +543,8 @@ enum MenuBarRefreshInterval: String, CaseIterable, Identifiable, Codable, Sendab
             1
         case .twoSeconds:
             2
-        case .fiveSeconds:
-            5
+        case .threeSeconds:
+            3
         }
     }
 
@@ -482,6 +560,7 @@ enum MenuBarRefreshInterval: String, CaseIterable, Identifiable, Codable, Sendab
         statusVisible: Bool = true
     ) -> UInt64 {
         // D74: status-item visibility does not disable background prestorage.
+        // D127: the tick no longer slows down while the panel is closed.
         let cadence = MenuBarSamplingCadence.resolve(visible: panelVisible,
             lowPower: lowPowerMode, suspended: false, selectedInterval: seconds)
         let resolvedInterval = customFanControlActive && !lowPowerMode
@@ -491,8 +570,9 @@ enum MenuBarRefreshInterval: String, CaseIterable, Identifiable, Codable, Sendab
 
     var memorySnapshotSeconds: TimeInterval { seconds }
 
+    /// D127: iStat's default (`UpdateFrequency` 1, 2 s); was 1 s.
     static var defaultValue: MenuBarRefreshInterval {
-        .oneSecond
+        .twoSeconds
     }
 }
 
@@ -678,21 +758,15 @@ struct SystemFanReading: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// D128: iStat's fan speed (sensor type 3): the locale's grouped whole
+/// number, "1,234 rpm" (was always "," groups; the same on en_US).
 enum SystemFanSpeedFormat {
     static func number(_ rpm: Int) -> String {
-        let digits = Array(String(max(0, rpm)))
-        var groups: [String] = []
-        var end = digits.count
-        while end > 0 {
-            let start = max(0, end - 3)
-            groups.append(String(digits[start..<end]))
-            end = start
-        }
-        return groups.reversed().joined(separator: ",")
+        IStatNumberFormat.number(Double(max(0, rpm)), decimals: 0)
     }
 
     static func string(_ rpm: Int) -> String {
-        "\(number(rpm)) rpm"
+        IStatNumberFormat.fanSpeed(Double(max(0, rpm)))
     }
 }
 

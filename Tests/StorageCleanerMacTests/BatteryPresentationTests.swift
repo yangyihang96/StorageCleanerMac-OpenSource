@@ -294,7 +294,9 @@ final class BatteryPresentationTests: XCTestCase {
             ),
             encoding: .utf8
         )
-        XCTAssertTrue(power.contains("duration: GeekPowerLayout.detailPreviewDuration"))
+        // D132 (2026-10-19): the preview is iStat's 69 × 15 min menu graph
+        // (was `duration: GeekPowerLayout.detailPreviewDuration`, one hour).
+        XCTAssertTrue(power.contains("duration: GeekPowerLayout.menuGraphDuration"))
         XCTAssertTrue(power.contains("points: batteryPowerHistory"))
         XCTAssertFalse(power.contains("duration: geekChartDuration"))
 
@@ -316,7 +318,9 @@ final class BatteryPresentationTests: XCTestCase {
         XCTAssertTrue(kernel.contains(
             "isEstimated: buckets[index].isEstimated || payloads[index].isEstimated\n                    || chargingStates[index].isEstimated\n                    || powerSources[index].isEstimated"
         ))
-        XCTAssertTrue(details.contains("isEstimated: hoveredPoint.isEstimated"))
+        // D132 (2026-10-19): iStat's battery graphs show a filled bucket like
+        // a measured one (was `isEstimated: hoveredPoint.isEstimated`).
+        XCTAssertTrue(details.contains("isEstimated: batteryGraph == nil && hoveredPoint.isEstimated"))
         XCTAssertFalse(details.contains("date: latest.date"))
         XCTAssertFalse(details.contains("date: mark.end"))
     }

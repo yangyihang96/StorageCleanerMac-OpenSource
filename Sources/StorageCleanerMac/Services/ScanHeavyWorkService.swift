@@ -26,7 +26,9 @@ struct ScanHeavyWorkService: Sendable {
     struct Operations: Sendable {
         let scan: @Sendable (ScanMode, DiskScanProgressHandler?) async throws -> ScanResult
         let moveToTrash: @Sendable (StorageItem, Set<String>) async throws -> [TrashMoveRecord]
-        let emptyTrash: @Sendable () async throws -> TrashSummary
+        /// D101 L5: reads the Trash for the confirmation; deletes nothing.
+        let freezeTrash: @Sendable () async throws -> FrozenTrash?
+        let emptyTrash: @Sendable (FrozenTrash) async throws -> FrozenTrashEmptyResult
         let restoreFromTrash: @Sendable ([TrashMoveRecord]) async throws -> TrashRestoreSummary
         let optimizeMemory: @Sendable () async throws -> MemoryOptimizationResult
         let runHomebrewUpgrade: @Sendable ([AppUpdateItem]) async throws -> AppUpdateHomebrewRunResult
@@ -34,10 +36,13 @@ struct ScanHeavyWorkService: Sendable {
 
         init(
             scan: @escaping @Sendable (ScanMode, DiskScanProgressHandler?) async throws -> ScanResult = { mode, progressHandler in
-                try await Task.detached(priority: .userInitiated) {
+                let ignoreList = IgnoreListStore.shared.snapshot()
+                return try await Task.detached(priority: .userInitiated) {
                     try DiskScanner(
+                        excludedPaths: [],
                         scanMode: mode,
-                        progressHandler: progressHandler
+                        progressHandler: progressHandler,
+                        ignoreList: ignoreList
                     ).scan()
                 }.value
             },
@@ -49,9 +54,14 @@ struct ScanHeavyWorkService: Sendable {
                     try await worker.value
                 } onCancel: { worker.cancel() }
             },
-            emptyTrash: @escaping @Sendable () async throws -> TrashSummary = {
+            freezeTrash: @escaping @Sendable () async throws -> FrozenTrash? = {
                 try await Task.detached(priority: .userInitiated) {
-                    try CleanupService.emptyUserTrash()
+                    try CleanupService.freezeTrash()
+                }.value
+            },
+            emptyTrash: @escaping @Sendable (FrozenTrash) async throws -> FrozenTrashEmptyResult = { frozen in
+                await Task.detached(priority: .userInitiated) {
+                    await CleanupService.emptyFrozenTrash(frozen, deleter: FoundationCleanupPermanentDeleter())
                 }.value
             },
             restoreFromTrash: @escaping @Sendable ([TrashMoveRecord]) async throws -> TrashRestoreSummary = { records in
@@ -71,6 +81,7 @@ struct ScanHeavyWorkService: Sendable {
         ) {
             self.scan = scan
             self.moveToTrash = moveToTrash
+            self.freezeTrash = freezeTrash
             self.emptyTrash = emptyTrash
             self.restoreFromTrash = restoreFromTrash
             self.optimizeMemory = optimizeMemory
@@ -168,12 +179,17 @@ struct ScanHeavyWorkService: Sendable {
         )
     }
 
+    func freezeTrash() async throws -> FrozenTrash? {
+        try await operations.freezeTrash()
+    }
+
     func emptyTrash(
+        _ frozen: FrozenTrash,
         lease: HeavyWorkCoordinator.Lease
-    ) async throws -> TrashSummary {
+    ) async throws -> FrozenTrashEmptyResult {
         try await coordinator.requireValid(lease, owner: .emptyTrash)
         try Task.checkCancellation()
-        return try await operations.emptyTrash()
+        return try await operations.emptyTrash(frozen)
     }
 
     func restoreFromTrash(

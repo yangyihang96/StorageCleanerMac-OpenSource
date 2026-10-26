@@ -240,6 +240,7 @@ struct MainWindowChromeConfigurator: NSViewRepresentable {
             NotificationCenter.default.removeObserver(self)
             self.window = window
             didApplyInitialLayout = false
+            sidebarItem = nil
 
             NotificationCenter.default.addObserver(
                 self,
@@ -271,6 +272,37 @@ struct MainWindowChromeConfigurator: NSViewRepresentable {
             guard !didApplyInitialLayout else { return }
             didApplyInitialLayout = true
             applyLayout(centerWhenResized: true)
+        }
+
+        /// D175: the sidebar column of the main window, once its split view exists.
+        private weak var sidebarItem: NSSplitViewItem?
+
+        /// D175: the sidebar column never stays hidden. A column hidden by the
+        /// old ⌃⌘S (`toggleSidebar`) was kept in the split view's autosave and
+        /// restored on every launch, and the window has no control that shows
+        /// it again; folding to icons is the sidebar's own toggle (D94).
+        func keepSidebarShown(in window: NSWindow) {
+            if sidebarItem == nil, let controller = MainWindowSidebarColumn.controller(in: window.contentView) {
+                sidebarItem = controller.splitViewItems.first { $0.behavior == .sidebar } ?? controller.splitViewItems.first
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(splitViewDidResizeSubviews(_:)),
+                    name: NSSplitView.didResizeSubviewsNotification,
+                    object: controller.splitView
+                )
+            }
+            guard let sidebarItem else { return }
+            sidebarItem.canCollapse = false
+            if sidebarItem.isCollapsed { sidebarItem.isCollapsed = false }
+        }
+
+        @objc private func splitViewDidResizeSubviews(_ notification: Notification) {
+            guard sidebarItem?.isCollapsed == true else { return }
+            // Not inside the split view's own layout pass.
+            DispatchQueue.main.async { [weak self] in
+                guard let item = self?.sidebarItem, item.isCollapsed else { return }
+                item.isCollapsed = false
+            }
         }
 
         @objc private func windowDidChangeScreen(_ notification: Notification) {
@@ -366,12 +398,31 @@ struct MainWindowChromeConfigurator: NSViewRepresentable {
 
         coordinator.attach(to: window)
         coordinator.apply()
+        coordinator.keepSidebarShown(in: window)
 
         if let sidebarToggleIndex = window.toolbar?.items.firstIndex(
             where: { $0.itemIdentifier == .toggleSidebar }
         ) {
             window.toolbar?.removeItem(at: sidebarToggleIndex)
         }
+    }
+}
+
+/// D175: finds the split view controller behind the main window's
+/// NavigationSplitView (sidebar and detail).
+enum MainWindowSidebarColumn {
+    @MainActor
+    static func controller(in view: NSView?) -> NSSplitViewController? {
+        guard let view else { return nil }
+        if let splitView = view as? NSSplitView,
+           let controller = splitView.delegate as? NSSplitViewController,
+           controller.splitViewItems.count > 1 {
+            return controller
+        }
+        for subview in view.subviews {
+            if let controller = controller(in: subview) { return controller }
+        }
+        return nil
     }
 }
 
@@ -460,10 +511,45 @@ final class TitlebarDragView: NSView {
     }
 }
 
+/// D94: the main window has no toolbar on any page, so the window buttons,
+/// the corner radius and the sidebar keep one place when the page changes.
+/// V1 pages show “操作记录” in this band instead. It is as tall as the
+/// toolbar it replaces, so V1 content stays where it was, and the button
+/// sits on the window buttons' line.
+struct MainWindowHistoryBand: View {
+    /// The window buttons are centred on a 32 pt titlebar without a toolbar.
+    static let buttonLineHeight: CGFloat = 32
+
+    let open: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            TitlebarDragRegion()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityHidden(true)
+            AppIconButton(
+                title: L10n.text("操作记录", "Operation History"),
+                systemImage: "clock.arrow.circlepath",
+                action: open
+            )
+            .frame(height: Self.buttonLineHeight)
+            .padding(.trailing, AppDesignTokens.Spacing.medium)
+#if DEBUG
+            .layoutProbe("mainWindow.historyButton")
+#endif
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: AppDesignTokens.Layout.integratedTitlebarHeight)
+    }
+}
+
 struct MainContentHost<Content: View>: View {
     @Namespace private var lightfieldNamespace
     @State private var lightfieldPhase: FeatureLightfieldPhase = .landing
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.featureOperationHistoryAction) private var openOperationHistory
+    /// Tests of the D67–D94 layouts keep the classic canvas (D141).
+    @Environment(\.careStudioClassicResults) private var usesClassicPages
     let route: ReviewFilter
     let showsIntegratedTitlebar: Bool
     private let content: Content
@@ -480,10 +566,19 @@ struct MainContentHost<Content: View>: View {
 
     var body: some View {
         let theme = route.moduleTheme
+        let studio = usesClassicPages ? nil : CareStudioModule(filter: route)
+        // D67 pages show the same entry in their status line. D154: studio
+        // pages draw the module gradient up under the title bar, as
+        // CleanMyMac does, so they have no band; Operation History is on My
+        // Activity there.
+        let historyAction = showsIntegratedTitlebar || FeatureLightfield.owns(route)
+            || studio != nil ? nil : openOperationHistory
 
         VStack(spacing: 0) {
             if showsIntegratedTitlebar {
                 IntegratedTitlebar(theme: theme)
+            } else if let historyAction {
+                MainWindowHistoryBand(open: historyAction)
             }
 
             AdaptivePageViewport(resetID: route) {
@@ -491,8 +586,14 @@ struct MainContentHost<Content: View>: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .ignoresSafeArea(.container, edges: historyAction == nil ? [] : .top)
         .background {
-            if FeatureLightfield.owns(route) {
+            if let studio {
+                // D154: every page sits on its CleanMyMac module's gradient,
+                // the studio pages and the D67 pages not yet moved alike, so
+                // the sidebar and the page are one canvas.
+                CareStudioBackdrop(module: studio, reportsWindowSize: true)
+            } else if FeatureLightfield.owns(route) {
                 GeometryReader { proxy in
                     let topInset = proxy.safeAreaInsets.top
                     let canvas = CGSize(width: proxy.size.width, height: max(1, proxy.size.height - topInset))
@@ -510,8 +611,11 @@ struct MainContentHost<Content: View>: View {
         .environment(\.moduleTheme, theme)
         .environment(\.featureLightfieldModule, FeatureLightfield.owns(route) ? route : nil)
         .environment(\.featureLightfieldBackdropProvided, FeatureLightfield.owns(route))
+        // D154: every page is on its module gradient, so shared panels draw
+        // the studio's translucent card instead of glass.
+        .environment(\.careStudioSurface, studio != nil)
         .environment(\.smartScanFlowNamespace, FeatureLightfield.owns(route) ? lightfieldNamespace : nil)
-        .tint(theme.actionFill)
+        .tint(studio.map { CareStudioInk.tint(for: $0.family) } ?? theme.actionFill)
         .foregroundStyle(theme.primaryText, theme.secondaryText, theme.tertiaryText)
 
     }
@@ -583,7 +687,9 @@ struct AdaptivePageViewport<Content: View>: View {
             let pageLayout = PageLayout.resolve(size: proxy.size, previous: lastLayout)
             Group {
                 if resetID == .performance || resetID.map(ReviewFilter.fileWorkspaceCases.contains) == true
-                    || resetID.map(FeatureLightfield.owns) == true {
+                    || resetID.map(FeatureLightfield.owns) == true
+                    // D154: the new module pages scroll their own content.
+                    || [.cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles].contains(resetID) {
                     // These workspaces own their scrolling and action bars.
                     // An outer minimum-height page would move those actions
                     // below a short tiled window's real viewport.

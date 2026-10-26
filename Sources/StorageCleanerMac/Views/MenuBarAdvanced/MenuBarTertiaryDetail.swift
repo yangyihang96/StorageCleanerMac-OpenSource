@@ -344,7 +344,10 @@ extension MenuBarAdvancedStatusView {
                     GeekPrecisionLineChart(
                         points: history,
                         series: temperatureSeries,
-                        valueRange: 20...110,
+                        // D133: iStat's temperature scale, 0–100° and
+                        // rounded up to 10° above it (was 20...110).
+                        valueRange: GeekSensorMetricHoverDetail.displayedValueRange(
+                            0...100, unit: .temperature, peak: summary.temperaturePeak),
                         unit: .temperature,
                         accessibilityLabel: hasChipTemperature && hasGPUTemperatureHistory
                             ? L10n.text("可悬停的最近 \(geekTelemetryChartRangeTitle) 芯片与 GPU 温度", "Hoverable chip and GPU temperatures over the last \(geekTelemetryChartRangeTitle)")
@@ -355,7 +358,9 @@ extension MenuBarAdvancedStatusView {
                         showsTimelineLabels: false,
                         showsTooltip: true,
                         horizontalInset: 8,
-                        showsSamplingDetails: false
+                        showsSamplingDetails: false,
+                        // D130: iStat's history buckets.
+                        bucketing: .history
                     )
                     .frame(height: PanelLayoutMetrics.primaryChartHeight)
 
@@ -363,7 +368,8 @@ extension MenuBarAdvancedStatusView {
                        let statistics = summary.gpuTemperatureStatistics {
                         AdvancedValueRow(
                             title: L10n.text("GPU 最低 / 平均 / 最高", "GPU Minimum / Average / Maximum"),
-                            value: String(format: "%.1f / %.1f / %.1f°C", statistics.minimum, statistics.average, statistics.maximum),
+                            value: [statistics.minimum, statistics.average, statistics.maximum]
+                                .map { IStatNumberFormat.temperature($0) }.joined(separator: " / "),
                             tint: resolvedGPUTint
                         )
                     }
@@ -384,7 +390,9 @@ extension MenuBarAdvancedStatusView {
                         showsTimelineLabels: false,
                         showsTooltip: true,
                         horizontalInset: 8,
-                        showsSamplingDetails: false
+                        showsSamplingDetails: false,
+                        // D130: iStat's history buckets.
+                        bucketing: .history
                     )
                     .frame(height: PanelLayoutMetrics.primaryChartHeight)
                     ForEach(fanTelemetryRows) { row in
@@ -400,7 +408,7 @@ extension MenuBarAdvancedStatusView {
                 ) {
                     AdvancedValueRow(
                         title: L10n.text("当前", "Current"),
-                        value: String(format: "%.1f°C", gpuTemperature),
+                        value: IStatNumberFormat.temperature(gpuTemperature),
                         tint: resolvedThermalTint
                     )
                 }
@@ -456,20 +464,20 @@ extension MenuBarAdvancedStatusView {
                             AdvancedValueRow(title: L10n.text("输入电流", "Input Current"), value: HardwareReadingText.amps(amps), tint: AppDesignTokens.Palette.warning)
                         }
                         if let adapterPower = electrical.adapterPowerWatts {
-                            AdvancedValueRow(title: L10n.text("协商功率", "Negotiated Power"), value: String(format: "%.0f W", adapterPower), tint: AppDesignTokens.Palette.success)
+                            AdvancedValueRow(title: L10n.text("协商功率", "Negotiated Power"), value: IStatNumberFormat.power(adapterPower), tint: AppDesignTokens.Palette.success)
                         }
                         if input?.inputPowerWatts.value == nil {
                             if let adapterVoltage = electrical.adapterVoltageVolts {
-                                AdvancedValueRow(title: L10n.text("协商电压", "Negotiated Voltage"), value: String(format: "%.1f V", adapterVoltage), tint: AppDesignTokens.Palette.information)
+                                AdvancedValueRow(title: L10n.text("协商电压", "Negotiated Voltage"), value: IStatNumberFormat.voltage(adapterVoltage), tint: AppDesignTokens.Palette.information)
                             }
                             if let adapterAmperage = electrical.adapterAmperageAmps {
-                                AdvancedValueRow(title: L10n.text("协商电流", "Negotiated Current"), value: String(format: "%.2f A", adapterAmperage), tint: AppDesignTokens.Palette.warning)
+                                AdvancedValueRow(title: L10n.text("协商电流", "Negotiated Current"), value: IStatNumberFormat.current(adapterAmperage), tint: AppDesignTokens.Palette.warning)
                             }
                         }
                     }
                     if hasInternalBattery {
                         if let voltage = electrical.voltageVolts {
-                            AdvancedValueRow(title: L10n.text("电池电压", "Battery Voltage"), value: String(format: "%.3f V", voltage), tint: AppDesignTokens.Palette.information)
+                            AdvancedValueRow(title: L10n.text("电池电压", "Battery Voltage"), value: IStatNumberFormat.voltage(voltage), tint: AppDesignTokens.Palette.information)
                         }
                         if let current = electrical.amperageAmps {
                             AdvancedValueRow(title: L10n.text("电池电流", "Battery Current"), value: HardwareReadingText.signed(current, decimals: 3, unit: "A"), tint: batteryTint)
@@ -478,7 +486,7 @@ extension MenuBarAdvancedStatusView {
                             AdvancedValueRow(title: L10n.text("电池功率", "Battery Power"), value: HardwareReadingText.signedWatts(power), tint: AppDesignTokens.Palette.warning)
                         }
                         if let temperature = electrical.temperatureCelsius {
-                            AdvancedValueRow(title: L10n.text("电池温度", "Battery Temperature"), value: String(format: "%.1f°C", temperature), tint: temperature >= 40 ? AppDesignTokens.Palette.warning : AppDesignTokens.Palette.success)
+                            AdvancedValueRow(title: L10n.text("电池温度", "Battery Temperature"), value: IStatNumberFormat.temperature(temperature), tint: temperature >= 40 ? AppDesignTokens.Palette.warning : AppDesignTokens.Palette.success)
                         }
                     }
                 } else {
@@ -512,7 +520,7 @@ extension MenuBarAdvancedStatusView {
                         }
                         if let estimate = batteryRuntimeEstimate {
                             AdvancedValueRow(title: L10n.text("耗电预计可用", "Power-based Runtime"), value: durationMinutesText(estimate.minutes), tint: batteryTint)
-                            AdvancedValueRow(title: L10n.text("近期耗电", "Recent Draw"), value: String(format: "%.1f W", estimate.powerWatts), tint: resolvedEnergyTint)
+                            AdvancedValueRow(title: L10n.text("近期耗电", "Recent Draw"), value: IStatNumberFormat.power(estimate.powerWatts), tint: resolvedEnergyTint)
                         }
                         if let remaining = batterySnapshot.remainingTimeMinutes {
                             AdvancedValueRow(

@@ -35,7 +35,7 @@ enum BrowserPrivacyRecoveryText {
                 guard let count = summary.visitCount else {
                     return contract.type.title + " · " + L10n.text("条数未确认", "Record count unconfirmed")
                 }
-                return contract.type.title + " · " + L10n.text("\(count) 条记录", "\(count) records")
+                return contract.type.title + " · " + L10n.text("\(ByteFormat.count(count)) 条记录", "\(ByteFormat.count(count)) records")
             }
             guard let visits = summary.visitCount else {
                 return L10n.text("所选访问", "the selected visits")
@@ -150,11 +150,11 @@ enum BrowserPrivacyRecoveryText {
         let count = laterBackups.count
         let latestTime = BrowserPrivacyDateFormatter.string(latest.createdAt)
         if entry.rowBackup {
-            return L10n.text("这份备份之后还有 \(count) 份同库备份（最近一份在 \(latestTime)）。补回行可能带回后续删除的记录；不会覆盖较新的冲突行，也不会撤销其他表。", "There are \(count) later backups of the same database (latest: \(latestTime)). Adding rows back may reintroduce records deleted later; newer conflicting rows and other tables are kept.")
+            return L10n.text("这份备份之后还有 \(ByteFormat.count(count)) 份同库备份（最近一份在 \(latestTime)）。补回行可能带回后续删除的记录；不会覆盖较新的冲突行，也不会撤销其他表。", "There are \(ByteFormat.count(count)) later backups of the same database (latest: \(latestTime)). Adding rows back may reintroduce records deleted later; newer conflicting rows and other tables are kept.")
         }
         return L10n.text(
-            "这不是这个配置文件最近的一份备份：在它之后还有 \(count) 份（最近一份在 \(latestTime)）。恢复它会把之后的删除和恢复都一起撤销，之后删除的记录都会重新出现。",
-            "This is not the newest backup of this profile: \(count) more were taken after it (the latest at \(latestTime)). Restoring it undoes every later deletion and restore as well, and every record deleted after it will reappear."
+            "这不是这个配置文件最近的一份备份：在它之后还有 \(ByteFormat.count(count)) 份（最近一份在 \(latestTime)）。恢复它会把之后的删除和恢复都一起撤销，之后删除的记录都会重新出现。",
+            "This is not the newest backup of this profile: \(ByteFormat.count(count)) more were taken after it (the latest at \(latestTime)). Restoring it undoes every later deletion and restore as well, and every record deleted after it will reappear."
         )
     }
 

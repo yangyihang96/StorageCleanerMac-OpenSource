@@ -9,6 +9,10 @@ struct SparkleRelease: Hashable, Sendable {
     let maximumSystemVersion: String?
     let byteCount: Int64?
     let isDelta: Bool
+    /// The item's `pubDate` and `description` (CleanMyMac's “Release Date:” and
+    /// “What’s New:”), as plain text.
+    var releaseDate: Date? = nil
+    var releaseNotes: String? = nil
 }
 
 enum SparkleAutomaticUpdateError: LocalizedError, Sendable {
@@ -136,6 +140,9 @@ final class SparkleAppcastParser: NSObject, XMLParserDelegate {
     func parser(_ parser: XMLParser, foundCharacters string: String) {
         if insideItem { fields[element, default: ""] += string }
     }
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        if insideItem { fields[element, default: ""] += String(decoding: CDATABlock, as: UTF8.self) }
+    }
     func parser(_ parser: XMLParser, didEndElement name: String, namespaceURI: String?, qualifiedName: String?) {
         guard name == "item" else { return }
         defer { insideItem = false; element = "" }
@@ -145,6 +152,45 @@ final class SparkleAppcastParser: NSObject, XMLParserDelegate {
         releases.append(.init(version: .init(marketing: marketing, build: version), downloadURL: url,
             edSignature: enclosure["sparkle:edSignature"], minimumSystemVersion: fields["sparkle:minimumSystemVersion"]?.trimmed,
             maximumSystemVersion: fields["sparkle:maximumSystemVersion"]?.trimmed,
-            byteCount: enclosure["length"].flatMap(Int64.init), isDelta: false))
+            byteCount: enclosure["length"].flatMap(Int64.init), isDelta: false,
+            releaseDate: fields["pubDate"].flatMap(ReleaseNotesText.date(fromRFC822:)),
+            releaseNotes: fields["description"].flatMap { ReleaseNotesText.plain(fromHTML: $0) }))
+    }
+}
+
+/// Appcast text for display: RFC 822 dates and HTML release notes as plain
+/// text (no WebKit, no links followed, nothing fetched).
+enum ReleaseNotesText {
+    private static let formats = ["EEE, dd MMM yyyy HH:mm:ss Z", "EEE, d MMM yyyy HH:mm:ss Z", "dd MMM yyyy HH:mm:ss Z",
+                                  "EEE, dd MMM yyyy HH:mm:ss zzz", "yyyy-MM-dd'T'HH:mm:ssZ", "yyyy-MM-dd"]
+
+    static func date(fromRFC822 raw: String) -> Date? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        for format in formats {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) { return date }
+        }
+        return nil
+    }
+
+    static func plain(fromHTML raw: String, limit: Int = 4_000) -> String? {
+        var text = raw
+        for (pattern, replacement) in [("(?i)<br\\s*/?>", "\n"), ("(?i)</(p|div|h[1-6])>", "\n"), ("(?i)<li[^>]*>", "\n• "),
+                                       ("(?is)<(script|style)[^>]*>.*?</\\1>", ""), ("<[^>]+>", "")] {
+            text = text.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+        }
+        for (entity, character) in [("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"), ("&amp;", "&")] {
+            text = text.replacingOccurrences(of: entity, with: character)
+        }
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces) }
+        var collapsed: [String] = []
+        for line in lines where !(line.isEmpty && (collapsed.last?.isEmpty ?? true)) { collapsed.append(line) }
+        let result = collapsed.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !result.isEmpty else { return nil }
+        return result.count > limit ? String(result.prefix(limit)) + "…" : result
     }
 }

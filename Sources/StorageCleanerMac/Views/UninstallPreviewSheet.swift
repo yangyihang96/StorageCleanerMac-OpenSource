@@ -7,6 +7,7 @@ struct UninstallPreviewSheet: View {
     var embedded: Bool = false
     @State private var showReceipts = false
     @State private var confirmRestore = false
+    @StateObject private var vendorUninstaller = VendorUninstallerController()
     private var selectablePaths: Set<String> { UninstallPresentation.selectablePaths(app) }
     private var isProcessing: Bool { store.isUninstallingApp }
     private var result: UninstallReviewResult? { store.uninstallResult }
@@ -37,8 +38,9 @@ struct UninstallPreviewSheet: View {
                                     pathLabel(app.path)
                                 }
                                 Spacer(minLength: 4)
-                                Text(ByteFormat.string(app.sizeBytes)).monospacedDigit()
+                                Text(ByteFormat.storageString(app.sizeBytes)).monospacedDigit()
                             }.padding(12).background(AppAppearanceColors.secondarySurface, in: RoundedRectangle(cornerRadius: 10))
+                            vendorUninstallerNotice
                         }
                         if store.isPreparingUninstall {
                             Text(L10n.text("正在检查关联文件…", "Checking related files…"))
@@ -68,6 +70,8 @@ struct UninstallPreviewSheet: View {
         .frame(minWidth: embedded ? 0 : 360, idealWidth: 620, maxWidth: embedded ? .infinity : 760)
         .background(AppAppearanceColors.panel)
         .interactiveDismissDisabled(isProcessing || store.isRestoringRecordedOperation)
+        // D101 G9: read-only lookup; the uninstaller opens only from its button.
+        .task(id: residual ? nil : app.path) { await vendorUninstaller.load(applicationPath: residual ? nil : app.path) }
         .sheet(isPresented: $showReceipts) {
             ReversibleOperationsView(store: store, resumeUninstall: { store.prepareResidualUninstall($0) })
         }
@@ -76,6 +80,27 @@ struct UninstallPreviewSheet: View {
             Button(L10n.text("恢复", "Restore")) { store.restoreUninstallResult() }
         } message: {
             Text(L10n.text("恢复到原位置；同名文件不会覆盖。", "Restore to original locations without overwriting existing files."))
+        }
+    }
+
+    /// D101 G9: the developer's own uninstaller, same Team ID as the app.
+    @ViewBuilder private var vendorUninstallerNotice: some View {
+        if let uninstaller = vendorUninstaller.uninstaller {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(L10n.text("该软件提供官方卸载程序，建议优先使用", "This app comes with its developer's own uninstaller; use it first"),
+                      systemImage: "info.circle").fontWeight(.medium)
+                Text(L10n.text("“\(uninstaller.name)”与此应用由同一开发者签名（Team ID \(uninstaller.teamIdentifier)）。打开后本应用不会接着删除。",
+                               "“\(uninstaller.name)” is signed by the same developer as this app (Team ID \(uninstaller.teamIdentifier)). Opening it does not make this app delete anything."))
+                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                pathLabel(uninstaller.url.path)
+                Button(L10n.text("打开卸载程序", "Open Uninstaller")) { Task { await vendorUninstaller.open() } }
+                    .appButtonChrome(.secondary).disabled(vendorUninstaller.isOpening || isProcessing)
+            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppAppearanceColors.secondarySurface, in: RoundedRectangle(cornerRadius: 10))
+        }
+        if let message = vendorUninstaller.message {
+            Text(message).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -104,7 +129,7 @@ struct UninstallPreviewSheet: View {
                 HStack {
                     Text(verified ? L10n.text("关联文件", "Related Files") : L10n.text("保留文件", "Kept Files"))
                         .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    Text("\(items.count)").foregroundStyle(.secondary).monospacedDigit()
+                    Text(ByteFormat.count(items.count)).foregroundStyle(.secondary).monospacedDigit()
                     Spacer()
                     // D87: high-value data (browser profiles, Docker data) is
                     // never part of the bulk selection; it is ticked one by one.
@@ -145,7 +170,7 @@ struct UninstallPreviewSheet: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(UninstallPresentation.category(item.path)).fontWeight(.medium)
                     Spacer(minLength: 6)
-                    Text(item.sizeIsKnown ? ByteFormat.string(item.sizeBytes) : L10n.text("大小未知", "Unknown size"))
+                    Text(item.sizeIsKnown ? ByteFormat.storageString(item.sizeBytes) : L10n.text("大小未知", "Unknown size"))
                         .foregroundStyle(.secondary).monospacedDigit().fixedSize()
                 }
                 pathLabel(item.path)
@@ -172,9 +197,9 @@ struct UninstallPreviewSheet: View {
                 let count = selected.count + (residual ? 0 : 1)
                 let knownBytes = selected.filter(\.sizeIsKnown).reduce(Int64(0)) { $0 + $1.sizeBytes } + (residual ? 0 : app.sizeBytes)
                 HStack {
-                    Text(L10n.text("已选 \(count) 项", "\(count) selected")).fontWeight(.medium)
+                    Text(L10n.text("已选 \(ByteFormat.count(count)) 项", "\(ByteFormat.count(count)) selected")).fontWeight(.medium)
                     Spacer()
-                    Text(ByteFormat.string(knownBytes) + (selected.contains(where: { !$0.sizeIsKnown }) ? " + ?" : "")).monospacedDigit()
+                    Text(ByteFormat.storageString(knownBytes) + (selected.contains(where: { !$0.sizeIsKnown }) ? " + ?" : "")).monospacedDigit()
                 }
                 Text(L10n.text("移入废纸篓，可恢复；清空前不释放空间。", "Recoverable in Trash; space is freed only when Trash is emptied."))
                     .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
@@ -242,7 +267,7 @@ struct UninstallPreviewSheet: View {
                     .background(AppAppearanceColors.secondarySurface, in: RoundedRectangle(cornerRadius: 10))
             }
             if !retained.isEmpty {
-                Text(L10n.text("已保留 \(retained.count) 项", "\(retained.count) items kept")).fontWeight(.medium)
+                Text(L10n.text("已保留 \(ByteFormat.count(retained.count)) 项", "\(ByteFormat.count(retained.count)) items kept")).fontWeight(.medium)
                 ForEach(retained) { item in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(UninstallPresentation.category(item.path))

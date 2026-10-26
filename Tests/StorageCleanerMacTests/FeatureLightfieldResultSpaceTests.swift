@@ -153,22 +153,29 @@ final class FeatureLightfieldResultSpaceTests: XCTestCase {
         XCTAssertEqual(Set(stems).count, 4)
         for scope in SafeCleanupScanScope.allCases {
             let stem = FeatureLightfieldCleanupScopeRow.resourceStem(scope), prefix = "lightfield.cleanup.scope." + stem
-            for size in [192, 512] {
-                let loaded = await library.image(named: stem + "-\(size)")
-                let picture = try XCTUnwrap(loaded)
-                XCTAssertEqual(picture.width, size)
-                XCTAssertEqual(picture.height, size)
-                XCTAssertTrue([CGImageAlphaInfo.premultipliedFirst, .premultipliedLast, .first, .last].contains(picture.alphaInfo))
+            // D192＋旧值：原为四张 PNG；系统垃圾复用缓存图，其余三项必须画出对应 SF Symbol。
+            if scope == .systemJunk {
+                for size in [192, 512] {
+                    let loaded = await library.image(named: stem + "-\(size)")
+                    let picture = try XCTUnwrap(loaded)
+                    XCTAssertEqual(picture.width, size)
+                    XCTAssertEqual(picture.height, size)
+                    XCTAssertTrue([CGImageAlphaInfo.premultipliedFirst, .premultipliedLast, .first, .last].contains(picture.alphaInfo))
+                }
+            } else {
+                XCTAssertNotNil(NSImage(systemSymbolName: ToolPreparationView.symbol(for: scope), accessibilityDescription: nil))
+                let bitmap = await library.image(named: stem + "-192")
+                XCTAssertNil(bitmap, "D192 adds no image assets for the three symbol categories")
             }
-            let ids = Set(["check", "icon", "title", "detail"].map { prefix + "." + $0 })
-                .union(["lightfield.option.loaded." + stem + "-192"])
+            let drawnIcon = scope == .systemJunk ? "lightfield.option.loaded." + stem + "-192" : prefix + ".symbol"
+            let ids = Set(["check", "icon", "title", "detail"].map { prefix + "." + $0 }).union([drawnIcon])
             let frames = try await host.frames(required: ids,
                 size: .init(width: 520, height: 300))
             let check = try XCTUnwrap(frames[prefix + ".check"]), icon = try XCTUnwrap(frames[prefix + ".icon"])
             let title = try XCTUnwrap(frames[prefix + ".title"]), detail = try XCTUnwrap(frames[prefix + ".detail"])
             XCTAssertEqual(icon.size, CGSize(width: 40, height: 40))
-            XCTAssertGreaterThan(try XCTUnwrap(frames["lightfield.option.loaded." + stem + "-192"]).height, 0,
-                "The bitmap must be drawn; an empty reserved slot is insufficient")
+            XCTAssertGreaterThan(try XCTUnwrap(frames[drawnIcon]).height, 0,
+                "D192＋旧值：原为 bitmap；现在实际绘制 PNG 或 SF Symbol，不能只留空位")
             XCTAssertLessThan(check.maxX, icon.minX)
             XCTAssertLessThan(icon.maxX, title.minX)
             XCTAssertLessThan(title.maxY, detail.minY)
@@ -288,7 +295,8 @@ final class FeatureLightfieldResultSpaceTests: XCTestCase {
             XCTAssertGreaterThan(overview.height, 0)
             XCTAssertLessThanOrEqual(overview.maxY, 72)
             XCTAssertEqual(try XCTUnwrap(frames["lightfield.results.scrollViewport"]), try XCTUnwrap(frames["lightfield.content"]))
-            let label = L10n.text("内存总览 · 已用 / 总量", "Memory Overview · Used / Total") + " · " + used
+            // The summary shows the shared unit apart (2.0.1: “12.75 / 16 GB”).
+            let label = L10n.text("内存总览 · 已用 / 总量", "Memory Overview · Used / Total") + " · 12.75 / 16 GB"
             try await host.waitForAccessibility(labels: [label])
             if size.width == 1070 {
                 XCTAssertGreaterThanOrEqual(fullyVisibleRows(frames, prefix: "overview.process.",

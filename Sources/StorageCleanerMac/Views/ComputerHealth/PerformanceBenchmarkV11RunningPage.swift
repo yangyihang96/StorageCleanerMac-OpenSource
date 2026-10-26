@@ -30,7 +30,7 @@ struct PerformanceBenchmarkV11RunningPage: View {
                             .lightfieldComponentProbe("performance.running.progress.total")
                         HStack {
                             Text(L10n.text("18 项核心 · 子进度", "18 Core measurements · Subprogress")); Spacer(minLength: 0)
-                            Text("\(run.completedCoreCount)/18")
+                            Text("\(ByteFormat.count(run.completedCoreCount))/18")
                         }.font(.system(size: 13)).foregroundStyle(palette.fg2)
                         LightfieldDataBar(progress: Double(run.completedCoreCount) / 18, module: .performance,
                             style: .progress(segments: 18), accessibilityLabel: L10n.text("核心子进度", "Core subprogress"))

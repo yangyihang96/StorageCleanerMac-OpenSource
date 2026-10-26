@@ -29,6 +29,14 @@ than bypassing it or deleting associated files.
 
 Other app features may access the network for Sparkle update checks, explicitly requested speed tests, app-update catalog lookups, or benchmark leaderboard operations. Those are separate from memory diagnosis and should be reviewed under their own consent and trust boundaries.
 
+## Network connections
+
+The app bundle includes `InternetAccessPolicy.plist` with English and Simplified Chinese explanations. Network monitors that read this format, such as Little Snitch, show for each connection what it is for and what stops working if it is denied: the app's own updates and the signed list of official download sources (`github.com`, `*.githubusercontent.com`), app update lookups (`api.github.com`, `itunes.apple.com`, and the developers' own update feeds and download sites), the network speed test (`speed.cloudflare.com`), the public IP and country lookups described below, and the benchmark leaderboard. A guard test keeps this list in step with the addresses the code uses. Scan results and file contents are not uploaded.
+
+## iPhone and iPad backups
+
+File Analysis can list the iPhone and iPad backups in the default local backup folder (`~/Library/Application Support/MobileSync/Backup`), which needs Full Disk Access. It reads only each backup's device name, system version, backup date, encryption flag, whether the last backup finished, and its size on disk. Other fields in the backup's metadata files, such as serial numbers, phone numbers and device identifiers, are not kept or shown. Apart from the three metadata files (`Status.plist`, `Manifest.plist`, `Info.plist`), the backed-up files are not opened; sizes come from file-system metadata. The list stays on this Mac. This page cannot delete backups; it points to Finder's "Manage Backups…" for that.
+
 ## Browser privacy
 
 The browser privacy page reads the local history databases of installed browsers (Safari, Chromium-family and Firefox-family browsers) through a temporary read-only copy that is deleted after the scan. Addresses, page titles and visit times are shown only on this Mac. The app does not write them to settings, logs or diagnostic exports and does not upload them. Copy Address and Copy Domains put text on the clipboard only when clicked, marked as concealed and transient so clipboard managers that honour these markers do not record it. Page titles and addresses cannot be selected as text, so these buttons are the only way to copy them; only the list of site names on the manual-handling page can be selected and copied as ordinary text.
@@ -41,12 +49,15 @@ Before the app deletes history directly (Chromium-family browsers only), it back
 
 ## Public network address and country lookup
 
-Public IP and country lookup have independent opt-in switches in Settings → Access.
-Both default to off. Disabling public IP also stops country lookup; withdrawal
+Public IP and country lookup have independent switches in Settings → Access.
+Public IP is on by default (since 2.0.0, DECISIONS D76) and can be turned off
+there; once turned off it stays off. Country lookup is a separate opt-in and
+defaults to off. Disabling public IP also stops country lookup; withdrawal
 cancels active panel lookups and clears displayed external results.
 
-After public-IP consent, the network panel can request the public IPv4/IPv6 address using HTTPS requests
-to `api.ipify.org` and `api6.ipify.org`. Only with separate country-lookup consent does it send the resolved address as a
+While public IP is on, the network view of the Mini Window requests the public IPv4/IPv6 address using HTTPS requests
+to `api.ipify.org` and `api6.ipify.org`, only while that view is open; a result is reused for 15 minutes or until the network changes, and a failed
+lookup is retried after 60 seconds. It is not requested in the background while the Mini Window is closed. Only with separate country-lookup consent does it send the resolved address as a
 URL path component to `api.country.is` to look up a country code. These are
 third-party network requests, not purely local device measurements. Each provider
 can observe the connecting IP address and ordinary request metadata. Country

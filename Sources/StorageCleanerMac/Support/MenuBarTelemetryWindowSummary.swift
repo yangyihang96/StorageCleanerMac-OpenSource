@@ -14,6 +14,9 @@ struct MenuBarTelemetryWindowSummary: Sendable, Equatable {
     /// The largest finite fan speed or fan target in the window.
     let fanMaximum: Double?
     let gpuTemperatureStatistics: GeekSeriesStatistics?
+    /// D133: the highest chip or GPU temperature (a folded minute's peak),
+    /// for iStat's temperature scale.
+    let temperaturePeak: Double?
 
     static let temperatureChannels: [MenuBarTelemetryChannel] = [.chipTemperature, .gpuTemperature]
 
@@ -29,6 +32,10 @@ struct MenuBarTelemetryWindowSummary: Sendable, Equatable {
             .filter(\.isFinite)
             .max()
         gpuTemperatureStatistics = GeekSeriesStatistics(values: points.compactMap(\.gpuTemperature))
+        temperaturePeak = points.lazy
+            .flatMap { point in Self.temperatureChannels.compactMap { $0.peak(in: point) } }
+            .filter(\.isFinite)
+            .max()
     }
 
     /// The fan chart's scale: `MenuBarChartGeometry.niceCeiling` of the

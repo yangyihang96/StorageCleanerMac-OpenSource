@@ -51,7 +51,10 @@ enum CleanupRuleValidator {
         ".m2",
         ".cargo",
         "Library/pnpm",
-        "go/pkg"
+        "go/pkg",
+        // D101 G10: only Bun's install cache; `~/.bun/bin` and the global
+        // installs in `~/.bun/install/global` stay outside.
+        ".bun/install/cache"
     ]
     private static let forbiddenAutomaticRoots = [
         "Library",
@@ -99,6 +102,15 @@ enum CleanupRuleValidator {
                     throw CleanupRuleValidationError.invalidAttributionMetadata(ruleID: rule.id)
                 }
             }
+            if rule.contentRequirement != nil {
+                // D-FP6: a content check lists files to review one by one,
+                // never a preselected or automatic row.
+                guard rule.action == .moveToTrashAfterReview, rule.risk == .reviewOnly,
+                      rule.defaultSelection == .unselected, rule.include.entryKinds == [.regularFile],
+                      !rule.include.extensions.isEmpty, rule.effectiveCandidateScope == .immediateChildren else {
+                    throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
+                }
+            }
             guard (rule.developerTool == nil) == (rule.developerArtifactKind == nil) else {
                 throw CleanupRuleValidationError.invalidDeveloperArtifactMetadata(ruleID: rule.id)
             }
@@ -116,6 +128,7 @@ enum CleanupRuleValidator {
             }
             guard rule.maximumDepth >= 0,
                   rule.maximumDepth <= maximumDepth,
+                  rule.maximumCandidates.map({ (1...1_000).contains($0) }) ?? true,
                   rule.minimumAgeDays >= 0,
                   rule.minimumAgeDays <= maximumAgeDays,
                   rule.minimumBytes >= 0,
@@ -129,7 +142,9 @@ enum CleanupRuleValidator {
                 throw CleanupRuleValidationError.invalidBundleIdentifier(ruleID: rule.id)
             }
             if rule.effectiveCandidateScope == .root {
-                guard rule.root.kind == .homeRelative,
+                // D181: a volume Trash folder is a root row only for emptying.
+                guard rule.root.kind == .homeRelative
+                        || (rule.root.kind == .mountedVolumeTrashes && rule.action == .emptyTrash),
                       rule.include.entryKinds.contains(.directory),
                       rule.include.extensions.isEmpty,
                       rule.include.nameMatcher.mode == .any,
@@ -145,6 +160,23 @@ enum CleanupRuleValidator {
                 // so no rule may list one (the only user was Mail library
                 // attachments, which are no longer listed).
                 throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
+            }
+            if rule.effectiveCandidateScope == .namedDescendantDirectories {
+                // D183: descendant content is only offered after explicit review.
+                guard rule.root.kind == .homeRelative,
+                      rule.include.entryKinds == [.directory],
+                      rule.include.nameMatcher.mode == .exact,
+                      !rule.include.nameMatcher.values.isEmpty,
+                      rule.risk == .reviewOnly,
+                      rule.defaultSelection == .unselected,
+                      rule.action == .moveToTrashAfterReview,
+                      !rule.requiredClosedBundleIDs.isEmpty else {
+                    throw CleanupRuleValidationError.unsafeActionRiskCombination(ruleID: rule.id)
+                }
+            }
+            if rule.root.kind == .mountedVolumeTrashes, rule.action != .emptyTrash {
+                // D181: other drives are only ever reached to empty their Trash.
+                throw CleanupRuleValidationError.forbiddenRoot(ruleID: rule.id)
             }
             if rule.root.kind == .applicationsDirectory {
                 // D25: app bundles are removed from the Uninstall page. The
@@ -172,6 +204,13 @@ enum CleanupRuleValidator {
             let reviewed = rule.action == .moveToTrashAfterReview
             let protectedReviewed = rule.action == .moveToTrashAfterProtectedReview
             if automatic, rule.root.kind != .homeRelative {
+                throw CleanupRuleValidationError.forbiddenRoot(ruleID: rule.id)
+            }
+            // D101 G4-2: no rule, of any action, starts inside a location no
+            // flow may touch; D183 Mail attachments and D192's exact iCloud
+            // Trash root have their own explicitly reviewed execution flows.
+            if rule.root.kind == .homeRelative, ProtectedLocations.kind(ofHomeRelative: rule.root.path) != nil,
+               !CleanupNamedDescendantScope.permitsProtectedMailLibrary(rule), !rule.isICloudDriveTrash {
                 throw CleanupRuleValidationError.forbiddenRoot(ruleID: rule.id)
             }
             if automatic,
@@ -228,10 +267,12 @@ enum CleanupRuleValidator {
                 && rule.measurementRequirement == .bestEffort
                 && !rule.allowsManualSelection
             // D23: emptying the Trash is one root item, red, never preselected,
-            // and only ever applies to the user's own `~/.Trash`.
+            // and only applies to ~/.Trash, D181 volume Trash, or the exact
+            // D192 iCloud Drive Trash root (including cloud-only entries).
             let validEmptyTrashAction = rule.action == .emptyTrash
-                && rule.root.kind == .homeRelative
-                && rule.root.path == ".Trash"
+                && ((rule.root.kind == .homeRelative && rule.root.path == ".Trash")
+                    || rule.isICloudDriveTrash
+                    || rule.root.kind == .mountedVolumeTrashes)
                 && rule.effectiveCandidateScope == .root
                 && rule.risk == .protected
                 && rule.recommendation == .notRecommended
@@ -327,7 +368,7 @@ enum CleanupRuleValidator {
         }
         guard ruleRoot == containerRoot else { return .none }
         switch rule.effectiveCandidateScope {
-        case .root, .descendantAggregate:
+        case .root, .descendantAggregate, .namedDescendantDirectories:
             return .unbounded
         case .immediateChildren:
             switch rule.include.nameMatcher.mode {
@@ -408,6 +449,8 @@ enum CleanupRuleValidator {
             validRelativePath(root.path)
         case .applicationsDirectory:
             root.path == "/Applications"
+        case .mountedVolumeTrashes:
+            root.path == VolumeTrashLocator.volumesPath
         }
     }
 
@@ -461,14 +504,36 @@ enum CleanupFileSystemError: Error, Sendable {
 protocol ReadOnlyFileSystem: Sendable {
     func snapshot(at url: URL) throws -> FileSnapshot
     func aggregateSnapshot(at url: URL) throws -> FileSnapshot
+    /// D192: POSIX metadata only, including placeholders; no FileProvider queries.
+    func metadataOnlySnapshot(at url: URL) throws -> FileSnapshot
     func children(of directory: URL) throws -> [URL]
+    /// D183: directory and symlink entries only, with a bounded listing.
+    func directoryEntries(of directory: URL, checking: () throws -> Void) throws -> [URL]
     /// The stored destination of a symbolic link, without following it.
     func symbolicLinkDestination(of url: URL) throws -> String
+    /// D100 G1: how much of a regular file deleting it frees at once.
+    func storageSharing(at url: URL) -> FileStorageSharing.Reading
 }
 
 extension ReadOnlyFileSystem {
+    func metadataOnlySnapshot(at url: URL) throws -> FileSnapshot {
+        try aggregateSnapshot(at: url)
+    }
+
+    func directoryEntries(of directory: URL, checking: () throws -> Void) throws -> [URL] {
+        try children(of: directory).filter { url in
+            try checking()
+            let kind = try aggregateSnapshot(at: url).identity.entryKind
+            return kind == .directory || kind == .symbolicLink
+        }
+    }
+
     func aggregateSnapshot(at url: URL) throws -> FileSnapshot {
         try snapshot(at: url)
+    }
+
+    func storageSharing(at url: URL) -> FileStorageSharing.Reading {
+        .notReported
     }
 
     func symbolicLinkDestination(of url: URL) throws -> String {
@@ -750,9 +815,26 @@ struct FoundationReadOnlyFileSystem: ReadOnlyFileSystem {
     }
 
     func aggregateSnapshot(at url: URL) throws -> FileSnapshot {
+        try posixSnapshot(at: url, checkingVolumeAndAncestors: false)
+    }
+
+    func metadataOnlySnapshot(at url: URL) throws -> FileSnapshot {
+        try posixSnapshot(at: url, checkingVolumeAndAncestors: true)
+    }
+
+    private func posixSnapshot(at url: URL, checkingVolumeAndAncestors: Bool) throws -> FileSnapshot {
         let status = try fileStatus(at: url)
         let kind = entryKind(for: status)
         let allocated = max(Int64(0), Int64(status.st_blocks)) * 512
+        let dataless = checkingVolumeAndAncestors && status.st_flags & UInt32(SF_DATALESS) != 0
+        var writable = true
+        if checkingVolumeAndAncestors {
+            var volume = statfs()
+            let volumeURL = kind == .symbolicLink ? url.deletingLastPathComponent() : url
+            let result = volumeURL.withUnsafeFileSystemRepresentation { statfs($0, &volume) }
+            guard result == 0 else { throw CleanupFileSystemError.unreadable }
+            writable = volume.f_flags & UInt32(MNT_RDONLY) == 0
+        }
         return FileSnapshot(
             identity: FileIdentity(
                 deviceID: UInt64(status.st_dev),
@@ -765,11 +847,23 @@ struct FoundationReadOnlyFileSystem: ReadOnlyFileSystem {
             logicalSizeBytes: kind == .regularFile ? max(0, Int64(status.st_size)) : 0,
             allocatedSizeBytes: allocated,
             modificationTimeNanoseconds: timespecNanoseconds(status.st_mtimespec),
-            isWritableVolume: true,
-            isCloudItem: false,
-            isCloudPlaceholder: false,
-            hasSymbolicLinkComponent: kind == .symbolicLink
+            isWritableVolume: writable,
+            isCloudItem: dataless,
+            isCloudPlaceholder: dataless,
+            hasSymbolicLinkComponent: checkingVolumeAndAncestors
+                ? kind == .symbolicLink || hasSymbolicLinkAncestor(of: url) : kind == .symbolicLink
         )
+    }
+
+    /// D192: ancestor checks use lstat too, without URL resource attributes.
+    private func hasSymbolicLinkAncestor(of url: URL) -> Bool {
+        var ancestor = url.deletingLastPathComponent()
+        while ancestor.path != "/" {
+            guard let status = try? fileStatus(at: ancestor) else { return true }
+            if entryKind(for: status) == .symbolicLink { return true }
+            ancestor = ancestor.deletingLastPathComponent()
+        }
+        return false
     }
 
     func children(of directory: URL) throws -> [URL] {
@@ -782,6 +876,10 @@ struct FoundationReadOnlyFileSystem: ReadOnlyFileSystem {
         } catch {
             throw Self.cleanupError(for: error)
         }
+    }
+
+    func storageSharing(at url: URL) -> FileStorageSharing.Reading {
+        FileStorageSharing.read(at: url)
     }
 
     /// Maps an error from listing or reading an item (P2-4). Codes are read in
@@ -877,9 +975,12 @@ private struct CleanupAggregateMeasurement {
     /// P2-7: a protected folder (such as IDE local history) was found inside.
     /// It is not read or counted.
     var containsProtectedData = false
+    /// D100 G1: blocks inside that deleting the item would not free.
+    var reclaimable = CleanupReclaimableTally()
 
     mutating func add(_ child: CleanupAggregateMeasurement) {
         containsProtectedData = containsProtectedData || child.containsProtectedData
+        reclaimable.add(child.reclaimable)
         logicalSizeBytes = CleanupByteCount.adding(
             child.logicalSizeBytes,
             to: logicalSizeBytes
@@ -930,6 +1031,9 @@ actor ReadOnlyCleanupScanner {
     private let ruleSet: CleanupRuleSet
     private let rulesProvenance: CleanupRuleSetProvenance
     private let applicationsURL: URL
+    /// D181: `/Volumes`, where the volume Trash folders are found.
+    private let volumesURL: URL
+    private let volumeTrashLocator: any VolumeTrashLocating
     private let applicationEnvironment: any CleanupApplicationEnvironment
     /// `xcode-select`'s link to the active developer directory.
     private let developerDirectoryLinkURL: URL
@@ -938,6 +1042,8 @@ actor ReadOnlyCleanupScanner {
         fileSystem: any ReadOnlyFileSystem,
         ruleSet: CleanupRuleSet,
         applicationsURL: URL = URL(fileURLWithPath: "/Applications", isDirectory: true),
+        volumesURL: URL = URL(fileURLWithPath: VolumeTrashLocator.volumesPath, isDirectory: true),
+        volumeTrashLocator: any VolumeTrashLocating = VolumeTrashLocator(),
         applicationEnvironment: any CleanupApplicationEnvironment = NoCleanupApplicationEnvironment(),
         developerDirectoryLinkURL: URL = URL(fileURLWithPath: "/var/db/xcode_select_link")
     ) throws {
@@ -946,6 +1052,8 @@ actor ReadOnlyCleanupScanner {
         self.ruleSet = ruleSet
         self.rulesProvenance = ruleSet.effectiveProvenance
         self.applicationsURL = applicationsURL
+        self.volumesURL = volumesURL
+        self.volumeTrashLocator = volumeTrashLocator
         self.applicationEnvironment = applicationEnvironment
         self.developerDirectoryLinkURL = developerDirectoryLinkURL
     }
@@ -959,11 +1067,19 @@ actor ReadOnlyCleanupScanner {
         var truncatedCandidateCount = 0
         var notActionableCandidateCount = 0
         var excludedPathCandidateCount = 0
+        var ignoredPaths = Set<String>()
+        var ignoredPathsByRule: [String: Set<String>] = [:]
+        mutating func recordIgnored(_ path: String, ruleID: String) {
+            let path = PathSafety.normalizedPath(path)
+            ignoredPaths.insert(path)
+            ignoredPathsByRule[ruleID, default: []].insert(path)
+        }
         var protectedDataCandidateCount = 0
         var seenIdentityKeys = Set<String>()
 
         /// D19: found but not listed, with the reason kept in the issues.
         mutating func recordNotActionable(ruleID: String, path: String, kind: ScanIssueKind) {
+            if kind == .candidateContainsExcludedPath { recordIgnored(path, ruleID: ruleID) }
             issues.append(ScanIssue(ruleID: ruleID, path: path, kind: kind))
             notActionableCandidateCount += 1
             if kind == .candidateContainsExcludedPath {
@@ -1006,9 +1122,9 @@ actor ReadOnlyCleanupScanner {
     ) async throws -> ScanSession {
         let startedAt = Date()
         let deadline = startedAt.addingTimeInterval(request.maximumDuration)
-        let sessionID = ScanSessionID()
+        let sessionID = request.sessionID ?? ScanSessionID()
         let homePath = PathSafety.lexicalPath(request.userHomeURL.path)
-        let excludedPaths = request.excludedURLs.map {
+        let legacyExcludedPaths = request.excludedURLs.map {
             PathSafety.lexicalPath($0.path)
         }
         var ledger = ScanLedger()
@@ -1027,6 +1143,7 @@ actor ReadOnlyCleanupScanner {
         ))
 
         for rule in ruleSet.rules {
+            let excludedPaths = legacyExcludedPaths + request.ignoreList.paths(for: .cleanup(for: rule))
             if Task.isCancelled {
                 outcome = .cancelled
                 break
@@ -1072,10 +1189,16 @@ actor ReadOnlyCleanupScanner {
                 continue
             }
 
+            if isExcluded(rootPath, by: excludedPaths) {
+                ledger.recordIgnored(rootPath, ruleID: rule.id)
+                completedSubcategories.append(subcategory(rule: rule, candidates: []))
+                continue
+            }
             var ruleCandidates = [ScanCandidate]()
             var reachedDeadline = false
             do {
-                let rootSnapshot = try fileSystem.snapshot(at: rootURL)
+                let rootSnapshot = try rule.isICloudDriveTrash
+                    ? fileSystem.metadataOnlySnapshot(at: rootURL) : fileSystem.snapshot(at: rootURL)
                 ledger.visitedDirectoryPaths.insert(rootSnapshot.standardizedPath)
                 guard rootSnapshot.identity.entryKind == .directory,
                       !rootSnapshot.hasSymbolicLinkComponent else {
@@ -1094,9 +1217,11 @@ actor ReadOnlyCleanupScanner {
                     completedSubcategories.append(subcategory(rule: rule, candidates: []))
                     continue
                 }
-                guard PathSafety.isContained(
+                // D116 (G12): the root's two forms, worked out once for every
+                // entry this rule's walk checks.
+                let allowedRoot = PathSafety.ContainmentRoot(rootPath)
+                guard allowedRoot.contains(
                     rootSnapshot.standardizedPath,
-                    in: rootPath,
                     resolvingSymlinks: true
                 ) else {
                     permissions.append(CleanupPermissionReport(
@@ -1125,10 +1250,21 @@ actor ReadOnlyCleanupScanner {
                         sessionID: sessionID,
                         rule: rule,
                         rootURL: rootURL,
-                        rootPath: rootPath,
+                        allowedRoot: allowedRoot,
                         excludedPaths: excludedPaths,
                         deadline: deadline,
                         referenceDate: startedAt,
+                        ledger: &ledger
+                    )
+                } else if rule.root.kind == .mountedVolumeTrashes {
+                    ruleCandidates = try volumeTrashCandidates(
+                        sessionID: sessionID,
+                        rule: rule,
+                        volumesRoot: allowedRoot,
+                        excludedPaths: excludedPaths,
+                        deadline: deadline,
+                        referenceDate: startedAt,
+                        permissions: &permissions,
                         ledger: &ledger
                     )
                 } else if rule.action == .emptyTrash {
@@ -1151,6 +1287,11 @@ actor ReadOnlyCleanupScanner {
                         candidateURLs = try fileSystem.children(of: rootURL).sorted(by: {
                             $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
                         })
+                    case .namedDescendantDirectories:
+                        candidateURLs = try namedDescendantDirectories(
+                            rootURL: rootURL, rule: rule, allowedRoot: allowedRoot,
+                            homePath: homePath, excludedPaths: excludedPaths, deadline: deadline, ledger: &ledger
+                        )
                     case .descendantAggregate:
                         // Rejected by the validator; such a result could never be acted on.
                         candidateURLs = []
@@ -1171,6 +1312,7 @@ actor ReadOnlyCleanupScanner {
                             ))
                         }
                         if isExcluded(childURL.path, by: excludedPaths) {
+                            ledger.recordIgnored(childURL.path, ruleID: rule.id)
                             continue
                         }
 
@@ -1180,9 +1322,8 @@ actor ReadOnlyCleanupScanner {
                             if snapshot.identity.entryKind == .directory {
                                 ledger.visitedDirectoryPaths.insert(snapshot.standardizedPath)
                             }
-                            guard PathSafety.isContained(
+                            guard allowedRoot.contains(
                                 snapshot.standardizedPath,
-                                in: rootPath,
                                 resolvingSymlinks: false
                             ) else {
                                 ledger.issues.append(ScanIssue(
@@ -1202,9 +1343,8 @@ actor ReadOnlyCleanupScanner {
                                 ))
                                 continue
                             }
-                            guard PathSafety.isContained(
+                            guard allowedRoot.contains(
                                 snapshot.standardizedPath,
-                                in: rootPath,
                                 resolvingSymlinks: true
                             ) else {
                                 ledger.issues.append(ScanIssue(
@@ -1272,6 +1412,19 @@ actor ReadOnlyCleanupScanner {
                                 )
                                 continue
                             }
+                            // D101 G4-2: a location no flow may touch, or a
+                            // folder holding one, is counted, not listed.
+                            guard !ProtectedLocations.protects(
+                                path: snapshot.standardizedPath,
+                                homePath: PathSafety.lexicalPath(request.userHomeURL.path)
+                            ) || CleanupNamedDescendantScope.permitsProtectedMailLibrary(rule) else {
+                                ledger.recordNotActionable(
+                                    ruleID: rule.id,
+                                    path: snapshot.standardizedPath,
+                                    kind: .candidateContainsProtectedData
+                                )
+                                continue
+                            }
 
                             let aggregate = try aggregateSize(
                                 snapshot: snapshot,
@@ -1279,7 +1432,7 @@ actor ReadOnlyCleanupScanner {
                                 depth: 0,
                                 maximumDepth: rule.maximumDepth,
                                 ruleID: rule.id,
-                                allowedRootPath: rootPath,
+                                allowedRoot: allowedRoot,
                                 excludedPaths: excludedPaths,
                                 deadline: deadline,
                                 ledger: &ledger
@@ -1315,7 +1468,7 @@ actor ReadOnlyCleanupScanner {
                                 logical: aggregate.logicalSizeBytes,
                                 allocated: aggregate.allocatedSizeBytes
                             )
-                            ruleCandidates.append(candidate(
+                            var measured = candidate(
                                 sessionID: sessionID,
                                 rule: rule,
                                 rootURL: rootURL,
@@ -1327,7 +1480,9 @@ actor ReadOnlyCleanupScanner {
                                 developerInactivityThresholdDays:
                                     request.developerInactivityThresholdDays,
                                 referenceDate: startedAt
-                            ))
+                            )
+                            measured.reclaimableEstimate = aggregate.reclaimable.estimate
+                            ruleCandidates.append(measured)
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch is CleanupScanDeadlineExceeded {
@@ -1391,7 +1546,7 @@ actor ReadOnlyCleanupScanner {
                 retainedCandidates = actionableCandidates
             } else {
                 let sortedCandidates = actionableCandidates.sorted(by: candidateSort)
-                retainedCandidates = Array(sortedCandidates.prefix(Self.maximumCandidatesPerRule))
+                retainedCandidates = Array(sortedCandidates.prefix(rule.maximumCandidates ?? Self.maximumCandidatesPerRule))
                 ledger.truncatedCandidateCount += max(
                     0,
                     sortedCandidates.count - retainedCandidates.count
@@ -1433,19 +1588,9 @@ actor ReadOnlyCleanupScanner {
            candidates.contains(where: { !$0.measurementCompleteness.isComplete }) {
             outcome = .partial
         }
+        // D104 G5: the same test decides a merged rescan's outcome.
         if outcome != .cancelled,
-           issues.contains(where: { issue in
-               switch issue.kind {
-               case .permissionDenied, .vanished, .unreadable,
-                    .metadataUnavailable, .volumeUnavailable, .outsideAllowedRoot,
-                    .timedOut, .candidateNotActionable, .candidateContainsExcludedPath,
-                    .candidateContainsProtectedData:
-                   return true
-               case .symbolicLinkSkipped, .hardLinkDeduplicated,
-                    .cloudPlaceholderSkipped:
-                   return false
-               }
-           }) {
+           issues.contains(where: { $0.kind.limitsScanCoverage }) {
             outcome = .partial
         }
         return ScanSession(
@@ -1458,6 +1603,8 @@ actor ReadOnlyCleanupScanner {
             issues: issues,
             permissions: permissions,
             metrics: ScanMetrics(
+                ignoredItemCount: ledger.ignoredPaths.count,
+                ignoredPathsByRule: ledger.ignoredPathsByRule,
                 visitedEntryCount: ledger.visitedEntryCount,
                 visitedDirectoryCount: ledger.visitedDirectoryPaths.count,
                 candidateCount: candidates.count,
@@ -1507,7 +1654,7 @@ actor ReadOnlyCleanupScanner {
         sessionID: ScanSessionID,
         rule: CleanupRule,
         rootURL: URL,
-        rootPath: String,
+        allowedRoot: PathSafety.ContainmentRoot,
         excludedPaths: [String],
         deadline: Date,
         referenceDate: Date,
@@ -1520,6 +1667,7 @@ actor ReadOnlyCleanupScanner {
         for childURL in children {
             try checkDeadline(deadline)
             if isExcluded(childURL.path, by: excludedPaths) {
+                ledger.recordIgnored(childURL.path, ruleID: rule.id)
                 continue
             }
             do {
@@ -1527,8 +1675,7 @@ actor ReadOnlyCleanupScanner {
                 ledger.visitedEntryCount += 1
                 guard snapshot.identity.entryKind != .symbolicLink,
                       !snapshot.hasSymbolicLinkComponent,
-                      PathSafety.isContained(snapshot.standardizedPath, in: rootPath, resolvingSymlinks: false),
-                      PathSafety.isContained(snapshot.standardizedPath, in: rootPath, resolvingSymlinks: true) else {
+                      allowedRoot.containsAsWrittenAndResolved(snapshot.standardizedPath) else {
                     if childURL.pathExtension.lowercased() == "app" {
                         ledger.issues.append(ScanIssue(
                             ruleID: rule.id,
@@ -1605,7 +1752,7 @@ actor ReadOnlyCleanupScanner {
                     depth: 0,
                     maximumDepth: rule.maximumDepth,
                     ruleID: rule.id,
-                    allowedRootPath: rootPath,
+                    allowedRoot: allowedRoot,
                     excludedPaths: excludedPaths,
                     deadline: deadline,
                     ledger: &ledger
@@ -1633,6 +1780,7 @@ actor ReadOnlyCleanupScanner {
                 )
                 copy.ownerResolution = .applicationBundle
                 copy.ownerBundleIdentifiers = [bundleIdentifier]
+                copy.reclaimableEstimate = aggregate.reclaimable.estimate
                 measured.append(copy)
             }
             let actionable = measured.filter(\.isSelectable)
@@ -1661,7 +1809,7 @@ actor ReadOnlyCleanupScanner {
             $0.bytes == $1.bytes ? $0.groupID < $1.groupID : $0.bytes > $1.bytes
         }) {
             guard listed.isEmpty
-                || listed.count + group.candidates.count <= Self.maximumCandidatesPerRule else {
+                || listed.count + group.candidates.count <= (rule.maximumCandidates ?? Self.maximumCandidatesPerRule) else {
                 ledger.truncatedCandidateCount += group.candidates.count
                 continue
             }
@@ -1673,6 +1821,63 @@ actor ReadOnlyCleanupScanner {
     /// D23: one item for the Trash. It carries the top-level entries frozen at
     /// scan time; only those are ever deleted. Entries are measured without
     /// following links, and a link pointing outside the Trash is left out.
+    /// D181: one emptying row per other mounted volume's Trash folder, each
+    /// frozen like `~/.Trash`. A folder that cannot be read is reported with
+    /// its path, never guessed; the other volumes still count.
+    private func volumeTrashCandidates(
+        sessionID: ScanSessionID,
+        rule: CleanupRule,
+        volumesRoot: PathSafety.ContainmentRoot,
+        excludedPaths: [String],
+        deadline: Date,
+        referenceDate: Date,
+        permissions: inout [CleanupPermissionReport],
+        ledger: inout ScanLedger
+    ) throws -> [ScanCandidate] {
+        var candidates = [ScanCandidate]()
+        for trashURL in volumeTrashLocator.trashURLs(uid: getuid()) {
+            try checkDeadline(deadline)
+            let trashPath = PathSafety.lexicalPath(trashURL.path)
+            guard VolumeTrashLocator.isTrashPath(trashPath, uid: getuid()) else {
+                ledger.issues.append(ScanIssue(ruleID: rule.id, path: trashPath, kind: .outsideAllowedRoot))
+                continue
+            }
+            do {
+                let snapshot = try fileSystem.snapshot(at: trashURL)
+                guard snapshot.identity.entryKind == .directory,
+                      !snapshot.hasSymbolicLinkComponent,
+                      volumesRoot.contains(snapshot.standardizedPath, resolvingSymlinks: true) else {
+                    permissions.append(CleanupPermissionReport(ruleID: rule.id, path: trashPath, status: .unreadable))
+                    ledger.issues.append(ScanIssue(ruleID: rule.id, path: trashPath, kind: .outsideAllowedRoot))
+                    continue
+                }
+                ledger.visitedDirectoryPaths.insert(snapshot.standardizedPath)
+                candidates += try trashCandidates(
+                    sessionID: sessionID,
+                    rule: rule,
+                    rootURL: trashURL,
+                    rootSnapshot: snapshot,
+                    excludedPaths: excludedPaths,
+                    deadline: deadline,
+                    referenceDate: referenceDate,
+                    ledger: &ledger
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is CleanupScanDeadlineExceeded {
+                throw CleanupScanDeadlineExceeded()
+            } catch {
+                permissions.append(CleanupPermissionReport(
+                    ruleID: rule.id,
+                    path: trashPath,
+                    status: permissionStatus(for: error)
+                ))
+                ledger.issues.append(ScanIssue(ruleID: rule.id, path: trashPath, kind: issueKind(for: error)))
+            }
+        }
+        return candidates
+    }
+
     private func trashCandidates(
         sessionID: ScanSessionID,
         rule: CleanupRule,
@@ -1684,6 +1889,7 @@ actor ReadOnlyCleanupScanner {
         ledger: inout ScanLedger
     ) throws -> [ScanCandidate] {
         let trashPath = PathSafety.lexicalPath(rootSnapshot.standardizedPath)
+        let allowedTrash = PathSafety.ContainmentRoot(trashPath)
         let children = try fileSystem.children(of: rootURL).sorted(by: {
             $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
         })
@@ -1696,6 +1902,7 @@ actor ReadOnlyCleanupScanner {
         for childURL in children {
             try checkDeadline(deadline)
             if isExcluded(childURL.path, by: excludedPaths) {
+                ledger.recordIgnored(childURL.path, ruleID: rule.id)
                 total.markLowerBound(.excludedDescendant)
                 continue
             }
@@ -1711,10 +1918,11 @@ actor ReadOnlyCleanupScanner {
                 continue
             }
             do {
-                let entry = try fileSystem.snapshot(at: childURL)
+                let entry = try rule.isICloudDriveTrash
+                    ? fileSystem.metadataOnlySnapshot(at: childURL) : fileSystem.snapshot(at: childURL)
                 ledger.visitedEntryCount += 1
                 guard PathSafety.lexicalPath(childURL.deletingLastPathComponent().path) == trashPath,
-                      PathSafety.isContained(entry.standardizedPath, in: trashPath, resolvingSymlinks: false) else {
+                      allowedTrash.contains(entry.standardizedPath, resolvingSymlinks: false) else {
                     ledger.issues.append(ScanIssue(
                         ruleID: rule.id,
                         path: entry.standardizedPath,
@@ -1767,7 +1975,7 @@ actor ReadOnlyCleanupScanner {
                     continue
                 }
                 guard !entry.hasSymbolicLinkComponent,
-                      PathSafety.isContained(entry.standardizedPath, in: trashPath, resolvingSymlinks: true) else {
+                      allowedTrash.contains(entry.standardizedPath, resolvingSymlinks: true) else {
                     ledger.issues.append(ScanIssue(
                         ruleID: rule.id,
                         path: entry.standardizedPath,
@@ -1794,10 +2002,11 @@ actor ReadOnlyCleanupScanner {
                     depth: 0,
                     maximumDepth: rule.maximumDepth,
                     ruleID: rule.id,
-                    allowedRootPath: trashPath,
+                    allowedRoot: allowedTrash,
                     excludedPaths: excludedPaths,
                     deadline: deadline,
-                    ledger: &ledger
+                    ledger: &ledger,
+                    metadataOnly: rule.isICloudDriveTrash
                 )
                 guard !aggregate.completeness.isFailed else {
                     // An entry that cannot be listed is not frozen for deletion.
@@ -1824,7 +2033,9 @@ actor ReadOnlyCleanupScanner {
             }
         }
         let estimatedSize = total.allocatedSizeBytes ?? total.logicalSizeBytes
-        guard !entries.isEmpty, estimatedSize >= rule.minimumBytes else { return [] }
+        // A cloud-only Trash still needs a row when it has no local blocks.
+        let sizeForMinimum = rule.isICloudDriveTrash ? max(estimatedSize, total.logicalSizeBytes) : estimatedSize
+        guard !entries.isEmpty, sizeForMinimum >= rule.minimumBytes else { return [] }
         var trash = candidate(
             sessionID: sessionID,
             rule: rule,
@@ -1840,6 +2051,7 @@ actor ReadOnlyCleanupScanner {
             referenceDate: referenceDate
         )
         trash.permanentDeletionEntries = entries
+        trash.reclaimableEstimate = total.reclaimable.estimate
         return [trash]
     }
 
@@ -1933,6 +2145,8 @@ actor ReadOnlyCleanupScanner {
             request.userHomeURL.appendingPathComponent(rule.root.path, isDirectory: true)
         case .applicationsDirectory:
             applicationsURL
+        case .mountedVolumeTrashes:
+            volumesURL
         }
     }
 
@@ -1949,6 +2163,9 @@ actor ReadOnlyCleanupScanner {
                 && rootPath == PathSafety.lexicalPath(applicationsURL.path)
                 && (rule.action == .revealOnly
                     || rule.action == .moveToTrashAfterProtectedReview)
+        case .mountedVolumeTrashes:
+            rule.action == .emptyTrash
+                && rootPath == PathSafety.lexicalPath(volumesURL.path)
         }
     }
 
@@ -1997,27 +2214,101 @@ actor ReadOnlyCleanupScanner {
         )
     }
 
+    /// Discovery stops at a match. The ordinary candidate pipeline then
+    /// measures its whole subtree, without producing nested candidate rows.
+    private func namedDescendantDirectories(
+        rootURL: URL,
+        rule: CleanupRule,
+        allowedRoot: PathSafety.ContainmentRoot,
+        homePath: String,
+        excludedPaths: [String],
+        deadline: Date,
+        ledger: inout ScanLedger
+    ) throws -> [URL] {
+        var pending = [(rootURL, 0)]
+        var matches = [URL]()
+        while let (directory, depth) = pending.popLast() {
+            try checkDeadline(deadline)
+            guard depth < rule.maximumDepth else { continue }
+            do {
+                // Check every ancestor before listing it, including packages.
+                let parent = try fileSystem.snapshot(at: directory)
+                guard parent.identity.entryKind != .symbolicLink,
+                      !parent.hasSymbolicLinkComponent else {
+                    ledger.issues.append(ScanIssue(ruleID: rule.id, path: directory.path, kind: .symbolicLinkSkipped))
+                    continue
+                }
+                guard parent.identity.entryKind == .directory,
+                      allowedRoot.containsAsWrittenAndResolved(parent.standardizedPath) else {
+                    ledger.issues.append(ScanIssue(ruleID: rule.id, path: directory.path, kind: .outsideAllowedRoot))
+                    continue
+                }
+                let children = try fileSystem.directoryEntries(of: directory, checking: { try checkDeadline(deadline) })
+                for child in children {
+                    try checkDeadline(deadline)
+                    if isExcluded(child.path, by: excludedPaths) { ledger.recordIgnored(child.path, ruleID: rule.id); continue }
+                    do {
+                        let snapshot = try fileSystem.snapshot(at: child)
+                        ledger.visitedEntryCount += 1
+                        guard snapshot.identity.entryKind != .symbolicLink,
+                              !snapshot.hasSymbolicLinkComponent else {
+                            ledger.issues.append(ScanIssue(ruleID: rule.id, path: child.path, kind: .symbolicLinkSkipped))
+                            continue
+                        }
+                        guard snapshot.identity.entryKind == .directory else { continue }
+                        ledger.visitedDirectoryPaths.insert(snapshot.standardizedPath)
+                        guard allowedRoot.containsAsWrittenAndResolved(snapshot.standardizedPath) else {
+                            ledger.issues.append(ScanIssue(ruleID: rule.id, path: child.path, kind: .outsideAllowedRoot))
+                            continue
+                        }
+                        if shouldSkipCloudItem(snapshot, policy: rule.cloudPolicy) {
+                            ledger.issues.append(ScanIssue(ruleID: rule.id, path: child.path, kind: .cloudPlaceholderSkipped))
+                            continue
+                        }
+                        if matchesName(child.lastPathComponent, matcher: rule.include.nameMatcher) {
+                            matches.append(child)
+                        } else if CleanupNamedDescendantScope.permitsProtectedMailLibrary(rule) || !ProtectedLocations.protects(
+                            path: snapshot.standardizedPath,
+                            homePath: homePath
+                        ) {
+                            pending.append((child, depth + 1))
+                        }
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch is CleanupScanDeadlineExceeded {
+                        throw CleanupScanDeadlineExceeded()
+                    } catch {
+                        ledger.issues.append(ScanIssue(ruleID: rule.id, path: child.path, kind: issueKind(for: error)))
+                    }
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is CleanupScanDeadlineExceeded {
+                throw CleanupScanDeadlineExceeded()
+            } catch {
+                // Let the existing rule-root handler publish its permission
+                // report (including Full Disk Access guidance) for a denied root.
+                if directory.path == rootURL.path { throw error }
+                ledger.issues.append(ScanIssue(ruleID: rule.id, path: directory.path, kind: issueKind(for: error)))
+            }
+        }
+        return matches
+    }
+
     private func aggregateSize(
         snapshot: FileSnapshot,
         url: URL,
         depth: Int,
         maximumDepth: Int,
         ruleID: String,
-        allowedRootPath: String,
+        allowedRoot: PathSafety.ContainmentRoot,
         excludedPaths: [String],
         deadline: Date,
-        ledger: inout ScanLedger
+        ledger: inout ScanLedger,
+        metadataOnly: Bool = false
     ) throws -> CleanupAggregateMeasurement {
         try checkDeadline(deadline)
-        guard PathSafety.isContained(
-            snapshot.standardizedPath,
-            in: allowedRootPath,
-            resolvingSymlinks: false
-        ), PathSafety.isContained(
-            snapshot.standardizedPath,
-            in: allowedRootPath,
-            resolvingSymlinks: true
-        ) else {
+        guard allowedRoot.containsAsWrittenAndResolved(snapshot.standardizedPath) else {
             ledger.issues.append(ScanIssue(
                 ruleID: ruleID,
                 path: snapshot.standardizedPath,
@@ -2049,12 +2340,20 @@ actor ReadOnlyCleanupScanner {
             let logical = snapshot.logicalSizeBytes > 0
                 ? snapshot.logicalSizeBytes
                 : snapshot.allocatedSizeBytes ?? 0
-            return CleanupAggregateMeasurement(
+            var leaf = CleanupAggregateMeasurement(
                 logicalSizeBytes: logical,
                 allocatedSizeBytes: snapshot.allocatedSizeBytes,
                 completeness: .complete,
                 latestModificationTimeNanoseconds: snapshot.modificationTimeNanoseconds
             )
+            if snapshot.identity.entryKind == .regularFile {
+                leaf.reclaimable.record(
+                    metadataOnly ? .unknown : fileSystem.storageSharing(at: url),
+                    allocatedBytes: snapshot.allocatedSizeBytes ?? logical,
+                    deviceID: snapshot.identity.deviceID
+                )
+            }
+            return leaf
         }
         guard depth < maximumDepth else {
             return CleanupAggregateMeasurement(
@@ -2091,11 +2390,13 @@ actor ReadOnlyCleanupScanner {
         for childURL in childURLs {
             try checkDeadline(deadline)
             if isExcluded(childURL.path, by: excludedPaths) {
+                ledger.recordIgnored(childURL.path, ruleID: ruleID)
                 measurement.markLowerBound(.excludedDescendant)
                 continue
             }
             do {
-                let child = try fileSystem.aggregateSnapshot(at: childURL)
+                let child = try metadataOnly
+                    ? fileSystem.metadataOnlySnapshot(at: childURL) : fileSystem.aggregateSnapshot(at: childURL)
                 ledger.visitedEntryCount += 1
                 if child.identity.entryKind == .directory {
                     ledger.visitedDirectoryPaths.insert(child.standardizedPath)
@@ -2110,10 +2411,10 @@ actor ReadOnlyCleanupScanner {
                     measurement.markLowerBound(.symbolicLinkSkipped)
                     continue
                 }
-                if (child.identity.entryKind == .directory
+                if !metadataOnly && ((child.identity.entryKind == .directory
                         && CleanupProtectedContentPolicy.isProtectedDataFolder(named: childURL.lastPathComponent))
                     || (CleanupProtectedContentPolicy.protectsPersistentAgentState(ruleID: ruleID)
-                        && CleanupProtectedContentPolicy.isProtectedAgentEntry(named: childURL.lastPathComponent)) {
+                        && CleanupProtectedContentPolicy.isProtectedAgentEntry(named: childURL.lastPathComponent))) {
                     measurement.containsProtectedData = true
                     continue
                 }
@@ -2123,10 +2424,11 @@ actor ReadOnlyCleanupScanner {
                     depth: depth + 1,
                     maximumDepth: maximumDepth,
                     ruleID: ruleID,
-                    allowedRootPath: allowedRootPath,
+                    allowedRoot: allowedRoot,
                     excludedPaths: excludedPaths,
                     deadline: deadline,
-                    ledger: &ledger
+                    ledger: &ledger,
+                    metadataOnly: metadataOnly
                 )
                 measurement.add(childSize)
             } catch is CancellationError {
@@ -2166,6 +2468,9 @@ actor ReadOnlyCleanupScanner {
             return false
         }
         if rule.exclude.excludes(childName: url.lastPathComponent) {
+            return false
+        }
+        if let requirement = rule.contentRequirement, !requirement.isMet(at: url, snapshot: snapshot) {
             return false
         }
         guard !DeveloperCleanupAgePolicy.applies(to: rule),
@@ -2521,8 +2826,6 @@ enum CleanupRuleCopy {
             L10n.text("废纸篓", "Trash")
         case "cleanup.category.developer":
             L10n.text("开发工具与残留", "Developer Tools & Artifacts")
-        case "cleanup.category.downloads":
-            L10n.text("下载项目", "Downloads")
         case "cleanup.category.applications":
             L10n.text("重复的应用副本", "Duplicate App Copies")
         case "cleanup.category.userData":
@@ -2554,6 +2857,20 @@ enum CleanupRuleCopy {
                 "打开邮件附件时系统另存的副本，邮件里的原附件仍保留；是否还需要这些副本由你判断，默认不选。清理前请退出“邮件”。",
                 "Copies the system saved when you opened mail attachments; the attachments stay in your mail. Decide whether you still need these copies; they are not selected by default. Quit Mail before cleanup."
             )
+        case "cleanup.rule.mailLibraryAttachments.title":
+            L10n.text("邮件附件", "Mail Attachments")
+        case "cleanup.reason.mailLibraryAttachments":
+            L10n.text(
+                "邮件 App 本地库中的附件文件夹，默认不选，请先逐项审阅并退出“邮件”。附件只移入废纸篓，可放回；IMAP 等仍在服务器上的邮件打开时会重新下载附件。只存在本机的邮件（如 POP 或“我的 Mac 上”邮箱）需要从废纸篓放回附件后才能再查看。",
+                "Attachment folders in Mail’s local library. None is selected by default; review each one and quit Mail first. Attachments move to the Trash and can be put back. Mail downloads attachments again when you open messages still on a server, such as IMAP. For messages stored only on this Mac, including POP or On My Mac mailboxes, put the attachments back from the Trash to view them again."
+            )
+        case "cleanup.rule.brokenPreferences.title":
+            L10n.text("损坏的偏好设置", "Broken Preferences")
+        case "cleanup.reason.brokenPreferences":
+            L10n.text(
+                "这些设置文件 macOS 已经读不出来，对应的应用现在用的就是默认设置；移入废纸篓后应用会按需重新生成。个别应用会用这个扩展名存别的格式，所以默认不选，请逐个确认。",
+                "macOS can no longer read these settings files, so their apps already run on default settings; after they move to the Trash the apps create new ones as needed. A few apps store other formats under this extension, so none is selected by default; check each one."
+            )
         case "cleanup.rule.systemManagedCache.title":
             L10n.text("系统管理缓存", "System-Managed Cache")
         case "cleanup.reason.systemManagedCache":
@@ -2581,6 +2898,20 @@ enum CleanupRuleCopy {
             L10n.text(
                 "永久删除扫描时废纸篓里的项目，不可恢复；默认不选，执行前需要单独二次确认。扫描后放入废纸篓的项目（包括本次清理移入的）不会被删除。",
                 "Permanently deletes the items that were in the Trash during the scan. This cannot be undone; it is not selected by default and needs its own two confirmations. Items put in the Trash after the scan, including this cleanup's items, are not deleted."
+            )
+        case "cleanup.rule.iCloudDriveTrash.title":
+            L10n.text("iCloud 云盘废纸篓", "iCloud Drive Trash")
+        case "cleanup.reason.iCloudDriveTrash":
+            L10n.text(
+                "只永久删除扫描时已有的顶层项目；会从你所有设备上的 iCloud 云盘永久删除，不能撤销。默认不选，清空前需要单独两次确认；不会下载只在云端的文件。",
+                "Permanently deletes only the top-level items present during the scan, from iCloud Drive on all your devices. This cannot be undone. Off by default, with two separate confirmations; cloud-only files are never downloaded."
+            )
+        case "cleanup.rule.volumeTrash.title":
+            L10n.text("清空外接硬盘的废纸篓", "Empty Trash on Other Drives")
+        case "cleanup.reason.volumeTrash":
+            L10n.text(
+                "永久删除扫描时这块硬盘的废纸篓里已有的项目，不可恢复；默认不选，执行前需要单独二次确认。扫描后放入的项目不会被删除；硬盘拔出或换了就不执行。",
+                "Permanently deletes the items that were in this drive's Trash during the scan. This cannot be undone; it is not selected by default and needs its own two confirmations. Items added after the scan are not deleted, and nothing runs if the drive was ejected or replaced."
             )
         case "cleanup.rule.userLogs.title":
             L10n.text("用户日志", "User Logs")
@@ -2615,6 +2946,20 @@ enum CleanupRuleCopy {
             L10n.text("Homebrew 下载缓存", "Homebrew Download Cache")
         case "cleanup.rule.uvCache.title":
             L10n.text("uv 包缓存", "uv Package Cache")
+        case "cleanup.rule.bunInstallCache.title":
+            L10n.text("Bun 安装缓存", "Bun Install Cache")
+        case "cleanup.rule.bunInstallCache.reason":
+            L10n.text(
+                "Bun 下载的软件包缓存，下次安装时会重新下载。在 macOS 上 Bun 用克隆把缓存装进项目，清理通常释放不了多少空间，行内会写明预计释放多少。",
+                "Packages Bun downloaded; it downloads them again on the next install. On macOS Bun clones the cache into projects, so cleaning it often frees little; the row says how much."
+            )
+        case "cleanup.rule.iStatMenusHistory.title":
+            L10n.text("iStat Menus 历史记录", "iStat Menus History")
+        case "cleanup.rule.iStatMenusHistory.reason":
+            L10n.text(
+                "iStat Menus（Setapp 版）为历史图表保存的传感器和用量记录。iStat Menus 7.30 不会清理其中交换空间的历史，这个文件夹会一直变大。移入废纸篓后历史图表清空，之后重新开始记录。iStat Menus 的主程序、菜单栏程序和辅助程序都退出后才会清理；其中任何一个在运行，这一项就跳过。",
+                "The sensor and usage records iStat Menus (Setapp) keeps for its history charts. iStat Menus 7.30 never prunes the swap history in them, so this folder keeps growing. Once they move to the Trash the charts start empty and recording begins again. They are cleaned only after the iStat Menus app, its menu bar app and its helper have all quit; while any of them runs, this item is skipped."
+            )
         case "cleanup.rule.pnpmStore.title":
             L10n.text("pnpm 内容缓存", "pnpm Content Cache")
         case "cleanup.rule.gradleCache.title":
@@ -2651,33 +2996,12 @@ enum CleanupRuleCopy {
             L10n.text("无法确认最近修改时间", "The latest change time could not be verified")
         case "cleanup.rule.developerToolArtifact.title":
             L10n.text("开发工具残留", "Developer Tool Artifact")
-        case "cleanup.rule.coreSimulator.title":
-            L10n.text("CoreSimulator 数据", "CoreSimulator Data")
-        case "cleanup.rule.coreSimulator.reason":
-            L10n.text(
-                "模拟器目录可能包含应用测试状态；请先退出 Xcode 与模拟器，并确认这些状态不再需要。",
-                "Simulator data may include app test state; quit Xcode and Simulator, then confirm that state is no longer needed."
-            )
         case "cleanup.rule.dockerData.title":
             L10n.text("Docker 数据", "Docker Data")
         case "cleanup.rule.dockerData.reason":
             L10n.text(
                 "其中可能包含镜像、卷和开发环境状态，应优先使用 Docker 自带管理工具。",
                 "This may contain images, volumes, and environment state; use Docker's own management tools."
-            )
-        case "cleanup.rule.downloadInstallers.title":
-            L10n.text("下载的安装包", "Downloaded Installers")
-        case "cleanup.rule.downloadInstallers.reason":
-            L10n.text(
-                "安装包可能是唯一的离线副本；确认应用已安装且不再需要重新安装后再手动选择。",
-                "An installer may be the only offline copy; select it manually only after confirming the app is installed and no reinstall copy is needed."
-            )
-        case "cleanup.rule.downloadLargeItems.title":
-            L10n.text("下载目录大项目", "Large Download Items")
-        case "cleanup.rule.downloadLargeItems.reason":
-            L10n.text(
-                "下载内容可能是个人文件或仍在使用的资料；核对后可手动选择。",
-                "Downloads may be personal or still needed; select them manually only after review."
             )
         case "cleanup.rule.duplicateInstalledApps.title":
             L10n.text("重复安装的应用副本", "Duplicate App Copies")

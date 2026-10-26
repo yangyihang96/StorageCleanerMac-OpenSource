@@ -13,6 +13,37 @@ final class MacMiniModePackagingTests: XCTestCase {
         XCTAssertNil(plist["LaunchEvents"])
     }
 
+    /// D102 L3: the Beta build writes its helper's launchd file from a heredoc;
+    /// filled in with the Beta label it is the release file with only the label
+    /// changed, so the Beta helper also starts at boot. Every build reads both
+    /// keys back from the bundle.
+    func testBetaHelperLaunchesLikeTheReleaseHelper() throws {
+        let release = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: Data(contentsOf: root.appendingPathComponent("Resources/com.local.StorageCleanerMac.FanControlHelper.plist")),
+            options: [], format: nil) as? [String: Any])
+        let script = try String(contentsOf: root.appendingPathComponent("script/build_and_run.sh"), encoding: .utf8)
+        let heredoc = try XCTUnwrap(script.range(of: "cat >\"$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST\" <<PLIST\n"))
+        let end = try XCTUnwrap(script.range(of: "\nPLIST\n", range: heredoc.upperBound..<script.endIndex))
+        let label = "com.local.StorageCleanerMac.beta.FanControlHelper"
+        let text = script[heredoc.upperBound..<end.lowerBound]
+            .replacingOccurrences(of: "$FAN_HELPER_LABEL", with: label)
+            .replacingOccurrences(of: "$FAN_HELPER_NAME", with: "StorageCleanerFanControlHelper")
+        XCTAssertFalse(text.contains("$"), text)
+        var beta = try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(text.utf8), options: [], format: nil)
+            as? [String: Any])
+        XCTAssertEqual(beta["Label"] as? String, label)
+        XCTAssertEqual(beta["MachServices"] as? [String: Bool], [label: true])
+        beta["Label"] = release["Label"]
+        beta["MachServices"] = release["MachServices"]
+        XCTAssertEqual(NSDictionary(dictionary: beta), NSDictionary(dictionary: release))
+
+        let check = try r2SourceDeclaration("verify_sparkle_bundle()", in: script)
+        let file = "\"$APP_LAUNCH_DAEMONS/$FAN_HELPER_PLIST\")\""
+        XCTAssertTrue(check.contains("[ \"$(/usr/libexec/PlistBuddy -c 'Print :RunAtLoad' " + file + " = \"true\" ]"))
+        XCTAssertTrue(check.contains("[ \"$(/usr/libexec/PlistBuddy -c 'Print :KeepAlive:SuccessfulExit' " + file + " = \"false\" ]"))
+        XCTAssertEqual(SwiftSourceScanning.occurrences(of: "\nverify_sparkle_bundle\n", in: script), 1)
+    }
+
     // Wiring checks only. Lifecycle behavior is exercised by the shared
     // policy/engine tests, including connected idle, termination and removal.
     func testHelperLifecycleAndCommandBoundaryUseSharedPolicy() throws {

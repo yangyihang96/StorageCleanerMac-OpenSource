@@ -107,8 +107,16 @@ final class ControlPaletteTests: XCTestCase {
         XCTAssertTrue(routes.contains(".fixedSize(horizontal: false, vertical: true)"))
         let palette = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift")
         XCTAssertTrue(palette.contains("controlsEnabled: fanControl.helperState == .enabled && !fanControl.isDataOnlyFixture"))
-        XCTAssertTrue(palette.contains("if fanControl.isDataOnlyFixture { return L10n.text(\"FIXTURE"))
-        XCTAssertTrue(palette.contains("draft.selectMode(mode)"))
+        // D152: a fixture's toggles are off-limits behind the preview note and
+        // its Sync row and sliders are disabled; the toggles call the
+        // coordinator, whose fixture boundary rejects every write (were the
+        // draft's "FIXTURE · 仅预览…" reason and `draft.selectMode(mode)`).
+        XCTAssertFalse(palette.contains("FIXTURE"))
+        XCTAssertTrue(palette.contains("if isDataOnlyFixture { return previewNote }"))
+        XCTAssertFalse(palette.contains("draft.selectMode(mode)"))
+        XCTAssertTrue(palette.contains("await fanControl.selectMode(mode)"))
+        XCTAssertTrue(palette.contains("FanManualSliderList(fanControl: fanControl, readings: telemetry.readings)\n                .disabled(fanControl.isDataOnlyFixture)"))
+        XCTAssertTrue(factory.contains("coordinator.selectedMode = mode"), "D152: the fixture shows its mode without selecting it")
         let editor = try source("Sources/StorageCleanerMac/Views/FanCurveEditor.swift")
         XCTAssertTrue(editor.contains("&& !fanControl.isDataOnlyFixture"))
     }
@@ -126,6 +134,11 @@ final class ControlPaletteTests: XCTestCase {
     }
     #endif
 
+    /// D152: the manual section shows iStat's sliders and no readback (was
+    /// `FanManualSliderList.actualRPM`: the average 1_200 rpm of both fans for
+    /// the shared slider, 0 for the stopped fan, 2_400, nil for a fan that is
+    /// not there). Every fan, the stopped one too, gets its own slider under
+    /// its name when not synchronized; one fan always uses the shared slider.
     func testManualReadbackUsesEveryFanForAverageAndPreservesStoppedFan() {
         let telemetry = FanTelemetryState.resolve(snapshot: SystemMonitorSnapshot(
             generatedAt: Date(timeIntervalSince1970: 1),
@@ -136,68 +149,111 @@ final class ControlPaletteTests: XCTestCase {
                 SystemFanReading(index: 1, actualRPM: 2_400, minimumRPM: 1_400, maximumRPM: 6_000, targetRPM: nil),
             ]
         ))
-        XCTAssertEqual(FanManualSliderList.actualRPM(fanID: nil, telemetry: telemetry), 1_200)
-        XCTAssertEqual(FanManualSliderList.actualRPM(fanID: 0, telemetry: telemetry), 0)
-        XCTAssertEqual(FanManualSliderList.actualRPM(fanID: 1, telemetry: telemetry), 2_400)
-        XCTAssertNil(FanManualSliderList.actualRPM(fanID: 2, telemetry: telemetry))
+        let shared = [FanManualSliderList.Slider(fanID: nil, title: L10n.text("风扇", "Fans"))]
+        XCTAssertEqual(FanManualSliderList.sliders(readings: telemetry.readings, synchronizes: false), [
+            FanManualSliderList.Slider(fanID: 0, title: telemetry.readings[0].displayName),
+            FanManualSliderList.Slider(fanID: 1, title: telemetry.readings[1].displayName),
+        ])
+        XCTAssertEqual(FanManualSliderList.sliders(readings: telemetry.readings, synchronizes: true), shared)
+        XCTAssertEqual(FanManualSliderList.sliders(readings: [telemetry.readings[1]], synchronizes: false), shared)
+        XCTAssertEqual(FanManualSliderList.sliders(readings: [], synchronizes: false), [])
+        XCTAssertEqual(FanManualSliderList.sliders(readings: [telemetry.readings[0], telemetry.readings[0]],
+                                                   synchronizes: false), [], "A fan listed twice shows no sliders")
+        XCTAssertTrue(FanManualSliderList.isAvailable(for: telemetry))
+        XCTAssertEqual(telemetry.readings.map(\.actualRPM), [0, 2_400], "The stopped fan's readback stays exact")
+        XCTAssertEqual(FanManualSliderList.Slider(fanID: nil, title: "").id, -1)
+        XCTAssertEqual(FanManualSliderList.Slider(fanID: 1, title: "").id, 1)
     }
 
+    /// D152: no draft, Apply or Cancel. Outside manual mode the sliders and
+    /// Sync only store their values, as iStat saves them, and nothing is
+    /// sent or registered (was a draft whose mode, slider, sync and cancel
+    /// never submitted and left the preferences unchanged).
     func testFanDraftSelectionSliderSyncPresetAndCancelNeverSubmit() throws {
         let suite = TestPreferenceDomain.makeSuite()
         let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
         defer { TestPreferenceDomain.cleanup(suiteName: suite) }
         var requests: [FanControlHelperRequest] = []
         var registrations = 0
-        let coordinator = FanControlCoordinator(
-            defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
-            requestSender: { request in requests.append(request); throw CancellationError() },
-            legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
-            serviceStatusProvider: { .enabled }, serviceRegistrar: { registrations += 1 }
-        )
+        func makeCoordinator() -> FanControlCoordinator {
+            FanControlCoordinator(
+                defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
+                requestSender: { request in requests.append(request); throw CancellationError() },
+                legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
+                serviceStatusProvider: { .enabled }, serviceRegistrar: { registrations += 1 }
+            )
+        }
+        let coordinator = makeCoordinator()
         defer { coordinator.disconnectForTermination() }
         let telemetry = draftTelemetry()
         let originalReadings = telemetry.readings
         let persistedBefore = defaults.dictionaryRepresentation().mapValues { String(describing: $0) }
-        var draft = FanControlDraft(telemetry: telemetry, observedMode: nil, synchronizesFans: true)
-        let original = draft.configuration
-        draft.selectMode(.manual)
-        for percentage in 0...100 { draft.setPercentage(Double(percentage), fanID: nil) }
-        draft.setSynchronized(false)
-        draft.setTargetRPM(1_750, fanID: 0, telemetry: telemetry)
-        draft.setPercentage(75, fanID: 1)
-        draft.setSynchronized(true)
-        draft.selectMode(.customCurve)
-        draft.selectMode(.systemAutomatic)
-        XCTAssertTrue(draft.hasChanges)
+        XCTAssertEqual(coordinator.selectedMode, .systemAutomatic)
+        XCTAssertTrue(coordinator.synchronizesManualFans, "Sync starts on, as iStat's default")
+        for percentage in 0...100 { coordinator.updateManualPercentage(Double(percentage)) }
+        coordinator.commitManualPercentage(40)
+        coordinator.setManualFansSynchronized(false)
+        coordinator.commitManualPercentage(25, fanID: 0)
+        coordinator.updateManualPercentage(75, fanID: 1)
+        coordinator.setManualFansSynchronized(true)
+        XCTAssertFalse(coordinator.hasPendingManualCommit)
+        XCTAssertEqual(coordinator.selectedMode, .systemAutomatic)
         XCTAssertNil(coordinator.observedMode)
         XCTAssertNil(coordinator.requestedMode)
         XCTAssertEqual(telemetry.readings, originalReadings)
-        draft.cancel()
-        XCTAssertEqual(draft.configuration, original)
-        XCTAssertFalse(draft.hasChanges)
+        XCTAssertEqual(coordinator.manualPercentage(for: nil), 40, accuracy: 0.000_1)
+        XCTAssertEqual(coordinator.manualPercentage(for: 0), 40, accuracy: 0.000_1, "Synchronized fans show the shared value")
+        coordinator.setManualFansSynchronized(false)
+        XCTAssertEqual(coordinator.manualPercentage(for: 0), 25, accuracy: 0.000_1)
+        XCTAssertEqual(coordinator.manualPercentage(for: 1), 75, accuracy: 0.000_1)
         XCTAssertTrue(requests.isEmpty)
         XCTAssertEqual(registrations, 0)
-        XCTAssertEqual(defaults.dictionaryRepresentation().mapValues { String(describing: $0) }, persistedBefore)
+        // D152: the values are settings (was: the preferences unchanged).
+        let persistedAfter = defaults.dictionaryRepresentation().mapValues { String(describing: $0) }
+        let changedKeys = Set(persistedAfter.keys.filter { persistedAfter[$0] != persistedBefore[$0] })
+            .union(persistedBefore.keys.filter { persistedAfter[$0] == nil })
+        XCTAssertEqual(changedKeys, [
+            FanControlPreferences.manualFractionKey,
+            FanControlPreferences.manualSyncKey,
+            FanControlPreferences.manualFractionByFanKey,
+        ])
+        let restored = makeCoordinator()
+        defer { restored.disconnectForTermination() }
+        XCTAssertFalse(restored.synchronizesManualFans)
+        XCTAssertEqual(restored.manualPercentage(for: nil), 40, accuracy: 0.000_1)
+        XCTAssertEqual(restored.manualPercentage(for: 0), 25, accuracy: 0.000_1)
+        XCTAssertEqual(restored.manualPercentage(for: 1), 75, accuracy: 0.000_1)
+        XCTAssertEqual(restored.selectedMode, .systemAutomatic, "A new session starts automatic")
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(registrations, 0)
     }
 
+    /// D152: the sliders' values map to each fan's RPM in the planner (was
+    /// the draft's 25 % and 50 % for 1_750 and 4_000 rpm, its clamps to
+    /// 1_000 and 4_000 rpm and its readback match). A fan without its own
+    /// value takes the shared one; unknown ranges or a fan listed twice
+    /// leave the speed-setting toggles off-limits and the planner empty.
     func testManualDraftMapsPerFanRPMAndRejectsUnknownRanges() throws {
         let telemetry = draftTelemetry()
-        var draft = FanControlDraft(telemetry: telemetry, observedMode: nil, synchronizesFans: false)
-        draft.selectMode(.manual)
-        draft.setTargetRPM(1_750, fanID: 0, telemetry: telemetry)
-        draft.setTargetRPM(4_000, fanID: 1, telemetry: telemetry)
-        XCTAssertEqual(draft.percentage(for: 0), 25)
-        XCTAssertEqual(draft.percentage(for: 1), 50)
-        XCTAssertEqual(draft.targetRPM(fanID: 0, telemetry: telemetry), 1_750)
-        XCTAssertEqual(draft.targetRPM(fanID: 1, telemetry: telemetry), 4_000)
-        XCTAssertEqual(FanManualSliderList.actualRPM(fanID: 0, telemetry: telemetry), 0)
-        draft.setTargetRPM(Int.min, fanID: 0, telemetry: telemetry)
-        XCTAssertEqual(draft.targetRPM(fanID: 0, telemetry: telemetry), 1_000)
-        draft.setTargetRPM(Int.max, fanID: 0, telemetry: telemetry)
-        XCTAssertEqual(draft.targetRPM(fanID: 0, telemetry: telemetry), 4_000)
-        XCTAssertFalse(draft.matchesReadback(mode: nil, fractions: [0: 1, 1: 0.5]))
-        XCTAssertFalse(draft.matchesReadback(mode: .manual, fractions: [0: 0.5, 1: 0.5]))
-        XCTAssertTrue(draft.matchesReadback(mode: .manual, fractions: [0: 1, 1: 0.5]))
+        func plan(_ readings: [SystemFanReading], shared: Double, byFan: [Int: Double],
+                  synchronized: Bool) -> FanControlPlan? {
+            FanControlPlanner.plan(
+                mode: .manual, fanSet: .balanced, manualFraction: shared, manualFractionByFan: byFan,
+                synchronizesManualFans: synchronized, curveLowTemperature: 48, curveHighTemperature: 86,
+                thermalState: .nominal, fanReadings: readings, temperatureReadings: nil)
+        }
+        XCTAssertEqual(plan(telemetry.readings, shared: 0.7, byFan: [0: 0.25, 1: 0.5], synchronized: false)?
+            .targetRPMByFan, [0: 1_750, 1: 4_000])
+        XCTAssertEqual(plan(telemetry.readings, shared: 0.7, byFan: [0: 0.25], synchronized: false)?
+            .targetRPMByFan, [0: 1_750, 1: 4_800], "A fan without its own value takes the shared one")
+        XCTAssertEqual(plan(telemetry.readings, shared: 0.5, byFan: [0: 0.25, 1: 1], synchronized: true)?
+            .targetRPMByFan, [0: 2_500, 1: 4_000], "Synchronized fans take the shared value")
+        XCTAssertEqual(FanControlPlanner.targetRPM(minimumRPM: 1_000, maximumRPM: 4_000, fraction: -1), 1_000)
+        XCTAssertEqual(FanControlPlanner.targetRPM(minimumRPM: 1_000, maximumRPM: 4_000, fraction: 2), 4_000)
+        XCTAssertEqual(FanControlPlanner.targetRPM(minimumRPM: 1_000, maximumRPM: 4_000, fraction: .nan), 1_000)
+        XCTAssertTrue(FanManualSliderList.isAvailable(for: telemetry))
+        XCTAssertNil(FanControlPaletteView.disabledReason(mode: .manual, telemetry: telemetry, helperState: .enabled,
+            thermalState: .nominal, isDataOnlyFixture: false, curveIsAvailable: true))
         for readings in [
             [SystemFanReading(index: 0, actualRPM: 0, minimumRPM: nil, maximumRPM: nil, targetRPM: nil)],
             [telemetry.readings[0], telemetry.readings[0]],
@@ -205,12 +261,21 @@ final class ControlPaletteTests: XCTestCase {
             let unavailable = FanTelemetryState.resolve(snapshot: SystemMonitorSnapshot(
                 generatedAt: Date(), metrics: [], networkThroughput: nil, fanReadings: readings
             ))
-            var draft = FanControlDraft(telemetry: unavailable, observedMode: nil, synchronizesFans: true)
-            draft.setPercentage(100, fanID: nil)
-            XCTAssertNil(draft.targetRPM(fanID: nil, telemetry: unavailable))
+            XCTAssertFalse(FanManualSliderList.isAvailable(for: unavailable))
+            XCTAssertNil(plan(unavailable.readings, shared: 1, byFan: [:], synchronized: true))
+            for mode in [GeekFanControlMode.customCurve, .manual, .maximum] {
+                XCTAssertEqual(FanControlPaletteView.disabledReason(mode: mode, telemetry: unavailable,
+                    helperState: .enabled, thermalState: .nominal, isDataOnlyFixture: false, curveIsAvailable: true),
+                    L10n.text("风扇量程不可用 · 仅监测", "Fan Range Unavailable · Monitoring Only"), "\(mode)")
+            }
+            XCTAssertNil(FanControlPaletteView.disabledReason(mode: .systemAutomatic, telemetry: unavailable,
+                helperState: .enabled, thermalState: .nominal, isDataOnlyFixture: false, curveIsAvailable: true))
         }
     }
 
+    /// D152: a value stored outside manual mode sends nothing; the manual
+    /// toggle writes it through the existing verified chain and keeps it
+    /// (was: only the draft's explicit submit of 2_500 rpm wrote).
     func testManualDraftOnlyExplicitSubmitUsesTheExistingVerifiedRequestChain() async throws {
         let suite = TestPreferenceDomain.makeSuite()
         let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
@@ -225,26 +290,32 @@ final class ControlPaletteTests: XCTestCase {
             },
             legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
             serviceStatusProvider: { .enabled },
-            serviceRegistrar: { XCTFail("Explicit draft submission must not register Helper") }
+            serviceRegistrar: { XCTFail("The manual toggle must not register Helper") }
         )
         defer { coordinator.disconnectForTermination() }
         let snapshot = SystemMonitorSnapshot(generatedAt: Date(), metrics: [], networkThroughput: nil,
             fanReadings: [SystemFanReading(index: 0, actualRPM: 2_000, minimumRPM: 1_000, maximumRPM: 4_000, targetRPM: 2_000)])
         coordinator.process(snapshot: snapshot)
-        let telemetry = FanTelemetryState.resolve(snapshot: snapshot)
-        var draft = FanControlDraft(telemetry: telemetry, observedMode: nil, synchronizesFans: true)
-        draft.selectMode(.manual)
-        draft.setTargetRPM(2_500, fanID: nil, telemetry: telemetry)
+        coordinator.updateManualPercentage(80)
+        coordinator.commitManualPercentage(50)
         XCTAssertTrue(requests.isEmpty)
-        let submitted = await draft.submit(to: coordinator, telemetry: telemetry, thermalState: .nominal)
-        XCTAssertTrue(submitted)
+        XCTAssertFalse(coordinator.hasPendingManualCommit)
+        await coordinator.selectMode(.manual)
         let confirmed = await eventually { coordinator.observedMode == .manual && !coordinator.isApplying }
         XCTAssertTrue(confirmed)
         XCTAssertTrue(requests.contains { $0.operation == .apply })
         XCTAssertTrue(requests.allSatisfy { [.ping, .apply, .renewFanControlLease].contains($0.operation) })
+        XCTAssertEqual(requests.first(where: { $0.operation == .apply })?.targetRPMByFan, [0: 2_500])
+        XCTAssertEqual(coordinator.manualPercentage(for: nil), 50, accuracy: 0.000_1,
+            "The stored value is written, not replaced by the current speed")
         XCTAssertEqual(coordinator.latestFanReadings.first?.actualRPM, 2_000)
     }
 
+    /// D152: Sync writes at once in manual mode. With one fan the targets
+    /// stay the same, so the write renews the lease; while its reply is
+    /// pending the coordinator stays busy, and after a success or a failure
+    /// the stored value stays (was a same-RPM draft that stayed pending
+    /// until the readback settled and survived a failure).
     func testSameRPMDraftWaitsForSettledReadbackAndSurvivesFailure() async throws {
         for succeeds in [false, true] {
             let suite = TestPreferenceDomain.makeSuite()
@@ -266,7 +337,7 @@ final class ControlPaletteTests: XCTestCase {
                 },
                 legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
                 serviceStatusProvider: { .enabled },
-                serviceRegistrar: { XCTFail("A draft confirmation test must not register Helper") }
+                serviceRegistrar: { XCTFail("A Sync write test must not register Helper") }
             )
             defer { coordinator.disconnectForTermination() }
             let snapshot = SystemMonitorSnapshot(generatedAt: now, metrics: [], networkThroughput: nil,
@@ -277,30 +348,18 @@ final class ControlPaletteTests: XCTestCase {
             coordinator.commitManualPercentage(50)
             let initiallyConfirmed = await eventually { coordinator.observedMode == .manual && !coordinator.isApplying }
             XCTAssertTrue(initiallyConfirmed)
-            let telemetry = FanTelemetryState.resolve(snapshot: snapshot)
-            var draft = FanControlDraft(telemetry: telemetry, observedMode: coordinator.observedMode,
-                synchronizesFans: coordinator.synchronizesManualFans,
-                confirmedFractions: coordinator.confirmedManualFractionByFan)
-            draft.setSynchronized(!draft.synchronizesFans)
-            let submitted = draft.configuration
-            XCTAssertTrue(draft.hasChanges)
-            XCTAssertTrue(draft.matchesReadback(mode: coordinator.observedMode,
-                fractions: coordinator.confirmedManualFractionByFan), "Targets are deliberately identical to the old readback")
-            XCTAssertFalse(FanControlPaletteView.confirmSubmittedDraft(&draft,
-                submittedConfiguration: submitted, isSubmitting: true, fanControl: coordinator))
 
             // Renew the same targets through the injected transport. Its reply
             // remains pending while the previous confirmed mode/targets remain.
             now.addTimeInterval(FanControlSafetyPolicy.leaseRenewalInterval + 0.1)
             holdsWrites.value = true
-            let accepted = await draft.submit(to: coordinator, telemetry: telemetry, thermalState: .nominal)
-            XCTAssertTrue(accepted)
+            coordinator.setManualFansSynchronized(!coordinator.synchronizesManualFans)
             let waiting = await eventually { pending != nil }
             XCTAssertTrue(waiting)
             XCTAssertTrue(coordinator.isApplying)
-            XCTAssertFalse(FanControlPaletteView.confirmSubmittedDraft(&draft,
-                submittedConfiguration: submitted, isSubmitting: false, fanControl: coordinator))
-            XCTAssertTrue(draft.hasChanges)
+            XCTAssertFalse(coordinator.hasPendingManualCommit)
+            XCTAssertEqual(pending?.0.operation, .renewFanControlLease)
+            XCTAssertEqual(coordinator.observedMode, .manual)
             let reply = try XCTUnwrap(pending)
             pending = nil
             holdsWrites.value = false
@@ -309,29 +368,48 @@ final class ControlPaletteTests: XCTestCase {
                 appliedTargetRPMByFan: succeeds ? [0: 2_500] : [:]))
             let settled = await eventually { !coordinator.isApplying && !coordinator.isSwitchingMode }
             XCTAssertTrue(settled)
-            XCTAssertEqual(FanControlPaletteView.confirmSubmittedDraft(&draft,
-                submittedConfiguration: submitted, isSubmitting: false, fanControl: coordinator), succeeds)
-            XCTAssertEqual(draft.hasChanges, !succeeds)
+            XCTAssertEqual(coordinator.manualPercentage(for: nil), 50, accuracy: 0.000_1, "The stored value survives the reply")
             XCTAssertEqual(coordinator.latestFanReadings.first?.actualRPM, succeeds ? 2_500 : nil)
         }
     }
 
+    /// D152: the toggles and sliders share one gate (was the draft's
+    /// submit): a fixture shows the preview note and its coordinator stores
+    /// and writes nothing; a helper that is not set up names its next step;
+    /// thermal protection leaves only Automatic.
     func testDraftSubmissionRejectsFixtureUnapprovedAndThermallyProtectedStates() async throws {
         let telemetry = draftTelemetry()
+        func reason(_ mode: GeekFanControlMode, helperState: HelperState,
+                    thermalState: SystemThermalState = .nominal, fixture: Bool = false) -> String? {
+            FanControlPaletteView.disabledReason(mode: mode, telemetry: telemetry, helperState: helperState,
+                thermalState: thermalState, isDataOnlyFixture: fixture, curveIsAvailable: true)
+        }
         #if DEBUG || STORAGE_CLEANER_BETA
-        for state in [MiniWindowDemoData.HardwareControlDemoState.fanAutomatic, .fanReadOnly, .helperNotRegistered, .awaitingSystemApproval, .connectionInterrupted] {
+        for state in [MiniWindowDemoData.HardwareControlDemoState.fanAutomatic, .fanReadOnly, .helperNotRegistered,
+                      .awaitingSystemApproval, .connectionInterrupted, .dualFanManual] {
             let suite = TestPreferenceDomain.makeSuite()
             let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
             defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
             let coordinator = FanControlCoordinator.makeReadOnlyFixture(defaults: defaults, profile: profile, snapshot: fixtureSnapshot(profile))
-            var draft = FanControlDraft(telemetry: telemetry, observedMode: profile.observedMode, synchronizesFans: true)
-            draft.selectMode(.manual)
-            draft.setPercentage(75, fanID: nil)
-            let submitted = await draft.submit(to: coordinator, telemetry: telemetry, thermalState: .nominal)
-            XCTAssertFalse(submitted)
+            let selected = coordinator.selectedMode
+            let percentage = coordinator.manualPercentage(for: nil)
+            let synchronized = coordinator.synchronizesManualFans
+            for mode in GeekFanControlMode.allCases {
+                XCTAssertEqual(reason(mode, helperState: coordinator.helperState, fixture: coordinator.isDataOnlyFixture),
+                               FanControlPaletteView.previewNote, "\(state) \(mode)")
+            }
+            await coordinator.selectMode(.manual)
+            coordinator.updateManualPercentage(75)
+            coordinator.commitManualPercentage(75, fanID: 0)
+            coordinator.setManualFansSynchronized(!synchronized)
             XCTAssertEqual(coordinator.observedMode, profile.observedMode)
+            XCTAssertEqual(coordinator.selectedMode, selected)
             XCTAssertNil(coordinator.requestedMode)
+            XCTAssertFalse(coordinator.hasPendingManualCommit)
+            XCTAssertEqual(coordinator.manualPercentage(for: nil), percentage, accuracy: 0.000_1)
+            XCTAssertEqual(coordinator.synchronizesManualFans, synchronized)
+            XCTAssertFalse(coordinator.isApplying)
         }
         #endif
         for helper in [FanControlHelperStatus.notRegistered, .requiresApproval, .enabled] {
@@ -340,16 +418,20 @@ final class ControlPaletteTests: XCTestCase {
             defer { TestPreferenceDomain.cleanup(suiteName: suite) }
             let coordinator = FanControlCoordinator(defaults: defaults, helperStatusOverride: helper,
                 isHelperReachable: helper == .enabled,
-                requestSender: { _ in XCTFail("Blocked drafts cannot reach transport"); throw CancellationError() },
+                requestSender: { _ in XCTFail("Blocked toggles cannot reach transport"); throw CancellationError() },
                 legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
                 serviceStatusProvider: { .notRegistered },
-                serviceRegistrar: { XCTFail("Blocked drafts cannot register Helper") })
+                serviceRegistrar: { XCTFail("Blocked toggles cannot register Helper") })
             defer { coordinator.disconnectForTermination() }
-            var draft = FanControlDraft(telemetry: telemetry, observedMode: nil, synchronizesFans: true)
-            draft.selectMode(.manual)
-            let submitted = await draft.submit(to: coordinator, telemetry: telemetry,
-                thermalState: helper == .enabled ? .critical : .nominal)
-            XCTAssertFalse(submitted)
+            let thermalState: SystemThermalState = helper == .enabled ? .critical : .nominal
+            for mode in [GeekFanControlMode.customCurve, .manual, .maximum] {
+                XCTAssertEqual(reason(mode, helperState: coordinator.helperState, thermalState: thermalState),
+                    helper == .enabled
+                        ? L10n.text("热保护中，只能使用自动控制", "Thermal protection: automatic control only")
+                        : FanControlSetupPresentation.reason(coordinator.helperState), "\(helper) \(mode)")
+            }
+            XCTAssertEqual(reason(.systemAutomatic, helperState: coordinator.helperState, thermalState: thermalState),
+                helper == .enabled ? nil : FanControlSetupPresentation.reason(coordinator.helperState))
         }
     }
 
@@ -376,7 +458,8 @@ final class ControlPaletteTests: XCTestCase {
 
         let nearEdge = ControlPalettePlacement.frame(
             anchor: NSRect(x: 2, y: 2, width: 20, height: 20),
-            size: ControlPaletteMetrics.fanCurveSize,
+            // D152: the removed curve-editor page's size (was ControlPaletteMetrics.fanCurveSize).
+            size: CGSize(width: 354, height: 410),
             visibleFrame: visible
         )
         XCTAssertTrue(visible.contains(nearEdge))
@@ -628,19 +711,20 @@ final class ControlPaletteTests: XCTestCase {
             XCTAssertEqual(coordinator.panel.frame, stableFrame, "Subpixel measurement noise must not move the window")
         }
 
-        coordinator.state.showFanCurveEditor()
+        // D152: no curve-editor page (F6); a taller page keeps the fan width
+        // (was showFanCurveEditor() measuring 650 at fanCurveSize's width,
+        // then showFanControls() back to 248).
         layout.height = 650
-        let editorMeasured = await eventually {
+        let tallMeasured = await eventually {
             host.layoutSubtreeIfNeeded()
             return coordinator.state.measuredContentHeight == 650
                 && coordinator.panel.frame.height == 650
-                && coordinator.panel.frame.width == ControlPaletteMetrics.fanCurveSize.width
+                && coordinator.panel.frame.width == ControlPaletteMetrics.fanSize.width
         }
-        XCTAssertTrue(editorMeasured)
+        XCTAssertTrue(tallMeasured)
         XCTAssertTrue(visibleFrame.insetBy(dx: 6, dy: 6).contains(coordinator.panel.frame))
         XCTAssertEqual(coordinator.presentationCount, 1, "Changing content reuses the existing palette")
 
-        coordinator.state.showFanControls()
         layout.height = 248
         let controlsMeasured = await eventually {
             host.layoutSubtreeIfNeeded()
@@ -695,6 +779,14 @@ final class ControlPaletteTests: XCTestCase {
     }
 
     #if DEBUG || STORAGE_CLEANER_BETA
+    /// D152: the switches show the selection as iStat's do: automatic until a
+    /// toggle asks for another mode, which shows at once; a fixed fan set
+    /// shows as manual. The confirmed readback stays on the sensors page's
+    /// entry (was the compact automatic summary, kept only for a confirmed
+    /// automatic readback without a draft, a busy state or the expansion,
+    /// and a cancelled draft). A fixture's sliders and Sync change nothing;
+    /// the page grows with a second fan's Sync row and shrinks back, hidden
+    /// and without a write.
     func testConfirmedAutomaticUsesShortNativeLayoutAndCancelledDraftNeverWrites() async throws {
         let suite = TestPreferenceDomain.makeSuite()
         let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
@@ -703,30 +795,17 @@ final class ControlPaletteTests: XCTestCase {
         let snapshot = fixtureSnapshot(profile)
         let fanControl = FanControlCoordinator.makeReadOnlyFixture(
             defaults: defaults, profile: profile, snapshot: snapshot)
-        let telemetry = FanTelemetryState.resolve(snapshot: snapshot)
-        var draft = FanControlDraft(telemetry: telemetry, observedMode: fanControl.observedMode,
-            synchronizesFans: fanControl.synchronizesManualFans)
-        let original = draft.configuration
-        func usesSummary(observedMode: GeekFanControlMode? = .systemAutomatic,
-            expanded: Bool = false, busy: Bool = false, submitted: Bool = false,
-            otherPendingChanges: Bool = false) -> Bool {
-            FanControlPaletteView.usesCompactAutomaticLayout(isExpanded: expanded,
-                observedMode: observedMode, draft: draft,
-                hasPendingChanges: draft.hasChanges || otherPendingChanges,
-                isBusy: busy, hasSubmittedDraft: submitted)
-        }
-        XCTAssertTrue(usesSummary())
-        XCTAssertFalse(usesSummary(observedMode: nil), "Unknown must never look like confirmed automatic")
-        XCTAssertFalse(usesSummary(expanded: true))
-        XCTAssertFalse(usesSummary(busy: true))
-        XCTAssertFalse(usesSummary(submitted: true))
-        XCTAssertFalse(usesSummary(otherPendingChanges: true))
-        draft.selectMode(.manual)
-        draft.setPercentage(75, fanID: nil)
-        XCTAssertFalse(usesSummary(), "A mode or target draft must keep its controls visible")
-        draft.cancel()
-        XCTAssertEqual(draft.configuration, original)
-        XCTAssertTrue(usesSummary())
+        XCTAssertEqual(FanControlPaletteView.displayedMode(requested: fanControl.requestedMode,
+                                                           selected: fanControl.selectedMode), .systemAutomatic)
+        XCTAssertEqual(FanControlPaletteView.displayedMode(requested: nil, selected: .systemAutomatic), .systemAutomatic)
+        XCTAssertEqual(FanControlPaletteView.displayedMode(requested: .manual, selected: .systemAutomatic), .manual,
+                       "A requested mode shows at once")
+        XCTAssertEqual(FanControlPaletteView.displayedMode(requested: .systemAutomatic, selected: .manual), .systemAutomatic)
+        XCTAssertEqual(FanControlPaletteView.displayedMode(requested: nil, selected: .fanSet), .manual)
+        fanControl.commitManualPercentage(75)
+        fanControl.setManualFansSynchronized(false)
+        XCTAssertEqual(fanControl.manualPercentage(for: nil), FanControlPreferences.defaultManualFraction * 100, accuracy: 0.000_1)
+        XCTAssertTrue(fanControl.synchronizesManualFans)
         XCTAssertNil(fanControl.requestedMode)
         XCTAssertFalse(fanControl.isApplying)
         XCTAssertEqual(fanControl.latestFanReadings, snapshot.fanReadings)
@@ -754,15 +833,18 @@ final class ControlPaletteTests: XCTestCase {
         }
         let measured = await eventually { updateMeasurement() }
         XCTAssertTrue(measured)
-        let compactHeight = coordinator.panel.frame.height
-        coordinator.state.setFanControlsExpanded(true)
-        let expanded = await eventually { updateMeasurement() && coordinator.panel.frame.height > compactHeight }
-        XCTAssertTrue(expanded, "Expanded controls must remeasure to fit the larger gauges and temperature source")
+        let singleFanHeight = coordinator.panel.frame.height
+        XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
+        // D152: a second fan adds the Sync row (was setFanControlsExpanded(true)).
+        store.menuBarMonitorState.update(fixtureSnapshot(MiniWindowDemoData.hardwareControlProfile(for: .dualFan)))
+        let grown = await eventually { updateMeasurement() && coordinator.panel.frame.height > singleFanHeight }
+        XCTAssertTrue(grown, "The Sync row must remeasure the page")
         XCTAssertTrue(visible.insetBy(dx: 6, dy: 6).contains(coordinator.panel.frame))
         XCTAssertEqual(coordinator.panel.frame.maxX, parent.frame.minX - ControlPaletteMetrics.gap, accuracy: 0.001)
-        coordinator.state.setFanControlsExpanded(false)
-        let collapsed = await eventually { updateMeasurement() && abs(coordinator.panel.frame.height - compactHeight) < 0.5 }
-        XCTAssertTrue(collapsed)
+        XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
+        store.menuBarMonitorState.update(snapshot)
+        let shrunk = await eventually { updateMeasurement() && abs(coordinator.panel.frame.height - singleFanHeight) < 0.5 }
+        XCTAssertTrue(shrunk)
         XCTAssertEqual(coordinator.presentationCount, 1)
         XCTAssertFalse(coordinator.panel.isVisible, "Native measurement stays hidden and must not operate the app")
         XCTAssertEqual(fanControl.observedMode, .systemAutomatic)
@@ -771,6 +853,11 @@ final class ControlPaletteTests: XCTestCase {
     }
     #endif
 
+    /// D152: the production root measures the sections in the hidden native
+    /// panel at the fan width; turning Sync off adds a slider per fan and
+    /// turning it on again removes them, in automatic mode without a write
+    /// (was compact → expanded details → the curve editor at its own width
+    /// → compact, with one fan).
     func testProductionRootMeasuresFanControlsAndEditorInsideHiddenNativePanel() async throws {
         let suite = TestPreferenceDomain.makeSuite()
         let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
@@ -791,10 +878,11 @@ final class ControlPaletteTests: XCTestCase {
         let store = try ScanStore.makeForTests(for: self, cleanupPreferences: defaults, cleanReportLoader: { [] })
         let snapshot = SystemMonitorSnapshot(
             generatedAt: Date(), metrics: [], networkThroughput: nil,
-            fanReadings: [SystemFanReading(
-                index: 0, actualRPM: 1_620, minimumRPM: 1_200,
-                maximumRPM: 6_000, targetRPM: nil
-            )],
+            fanReadings: [
+                SystemFanReading(index: 0, actualRPM: 1_620, minimumRPM: 1_200, maximumRPM: 6_000, targetRPM: nil),
+                // D152: a second fan for the Sync row (was one fan).
+                SystemFanReading(index: 1, actualRPM: 1_800, minimumRPM: 1_300, maximumRPM: 6_000, targetRPM: nil),
+            ],
             temperatureReadings: [SystemTemperatureReading(zone: .chip, celsius: 51)]
         )
         store.menuBarMonitorState.update(snapshot)
@@ -830,34 +918,22 @@ final class ControlPaletteTests: XCTestCase {
         }
         XCTAssertTrue(compactMeasured, "The production root must publish its first content measurement")
         let compactHeight = coordinator.panel.frame.height
-        coordinator.state.setFanControlsExpanded(true)
+        XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
+        XCTAssertTrue(fanControl.synchronizesManualFans)
+        fanControl.setManualFansSynchronized(false)
         let expandedMeasured = await eventually {
             host.needsLayout = true
             host.layoutSubtreeIfNeeded()
             coordinator.panel.displayIfNeeded()
-            // Full controls add capability details to the same selected mode;
-            // they no longer stack the manual and curve editors together.
             return coordinator.panel.frame.height > compactHeight + 0.5
                 && coordinator.panel.frame.height == coordinator.state.measuredContentHeight
         }
         XCTAssertTrue(expandedMeasured,
-            "Expanded native measurement must grow: compact=\(compactHeight), expanded=\(coordinator.panel.frame.height)")
+            "Per-fan sliders must grow the native measurement: synced=\(compactHeight), per fan=\(coordinator.panel.frame.height)")
         XCTAssertTrue(bounds.contains(coordinator.panel.frame))
         XCTAssertEqual(coordinator.panel.frame.maxX, parent.frame.minX - ControlPaletteMetrics.gap, accuracy: 0.001)
-
-        coordinator.state.showFanCurveEditor()
-        let editorMeasured = await eventually {
-            host.needsLayout = true
-            host.layoutSubtreeIfNeeded()
-            coordinator.panel.displayIfNeeded()
-            return coordinator.state.measuredContentHeight != nil
-                && coordinator.panel.frame.width == ControlPaletteMetrics.fanCurveSize.width
-                && coordinator.panel.frame.height == coordinator.state.measuredContentHeight
-        }
-        XCTAssertTrue(editorMeasured)
-        XCTAssertTrue(bounds.contains(coordinator.panel.frame))
-        coordinator.state.showFanControls()
-        coordinator.state.setFanControlsExpanded(false)
+        XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
+        fanControl.setManualFansSynchronized(true)
         let collapsed = await eventually {
             host.needsLayout = true
             host.layoutSubtreeIfNeeded()
@@ -868,6 +944,7 @@ final class ControlPaletteTests: XCTestCase {
         XCTAssertTrue(collapsed)
         XCTAssertFalse(coordinator.panel.isVisible)
         XCTAssertNil(fanControl.observedMode, "Layout changes must not confirm a hardware mode")
+        XCTAssertFalse(fanControl.hasPendingManualCommit)
     }
 
     func testOnePanelIsReusedAcrossOneHundredOpenCloseCycles() {
@@ -1473,36 +1550,41 @@ final class ControlPaletteTests: XCTestCase {
         XCTAssertNil(coordinator.observedMode)
     }
 
+    /// D152: iStat labels each slider with its fan's name, so the sliders
+    /// carry the full hardware names (was FanTargetPickerPresentation's short
+    /// "Fan 1" button title beside the full name in its menu).
     func testCompactFanNamesMapShortButtonsToFullHardwareNames() {
         let longNames = [
             "Optical Drive Cooling Fan With An Extended Hardware Name",
             "Power Supply Exhaust Fan With Another Extended Hardware Name",
         ]
         for usesChinese in [false, true] {
-            for (index, name) in longNames.enumerated() {
-                let reading = SystemFanReading(index: index,
+            let readings = longNames.enumerated().map { index, name in
+                SystemFanReading(index: index,
                     identity: usesChinese ? (index == 0 ? .left : .right) : .named(name),
                     actualRPM: 2_800, minimumRPM: 1_200, maximumRPM: 5_400, targetRPM: 2_800)
-                let presentation = FanTargetPickerPresentation(reading: reading, usesChinese: usesChinese)
-                XCTAssertEqual(presentation.fullName, usesChinese ? reading.displayName : longNames[index])
-                XCTAssertEqual(presentation.buttonTitle, usesChinese ? reading.displayName : "Fan \(index + 1)")
+            }
+            let sliders = FanManualSliderList.sliders(readings: readings, synchronizes: false)
+            XCTAssertEqual(sliders.map(\.fanID), [0, 1])
+            XCTAssertEqual(sliders.map(\.title), readings.map(\.displayName))
+            if !usesChinese {
+                XCTAssertEqual(sliders.map(\.title), longNames)
             }
         }
     }
 
+    /// D152: no fan picker; iStat shows a slider per fan under its name
+    /// (was a fixed 80 pt Menu with an inline Picker bound to the selected
+    /// fan, the short title on its button and the full names in the menu).
     func testCompactFanMenuUsesBoundPickerForNativeSelection() throws {
         let viewSource = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/FanControlInlineControls.swift")
-        let menu = try MiniWindowLogicFixtures.section(viewSource,
-            from: "    private func compactTargetFanMenu(reading: SystemFanReading) -> some View {\n",
-            to: "    private func sliderRow(")
-        XCTAssertTrue(menu.contains("return Menu {\n            Picker("))
-        XCTAssertTrue(menu.contains("Picker(L10n.text(\"目标风扇\", \"Target Fan\"), selection: Binding("))
-        XCTAssertTrue(menu.contains("get: { selectedFanID ?? reading.index }"))
-        XCTAssertTrue(menu.contains("set: { selectedFanID = $0 }"))
-        XCTAssertTrue(menu.contains("Text(FanTargetPickerPresentation(reading: fan, usesChinese: L10n.usesChinese).fullName)\n                        .tag(fan.index)"))
-        XCTAssertTrue(menu.contains(".pickerStyle(.inline)"))
-        XCTAssertTrue(menu.contains("Text(presentation.buttonTitle)"))
-        XCTAssertTrue(menu.contains(".frame(width: 80)"))
+        XCTAssertFalse(viewSource.contains("compactTargetFanMenu"))
+        XCTAssertFalse(viewSource.contains("Picker("))
+        XCTAssertFalse(viewSource.contains("FanTargetPickerPresentation"))
+        let list = try MiniWindowLogicFixtures.section(viewSource,
+            from: "struct FanManualSliderList: View {\n", to: "    var body: some View {")
+        XCTAssertTrue(list.contains("if synchronizes || readings.count < 2 {"))
+        XCTAssertTrue(list.contains("return readings.map { Slider(fanID: $0.index, title: $0.displayName) }"))
     }
 
     func testFanLayoutFixturePausesAuxiliaryMonitoringBeforeSuspending() throws {
@@ -1629,10 +1711,15 @@ final class ControlPaletteTests: XCTestCase {
                     defer { TestPreferenceDomain.cleanup(suiteName: suite) }
                     let profile = MiniWindowDemoData.hardwareControlProfile(for: state)
                     let snapshot = fixtureSnapshot(profile)
+                    // D152: a fixture refuses Sync like every write, so the
+                    // stored preference sets it (was setManualFansSynchronized
+                    // on the fixture).
+                    if state == .dualFanManual {
+                        defaults.set(synchronized, forKey: FanControlPreferences.manualSyncKey)
+                    }
                     let fanControl = FanControlCoordinator.makeReadOnlyFixture(
                         defaults: defaults, profile: profile, snapshot: snapshot)
                     if state == .dualFanManual {
-                        fanControl.setManualFansSynchronized(synchronized)
                         XCTAssertEqual(fanControl.synchronizesManualFans, synchronized)
                     }
                     let store = try ScanStore.makeForTests(for: self, cleanupPreferences: defaults, cleanReportLoader: { [] })
@@ -1651,48 +1738,41 @@ final class ControlPaletteTests: XCTestCase {
                     defer { coordinator.teardown() }
                     let host = try XCTUnwrap(coordinator.panel.contentView as? NSHostingView<AnyView>)
                     coordinator.toggle(.fan, anchorScreenRect: NSRect(x: 650, y: 120, width: 280, height: 24), parentWindow: parent)
-                    var compactHeight: CGFloat?
-                    for expanded in [false, true] {
-                        coordinator.state.setFanControlsExpanded(expanded)
-                        let fits = await eventually {
-                            host.layoutSubtreeIfNeeded()
-                            coordinator.panel.displayIfNeeded()
-                            guard let measured = coordinator.state.measuredContentHeight else { return false }
-                            // Expansion publishes asynchronously. An old compact
-                            // measurement matching the old frame is not acceptance.
-                            guard coordinator.state.hasNaturalContentMeasurement,
-                                  !expanded || measured > (compactHeight ?? measured) else { return false }
-                            return abs(coordinator.panel.frame.height - measured) < 0.5
+                    // D152: one page, no expanded details (was the compact
+                    // page, then setFanControlsExpanded(true) growing it).
+                    let fits = await eventually {
+                        host.layoutSubtreeIfNeeded()
+                        coordinator.panel.displayIfNeeded()
+                        guard let measured = coordinator.state.measuredContentHeight,
+                              coordinator.state.hasNaturalContentMeasurement else { return false }
+                        return abs(coordinator.panel.frame.height - measured) < 0.5
+                    }
+                    XCTAssertTrue(fits, "\(state) must fit its measured content")
+                    let height = coordinator.state.measuredContentHeight
+                    if state == .fanAutomatic {
+                        XCTAssertLessThanOrEqual(height ?? .infinity, 230,
+                            "D152: the four sections with one fan stay within the compact automatic budget")
+                    } else if state == .fanManual65 || state == .dualFanManual {
+                        XCTAssertLessThanOrEqual(height ?? .infinity, 280,
+                            "Manual mode should fit its sliders without opening a tall inspector")
+                        if state == .dualFanManual {
+                            XCTAssertLessThanOrEqual(height ?? .infinity, 276,
+                                "Both synchronization states need at least 4 pt of headroom")
                         }
-                        XCTAssertTrue(fits, "\(state) must fit its measured content, expanded=\(expanded)")
-                        if !expanded {
-                            compactHeight = coordinator.state.measuredContentHeight
-                            if state == .fanAutomatic {
-                                XCTAssertLessThanOrEqual(compactHeight ?? .infinity, 230,
-                                    "Confirmed automatic mode should remain a compact three-choice palette")
-                            } else if state == .fanManual65 || state == .dualFanManual {
-                                XCTAssertLessThanOrEqual(compactHeight ?? .infinity, 280,
-                                    "Manual mode should fit its slider without opening a tall inspector")
-                                if state == .dualFanManual {
-                                    XCTAssertLessThanOrEqual(compactHeight ?? .infinity, 276,
-                                        "Both synchronization states need at least 4 pt of headroom")
-                                }
-                            }
-                            print("风扇紧凑高度：\(state.rawValue) sync=\(synchronized) \(language.rawValue) \(dark ? "深色" : "浅色") \(compactHeight ?? .infinity) pt")
-                        }
-                        XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
-                        XCTAssertTrue(visible.insetBy(dx: 6, dy: 6).contains(coordinator.panel.frame))
-                        XCTAssertLessThanOrEqual(host.fittingSize.width, ControlPaletteMetrics.fanSize.width + 0.5)
-                        XCTAssertNil(fanControl.requestedMode)
-                        XCTAssertFalse(fanControl.isApplying)
-                        XCTAssertEqual(fanControl.observedMode, profile.observedMode)
-                        if let artifactDirectory {
-                            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-                            host.cacheDisplay(in: host.bounds, to: bitmap)
-                            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                            let name = "\(language.rawValue)-\(state.rawValue)-sync-\(synchronized)-\(dark ? "dark" : "light")-\(expanded ? "expanded" : "compact").png"
-                            try png.write(to: artifactDirectory.appendingPathComponent(name))
-                        }
+                    }
+                    print("风扇高度：\(state.rawValue) sync=\(synchronized) \(language.rawValue) \(dark ? "深色" : "浅色") \(height ?? .infinity) pt")
+                    XCTAssertEqual(coordinator.panel.frame.width, ControlPaletteMetrics.fanSize.width)
+                    XCTAssertTrue(visible.insetBy(dx: 6, dy: 6).contains(coordinator.panel.frame))
+                    XCTAssertLessThanOrEqual(host.fittingSize.width, ControlPaletteMetrics.fanSize.width + 0.5)
+                    XCTAssertNil(fanControl.requestedMode)
+                    XCTAssertFalse(fanControl.isApplying)
+                    XCTAssertEqual(fanControl.observedMode, profile.observedMode)
+                    if let artifactDirectory {
+                        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                        host.cacheDisplay(in: host.bounds, to: bitmap)
+                        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                        let name = "\(language.rawValue)-\(state.rawValue)-sync-\(synchronized)-\(dark ? "dark" : "light").png"
+                        try png.write(to: artifactDirectory.appendingPathComponent(name))
                     }
                 }
             }
@@ -1732,14 +1812,27 @@ final class ControlPaletteTests: XCTestCase {
             temperatureReadings: [], sensorAvailability: base.sensorAvailability))
         let states = ProcessInfo.processInfo.environment["STORAGE_CLEANER_FAN_SYNC_ORDER"] == "reversed"
             ? [false, true] : [true, false]
+        // D152: the palette itself at its column width, with a coordinator in
+        // automatic mode so Sync only stores (was the slider list bound to a
+        // draft at 260 pt with the 80 pt target-fan menu).
+        let suite = TestPreferenceDomain.makeSuite()
+        let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suite))
+        defer { TestPreferenceDomain.cleanup(suiteName: suite) }
+        defaults.set(states[0], forKey: FanControlPreferences.manualSyncKey)
+        let fanControl = FanControlCoordinator(
+            defaults: defaults, helperStatusOverride: .enabled, isHelperReachable: true,
+            requestSender: { _ in XCTFail("A layout test must not reach the helper"); throw CancellationError() },
+            legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
+            serviceStatusProvider: { .enabled },
+            serviceRegistrar: { XCTFail("A layout test must never register Helper") })
+        defer { fanControl.disconnectForTermination() }
         let recorder = ControlPaletteFanFrameRecorder()
-        let state = ControlPaletteFanLayoutDraft(telemetry: telemetry, synchronized: states[0])
-        let size = CGSize(width: 260, height: 120)
+        let width = ControlPaletteMetrics.fanSize.width - 2 * GeekPanelLayout.contentPadding
+        let size = CGSize(width: width, height: 320)
         // Both samples must belong to one fixed viewport and coordinate space.
         // The production palette also disables automatic hosting size options.
         let host = NSHostingView(rootView: ControlPaletteFanLayoutContent(
-            state: state, telemetry: telemetry, recorder: recorder)
-            .frame(width: 260)
+            fanControl: fanControl, telemetry: telemetry, width: width, recorder: recorder)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .environment(\.locale, L10n.locale)
@@ -1758,40 +1851,31 @@ final class ControlPaletteTests: XCTestCase {
         var syncFrames: [CGRect] = []
         for synchronized in states {
             recorder.frames = [:]
-            state.draft.setSynchronized(synchronized)
+            fanControl.setManualFansSynchronized(synchronized)
+            XCTAssertEqual(fanControl.synchronizesManualFans, synchronized)
+            let expected = synchronized ? ["fan.manual.slider.-1"] : ["fan.manual.slider.0", "fan.manual.slider.1"]
+            let absent = synchronized ? ["fan.manual.slider.0", "fan.manual.slider.1"] : ["fan.manual.slider.-1"]
             var lastFrames: [String: CGRect]?
             var stableSamples = 0
-            // The borderless menu draws its label through AppKit, so a probe on the label
-            // never reports. Measure the menu frame, and the short title in the label font
-            // (MenuBarPanelTypography.caption, 11 pt) plus room for the menu indicator.
             let measured = await eventually {
                 host.needsLayout = true
                 host.layoutSubtreeIfNeeded()
                 window.displayIfNeeded()
                 // Never accept the first merely nonempty preference delivery.
                 // Stability is independent of the later position expectations.
-                guard let root = recorder.frames["fan.manual.fixture"],
-                      abs(root.width - 260) <= 0.5,
+                guard let root = recorder.frames["fan.palette.fixture"],
+                      abs(root.width - width) <= 0.5,
                       abs(root.minX) <= 0.5, abs(root.minY) <= 0.5,
                       host.bounds.size == size, host.frame.size == size,
-                      let toggle = recorder.frames["fan.sync.toggle"],
-                      toggle.width >= 30,
-                      toggle.height >= MiniWindowStyleTokens.controlRowHeight,
-                      root.insetBy(dx: -0.5, dy: -0.5).contains(toggle) else {
+                      let sync = recorder.frames["fan.manual.sync"],
+                      abs(sync.height - GeekIStatTextSectionGeometry.rowHeight) <= 0.5,
+                      root.insetBy(dx: -0.5, dy: -0.5).contains(sync),
+                      expected.allSatisfy({ id in
+                          recorder.frames[id].map { root.insetBy(dx: -0.5, dy: -0.5).contains($0) } ?? false
+                      }),
+                      absent.allSatisfy({ recorder.frames[$0] == nil }) else {
                     lastFrames = nil; stableSamples = 0
                     return false
-                }
-                if synchronized {
-                    guard recorder.frames["fan.target.menu"] == nil else {
-                        lastFrames = nil; stableSamples = 0
-                        return false
-                    }
-                } else {
-                    guard let menu = recorder.frames["fan.target.menu"], menu.width > 0,
-                          root.insetBy(dx: -0.5, dy: -0.5).contains(menu) else {
-                        lastFrames = nil; stableSamples = 0
-                        return false
-                    }
                 }
                 let current = recorder.frames
                 stableSamples = current == lastFrames ? stableSamples + 1 : 0
@@ -1817,15 +1901,20 @@ final class ControlPaletteTests: XCTestCase {
             let evidenceData = try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
             layoutDiagnostics.append(Data(("FAN_SYNC_LAYOUT " + String(decoding: evidenceData, as: UTF8.self) + "\n").utf8))
             XCTAssertTrue(measured)
-            syncFrames.append(try XCTUnwrap(frames["fan.sync.toggle"]))
+            syncFrames.append(try XCTUnwrap(frames["fan.manual.sync"]))
+            let section = try XCTUnwrap(frames["fan.section.manual"])
+            let sliders = try expected.map { try XCTUnwrap(frames[$0]) }
+            for slider in sliders {
+                XCTAssertEqual(slider.height, FanControlSliderGeometry.height, accuracy: 0.5)
+                XCTAssertEqual(slider.width, section.width, accuracy: 0.5)
+            }
             if !synchronized {
-                let menu = try XCTUnwrap(frames["fan.target.menu"])
-                XCTAssertEqual(menu.width, 80, accuracy: 0.5)
-                let shortTitle = FanTargetPickerPresentation(reading: readings[0], usesChinese: L10n.usesChinese).buttonTitle
-                let titleWidth = (shortTitle as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
-                XCTAssertLessThanOrEqual(titleWidth + 24, menu.width,
-                    "The complete short name and the menu indicator must fit inside the fixed-width menu button")
-                XCTAssertLessThanOrEqual(host.fittingSize.width, 260.5)
+                XCTAssertEqual(sliders[1].minY - sliders[0].maxY, FanControlSliderGeometry.spacing, accuracy: 0.5)
+                // The full names stay on the sliders and are cut inside the
+                // label's W − 16 instead of widening the page.
+                XCTAssertEqual(FanManualSliderList.sliders(readings: readings, synchronizes: false).map(\.title),
+                               readings.map(\.displayName))
+                XCTAssertLessThanOrEqual(host.fittingSize.width, width + 0.5)
             }
         }
         XCTAssertEqual(syncFrames[0].maxX, syncFrames[1].maxX, accuracy: 0.5)
@@ -1972,30 +2061,26 @@ private final class ControlPaletteFanFrameRecorder {
 }
 
 #if DEBUG
-@MainActor
-private final class ControlPaletteFanLayoutDraft: ObservableObject {
-    @Published var draft: FanControlDraft
-
-    init(telemetry: FanTelemetryState, synchronized: Bool) {
-        draft = FanControlDraft(telemetry: telemetry, observedMode: .manual, synchronizesFans: synchronized)
-    }
-}
-
+/// D152: the fan palette at its column width with a probe on the whole page
+/// (was the slider list bound to a draft in `ControlPaletteFanLayoutDraft`).
 @MainActor
 private struct ControlPaletteFanLayoutContent: View {
-    @ObservedObject var state: ControlPaletteFanLayoutDraft
+    @ObservedObject var fanControl: FanControlCoordinator
     let telemetry: FanTelemetryState
+    let width: CGFloat
     let recorder: ControlPaletteFanFrameRecorder
+    @StateObject private var presentation = ControlPalettePresentationState()
 
     var body: some View {
-        let synchronized = state.draft.synchronizesFans
-        return FanManualSliderList(draft: $state.draft, telemetry: telemetry, isDisabled: false, compact: true)
-            .frame(width: 260)
-            .layoutProbe("fan.manual.fixture")
+        let synchronized = fanControl.synchronizesManualFans
+        return FanControlPaletteView(presentation: presentation, fanControl: fanControl,
+                                     telemetry: telemetry, thermalState: .nominal)
+            .frame(width: width)
+            .layoutProbe("fan.palette.fixture")
             .onPreferenceChange(LayoutFramePreferenceKey.self) { frames in
                 Task { @MainActor in
                     // Ignore a queued delivery for the state we just replaced.
-                    guard state.draft.synchronizesFans == synchronized else { return }
+                    guard fanControl.synchronizesManualFans == synchronized else { return }
                     recorder.frames = frames
                 }
             }

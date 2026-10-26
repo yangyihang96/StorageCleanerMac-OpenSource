@@ -105,6 +105,11 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
     let memoryPhysicalBytes: UInt64?
     let compressedMemoryBytes: UInt64?
     let swapUsedBytes: UInt64?
+    /// D133: iStat's swap history value, the used share of the swap files
+    /// when the sample was taken, in percent (`swapHistoryAverage:` averages
+    /// used / total over a bucket's samples); 0 without swap files, nil
+    /// when the used size was not read.
+    let swapUsedPercent: Double?
     let chipTemperature: Double?
     let gpuTemperature: Double?
     let temperatureReadings: [SystemTemperatureReading]?
@@ -128,6 +133,7 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
         memoryPhysicalBytes: UInt64? = nil,
         compressedMemoryBytes: UInt64? = nil,
         swapUsedBytes: UInt64? = nil,
+        swapUsedPercent: Double? = nil,
         chipTemperature: Double?,
         gpuTemperature: Double? = nil,
         temperatureReadings: [SystemTemperatureReading]? = nil,
@@ -154,6 +160,7 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
         self.memoryPhysicalBytes = memoryPhysicalBytes
         self.compressedMemoryBytes = compressedMemoryBytes
         self.swapUsedBytes = swapUsedBytes
+        self.swapUsedPercent = swapUsedPercent
         self.chipTemperature = chipTemperature
         self.gpuTemperature = gpuTemperature
         self.temperatureReadings = temperatureReadings
@@ -182,6 +189,7 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
         memoryPhysicalBytes = nil
         compressedMemoryBytes = nil
         swapUsedBytes = nil
+        swapUsedPercent = nil
         chipTemperature = Self.metricValue(.chipTemperature, in: snapshot)
         gpuTemperature = snapshot.temperatureReadings?
             .first(where: { $0.zone == .gpu && $0.celsius.isFinite })?
@@ -218,6 +226,7 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
         memoryPhysicalBytes = snapshot.ringComposition?.physicalBytes
         compressedMemoryBytes = snapshot.ringComposition?.compressedBytes ?? snapshot.measurements.compressedBytes.value
         swapUsedBytes = snapshot.measurements.swapUsedBytes.value
+        swapUsedPercent = Self.swapUsedPercent(used: swapUsedBytes, total: snapshot.swapTotalBytes)
         chipTemperature = nil
         gpuTemperature = nil
         temperatureReadings = nil
@@ -226,6 +235,14 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
         fanReadings = nil
         downBytesPerSecond = nil
         upBytesPerSecond = nil
+    }
+
+    /// D133: used / total in percent; 0 without swap files (iStat's 0 / 0
+    /// reads as 0), nil without a reading of the used size.
+    static func swapUsedPercent(used: UInt64?, total: Int64) -> Double? {
+        guard let used else { return nil }
+        guard total > 0 else { return 0 }
+        return min(100, Double(used) / Double(total) * 100)
     }
 
     /// The sample that stands for a history bucket when this (newer) sample
@@ -346,6 +363,7 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
             memoryPhysicalBytes: memoryPhysicalBytes,
             compressedMemoryBytes: compressedMemoryBytes,
             swapUsedBytes: swapUsedBytes,
+            swapUsedPercent: swapUsedPercent,
             chipTemperature: chipTemperature,
             gpuTemperature: gpuTemperature,
             temperatureReadings: temperatureReadings,
@@ -375,6 +393,7 @@ struct MenuBarTelemetryPoint: Codable, Equatable, Sendable {
             memoryPhysicalBytes: memoryPhysicalBytes,
             compressedMemoryBytes: compressedMemoryBytes,
             swapUsedBytes: swapUsedBytes,
+            swapUsedPercent: swapUsedPercent,
             chipTemperature: chipTemperature,
             gpuTemperature: gpuTemperature,
             temperatureReadings: temperatureReadings,
@@ -454,6 +473,7 @@ extension MenuBarTelemetryPoint {
         case sensorSampledAt, gpuSampledAt, bucketStatistics
         case date, cpuTotal, cpuUser, cpuSystem, gpu, memory, memoryPressure, memoryPressureLevelCode
         case memoryAppOrOtherBytes, memoryWiredBytes, memoryPhysicalBytes, compressedMemoryBytes, swapUsedBytes
+        case swapUsedPercent
         case chipTemperature, gpuTemperature, temperatureReadings, addedTemperatureReadings
         case fanRPM, fanTargetRPM, fanReadings, downBytesPerSecond, upBytesPerSecond
     }
@@ -486,6 +506,7 @@ extension MenuBarTelemetryPoint {
             memoryPhysicalBytes: try container.decodeIfPresent(UInt64.self, forKey: .memoryPhysicalBytes),
             compressedMemoryBytes: try container.decodeIfPresent(UInt64.self, forKey: .compressedMemoryBytes),
             swapUsedBytes: try container.decodeIfPresent(UInt64.self, forKey: .swapUsedBytes),
+            swapUsedPercent: try container.decodeIfPresent(Double.self, forKey: .swapUsedPercent),
             chipTemperature: try container.decodeIfPresent(Double.self, forKey: .chipTemperature),
             gpuTemperature: try container.decodeIfPresent(Double.self, forKey: .gpuTemperature),
             temperatureReadings: stored?.compactMap { reading in
@@ -522,6 +543,7 @@ extension MenuBarTelemetryPoint {
         try container.encodeIfPresent(memoryPhysicalBytes, forKey: .memoryPhysicalBytes)
         try container.encodeIfPresent(compressedMemoryBytes, forKey: .compressedMemoryBytes)
         try container.encodeIfPresent(swapUsedBytes, forKey: .swapUsedBytes)
+        try container.encodeIfPresent(swapUsedPercent, forKey: .swapUsedPercent)
         try container.encodeIfPresent(chipTemperature, forKey: .chipTemperature)
         try container.encodeIfPresent(gpuTemperature, forKey: .gpuTemperature)
         if let temperatureReadings {
@@ -555,6 +577,8 @@ enum MenuBarTelemetryChannel: String, CaseIterable, Equatable, Sendable {
     case memoryCompressedPercent
     case memoryFreePercent
     case swapUsedBytes
+    /// D133: `MenuBarTelemetryPoint.swapUsedPercent`.
+    case swapUsedPercent
     case chipTemperature
     case gpuTemperature
     case socTemperature
@@ -632,6 +656,8 @@ enum MenuBarTelemetryChannel: String, CaseIterable, Equatable, Sendable {
             point.memoryComposition.map { $0.availableRatio * 100 }
         case .swapUsedBytes:
             point.swapUsedBytes.map { Double($0) }
+        case .swapUsedPercent:
+            point.swapUsedPercent
         case .chipTemperature:
             point.temperature(.chip) ?? point.chipTemperature
         case .gpuTemperature:

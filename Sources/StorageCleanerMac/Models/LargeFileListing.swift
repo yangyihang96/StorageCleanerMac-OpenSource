@@ -1,7 +1,9 @@
 import Foundation
 
-/// D85：独立大文件清单的门槛。只有三档；默认 200 MiB 与改前相同。
-/// 单位一律按二进制（1 MiB = 1,048,576 字节），界面上写明 MiB / GiB。
+/// D85：独立大文件清单的门槛。只有三档，默认是中间一档。
+/// D178：单位跟访达和 CleanMyMac 一样按十进制（1 MB = 1,000,000 字节），
+/// 门槛写整数（原来按二进制：50 MiB、200 MiB、1 GiB）。档位名（rawValue）
+/// 存在偏好里，所以沿用原来的 `mib50` 这些名字。
 enum LargeFileThreshold: String, CaseIterable, Identifiable, Sendable {
     case mib50
     case mib200
@@ -13,18 +15,18 @@ enum LargeFileThreshold: String, CaseIterable, Identifiable, Sendable {
 
     var bytes: Int64 {
         switch self {
-        case .mib50: 50 * 1024 * 1024
-        case .mib200: 200 * 1024 * 1024
-        case .gib1: 1024 * 1024 * 1024
+        case .mib50: 50_000_000
+        case .mib200: 200_000_000
+        case .gib1: 1_000_000_000
         }
     }
 
     /// 单位标注清楚的档位名；不随语言改变单位写法。
     var title: String {
         switch self {
-        case .mib50: "50 MiB"
-        case .mib200: "200 MiB"
-        case .gib1: "1 GiB"
+        case .mib50: "50 MB"
+        case .mib200: "200 MB"
+        case .gib1: "1 GB"
         }
     }
 
@@ -41,8 +43,8 @@ enum LargeFileThreshold: String, CaseIterable, Identifiable, Sendable {
 
     static var unitHelp: String {
         L10n.text(
-            "按本地占用（分配大小）比较；1 MiB = 1,048,576 字节，1 GiB = 1024 MiB。",
-            "Compared by local usage (allocated size); 1 MiB = 1,048,576 bytes, 1 GiB = 1024 MiB."
+            "按本地占用（分配大小）比较；1 MB = 1,000,000 字节，1 GB = 1000 MB。",
+            "Compared by local usage (allocated size); 1 MB = 1,000,000 bytes, 1 GB = 1000 MB."
         )
     }
 
@@ -55,6 +57,7 @@ enum LargeFileThreshold: String, CaseIterable, Identifiable, Sendable {
 /// D84/D85：一次大文件清单扫描的范围与截断情况。大小均为本地占用
 /// （分配大小）；测量超时的文件夹只记到本轮量到的下限。
 struct LargeFileListingSummary: Equatable, Sendable {
+    var ignoredItemCount: Int = 0
     let threshold: LargeFileThreshold
     let resultLimit: Int
     /// 达到门槛并测到的项目数（截断前）。
@@ -81,13 +84,13 @@ struct LargeFileListingSummary: Equatable, Sendable {
         )]
         if reachedResultLimit {
             parts.append(L10n.text(
-                "仅显示前 \(shownCount) 项（共找到 \(qualifyingCount) 项）",
-                "Showing only the first \(L10n.items(shownCount)) (\(qualifyingCount) found)"
+                "仅显示前 \(ByteFormat.count(shownCount)) 项（共找到 \(ByteFormat.count(qualifyingCount)) 项）",
+                "Showing only the first \(L10n.items(shownCount)) (\(ByteFormat.count(qualifyingCount)) found)"
             ))
         } else if reachedTimeLimit || reachedFolderLimit {
             // 没到结果上限：已找到的都显示了，只是还有位置没测完，可能漏掉更多。
             parts.append(L10n.text(
-                "已显示找到的 \(shownCount) 项，可能还有未测到的",
+                "已显示找到的 \(ByteFormat.count(shownCount)) 项，可能还有未测到的",
                 "Showing the \(L10n.items(shownCount)) found; more may not have been measured"
             ))
         }
@@ -98,10 +101,11 @@ struct LargeFileListingSummary: Equatable, Sendable {
         }
         if !lowerBoundPaths.isEmpty {
             parts.append(L10n.text(
-                "\(lowerBoundPaths.count) 项测量超时，大小为本轮量到的下限",
+                "\(ByteFormat.count(lowerBoundPaths.count)) 项测量超时，大小为本轮量到的下限",
                 "\(L10n.items(lowerBoundPaths.count)) timed out; sizes are lower bounds"
             ))
         }
+        if ignoredItemCount > 0 { parts.append(IgnoreListSnapshot.summary(ignoredItemCount)) }
         return parts.joined(separator: " · ")
     }
 
@@ -112,7 +116,8 @@ struct LargeFileListingSummary: Equatable, Sendable {
         resultLimit: Int,
         reachedTimeLimit: Bool,
         reachedFolderLimit: Bool,
-        lowerBoundPaths: Set<String>
+        lowerBoundPaths: Set<String>,
+        ignoredItemCount: Int = 0
     ) -> (entries: [DirectoryEntry], summary: LargeFileListingSummary) {
         // 与改前相同：所有候选（含权限不足的 0 字节占位）按大小降序后取前
         // resultLimit 项；同样大小再按路径，使顺序稳定。
@@ -125,6 +130,7 @@ struct LargeFileListingSummary: Equatable, Sendable {
         return (
             shown,
             LargeFileListingSummary(
+                ignoredItemCount: ignoredItemCount,
                 threshold: threshold,
                 resultLimit: limit,
                 qualifyingCount: candidates.filter { !$0.denied }.count,

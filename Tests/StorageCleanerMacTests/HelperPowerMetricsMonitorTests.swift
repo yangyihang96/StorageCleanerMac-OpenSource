@@ -309,13 +309,15 @@ final class HelperPowerMetricsMonitorTests: XCTestCase {
         XCTAssertEqual(HelperPowerMetricsPresentation.source, "系统助手 · powermetrics")
         let available = HelperPowerMetricsState.available(sample, sampledAt: at)
         let rows = HelperPowerMetricsPresentation.rows(available, now: at)
-        XCTAssertEqual(rows.first { $0.id == "cpu" }?.value, "5.00 W")
-        XCTAssertEqual(rows.first { $0.id == "ane" }?.value, "0.00 W")
-        XCTAssertEqual(rows.first { $0.id == "P0" }?.value, "3200 MHz")
+        // D128 (2026-10-19): iStat's power and frequency formats (was
+        // "5.00 W", "0.00 W", "3200 MHz").
+        XCTAssertEqual(rows.first { $0.id == "cpu" }?.value, "5 W")
+        XCTAssertEqual(rows.first { $0.id == "ane" }?.value, "0 W")
+        XCTAssertEqual(rows.first { $0.id == "P0" }?.value, "3.2 GHz")
         XCTAssertEqual(rows.first { $0.id == "efficiency" }?.value, "—")
         XCTAssertTrue(HelperPowerMetricsPresentation.detail(available, now: at).contains("1.00"))
         let expired = at.addingTimeInterval(6.01)
-        XCTAssertEqual(HelperPowerMetricsPresentation.rows(available, now: expired).first?.value, "5.00 W")
+        XCTAssertEqual(HelperPowerMetricsPresentation.rows(available, now: expired).first?.value, "5 W", "D128: was 5.00 W")
         XCTAssertTrue(HelperPowerMetricsPresentation.detail(available, now: expired).contains("6 秒前"))
     }
 
@@ -326,9 +328,11 @@ final class HelperPowerMetricsMonitorTests: XCTestCase {
             XCTAssertTrue(source.contains(event), event)
         }
         XCTAssertTrue(try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift").contains("HelperPowerMetricsView(monitor: store.helperPowerMetricsMonitor"))
-        for path in ["Views/MenuBarAdvanced/GeekPowerView.swift", "Views/MenuBarAdvanced/GeekSensorsView.swift"] {
-            XCTAssertTrue(try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/" + path).contains("geekHelperPowerMetricsCards"), path)
-        }
+        // D119 (2026-10-18): the helper rows are the sensors page's power and
+        // frequency groups, as on iStat; the power page no longer lists them.
+        XCTAssertTrue(try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift").contains("geekHelperPowerMetricsCards"))
+        XCTAssertTrue(try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift").contains("geekSensorFrequencyGroup"))
+        XCTAssertFalse(try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerView.swift").contains("geekHelperPowerMetricsCards"))
         let miniCards = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHelperPowerMetricsCards.swift")
         XCTAssertTrue(miniCards.contains("GeekHelperPowerMetricsCards(monitor: store.helperPowerMetricsMonitor)"))
         XCTAssertTrue(miniCards.contains("@ObservedObject var monitor: HelperPowerMetricsMonitor"))

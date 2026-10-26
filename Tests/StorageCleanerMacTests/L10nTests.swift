@@ -77,11 +77,17 @@ final class L10nTests: XCTestCase {
     func testReviewFilterTerminologyFollowsLanguageMode() {
         let chineseTitles = [
             "智能扫描", "系统健康", "性能测试", "安全清理", "浏览器隐私", "开发工具与产物", "大型文件", "文件搬家", "重复文件", "系统工具",
-            "登录项与后台任务", "内存管理", "能耗", "卸载", "应用更新"
+            "登录项与后台任务", "内存管理", "能耗", "卸载", "应用更新",
+            // D154: CleanMyMac's Cloud Cleanup, My Tools and My Activity.
+            "云盘清理", "我的工具", "我的活动",
+            // D154 batch 2: the D160–D165 tool pages.
+            "扩展", "维护任务", "聊天文件"
         ]
         let englishTitles = [
             "Smart Scan", "System Health", "Performance Test", "Safe Cleanup", "Browser Privacy", "Dev Tools & Artifacts", "Large Files", "File Migration", "Duplicates", "System Tools",
-            "Login Items & Background Tasks", "Memory Management", "Energy", "Uninstall", "App Updates"
+            "Login Items & Background Tasks", "Memory Management", "Energy", "Uninstall", "App Updates",
+            "Cloud Cleanup", "My Tools", "My Activity",
+            "Extensions", "Maintenance", "Chat Files"
         ]
 
         languagePreferences.set(AppLanguage.zhHans.rawValue, forKey: L10n.languageDefaultsKey)

@@ -287,3 +287,151 @@ final class CleanupDefaultSelectionPolicyTests: XCTestCase {
         )
     }
 }
+
+// MARK: - D101 G10: rows that free too little
+
+extension CleanupDefaultSelectionPolicyTests {
+    private static let mib: Int64 = 1_024 * 1_024
+
+    /// A green row that G1 says frees noticeably less than its size (clones or
+    /// a local snapshot share the rest) is not preselected when what it likely
+    /// frees is under 1 MiB or under a tenth of the size. D116: likely is G1's
+    /// conservative amount plus the full clone groups wholly inside the row;
+    /// groups reaching outside it still count as kept. Rows that share little
+    /// or nothing, or whose sharing was not read, keep D47.
+    func testAGreenRowThatFreesTooLittleIsNotPreselected() {
+        // Bun's cache on this Mac: nearly all of it is cloned into node_modules.
+        let bun = Self.sharing("bun-cache", bytes: 486 * Self.mib, cloneShared: 486 * Self.mib - 4_096)
+        // D116: when every clone lies inside the row, cleaning the row frees them too.
+        let bunWhole = Self.sharing("bun-cache-whole", bytes: 486 * Self.mib, cloneShared: 486 * Self.mib - 4_096,
+                                    wholeCloneGroups: 486 * Self.mib - 4_096)
+        // Only 40 MiB of the clones lie wholly inside: 40 MiB is under a tenth of 486 MiB.
+        let bunPartlyInside = Self.sharing("bun-cache-partly-inside", bytes: 486 * Self.mib,
+                                           cloneShared: 486 * Self.mib - 4_096, wholeCloneGroups: 40 * Self.mib)
+        // The edges of "a tenth" with clones inside, and a snapshot next to them.
+        let insideATenth = Self.sharing("inside-a-tenth", bytes: 100 * Self.mib, cloneShared: 100 * Self.mib,
+                                        wholeCloneGroups: 10 * Self.mib)
+        let insideUnderATenth = Self.sharing("inside-under-a-tenth", bytes: 100 * Self.mib,
+                                             cloneShared: 100 * Self.mib, wholeCloneGroups: 10 * Self.mib - 1)
+        let snapshotAndInside = Self.sharing("snapshot-and-inside", bytes: 100 * Self.mib, cloneShared: 60 * Self.mib,
+                                             snapshotHeld: 40 * Self.mib, wholeCloneGroups: 60 * Self.mib)
+        // An inside amount counts at most the clone-shared part (a snapshot's
+        // part never counts). An inside amount larger than the row still
+        // means the row frees what it lists.
+        let insideOverstated = Self.sharing("inside-overstated", bytes: 100 * Self.mib, cloneShared: 4 * Self.mib,
+                                            snapshotHeld: 95 * Self.mib, wholeCloneGroups: 400 * Self.mib)
+        let insideCappedAtSize = Self.sharing("inside-capped-at-size", bytes: 10 * Self.mib,
+                                              cloneShared: 400 * Self.mib, wholeCloneGroups: 400 * Self.mib)
+        // uv: 854 MiB listed, 67 MiB private: over 1 MiB but under a tenth.
+        let uv = Self.sharing("uv-cache", bytes: 854 * Self.mib, cloneShared: 787 * Self.mib)
+        let snapshot = Self.sharing("snapshot-held", bytes: 50 * Self.mib, snapshotHeld: 49 * Self.mib + Self.mib / 2)
+        // The edges of "a tenth" and "1 MiB".
+        let freesATenth = Self.sharing("frees-a-tenth", bytes: 100 * Self.mib, cloneShared: 90 * Self.mib)
+        let freesUnderATenth = Self.sharing("frees-under-a-tenth", bytes: 100 * Self.mib, cloneShared: 90 * Self.mib + 1)
+        let freesOneMiB = Self.sharing("frees-one-mib", bytes: 10 * Self.mib, cloneShared: 9 * Self.mib)
+        let freesUnderOneMiB = Self.sharing("frees-under-one-mib", bytes: 10 * Self.mib, cloneShared: 9 * Self.mib + 1)
+        // Not G10's business.
+        let notRead = Self.candidate(name: "small-cache", bytes: 200 * 1_024)
+        let sharesNothing = Self.sharing("shares-nothing", bytes: 200 * 1_024)
+        let sharesLittle = Self.sharing("shares-little", bytes: 500 * 1_024, cloneShared: 4_096)
+        let unreadable = Self.sharing("unreadable", bytes: 100 * Self.mib, unknown: 100 * Self.mib)
+
+        let heldBack = [bun, bunPartlyInside, insideUnderATenth, insideOverstated, uv, snapshot, freesUnderATenth,
+                        freesUnderOneMiB]
+        let preselected = [bunWhole, insideATenth, snapshotAndInside, insideCappedAtSize, freesATenth, freesOneMiB,
+                           notRead, sharesNothing, sharesLittle, unreadable]
+        for candidate in heldBack {
+            let name = candidate.sourceURL.lastPathComponent
+            XCTAssertTrue(candidate.freesTooLittleToPreselect, name)
+            XCTAssertTrue(candidate.isHeldBackFromPreselection, name)
+            XCTAssertFalse(candidate.isPreselectedByDefault, name)
+            XCTAssertFalse(candidate.isRecommendedForSelection, name)
+            XCTAssertTrue(candidate.isSelectable, name)
+            XCTAssertEqual(candidate.preselectionReason, .freesLittle, name)
+            // The row says why: the G1 note gives what it frees.
+            XCTAssertNotNil(CleanupCandidateRowHint.reclaimable(for: candidate), name)
+        }
+        for candidate in preselected {
+            let name = candidate.sourceURL.lastPathComponent
+            XCTAssertFalse(candidate.freesTooLittleToPreselect, name)
+            XCTAssertTrue(candidate.isPreselectedByDefault, name)
+            XCTAssertTrue(candidate.isRecommendedForSelection, name)
+            XCTAssertEqual(candidate.preselectionReason, .preselected, name)
+        }
+        XCTAssertEqual(bun.reclaimableSizeBytes, 4_096)
+        // D116 changes preselection only: the conservative amount and the row note stay as they were.
+        XCTAssertEqual(bunWhole.reclaimableSizeBytes, 4_096)
+        XCTAssertEqual(snapshotAndInside.reclaimableSizeBytes, 0)
+        XCTAssertEqual(insideOverstated.reclaimableSizeBytes, Self.mib)
+        XCTAssertEqual(insideCappedAtSize.reclaimableSizeBytes, 0)
+        for candidate in [bunWhole, insideATenth, snapshotAndInside, insideCappedAtSize] {
+            XCTAssertNotNil(CleanupCandidateRowHint.reclaimable(for: candidate), candidate.sourceURL.lastPathComponent)
+        }
+        XCTAssertEqual(uv.reclaimableSizeBytes, 67 * Self.mib)
+        XCTAssertEqual(freesATenth.reclaimableSizeBytes, 10 * Self.mib)
+        XCTAssertEqual(freesOneMiB.reclaimableSizeBytes, Self.mib)
+
+        let session = Self.session(heldBack + preselected)
+        XCTAssertEqual(CleanupSelection.defaults(in: session).selectedCandidateIDs, Set(preselected.map(\.id)))
+        XCTAssertEqual(CleanupSelection.recommended(in: session).selectedCandidateIDs, Set(preselected.map(\.id)))
+    }
+
+    /// Yellow and red rows keep their own reasons, and a running app still
+    /// comes first; once it quits, the row is held back for what it frees.
+    func testOtherReasonsComeBeforeFreeingTooLittle() throws {
+        var yellow = Self.candidate(name: "Mail Downloads", risk: .reviewOnly, categoryID: "mail", bytes: 486 * Self.mib)
+        yellow.reclaimableEstimate = Self.estimate(cloneShared: 486 * Self.mib)
+        var red = Self.candidate(name: "Example Beta.app", risk: .protected, categoryID: "applications",
+                                 bytes: 486 * Self.mib)
+        red.reclaimableEstimate = Self.estimate(cloneShared: 486 * Self.mib)
+        var running = Self.candidate(name: "com.example.running", bytes: 486 * Self.mib, ownerResolution: .declared,
+                                     runningOwners: ["com.example.running"])
+        running.reclaimableEstimate = Self.estimate(cloneShared: 486 * Self.mib)
+        XCTAssertEqual(yellow.preselectionReason, .reviewRequired)
+        XCTAssertEqual(red.preselectionReason, .protected)
+        XCTAssertEqual(running.preselectionReason, .ownerRunning)
+
+        let quit = Self.session([running]).updatingRunningOwners(from: CleanupApplicationSnapshot())
+        let row = try XCTUnwrap(quit.candidates.first)
+        XCTAssertFalse(row.isOwnerRunning)
+        XCTAssertEqual(row.preselectionReason, .freesLittle)
+        XCTAssertTrue(CleanupSelection.defaults(in: quit).selectedCandidateIDs.isEmpty)
+    }
+
+    /// The row's preselection line gives the reason in either language; the
+    /// Chinese record (D82) reads the same as the title.
+    func testTheFreesLittleReasonReadsInBothLanguages() {
+        let row = Self.sharing("bun-cache", bytes: 486 * Self.mib, cloneShared: 486 * Self.mib)
+        for language in [AppLanguage.zhHans, .english] {
+            let defaults = TestPreferenceDomain.make(for: self)
+            defaults.set(language.rawValue, forKey: L10n.languageDefaultsKey)
+            let preferences = TestVolatilePreferences()
+            preferences.set(language.rawValue, forKey: L10n.languageDefaultsKey)
+            defer { preferences.restore() }
+            XCTAssertEqual(L10n.usesChinese, language == .zhHans)
+            XCTAssertEqual(row.ruleExplanation.preselection, CleanupPreselectionReason.freesLittle.title)
+            if language == .zhHans {
+                XCTAssertEqual(row.preselectionExplanationText, row.preselectionReason.title)
+                // D178 (was "不到 1 MiB").
+                XCTAssertTrue(row.ruleExplanation.preselection.contains("不到 1 MB"))
+            } else {
+                XCTAssertTrue(row.ruleExplanation.preselection.hasPrefix("Not preselected"))
+            }
+        }
+    }
+
+    private static func estimate(cloneShared: Int64 = 0, snapshotHeld: Int64 = 0, unknown: Int64 = 0,
+                                 wholeCloneGroups: Int64 = 0) -> CleanupReclaimableEstimate {
+        CleanupReclaimableEstimate(cloneSharedBytes: cloneShared, snapshotHeldBytes: snapshotHeld,
+                                   unknownBytes: unknown, wholeCloneGroupBytes: wholeCloneGroups)
+    }
+
+    /// A green row whose sharing G1 read.
+    private static func sharing(_ name: String, bytes: Int64, cloneShared: Int64 = 0, snapshotHeld: Int64 = 0,
+                                unknown: Int64 = 0, wholeCloneGroups: Int64 = 0) -> ScanCandidate {
+        var row = candidate(name: name, bytes: bytes)
+        row.reclaimableEstimate = estimate(cloneShared: cloneShared, snapshotHeld: snapshotHeld, unknown: unknown,
+                                           wholeCloneGroups: wholeCloneGroups)
+        return row
+    }
+}

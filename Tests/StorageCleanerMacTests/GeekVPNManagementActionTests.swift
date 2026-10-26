@@ -6,6 +6,9 @@ import XCTest
 
 /// UI plan U1 085: in the mini window's VPN detail, "断开连接" is a
 /// destructive, full-width button with a larger click area (concept 085).
+/// D125 (2026-10-19): the page is iStat's interface submenu and the action
+/// is iStat's 31 pt button item at the page's width below the sections (was
+/// a 30 pt button in a management card under its description).
 /// Only the presentation is checked: the injected control action fails the
 /// test if anything calls it, so nothing is ever disconnected.
 @MainActor
@@ -74,26 +77,23 @@ final class GeekVPNManagementActionTests: XCTestCase {
                 defer { host.close() }
                 let frames = try await host.frames(
                     from: recorder,
-                    required: ["vpn.panel", "vpn.management.card", "vpn.management.action",
-                               "vpn.management.description"]
+                    required: ["vpn.panel", "vpn.action"]
                 )
                 let tag = "\(scenario.rawValue) \(language)"
                 let panel = try XCTUnwrap(frames["vpn.panel"])
-                let card = try XCTUnwrap(frames["vpn.management.card"])
-                let action = try XCTUnwrap(frames["vpn.management.action"])
-                let description = try XCTUnwrap(frames["vpn.management.description"])
-                // Review P2-5: one-line and two-line descriptions both leave the
-                // same space above the text as below the button.
-                XCTAssertEqual(description.minY - card.minY, card.maxY - action.maxY, accuracy: 1,
-                               "Balanced card: \(tag), description height \(description.height)")
-                XCTAssertGreaterThanOrEqual(action.minY, description.maxY + 4, tag)
-                // Full card width (inside the card's 8 pt insets) and 30 pt tall,
-                // where the old small bordered text button was about 20 pt.
-                XCTAssertEqual(action.width, card.width - 2 * MiniWindowStyleTokens.cardHorizontalInset,
+                let action = try XCTUnwrap(frames["vpn.action"])
+                // D125: the button item spans the page inside its 8 pt insets
+                // and is 31 tall (the old small bordered text button was about
+                // 20 pt); it is the page's last item, 8 above its bottom, and
+                // the page is as tall as its size says (no note before a
+                // request).
+                XCTAssertEqual(GeekIStatInterfaceGeometry.buttonHeight, 31)
+                XCTAssertEqual(action.width, panel.width - 2 * GeekPanelLayout.contentPadding,
                                accuracy: 1, tag)
-                XCTAssertGreaterThanOrEqual(action.height, GeekVPNManagementActionButton.height - 0.5, tag)
-                XCTAssertTrue(card.insetBy(dx: -0.5, dy: -0.5).contains(action), tag)
-                XCTAssertTrue(panel.insetBy(dx: -0.5, dy: -0.5).contains(card), "Card fits the panel: \(tag)")
+                XCTAssertEqual(action.height, GeekIStatInterfaceGeometry.buttonHeight, accuracy: 0.5, tag)
+                XCTAssertEqual(panel.maxY - action.maxY, GeekPanelLayout.contentPadding, accuracy: 1, tag)
+                XCTAssertEqual(panel.height, size.height, accuracy: 1, "Page height matches its size: \(tag)")
+                XCTAssertTrue(panel.insetBy(dx: -0.5, dy: -0.5).contains(action), "Button fits the panel: \(tag)")
             }
         }
     }
@@ -105,10 +105,21 @@ final class GeekVPNManagementActionTests: XCTestCase {
                 .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekNetworkView.swift"),
             encoding: .utf8
         )
-        let button = try XCTUnwrap(network.components(separatedBy: "struct GeekVPNManagementActionButton: View").last)
-        XCTAssertTrue(button.contains("role: isDestructive ? .destructive : nil"))
-        XCTAssertTrue(button.contains("AppDesignTokens.Palette.destructive"))
-        XCTAssertTrue(network.contains("GeekVPNManagementActionButton("))
+        let sections = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekIStatInterfaceSections.swift"),
+            encoding: .utf8
+        )
+        // D125: iStat's button item; the disconnect request is its
+        // destructive kind, the red gradient with a white label (was
+        // `GeekVPNManagementActionButton` with the destructive outline).
+        let button = try XCTUnwrap(sections.components(separatedBy: "struct GeekIStatButtonItem: View").last)
+        XCTAssertTrue(button.contains("role: kind == .destructive ? .destructive : nil"))
+        XCTAssertTrue(button.contains("GeekIStatInterfaceGeometry.destructiveTop"))
+        XCTAssertTrue(network.contains("GeekIStatButtonItem("))
+        XCTAssertTrue(network.contains("kind: action.isDestructive ? .destructive : .standard"))
+        XCTAssertFalse(network.contains("GeekVPNManagementActionButton"))
         // The old small, blue bordered button is gone.
         XCTAssertFalse(network.contains("""
                         Button(actionTitle) {

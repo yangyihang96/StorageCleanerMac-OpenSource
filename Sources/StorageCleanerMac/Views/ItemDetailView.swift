@@ -101,7 +101,7 @@ struct ItemDetailView: View {
                     Divider()
                         .frame(height: 14)
 
-                    Text(ByteFormat.string(item.sizeBytes))
+                    Text(ByteFormat.storageString(item.sizeBytes))
                         .font(AppDesignTokens.Typography.metadata)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)

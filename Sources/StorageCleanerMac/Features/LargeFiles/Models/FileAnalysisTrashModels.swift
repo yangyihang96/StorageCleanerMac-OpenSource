@@ -218,60 +218,37 @@ struct FileAnalysisTrashPolicy: Equatable, Sendable {
         "Applications", "Desktop", "Documents", "Downloads", "Library", "Movies", "Music", "Pictures", "Public",
     ]
 
-    /// D54 ①: `~/Library` folders kept whole, with everything inside them.
-    static let protectedLibraryFolderNames: Set<String> = [
-        "Keychains", "Mail", "Messages", "Safari", "Accounts", "Calendars", "Cookies", "HomeKit", "Passes",
-        "Autosave Information", "LaunchAgents", "Preferences", "Mobile Documents", "CloudStorage", "Biome",
-        "IdentityServices", "Sharing", "Suggestions", "Metadata", "Daemon Containers", "Reminders", "Shortcuts",
-    ]
-    /// D54 ①: in these `~/Library` folders Apple's own entries and a few
-    /// named stores are kept whole.
-    static let sharedLibraryFolderNames: Set<String> = ["Containers", "Group Containers", "Application Support"]
-    static let protectedSharedEntryNames: Set<String> = [
-        "AddressBook", "CallHistoryDB", "Knowledge",
-        // D54 supplement (second review P2-1): the File Provider and iCloud
-        // Drive databases, more system stores, and the Shortcuts group
-        // containers, whose names do not carry `com.apple`.
-        "FileProvider", "CloudDocs", "iCloud", "CallHistoryTransactions", "DifferentialPrivacy", "Dock",
-        "group.is.workflow.shortcuts", "group.is.workflow.my.app",
-    ]
+    /// D54 ① and D101 G4-2: the `~/Library` folders File Analysis keeps
+    /// whole, with everything inside them: the ones no flow may touch
+    /// (`ProtectedLocations`) and three only File Analysis keeps whole,
+    /// since uninstall removes an app's own preferences.
+    static let fileAnalysisLibraryFolderNames: Set<String> = ["Cookies", "LaunchAgents", "Preferences"]
+    static let protectedLibraryFolderNames: Set<String> = ProtectedLocations.libraryFolderNames
+        .union(ProtectedLocations.cloudLibraryFolderNames).union(fileAnalysisLibraryFolderNames)
+    /// D54 ①: in these `~/Library` folders Apple's own entries (only here)
+    /// and the named system stores of `ProtectedLocations` are kept whole.
+    static let sharedLibraryFolderNames = ProtectedLocations.sharedLibraryFolderNames
+    static let protectedSharedEntryNames = ProtectedLocations.sharedEntryNames
     /// D54 ②: app containers; a container's root and its Data folder are not
     /// moved whole.
     static let appContainerFolderNames: Set<String> = ["Containers", "Group Containers"]
     /// D54 ①: keys and credentials, relative to the home folder.
-    static let credentialPaths: [String] = [
-        ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config/gh", ".config/gcloud", ".netrc",
-        // D54 supplement (second review P2-1).
-        ".git-credentials", ".npmrc", ".pypirc", ".pgpass", ".cargo/credentials", ".cargo/credentials.toml",
-        ".config/op", ".password-store", ".terraform.d/credentials.tfrc.json",
-    ]
-    /// The credential paths above that are single files.
-    static let credentialFilePaths: Set<String> = [
-        ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".pgpass", ".cargo/credentials",
-        ".cargo/credentials.toml", ".terraform.d/credentials.tfrc.json",
-    ]
-    /// D54 ①: this app's data folder for every identity (release, beta),
-    /// relative to the home folder; the integration identity keeps its data
-    /// in folders starting with `integrationDataPrefix`.
-    static var appDataRelativePaths: [String] {
-        [false, true].map { "Library/Application Support/" + AppDataDirectories.applicationSupportDirectoryName(isBeta: $0) }
-    }
-    static let integrationDataPrefix = "Library/Caches/StorageCleanerIntegration-"
+    static let credentialPaths = ProtectedLocations.credentialPaths
+    static let credentialFilePaths = ProtectedLocations.credentialFilePaths
+    /// D54 ①: this app's data folder for every identity, relative to the
+    /// home folder, and the integration identity's prefix.
+    static var appDataRelativePaths: [String] { ProtectedLocations.appDataRelativePaths }
+    static let integrationDataPrefix = ProtectedLocations.integrationDataPrefix
 
     // r2-fa-followups P2-4: rows and map tiles ask while they draw, so the
     // lists above are folded once here and `block()` folds only the item's
     // own path.
     static let foldedStandardFolderNames = folded(standardFolderNames)
-    static let foldedProtectedLibraryFolderNames = folded(protectedLibraryFolderNames)
+    static let foldedFileAnalysisLibraryFolderNames = folded(fileAnalysisLibraryFolderNames)
     static let foldedSharedLibraryFolderNames = folded(sharedLibraryFolderNames)
-    static let foldedProtectedSharedEntryNames = folded(protectedSharedEntryNames)
     static let foldedAppContainerFolderNames = folded(appContainerFolderNames)
-    static let foldedCredentialPaths: [String] = credentialPaths.map(protectedName)
-    static let foldedAppDataRelativePaths: [String] = appDataRelativePaths.map(protectedName)
-    static let foldedIntegrationDataPrefix = protectedName(integrationDataPrefix)
-    private static let foldedCloudLocations = ["Library/Mobile Documents", "Library/CloudStorage"].map(protectedName)
+    static let foldedCredentialPaths = ProtectedLocations.foldedCredentialPaths
     private static let foldedTrash = protectedName(".Trash")
-    private static let foldingLocale = Locale(identifier: "en_US_POSIX")
 
     let rootPath: String
     let targetKind: StorageMapScanTarget.Kind
@@ -464,23 +441,25 @@ struct FileAnalysisTrashPolicy: Equatable, Sendable {
         let parts = folded.split(separator: "/").dropFirst(homeComponentCount).map(String.init)
         let relative = parts.joined(separator: "/")
         if parts.count == 1, Self.foldedStandardFolderNames.contains(relative) { return .standardFolder }
-        // This app's data (with Operation History) and every folder holding
-        // it; D54: every identity's data folder.
+        // This app's data (with Operation History) and every folder holding it.
         if Self.contains(folded, in: foldedAppDataPath) || Self.contains(foldedAppDataPath, in: folded) { return .appData }
-        if Self.foldedAppDataRelativePaths.contains(where: { Self.contains(relative, in: $0) })
-            || relative.hasPrefix(Self.foldedIntegrationDataPrefix) {
-            return .appData
+        // D101 G4-2: the locations no flow may touch (every identity's data
+        // folder, iCloud, credentials, system data), with everything inside.
+        // They share no path with the checks below, so the order is kept.
+        switch ProtectedLocations.kind(ofFoldedParts: parts) {
+        case .appData: return .appData
+        case .cloudStorage: return .cloudStorage
+        case .credentials: return .credentials
+        case .systemData: return .systemData
+        case nil: break
         }
         if Self.contains(relative, in: Self.foldedTrash) { return .trash }
-        if Self.foldedCloudLocations.contains(where: { Self.contains(relative, in: $0) }) { return .cloudStorage }
         if cloudSyncedFolders.contains(where: { Self.contains(folded, in: Self.protectedName($0)) }) { return .cloudStorage }
-        // D54 ①: keys and credentials, and system data in the Library, with
-        // everything inside them.
-        if Self.foldedCredentialPaths.contains(where: { Self.contains(relative, in: $0) }) { return .credentials }
+        // D54 ①: what only File Analysis keeps whole, with everything inside.
         if parts.count >= 2, parts[0] == "library" {
-            if Self.foldedProtectedLibraryFolderNames.contains(parts[1]) { return .systemData }
+            if Self.foldedFileAnalysisLibraryFolderNames.contains(parts[1]) { return .systemData }
             if parts.count >= 3, Self.foldedSharedLibraryFolderNames.contains(parts[1]),
-               Self.isFoldedAppleOwned(parts[2]) || Self.foldedProtectedSharedEntryNames.contains(parts[2]) {
+               Self.isFoldedAppleOwned(parts[2]) {
                 return .systemData
             }
             // D54 ②: not whole, though what is inside follows the rules.
@@ -510,8 +489,7 @@ struct FileAnalysisTrashPolicy: Equatable, Sendable {
     /// Only protection rules fold case; indexed item identities and exact
     /// paths still use their original spelling. Accents are not stripped.
     static func protectedName(_ name: String) -> String {
-        name.folding(options: [.caseInsensitive], locale: foldingLocale)
-            .precomposedStringWithCanonicalMapping
+        ProtectedLocations.folded(name)
     }
 
     static func protectedContains(_ path: String, in root: String) -> Bool {
@@ -623,6 +601,10 @@ struct FileAnalysisTrashReviewItem: Identifiable, Equatable, Sendable {
     let externalVolumeName: String?
     /// D54 ④: a file with other hard links; its space may stay in use.
     var hasOtherHardLinks = false
+    /// D104 G1: for a ready file without other hard links, how much of it
+    /// clones or a local snapshot keep once the Trash is emptied. Folders
+    /// are not walked for it.
+    var reclaimableEstimate: CleanupReclaimableEstimate? = nil
 
     var isReady: Bool {
         if case .ready = status { return true }
@@ -639,6 +621,14 @@ struct FileAnalysisTrashReview: Equatable, Sendable {
     var readyItems: [FileAnalysisTrashReviewItem] { items.filter(\.isReady) }
     var readyBytes: Int64 { readyItems.reduce(0) { $0 + max(0, $1.selection.bytes) } }
     var blockedCount: Int { items.count - readyItems.count }
+    /// D104 G1: what the ready items free once the Trash is emptied. Folders
+    /// and files with other hard links count their whole size; for the
+    /// latter that is already only an upper bound (D93 P1-2).
+    var reclaimable: CleanupSelectionReclaimable {
+        CleanupSelectionReclaimable(items: readyItems.map {
+            (size: max(0, $0.selection.bytes), estimate: $0.reclaimableEstimate)
+        })
+    }
     var externalVolumeNames: [String] {
         var seen = Set<String>()
         return readyItems.compactMap(\.externalVolumeName).filter { seen.insert($0).inserted }

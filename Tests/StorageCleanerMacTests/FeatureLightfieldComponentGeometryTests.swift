@@ -156,16 +156,20 @@ final class FeatureLightfieldComponentGeometryTests: XCTestCase {
             }
         }
         XCTAssertEqual(LightfieldBubbleLayout.hoverScale, 1.04)
-        XCTAssertEqual(LightfieldBubbleLayout.labelThreshold, 100)
+        // D193③: the user lowered the threshold to about 80 pt (was 100).
+        XCTAssertEqual(LightfieldBubbleLayout.labelThreshold, 80)
     }
     /// Main-session visual round: values copied from the approved mockups'
     /// module table (renders/a performance-running, energy, startup, updater;
     /// renders/b files). Without them these modules fell back to legacy themes.
     func testApprovedMockupAccentTokensCoverTheB3ToB7Modules() {
-        for (module, colors) in [(ReviewFilter.startup, [UInt32(0xFF5FA2), 0xAD1653]), (.energy, [0xFF5FA2, 0xAD1653]),
-            (.performance, [0xFF5FA2, 0xAD1653]), (.updater, [0xA285FF, 0x5137C7]),
-            (.largeFiles, [0x2CC9D6, 0x0E7C8C]), (.migration, [0x2CC9D6, 0x0E7C8C])] {
-            XCTAssertEqual(FeatureLightfieldPalette.accents(module), colors, module.rawValue)
+        // D154: these modules now take their CleanMyMac module's colours
+        // (were the B3–B7 mockup values: pink for startup, energy and the
+        // benchmark, violet for updates, teal for the file tools).
+        for (module, family) in [(ReviewFilter.startup, CareStudioFamily.performance), (.energy, .myTools),
+            (.performance, .myTools), (.updater, .applications),
+            (.largeFiles, .spaceMap), (.migration, .myTools)] {
+            XCTAssertEqual(FeatureLightfieldPalette.accents(module), family.palette.action, module.rawValue)
         }
     }
     func testBubbleTailMergesBeyondTwentyFourAndKeepsTheTotal() throws {

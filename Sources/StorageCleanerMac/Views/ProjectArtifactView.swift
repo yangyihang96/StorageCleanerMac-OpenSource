@@ -53,15 +53,16 @@ private final class ProjectArtifactController: ObservableObject {
         selection = CleanupSelection(); result = nil; report = nil; plan = nil; preflight = nil
         busy = true; status = "只读识别项目产物…"
         let roots = roots, coordinator = coordinator
-        let excludedURLs = ScanExclusionService.excludedPaths().map { URL(fileURLWithPath: $0) }
+        let ignoreList = IgnoreListStore.shared.snapshot()
+        let excludedURLs = ignoreList.paths(for: .other).map { URL(fileURLWithPath: $0) }
         task = Task {
             defer { busy = false; task = nil; if closing { releaseAccess() } }
             do {
                 let result = try await coordinator.withLease(owner: .mainScan) { _ in
-                    try await ProjectArtifactScanner(excludedURLs: excludedURLs).scan(roots: roots)
+                    try await ProjectArtifactScanner(excludedURLs: excludedURLs, ignoreList: ignoreList).scan(roots: roots)
                 }
                 self.result = result
-                status = result.limited ? "扫描不完整；已确认产物可审阅选择，活动时间不完整的项目不参与 N 天选择" : "发现 \(result.rows.count) 项；默认不预选"
+                status = IgnoreListSnapshot.appendingSummary(result.session.metrics.ignoredItemCount, to: result.limited ? "扫描不完整；已确认产物可审阅选择，活动时间不完整的项目不参与 N 天选择" : "发现 \(ByteFormat.count(result.rows.count)) 项；默认不预选")
             } catch is CancellationError { status = "扫描已取消" }
             catch { status = "扫描失败：\(error.localizedDescription)" }
         }
@@ -92,7 +93,7 @@ private final class ProjectArtifactController: ObservableObject {
             let report = await executor.execute(plan: plan, context: context(result: result, approved: approved), progress: { _ in })
             self.report = report; self.plan = nil; self.preflight = nil; self.selection = CleanupSelection()
             self.result = nil // Consumed plan cannot be selected again; rescan explicitly.
-            status = "已移入废纸篓 \(report.summary.movedItemCount) 项；跳过 \(report.summary.skippedItemCount) 项；失败 \(report.summary.failedItemCount) 项。恢复见操作记录；移入废纸篓不代表空间已释放。"
+            status = "已移入废纸篓 \(ByteFormat.count(report.summary.movedItemCount)) 项；跳过 \(ByteFormat.count(report.summary.skippedItemCount)) 项；失败 \(ByteFormat.count(report.summary.failedItemCount)) 项。恢复见操作记录；移入废纸篓不代表空间已释放。"
         }
     }
     func cancel() { task?.cancel() }
@@ -112,8 +113,14 @@ struct ProjectArtifactView: View {
     init(coordinator: HeavyWorkCoordinator) { _controller = StateObject(wrappedValue: ProjectArtifactController(coordinator: coordinator)) }
     /// Display-only rows are not measured; a zero lower bound would read as empty.
     static func sizeText(_ row: ProjectArtifactRow) -> String {
-        guard row.blockedReason != nil else { return ByteFormat.string(row.candidate.estimatedSizeBytes) }
-        return row.candidate.estimatedSizeBytes == 0 ? "未测量" : ByteFormat.string(row.candidate.estimatedSizeBytes) + "（本轮量到的下限）"
+        guard row.blockedReason != nil else { return ByteFormat.storageString(row.candidate.estimatedSizeBytes) }
+        return row.candidate.estimatedSizeBytes == 0 ? "未测量" : ByteFormat.storageString(row.candidate.estimatedSizeBytes) + "（本轮量到的下限）"
+    }
+    /// D104 G1: what the selected artifacts free once the Trash is emptied,
+    /// when clones or a local snapshot keep a noticeable part of them.
+    static func reclaimableNote(_ selected: [ScanCandidate]) -> String {
+        let bytes = CleanupByteCount.sum(selected.map(\.estimatedSizeBytes))
+        return CleanupSelectionReclaimable(candidates: selected).note(ofSelected: bytes).map { " · " + $0 } ?? ""
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -140,6 +147,9 @@ struct ProjectArtifactView: View {
                                     Text("\(row.project.lastPathComponent) · \(row.requirement.relativeArtifact) · \(Self.sizeText(row))")
                                 }.disabled(!row.candidate.isSelectable || controller.busy || controller.plan != nil)
                                 Text(row.candidate.snapshot.allocatedSizeBytes == nil ? "逻辑大小；本地占用不可用" : "本地占用").font(AppDesignTokens.TypeScale.secondary)
+                                if let reclaimable = CleanupCandidateRowHint.reclaimable(for: row.candidate) {
+                                    Label(reclaimable.text, systemImage: reclaimable.systemImage).font(AppDesignTokens.TypeScale.secondary)
+                                }
                                 Text(row.project.path).font(AppDesignTokens.TypeScale.secondary).textSelection(.enabled)
                                 Text("项目最后修改：\(row.projectModifiedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")").font(AppDesignTokens.TypeScale.secondary)
                                 Text(row.blockedReason ?? "清单 \(row.requirement.manifest) 确认；产物可重新生成，默认不预选").font(AppDesignTokens.TypeScale.secondary)
@@ -154,9 +164,9 @@ struct ProjectArtifactView: View {
                     }
                 }
             }
-            Text("大小优先显示本地占用；不可用时标明逻辑大小。不可读或受保护项仅显示已量到的下限。硬链接按身份去重，APFS 克隆共享块不能据此计算释放量。").font(AppDesignTokens.TypeScale.secondary)
+            Text("大小优先显示本地占用；不可用时标明逻辑大小。不可读或受保护项仅显示已量到的下限。硬链接按身份去重；与 APFS 克隆共享或被本地快照占用的部分，清空废纸篓后也不会释放，明显时在行内注明预计释放量。").font(AppDesignTokens.TypeScale.secondary)
             if let plan = controller.plan, let preflight = controller.preflight {
-                Text("动作：移到废纸篓 · \(plan.items.count) 项 · \(ByteFormat.string(plan.estimatedMovableBytes))；复查就绪 \(preflight.readyCount) 项，跳过 \(preflight.skippedCount) 项。可从操作记录恢复。")
+                Text("动作：移到废纸篓 · \(ByteFormat.count(plan.items.count)) 项 · \(ByteFormat.storageString(plan.estimatedMovableBytes))\(Self.reclaimableNote(controller.result?.session.candidates.filter { controller.selection.selectedCandidateIDs.contains($0.id) } ?? []))；复查就绪 \(ByteFormat.count(preflight.readyCount)) 项，跳过 \(ByteFormat.count(preflight.skippedCount)) 项。可从操作记录恢复。")
                 Toggle("已核对重建命令、联网/权限条件及产物内本地改动，并停止相关 node、cargo、python/虚拟环境等进程（无法可靠检测）", isOn: $reviewed)
                 HStack {
                     Button("返回选择") { controller.plan = nil; controller.preflight = nil; reviewed = false }.disabled(controller.busy)

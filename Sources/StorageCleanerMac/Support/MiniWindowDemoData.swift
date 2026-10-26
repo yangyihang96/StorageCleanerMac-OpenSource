@@ -303,7 +303,10 @@ enum MiniWindowDemoData {
             scopedDNSServers: ["10.8.0.1", "1.1.1.1"],
             gatewayOrRemoteAddress: "198.51.100.24",
             isDefaultRoute: true,
-            isSplitTunnel: false
+            isSplitTunnel: false,
+            // D140: the tunnel's addresses are point-to-point, so iStat lists
+            // none of them.
+            listedAddresses: []
         )
     }
 
@@ -844,7 +847,7 @@ enum MiniWindowDemoData {
                         kind: .memoryUsage,
                         value: hasMemoryOverride ? memory.usedPercentText : "81%",
                         detail: hasMemoryOverride
-                            ? "\(ByteFormat.string(memory.usedBytes)) / \(ByteFormat.string(memory.physicalBytes))"
+                            ? "\(IStatNumberFormat.memory(memory.usedBytes)) / \(IStatNumberFormat.memory(memory.physicalBytes))"
                             : "38.9 GB / 48 GB",
                         isAvailable: true
                     ),
@@ -857,7 +860,7 @@ enum MiniWindowDemoData {
                     SystemMonitorMetric(
                         kind: .fanSpeed,
                         value: fan.actualRPM.map(SystemFanSpeedFormat.string) ?? "—",
-                        detail: L10n.text("\(fan.fanCount) 个风扇", "\(fan.fanCount) fans"),
+                        detail: L10n.text("\(ByteFormat.count(fan.fanCount)) 个风扇", "\(ByteFormat.count(fan.fanCount)) fans"),
                         isAvailable: fan.telemetryAvailable
                     ),
                     SystemMonitorMetric(
@@ -1027,7 +1030,8 @@ enum MiniWindowDemoData {
                 memoryPressureLevelCode: point.memoryPressureLevelCode,
                 memoryAppOrOtherBytes: point.memoryAppOrOtherBytes, memoryWiredBytes: point.memoryWiredBytes,
                 memoryPhysicalBytes: point.memoryPhysicalBytes, compressedMemoryBytes: point.compressedMemoryBytes,
-                swapUsedBytes: point.swapUsedBytes, chipTemperature: point.chipTemperature,
+                swapUsedBytes: point.swapUsedBytes, swapUsedPercent: point.swapUsedPercent,
+                chipTemperature: point.chipTemperature,
                 gpuTemperature: point.gpuTemperature, temperatureReadings: point.temperatureReadings,
                 fanRPM: point.fanRPM, fanTargetRPM: point.fanTargetRPM, fanReadings: point.fanReadings,
                 downBytesPerSecond: point.downBytesPerSecond, upBytesPerSecond: point.upBytesPerSecond,
@@ -1386,6 +1390,10 @@ enum MiniWindowDemoData {
         )
     }
 
+    /// D122: the awake share of the fixture's 8.5 days since the boot
+    /// (`systemUptimeSeconds`), for the uptime page.
+    static let systemAwakeSeconds: TimeInterval = 561_600
+
     static let storageSnapshot = StorageCapacitySnapshot(
         totalBytes: 1_000_000_000_000,
         availableBytes: 480_000_000_000,
@@ -1417,7 +1425,9 @@ enum MiniWindowDemoData {
         ipv6Router: "2001:db8::1",
         dnsServers: ["192.0.2.53", "2001:db8::53"],
         interfaceMTU: 1_500,
-        linkSpeedMbps: 1_200
+        linkSpeedMbps: 1_200,
+        // D140: the addresses iStat lists, the IPv6 one secured.
+        listedAddresses: ["192.0.2.35", "2001:db8::35"]
     )
 
     static let publicNetworkAddressSnapshot = PublicNetworkAddressSnapshot(
@@ -1609,6 +1619,20 @@ enum MiniWindowDemoData {
             }
             let userValue = cpuPattern == nil ? Optional(user[valueIndex]) : totalValue.map { $0 * 0.7 }
             let systemValue = cpuPattern == nil ? Optional(system[valueIndex]) : totalValue.map { $0 * 0.3 }
+            // D122: each fan's own reading, as a live point carries the
+            // snapshot's, so a selected fan's history draws (was nil: only the
+            // average had a history).
+            let stageFanReadings = currentFan.readings.map { reading in
+                SystemFanReading(
+                    index: reading.index,
+                    identity: reading.identity,
+                    actualRPM: min(reading.maximumRPM ?? Int.max, max(reading.minimumRPM ?? 0,
+                        reading.actualRPM + Int(fan[valueIndex] - fan[0]))),
+                    minimumRPM: reading.minimumRPM,
+                    maximumRPM: reading.maximumRPM,
+                    targetRPM: reading.targetRPM
+                )
+            }
             return MenuBarTelemetryPoint(
                 date: referenceDate.addingTimeInterval(-Double(secondsBeforeCurrent)),
                 cpuTotal: totalValue,
@@ -1623,6 +1647,8 @@ enum MiniWindowDemoData {
                 memoryPhysicalBytes: memorySnapshot.ringComposition?.physicalBytes,
                 compressedMemoryBytes: memorySnapshot.ringComposition?.compressedBytes,
                 swapUsedBytes: memorySnapshot.measurements.swapUsedBytes.value,
+                swapUsedPercent: MenuBarTelemetryPoint.swapUsedPercent(
+                    used: memorySnapshot.measurements.swapUsedBytes.value, total: memorySnapshot.swapTotalBytes),
                 chipTemperature: temperature[valueIndex],
                 gpuTemperature: temperature[valueIndex] - 4,
                 temperatureReadings: [
@@ -1646,7 +1672,7 @@ enum MiniWindowDemoData {
                         Double(rpm) + fan[valueIndex] - fan[0]))
                 },
                 fanTargetRPM: showsCurveTarget ? currentFan.targetRPM.map(Double.init) : nil,
-                fanReadings: nil,
+                fanReadings: stageFanReadings.isEmpty ? nil : stageFanReadings,
                 downBytesPerSecond: download[valueIndex],
                 upBytesPerSecond: upload[valueIndex]
             )

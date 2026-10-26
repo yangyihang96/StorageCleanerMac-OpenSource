@@ -5,8 +5,56 @@ enum HomebrewAutomaticUpdateSafety {
     /// package and, where present, every application identity are read back.
     static func batchTargetVersion(metadata: HomebrewPackageMetadata, installedVersion: ApplicationVersion) -> ApplicationVersion? {
         guard metadata.hasOutdatedEvidence, let version = metadata.currentVersion?.trimmed.nonEmpty else { return nil }
-        return strictlyNewerCurrentVersion(metadata: metadata, installedVersion: installedVersion)
-            ?? ApplicationVersion(marketing: version)
+        if let strict = strictlyNewerCurrentVersion(metadata: metadata, installedVersion: installedVersion) {
+            return strict
+        }
+        // D190: the fallback keeps Homebrew's verdict where versions cannot be
+        // ordered strictly (formula revisions, CSV tuples, `latest`), never a
+        // target that is provably not newer than what is installed.
+        guard !targetIsNotNewer(metadata: metadata, installedVersion: installedVersion) else { return nil }
+        return ApplicationVersion(marketing: version)
+    }
+
+    /// D190: true when the installed version is provably the same as or newer
+    /// than Homebrew's target. A cask's application often updates itself and
+    /// Homebrew's record goes stale (10-23: Epic Games Launcher 20.3.5 against
+    /// a 20.3.3 cask; Claude 3.1623.0 against `3.1623.0,<digest>`; OrbStack
+    /// 2.2.4 build 21120 against `2.2.4,21120`), so `brew upgrade` would
+    /// reinstall or downgrade it. A formula is compared without its `_N`
+    /// revision, and only a lower target counts: a revision bump keeps the
+    /// version (`4.0.0` → `4.0.0_1`).
+    static func targetIsNotNewer(metadata: HomebrewPackageMetadata, installedVersion: ApplicationVersion) -> Bool {
+        guard let rawCurrent = metadata.currentVersion?.trimmed.nonEmpty,
+              let current = leadingConcreteVersion(rawCurrent, kind: metadata.kind),
+              let installed = leadingConcreteVersion(installedVersion.preferred, kind: metadata.kind) else {
+            return false
+        }
+        let order = ApplicationVersion.compare(current, installed)
+        switch metadata.kind {
+        case .formula:
+            return order == .orderedAscending
+        case .cask:
+            guard order == .orderedSame else { return order == .orderedAscending }
+            // The same version: a numeric second field is Homebrew's build
+            // (`1.2.3,200`), newer only above the bundle's own build number.
+            // A digest or a missing build is the same release.
+            let fields = rawCurrent.split(separator: ",", omittingEmptySubsequences: false)
+            guard fields.count == 2, let target = UInt64(fields[1]), let own = UInt64(installedVersion.build) else {
+                return true
+            }
+            return target <= own
+        }
+    }
+
+    private static func leadingConcreteVersion(_ rawValue: String, kind: HomebrewPackageKind) -> String? {
+        guard let first = rawValue.trimmed.split(separator: ",", omittingEmptySubsequences: false).first.map(String.init),
+              isConcreteVersion(first) else {
+            return nil
+        }
+        guard kind == .formula, let revision = first.range(of: #"_[0-9]+$"#, options: .regularExpression) else {
+            return first
+        }
+        return String(first[..<revision.lowerBound])
     }
 
     /// Returns a concrete Homebrew target only when the cask/formula reports a
@@ -414,6 +462,36 @@ final class HomebrewProvider: ApplicationUpdateProvider, @unchecked Sendable {
                 releaseNotes: nil,
                 downloadSize: nil,
                 warning: nil
+            )
+        }
+
+        if HomebrewAutomaticUpdateSafety.targetIsNotNewer(metadata: metadata, installedVersion: application.installedVersion),
+           let target = metadata.currentVersion?.trimmed.nonEmpty {
+            let installed = application.installedVersion.display
+            // D190: never offer a reinstall or a downgrade as an update.
+            if metadata.kind == .cask {
+                return ApplicationUpdateCheckResult(
+                    status: .upToDate,
+                    availableVersion: nil,
+                    releaseDate: nil,
+                    releaseNotes: nil,
+                    downloadSize: nil,
+                    warning: L10n.text(
+                        "应用已是 \(installed)，不比 Homebrew 记录的 \(target) 旧（多半是应用自己更新了），不经 Homebrew 重装。",
+                        "The application is already \(installed), no older than Homebrew's \(target) (it most likely updated itself); Homebrew will not reinstall it."
+                    )
+                )
+            }
+            return ApplicationUpdateCheckResult(
+                status: .updateAvailable,
+                availableVersion: ApplicationVersion(marketing: target),
+                releaseDate: nil,
+                releaseNotes: nil,
+                downloadSize: nil,
+                warning: L10n.text(
+                    "Homebrew 要换成的 \(target) 比已装的 \(installed) 低，不加入批量更新；确有需要请在终端运行 brew upgrade。",
+                    "Homebrew's target \(target) is lower than the installed \(installed), so it is not added to batch updates; run brew upgrade in Terminal if you need it."
+                )
             )
         }
 

@@ -33,11 +33,13 @@ enum ApplicationUpdateNotificationService {
             return
         }
 
+        // CleanMyMac `local_notification_applications_updates_complete_*`,
+        // with this app's counts kept in the body.
         let content = UNMutableNotificationContent()
-        content.title = L10n.text("应用更新已完成", "Application Updates Finished")
+        content.title = L10n.text("更新任务已完成！", "Updater tasks completed!")
         content.body = L10n.text(
-            "\(completed) 个成功，\(failed) 个失败，\(cancelled) 个取消",
-            "\(completed) succeeded, \(failed) failed, \(cancelled) cancelled"
+            "\(ByteFormat.count(completed)) 个成功，\(ByteFormat.count(failed)) 个失败，\(ByteFormat.count(cancelled)) 个取消。点击以查看您的应用程序更新结果。",
+            "\(ByteFormat.count(completed)) succeeded, \(ByteFormat.count(failed)) failed, \(ByteFormat.count(cancelled)) cancelled. Click to see your application update results."
         )
         content.sound = .default
 

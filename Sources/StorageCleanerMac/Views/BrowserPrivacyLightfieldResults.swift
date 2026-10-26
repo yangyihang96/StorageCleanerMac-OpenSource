@@ -57,7 +57,7 @@ struct BrowserPrivacyLightfieldResults<Notices: View, Utilities: View>: View {
     private var summaryNote: String {
         let snapshot = store.resultPresentation
         let sites = snapshot?.siteCount ?? 0, hidden = snapshot?.concealedCount ?? 0
-        return "· " + L10n.text("\(sites) 个站点", "\(sites) sites")
+        return "· " + L10n.text("\(ByteFormat.count(sites)) 个站点", "\(ByteFormat.count(sites)) sites")
             + (hidden > 0 ? " · " + BrowserPrivacyDisclosurePolicy.sensitiveSummary(hidden) : "")
     }
 
@@ -157,6 +157,16 @@ struct BrowserPrivacyLightfieldBrowser: View {
     }
 }
 
+extension BrowserPrivacyBrowser {
+    /// The app whose icon stands for this browser: the bundle the scan found,
+    /// else the app Launch Services knows by its identifier (only its icon
+    /// is read).
+    @MainActor var iconPath: String? {
+        applicationURL?.path
+            ?? bundleIdentifier.flatMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)?.path }
+    }
+}
+
 /// One production browser/profile branch; its state is presentation-only.
 /// It is independently hostable for native AX tests (the AppKit harness does
 /// not publish ScrollView descendants; see existing N20).
@@ -191,7 +201,7 @@ struct BrowserPrivacyLightfieldProfile: View {
                     toggle(&closedProfiles, group.id)
                 } label: {
                     HStack(spacing: 16) {
-                        LightfieldAppIcon(path: group.browser.applicationURL?.path, size: .medium)
+                        LightfieldAppIcon(path: group.browser.iconPath, size: .medium)
                         Text(group.title).font(.system(size: 15, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                         Text(BrowserPrivacyLightfieldPresentation.counts(sites: group.sites.count, records: group.records.count))
                             .font(.system(size: 13)).foregroundStyle(palette.fg2).lineLimit(1)

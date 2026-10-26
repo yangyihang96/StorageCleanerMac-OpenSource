@@ -215,7 +215,8 @@ final class SystemEnergyACTelemetryTests: XCTestCase {
                                           telemetry: telemetry(MiniSensorsDecodingTests.mac17_9.keys),
                                           electrical: electrical(load: 40.04, batteryWatts: 0), now: now)
         XCTAssertEqual(onAC.map(\.title), ["整机", "电源输入", "电池", "屏幕背光"])
-        XCTAssertEqual(onAC.first?.value, "87.90 W", "PSTR, not the 60 s SystemLoad (40.04 W)")
+        // D128 (2026-10-19): iStat's power format (was "87.90 W").
+        XCTAssertEqual(onAC.first?.value, "87.9 W", "PSTR, not the 60 s SystemLoad (40.04 W)")
         XCTAssertFalse(onAC.contains { $0.value == "—" }, "no row without a value")
 
         let systemOnly = GeekPowerReadouts.rows(hasInternalBattery: true, powerSource: .acPower,

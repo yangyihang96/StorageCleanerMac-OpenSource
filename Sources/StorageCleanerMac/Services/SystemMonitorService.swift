@@ -359,8 +359,8 @@ enum SystemMonitorService {
                 kind: kind,
                 value: percentString(ratio * 100),
                 detail: L10n.text(
-                    "\(ByteFormat.string(Int64(clamping: used))) / \(ByteFormat.string(Int64(clamping: physical)))",
-                    "\(ByteFormat.string(Int64(clamping: used))) / \(ByteFormat.string(Int64(clamping: physical)))"
+                    "\(ByteFormat.memoryString(Int64(clamping: used))) / \(ByteFormat.memoryString(Int64(clamping: physical)))",
+                    "\(ByteFormat.memoryString(Int64(clamping: used))) / \(ByteFormat.memoryString(Int64(clamping: physical)))"
                 ),
                 isAvailable: true
             )
@@ -692,15 +692,17 @@ enum SystemMonitorService {
         String(format: "%.0f%%", value)
     }
 
+    /// D178: the menu bar's rate format, as its other rates write them (D128,
+    /// "1.6 MB/s"; was ByteFormat's binary "1.6 MiB/s").
     private static func speedString(_ bytesPerSecond: Int64) -> String {
-        "\(ByteFormat.string(bytesPerSecond))/s"
+        IStatNumberFormat.bandwidth(bytesPerSecond)
     }
 
     private static func fanSpeedDetail(fanCount: Int?) -> String {
         guard let fanCount, fanCount > 1 else {
             return L10n.text("当前转速", "Current speed")
         }
-        return L10n.text("\(fanCount) 个风扇平均", "\(fanCount) fan average")
+        return L10n.text("\(ByteFormat.count(fanCount)) 个风扇平均", "\(ByteFormat.count(fanCount)) fan average")
     }
 }
 
@@ -1023,8 +1025,10 @@ actor SystemMonitorSampler {
             || enabledKinds.contains(.fanSpeed)
         guard needsThermal else { return .empty }
 
+        // D127: the resident plan reads sensors on every tick; a tick that
+        // woke a few milliseconds earlier than the last must not skip one.
         if let thermalSampledAt,
-           now.timeIntervalSince(thermalSampledAt) < max(1, samplingInterval) {
+           now.timeIntervalSince(thermalSampledAt) < max(1, samplingInterval) - MenuBarPerformancePolicy.tickTolerance {
             return cachedThermal
         }
 

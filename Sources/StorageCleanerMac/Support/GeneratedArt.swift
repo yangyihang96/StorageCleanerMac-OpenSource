@@ -2,9 +2,10 @@ import AppKit
 import ImageIO
 import SwiftUI
 
-/// D58 illustration set A ("glossy glass 3D"): module marks and state
-/// pictures generated with Codex image generation from the main session's
-/// prompts (masters stay outside the repository, see `Resources/Art`).
+/// Module marks, state pictures and (D166) result-card objects. D166 remade
+/// the D58 set and added marks for the D154 modules, a celebration state and
+/// `tile-*` objects as Blender models rendered in style A "glossy ceramic"
+/// (models and renders stay outside the repository, see `Resources/Art`).
 ///
 /// Shipped as HEIC with alpha in `Contents/Resources/Art`: `-192` for page
 /// header marks (64–96 pt @2x) and `-512` for landing centers (up to 256 pt
@@ -26,11 +27,86 @@ enum GeneratedArt: String, CaseIterable, Sendable {
     case migration = "module-migration"
     case duplicates = "module-duplicates"
     case similarPhotos = "module-similarphotos"
+    // D166: own marks for the D154 modules and tool pages that borrowed
+    // another module's picture.
+    case performance = "module-performance"
+    case applications = "module-apps"
+    case clutter = "module-clutter"
+    case cloudCleanup = "module-cloudcleanup"
+    case myTools = "module-mytools"
+    case myActivity = "module-myactivity"
+    case extensions = "module-extensions"
+    case maintenance = "module-maintenance"
+    case chatFiles = "module-chatfiles"
     case stateSuccess = "state-success"
     case stateAllClear = "state-allclear"
     case stateEmpty = "state-empty"
     case statePermission = "state-permission"
     case stateError = "state-error"
+    case stateCelebration = "state-celebration"
+    // D166②: the first-run screens (welcome and privacy, Full Disk Access).
+    case onboardWelcome = "onboard-welcome"
+    case onboardDiskAccess = "onboard-diskaccess"
+    // D166: one object per result card and manager row, in its module's
+    // colour; shipped at the header size only.
+    case tileSystemJunk = "tile-systemjunk"
+    case tileDevJunk = "tile-devjunk"
+    case tileAIClutter = "tile-aiclutter"
+    case tileMail = "tile-mail"
+    case tileTrash = "tile-trash"
+    case tileReview = "tile-review"
+    case tileAppUpdates = "tile-appupdates"
+    case tileUnused = "tile-unused"
+    case tileLeftovers = "tile-leftovers"
+    case tileInstallers = "tile-installers"
+    case tileLegacyApps = "tile-legacyapps"
+    case tileSystemUpdate = "tile-systemupdate"
+    case tilePickApps = "tile-pickapps"
+    case tileAppStore = "tile-appstore"
+    case tileOtherSources = "tile-othersources"
+    case tileVendors = "tile-vendors"
+    case tileCompare = "tile-compare"
+    case tileMaintenance = "tile-maintenance"
+    case tileLoginItems = "tile-loginitems"
+    case tileBackground = "tile-background"
+    case tileSync = "tile-sync"
+    case tileAttention = "tile-attention"
+    case tilePressure = "tile-pressure"
+    case tileTopApps = "tile-topapps"
+    case tileFreeable = "tile-freeable"
+    case tileProcesses = "tile-processes"
+    case tileHistory = "tile-history"
+    case tileSensitive = "tile-sensitive"
+    case tileCookies = "tile-cookies"
+    case tileBrowsers = "tile-browsers"
+    case tileDownloaded = "tile-downloaded"
+    case tileLargeCloud = "tile-largecloud"
+    case tileCloudOnly = "tile-cloudonly"
+    case tileOtherClouds = "tile-otherclouds"
+    case tileCleaned = "tile-cleaned"
+    case tileMonth = "tile-month"
+    case tileCount = "tile-count"
+    case tileRestore = "tile-restore"
+    // D166②: the completion bell and the Settings tabs (General, Mini
+    // Window, Scan & Safety, System Control), drawn in their final colours.
+    case tileNotifications = "tile-notifications"
+    case tileGeneral = "tile-general"
+    case tileMiniWindow = "tile-miniwindow"
+    case tileScanSafety = "tile-scansafety"
+    case tileSystemControl = "tile-systemcontrol"
+    // D166③: the maintenance and extension tool sidebars (purgeable space,
+    // permissions; Quick Look, screen savers, audio, app extensions).
+    case tilePurgeable = "tile-purgeable"
+    case tilePermissions = "tile-permissions"
+    case tileQuickLook = "tile-quicklook"
+    case tileScreenSaver = "tile-screensaver"
+    case tileAudio = "tile-audio"
+    case tileAppExtension = "tile-appextension"
+    // D166④: hero pictures for the protection and space map modules (a
+    // shield with a raised hand; a cluster of bubbles); the classic privacy
+    // and file analysis pages keep `privacy` and `fileAnalysis`.
+    case protection = "module-protection"
+    case spaceMap = "module-spacemap"
 
     /// The exported pixel sizes, chosen for their display sizes.
     enum Variant: Int, CaseIterable, Sendable {
@@ -40,14 +116,22 @@ enum GeneratedArt: String, CaseIterable, Sendable {
         case landing = 512
     }
 
+    /// A result-card or manager-row object (D166) rather than a module mark
+    /// or state picture.
+    var isTile: Bool { rawValue.hasPrefix("tile-") }
+
+    /// The sizes shipped: tiles are drawn at 96 pt or less, so only `header`.
+    var variants: [Variant] { isTile ? [.header] : Variant.allCases }
+
     static let resourceDirectory = "Art"
     static let similarPhotosSystemImage = "photo.on.rectangle.angled"
     /// The Performance page header (`PerformanceBenchmarkWorkspaceView`)
     /// shows its dashboard's speedometer, not the sidebar's gauge.
     static let performanceDashboardSystemImage = "speedometer"
 
+    /// A tile asked for its landing size gets its header picture.
     func resourceName(_ variant: Variant) -> String {
-        "\(rawValue)-\(variant.rawValue)"
+        "\(rawValue)-\((variants.contains(variant) ? variant : .header).rawValue)"
     }
 
     /// The module mark of a sidebar destination.
@@ -67,6 +151,13 @@ enum GeneratedArt: String, CaseIterable, Sendable {
         case .largeFiles: .fileAnalysis
         case .migration: .migration
         case .duplicates: .duplicates
+        // D166: the D154 module and tool pages have their own pictures.
+        case .cloudCleanup: .cloudCleanup
+        case .myTools: .myTools
+        case .myActivity: .myActivity
+        case .extensions: .extensions
+        case .maintenance: .maintenance
+        case .chatFiles: .chatFiles
         case .utilityHub: nil
         }
     }
@@ -92,9 +183,10 @@ enum GeneratedArt: String, CaseIterable, Sendable {
         library.cachedImage(named: resourceName(variant))
     }
 
-    /// Every header mark, for loading ahead of the first page change.
+    /// Every header mark, for loading ahead of the first page change; tiles
+    /// load when a card or row shows them.
     static var headerResourceNames: [String] {
-        allCases.map { $0.resourceName(.header) }
+        allCases.filter { !$0.isTile }.map { $0.resourceName(.header) }
     }
 }
 

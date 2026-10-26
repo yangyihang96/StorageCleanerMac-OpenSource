@@ -54,6 +54,8 @@ enum FileContentReadError: Error, LocalizedError, Equatable, Sendable {
     /// Do not expose untranslated POSIX/Cocoa diagnostics in user notices.
     static func userMessage(for error: any Error) -> String {
         if let known = error as? FileContentReadError { return known.localizedDescription }
+        // Another task holds the lease: not a permission or disk problem (malware removal, 10-24).
+        if let lease = error as? HeavyWorkCoordinator.Error { return lease.localizedDescription }
         if let known = error as? ExternalDriveMigrationError { return known.localizedDescription }
         let outer = error as NSError
         let system = (outer.userInfo[NSUnderlyingErrorKey] as? NSError) ?? outer

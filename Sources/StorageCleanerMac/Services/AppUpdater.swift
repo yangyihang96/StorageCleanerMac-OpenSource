@@ -21,7 +21,8 @@ final class AppUpdater: NSObject, ObservableObject {
         controller = SPUStandardUpdaterController(
             // Each signed bundle declares its own feed and verification key.
             // Beta uses appcast-beta.xml; production keeps appcast.xml.
-            startingUpdater: true,
+            // D106: an acceptance session never checks for an update.
+            startingUpdater: !AcceptanceLaunch.isActive,
             // The delegate only postpones the install relaunch and ends that
             // postponement with the update cycle. Sparkle still filters
             // compatibility, channels, phased rollouts and skipped releases
@@ -32,6 +33,8 @@ final class AppUpdater: NSObject, ObservableObject {
     }
 
     func checkForUpdates() {
+        // D106: not even on request; an acceptance session installs nothing.
+        guard !AcceptanceLaunch.isActive else { return }
         controller?.checkForUpdates(nil)
     }
 

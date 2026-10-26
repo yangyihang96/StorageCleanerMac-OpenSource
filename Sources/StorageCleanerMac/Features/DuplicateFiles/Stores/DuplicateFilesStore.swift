@@ -77,6 +77,9 @@ final class DuplicateFilesStore: ObservableObject {
     @Published private(set) var scanProgress: DuplicateFileScanProgress?
     @Published private(set) var scanCoverage: DuplicateFileScanCoverage?
     @Published private(set) var scanOutcome: DuplicateFileScanOutcome?
+    /// D154 batch 2: the content-proven groups of the latest scan in this
+    /// session, for “Merge into Clones” (D163). A restored result has none.
+    @Published private(set) var exactGroups: [DuplicateFileGroup] = []
     @Published private(set) var lastScanAt: Date?
     @Published private(set) var scanSeconds: TimeInterval?
     @Published private(set) var errorMessage: String?
@@ -174,12 +177,7 @@ final class DuplicateFilesStore: ObservableObject {
         ) ?? .userFiles
 
         if let resultStore = self.resultStore {
-            let configuration = Self.configuration(
-                scope: scanScope,
-                customRootPaths: customRootPaths,
-                externalRootPaths: externalRootPaths,
-                candidateRules: candidateRules
-            )
+            let configuration = currentConfiguration()
             // Revalidate only the saved snapshot off the main actor. Loading a
             // previous result never starts discovery or revives its selection.
             resultRestoreTask = Task { [weak self] in
@@ -190,12 +188,7 @@ final class DuplicateFilesStore: ObservableObject {
                       self.scanGeneration == nil,
                       self.phase == .idle,
                       self.lastScanAt == nil,
-                      Self.configuration(
-                        scope: self.scanScope,
-                        customRootPaths: self.customRootPaths,
-                        externalRootPaths: self.externalRootPaths,
-                        candidateRules: self.candidateRules
-                      ) == configuration else { return }
+                      self.currentConfiguration() == configuration else { return }
                 self.items = restored.items
                 self.scanCoverage = restored.coverage
                 self.scanProgress = restored.progress
@@ -260,12 +253,7 @@ final class DuplicateFilesStore: ObservableObject {
     func startScan() {
         guard canScan else { return }
 
-        let configuration = Self.configuration(
-            scope: scanScope,
-            customRootPaths: customRootPaths,
-            externalRootPaths: externalRootPaths,
-            candidateRules: candidateRules
-        )
+        let configuration = currentConfiguration()
         let control = DuplicateFileScanControl()
         let resumeStore = resumeIndexStore
         let resumeIndexData = resumeStore?.load()
@@ -278,6 +266,7 @@ final class DuplicateFilesStore: ObservableObject {
         scanProgress = .initial
         scanCoverage = nil
         scanOutcome = nil
+        exactGroups = []
         let started = Date()
         let operation = scanOperation
         let coordinator = coordinator
@@ -338,6 +327,7 @@ final class DuplicateFilesStore: ObservableObject {
                     return
                 }
                 items = Self.storageItems(from: report)
+                exactGroups = report.exactGroups
                 let completedAt = Date()
                 lastScanAt = completedAt
                 lastScanConfiguration = configuration
@@ -376,6 +366,29 @@ final class DuplicateFilesStore: ObservableObject {
         scanTask?.cancel()
     }
 
+    /// Report §4 item 12 (CleanMyMac's Start Over): back to the landing page.
+    /// The result goes, with its saved snapshot, so a new launch opens on the
+    /// landing page too; the scope, added folders and rules stay. Nothing
+    /// while a scan runs.
+    func startOver() {
+        guard !isScanning else { return }
+        resultRestoreTask?.cancel()
+        resultRestoreTask = nil
+        items = []
+        exactGroups = []
+        scanProgress = nil
+        scanCoverage = nil
+        scanOutcome = nil
+        lastScanAt = nil
+        scanSeconds = nil
+        lastScanConfiguration = nil
+        errorMessage = nil
+        selectionMessage = nil
+        phase = .idle
+        reconcileSelection(with: [])
+        resultStore?.remove()
+    }
+
     func waitForCurrentScan() async {
         await scanTask?.value
     }
@@ -384,9 +397,10 @@ final class DuplicateFilesStore: ObservableObject {
         await resultRestoreTask?.value
     }
 
-    func replaceItemsForTesting(_ items: [StorageItem], scannedAt: Date = Date()) {
+    func replaceItemsForTesting(_ items: [StorageItem], scannedAt: Date = Date(), coverage: DuplicateFileScanCoverage? = nil) {
         guard !isScanning else { return }
         self.items = items
+        if let coverage { scanCoverage = coverage }
         lastScanAt = scannedAt
         phase = .finished
         errorMessage = nil
@@ -457,29 +471,46 @@ final class DuplicateFilesStore: ObservableObject {
         }.value
     }
 
+    private func currentConfiguration() -> DuplicateFileScanner.Configuration {
+        let snapshot = defaults === UserDefaults.standard ? IgnoreListStore.shared.snapshot() : IgnoreListSnapshot.empty
+        var configuration = Self.configuration(
+            scope: scanScope,
+            customRootPaths: customRootPaths,
+            externalRootPaths: externalRootPaths,
+            candidateRules: candidateRules,
+            excludedPaths: defaults === UserDefaults.standard ? [] : ScanExclusionService.excludedPaths(defaults: defaults)
+        )
+        configuration.ignoreList = snapshot
+        return configuration
+    }
+
     private static func configuration(
         scope: DuplicateFileScanScope,
         customRootPaths: [String],
         externalRootPaths: [String],
-        candidateRules: Set<DuplicateFileCandidateGroup.Rule>
+        candidateRules: Set<DuplicateFileCandidateGroup.Rule>,
+        excludedPaths: [String]
     ) -> DuplicateFileScanner.Configuration {
         switch scope {
         case .userFiles:
             .userFiles(
                 customRoots: customRootPaths,
                 externalVolumeRoots: externalRootPaths,
+                excludedPaths: excludedPaths,
                 candidateRules: candidateRules
             )
         case .wholeComputer:
             .wholeComputer(
                 customRoots: customRootPaths,
                 externalVolumeRoots: externalRootPaths,
+                excludedPaths: excludedPaths,
                 candidateRules: candidateRules
             )
         case .selectedLocations:
             .selectedLocations(
                 customRoots: customRootPaths,
                 externalVolumeRoots: externalRootPaths,
+                excludedPaths: excludedPaths,
                 candidateRules: candidateRules
             )
         }
@@ -575,6 +606,102 @@ final class DuplicateFilesStore: ObservableObject {
 
     func selectedItems(from items: [StorageItem]) -> [StorageItem] {
         items.filter { selectedItemIDs.contains($0.id) && $0.status == .available }
+    }
+
+    // MARK: D207 ignore list (CleanMyMac's Add to Ignore List)
+
+    var canIgnore: Bool { !isScanning }
+
+    /// D207: similar photos go on the ignore list as similar files, the rest as duplicates.
+    static func ignoreCategory(of item: StorageItem) -> IgnoreCategory {
+        item.duplicateMatchKind == DuplicateFileCandidateGroup.Rule.similarImage.rawValue ? .similar : .duplicates
+    }
+
+    /// D207 (CleanMyMac's Add to Ignore List): the files go on the ignore list
+    /// and leave the result as a scan leaves out what the list covers, among
+    /// the ignored of their kind; a group left with one copy goes too, as it
+    /// no longer holds a duplicate. Put Back returns them, selected as they
+    /// were.
+    func ignore(_ chosen: [StorageItem], feedback: IgnoreListFeedback) {
+        guard canIgnore, !chosen.isEmpty, let snapshot = feedback.add(chosen.map {
+            IgnoreListFeedback.Item(target: IgnoreListTarget(path: $0.path), category: Self.ignoreCategory(of: $0), name: $0.title)
+        }) else { return }
+        let ignored = Set(items.filter { snapshot.ignores(path: $0.path, category: Self.ignoreCategory(of: $0)) }.map(\.id))
+        guard !ignored.isEmpty else { return }
+        let touched = Set(items.filter { ignored.contains($0.id) }.compactMap(\.duplicateGroupID))
+        let leftAlone = Dictionary(grouping: items.filter { !ignored.contains($0.id) && touched.contains($0.duplicateGroupID ?? "") },
+                                   by: { $0.duplicateGroupID ?? "" })
+            .values.filter { $0.count < 2 }.flatMap { $0.map(\.id) }
+        let hidden = ignored.union(leftAlone)
+        let held = items.enumerated().filter { hidden.contains($0.element.id) }.map { (index: $0.offset, item: $0.element) }
+        let wasSelected = selectedItemIDs.intersection(hidden)
+        let previousGroups = exactGroups
+        items.removeAll { hidden.contains($0.id) }
+        selectedItemIDs.subtract(hidden)
+        exactGroups = Self.groups(previousGroups, keeping: Set(items.map(\.path)))
+        // When the ignored file was the one copy its group kept, another copy
+        // stays now, as every group keeps one (a plan would refuse otherwise).
+        var kept: Set<String> = []
+        for groupID in touched {
+            let rest = items.filter { $0.duplicateGroupID == groupID && $0.status == .available }
+            guard rest.count >= 2, rest.allSatisfy({ selectedItemIDs.contains($0.id) }),
+                  let keep = rest.min(by: { $0.path.localizedStandardCompare($1.path) == .orderedAscending }) else { continue }
+            selectedItemIDs.remove(keep.id)
+            kept.insert(keep.id)
+        }
+        let similar = held.filter { ignored.contains($0.item.id) && Self.ignoreCategory(of: $0.item) == .similar }.count
+        changeIgnoredCounts(duplicates: ignored.count - similar, similar: similar)
+        let result = lastScanAt
+        feedback.onPutBack { [weak self] snapshot in
+            self?.putBack(held, ignored: ignored, groups: previousGroups, selected: wasSelected, kept: kept,
+                          result: result, snapshot: snapshot)
+        }
+    }
+
+    /// Put Back: files the list no longer covers return to their places, with
+    /// the copies of their groups that left alongside them.
+    private func putBack(_ held: [(index: Int, item: StorageItem)], ignored: Set<String>, groups: [DuplicateFileGroup],
+                         selected: Set<String>, kept: Set<String>, result: Date?, snapshot: IgnoreListSnapshot) {
+        guard canIgnore, lastScanAt == result else { return }
+        let present = Set(items.map(\.id))
+        let freed = held.filter {
+            ignored.contains($0.item.id) && !present.contains($0.item.id)
+                && !snapshot.ignores(path: $0.item.path, category: Self.ignoreCategory(of: $0.item))
+        }
+        let freedGroups = Set(freed.compactMap(\.item.duplicateGroupID))
+        let returning = freed + held.filter {
+            !ignored.contains($0.item.id) && !present.contains($0.item.id) && freedGroups.contains($0.item.duplicateGroupID ?? "")
+        }
+        guard !returning.isEmpty else { return }
+        for entry in returning.sorted(by: { $0.index < $1.index }) {
+            items.insert(entry.item, at: min(entry.index, items.count))
+        }
+        selectedItemIDs.formUnion(selected.intersection(returning.map(\.item.id)))
+        // The copy kept in its place is selected again once the kept one is back.
+        selectedItemIDs.formUnion(items.filter { kept.contains($0.id) && freedGroups.contains($0.duplicateGroupID ?? "") }.map(\.id))
+        exactGroups = Self.groups(groups, keeping: Set(items.map(\.path)))
+        let similar = freed.filter { Self.ignoreCategory(of: $0.item) == .similar }.count
+        changeIgnoredCounts(duplicates: -(freed.count - similar), similar: -similar)
+    }
+
+    /// The confirmed groups with only the files still listed; a group left
+    /// with fewer than two goes, and a changed group's freed space is unknown.
+    private static func groups(_ groups: [DuplicateFileGroup], keeping paths: Set<String>) -> [DuplicateFileGroup] {
+        groups.compactMap { group in
+            let files = group.files.filter { paths.contains($0.path) }
+            guard files.count >= 2 else { return nil }
+            guard files.count != group.files.count else { return group }
+            return DuplicateFileGroup(id: group.id, files: files, contentSizeBytes: group.contentSizeBytes,
+                                      matchKind: group.matchKind, relationship: group.relationship,
+                                      estimatedPhysicalReclaimableBytes: nil)
+        }
+    }
+
+    private func changeIgnoredCounts(duplicates: Int, similar: Int) {
+        guard var coverage = scanCoverage else { return }
+        coverage.ignoredDuplicateFiles = max(0, (coverage.ignoredDuplicateFiles ?? 0) + duplicates)
+        coverage.ignoredSimilarFiles = max(0, (coverage.ignoredSimilarFiles ?? 0) + similar)
+        scanCoverage = coverage
     }
 
     func dismissSelectionMessage() {

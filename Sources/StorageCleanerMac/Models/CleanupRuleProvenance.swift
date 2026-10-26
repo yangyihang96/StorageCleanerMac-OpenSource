@@ -43,6 +43,8 @@ enum CleanupRuleFingerprint {
     static func normalizedData(for rule: CleanupRule, includingMaintenance: Bool = true) throws -> Data {
         var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(rule)) as! [String: Any]
         object["candidateScope"] = rule.effectiveCandidateScope.rawValue
+        // Keep nil absent so D183 does not change any existing rule's hash.
+        if let limit = rule.maximumCandidates { object["maximumCandidates"] = limit }
         object["includedBundleIdentifiers"] = Array(rule.effectiveIncludedBundleIdentifiers)
         object["requiresDuplicateBundleIdentifier"] = rule.effectiveRequiresDuplicateBundleIdentifier
         var exclusion = object["exclude"] as! [String: Any]

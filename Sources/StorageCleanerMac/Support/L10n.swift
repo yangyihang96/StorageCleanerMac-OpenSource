@@ -177,27 +177,27 @@ enum L10n {
 
     static func items(_ count: Int) -> String {
         if usesChinese {
-            return "\(count) 项"
+            return "\(ByteFormat.count(count)) 项"
         }
-        return count == 1 ? "1 item" : "\(count) items"
+        return count == 1 ? "1 item" : "\(ByteFormat.count(count)) items"
     }
 
     /// 英文计数的单复数："1 file" / "2 files"。中文文案直接写在 `text(_:_:)` 里。
     static func englishCount(_ count: Int, _ singular: String, _ plural: String) -> String {
-        "\(count) " + (count == 1 ? singular : plural)
+        "\(ByteFormat.count(count)) " + (count == 1 ? singular : plural)
     }
 
     static func itemBytes(_ count: Int, _ bytes: String) -> String {
-        usesChinese ? "\(count) 项 · \(bytes)" : "\(items(count)) · \(bytes)"
+        usesChinese ? "\(ByteFormat.count(count)) 项 · \(bytes)" : "\(items(count)) · \(bytes)"
     }
 
     static func greenCountDescription(_ count: Int) -> String {
-        usesChinese ? "\(count) 个可安全清理项目，只会移到废纸篓。" : "\(items(count)) marked safe to clean. They will only be moved to Trash."
+        usesChinese ? "\(ByteFormat.count(count)) 个可安全清理项目，只会移到废纸篓。" : "\(items(count)) marked safe to clean. They will only be moved to Trash."
     }
 
     static func bulkTrashMessage(count: Int, bytes: String) -> String {
         if usesChinese {
-            return "将 \(count) 个可安全清理项目移到废纸篓，体积约 \(bytes)。清空废纸篓后才会真正释放空间。"
+            return "将 \(ByteFormat.count(count)) 个可安全清理项目移到废纸篓，体积约 \(bytes)。清空废纸篓后才会真正释放空间。"
         }
         return "Move \(items(count)) marked safe to clean to Trash, about \(bytes). Free space changes after Trash is emptied."
     }
@@ -207,13 +207,6 @@ enum L10n {
             return "将“\(title)”移到废纸篓。这个操作可以从废纸篓恢复。"
         }
         return "Move “\(title)” to Trash. You can restore it from Trash."
-    }
-
-    static func emptyTrashMessage(count: Int, bytes: String) -> String {
-        if usesChinese {
-            return "将永久删除废纸篓里的 \(count) 项，约 \(bytes)。这个操作通常无法恢复，建议先确认废纸篓内容。"
-        }
-        return "Permanently delete \(items(count)) from Trash, about \(bytes). This is usually not reversible, so review Trash first."
     }
 
     static func scanSeconds(_ seconds: TimeInterval) -> String {

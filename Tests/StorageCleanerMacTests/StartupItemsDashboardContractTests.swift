@@ -11,7 +11,8 @@ final class StartupItemsDashboardContractTests: XCTestCase {
         XCTAssertTrue(source.contains("LightfieldSummary(module: .startup"))
         XCTAssertFalse(source.contains("pageSize"))
         XCTAssertFalse(source.contains("startupArtwork"))
-        XCTAssertTrue(source.contains("Showing \\(presentation.visibleItems.count) of"))
+        // D178: the counts are grouped (was "Showing \\(presentation.visibleItems.count) of").
+        XCTAssertTrue(source.contains("Showing \\(ByteFormat.count(presentation.visibleItems.count)) of"))
         XCTAssertTrue(source.contains(".lightfieldResultRowBoundary()"))
     }
 
@@ -37,9 +38,10 @@ final class StartupItemsDashboardContractTests: XCTestCase {
 
     func testDashboardIsValueDrivenManagementConsole() throws {
         let source = try dashboardSource()
+        // D217＋旧值：primaryCategories 为 [.all, .loginItems, .background]。
         for token in ["struct StartupItemsDashboardView: View", "let items: [StartupItemsDomain.Item]",
             "FeatureLightfieldPage(", "let coverageAction: AnyView", "LightfieldSummary(", "presentation.visibleItems",
-            "StartupItemsCategory", "LightfieldTextSegments(", "[.all, .loginItems, .background]", "primaryCategories.map",
+            "StartupItemsCategory", "LightfieldTextSegments(", "[.all, .loginItems, .background, .otherBackground]", "primaryCategories.map",
             "TextField(", ".focused($isSearchFocused)", "StartupItemRow(", "StartupItemInspectorView(", "LightfieldAppIcon(",
             "Text(compactPurpose(item.resolvedPurpose.value))", "L10n.text(\"搜索启动项\"", "Toggle(", "Menu {",
             "includeTechnicalDetails: showsTechnicalDetails", "@State private var showsTechnicalDetails = false",

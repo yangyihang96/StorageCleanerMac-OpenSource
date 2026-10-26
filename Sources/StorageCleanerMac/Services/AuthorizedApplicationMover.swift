@@ -130,17 +130,26 @@ enum AuthorizedMoveError: LocalizedError {
     private func exchange(_ data: Data, authorization: Data?, connection: NSXPCConnection) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             let completion = FileMoveReplyGate(connection: connection, continuation: continuation)
-            connection.invalidationHandler = { completion.fail() }
-            connection.interruptionHandler = { completion.fail() }
-            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in completion.fail() }) as? FileOperationHelperProtocol else {
+            // D192 hotfix: XPC runs these and the replies on its own queue;
+            // @Sendable keeps them off this class's main-actor isolation,
+            // whose runtime check traps there (beta #10, SystemCacheService).
+            connection.invalidationHandler = { @Sendable in completion.fail() }
+            connection.interruptionHandler = { @Sendable in completion.fail() }
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ @Sendable _ in completion.fail() }) as? FileOperationHelperProtocol else {
                 completion.fail(); return
             }
-            if let authorization { proxy.prepare(data, authorization: authorization) { completion.finish($0) } }
-            else { proxy.commit(data) { completion.finish($0) } }
+            if let authorization { proxy.prepare(data, authorization: authorization) { @Sendable reply in completion.finish(reply) } }
+            else { proxy.commit(data) { @Sendable reply in completion.finish(reply) } }
         }
     }
 
     func prepareHelper(forceRefresh: Bool = false, refreshRegisteredBuild: Bool = true) async throws {
+        // D106: registering the helper and the password prompt that follows
+        // are system UI on the menu-bar display; an acceptance session refuses
+        // them before anything is registered.
+        guard DisplayConfinementGate.shared.permitsExternal("FileOperationHelper", detail: "register and authorize") else {
+            throw AuthorizedMoveError.unavailable
+        }
         // Replacing the app bundle alone does not replace a running daemon.
         // Refresh only when a user-confirmed operation needs this helper, never
         // during scanning, startup, or previews. Beta/formal use separate keys.
@@ -192,7 +201,8 @@ enum AuthorizedMoveError: LocalizedError {
             existingTrash: source, beforeMove: beforeMove)
     }
 
-    private func trustedBundledHelper(_ url: URL) -> Bool {
+    // D182 reuses this verifier before cache clearing can register the helper.
+    func trustedBundledHelper(_ url: URL) -> Bool {
         func certificate(_ url: URL, identifier: String) -> [SecCertificate]? {
             var code: SecStaticCode?; var info: CFDictionary?
             guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,

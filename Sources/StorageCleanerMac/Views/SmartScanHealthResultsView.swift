@@ -19,7 +19,7 @@ struct SmartScanHealthResultsView: View {
                         detail: snapshot.disk.remainingLifePercent.map { L10n.text("介质寿命估算 \($0)%", "Media Life Estimate \($0)%") } ?? "SMART",
                         value: smartStatus(snapshot.disk.smartStatus), status: smartTone(snapshot.disk.smartStatus))
                     FeatureLightfieldStatusRow(title: L10n.text("可用容量", "Free Space"),
-                        detail: (snapshot.disk.availableBytes ?? snapshot.capacity.availableBytes).map { ByteFormat.string($0) } ?? unavailable,
+                        detail: (snapshot.disk.availableBytes ?? snapshot.capacity.availableBytes).map { ByteFormat.storageString($0) } ?? unavailable,
                         value: ComputerHealthCheckState(status: snapshot.capacity.status).title,
                         status: HealthRecentChangesView.status(for: .init(status: snapshot.capacity.status)))
                     if case .notPresent = snapshot.batteryEvidence {

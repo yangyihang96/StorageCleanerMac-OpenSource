@@ -6,6 +6,8 @@ final class SettingsSourceContractTests: XCTestCase {
     private let pageNames = [
         "SettingsGeneral.swift", "SettingsMiniWindow.swift", "SettingsScan.swift",
         "SettingsAccess.swift", "SettingsSystem.swift", "SettingsUpdates.swift", "SettingsAbout.swift",
+        // D207＋旧值：7 个设置页，新增第 8 页“忽略列表”；仍逐个检查全部文件。
+        "SettingsIgnoreList.swift",
     ]
 
     func testMergedSettingsSourceIncludesRootAndAllSevenProductionPages() throws {
@@ -13,12 +15,17 @@ final class SettingsSourceContractTests: XCTestCase {
         let actualPages = try FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
         ).filter { $0.pathExtension == "swift" }.map(\.lastPathComponent)
+        // D153: plus the combined status icon's section (was without
+        // "SettingsCombinedStatusIcon.swift").
         XCTAssertEqual(Set(actualPages), Set(pageNames + [
             "SettingsLightfield.swift", "SettingsPermissionRow.swift", "SettingsActivationRefresh.swift", "SettingsMiniWindowPreview.swift",
+            "SettingsCombinedStatusIcon.swift",
         ]))
 
         let root = try String(contentsOf: settingsURL, encoding: .utf8)
-        XCTAssertTrue(root.contains("private var settingsSidebar: some View"))
+        // D154 batch 3I: the tabs replace the sidebar (was
+        // `private var settingsSidebar: some View`).
+        XCTAssertTrue(root.contains("private var settingsTabBar: some View"))
         XCTAssertTrue(root.contains("private func settingsSections(for category: SettingsCategory)"))
         var expected = root
         for name in actualPages.sorted() {

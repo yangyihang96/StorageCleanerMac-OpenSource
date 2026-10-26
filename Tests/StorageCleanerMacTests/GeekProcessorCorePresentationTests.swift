@@ -54,27 +54,37 @@ final class GeekProcessorCorePresentationTests: XCTestCase {
         XCTAssertEqual(groups.map(\.sourceOffset), [6, 0])
         XCTAssertEqual(groups.map(\.averageUsagePercent), [20, 80])
         XCTAssertEqual(groups.map(\.colorRole), [.secondary, .primary])
-        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 18, groupCount: groups.count), 102)
+        // D119 (2026-10-18): iStat's cores section, 12 rings a row on the
+        // 272 pt CPU page: two rows and two legend rows. Was 102 (nine
+        // 28 pt rings a row).
+        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 18, groupCount: groups.count), 90)
     }
 
     func testCardBudgetAccommodatesEveryLegendWithoutShrinkingCoreRings() {
+        // D119 (2026-10-18): legend top 10 + 24 × rows − 2, 15 pt per
+        // legend row, 4 pt below. Was 18: [102, 102, 116, 130],
+        // 27: [119, 133, 147, 161], 32: [150, 164, 178, 192].
         let expectedHeights: [Int: [CGFloat]] = [
-            18: [102, 102, 116, 130],
-            27: [119, 133, 147, 161],
-            32: [150, 164, 178, 192],
+            18: [75, 90, 105, 120],
+            27: [99, 114, 129, 144],
+            32: [99, 114, 129, 144],
         ]
         for (coreCount, heights) in expectedHeights {
             for levelCount in 1...4 {
                 let height = GeekProcessorCoreLayout.cardHeight(for: coreCount, groupCount: levelCount)
                 XCTAssertEqual(height, heights[levelCount - 1])
                 let gridHeight = CGFloat(GeekProcessorCoreLayout.rowCount(for: coreCount))
-                    * (GeekProcessorCoreLayout.ringSize + GeekProcessorCoreLayout.spacing)
+                    * GeekProcessorCoreLayout.rowPitch
                 let legendsHeight = CGFloat(levelCount) * GeekProcessorCoreLayout.legendRowHeight
                 XCTAssertGreaterThanOrEqual(height - gridHeight, legendsHeight + 12)
             }
         }
-        XCTAssertEqual(GeekProcessorCoreLayout.ringSize, 28)
-        XCTAssertEqual(GeekProcessorCoreLayout.valueFontSize, 8)
+        // D119 (2026-10-18): iStat's 18 pt core rings with a 3 pt line and no
+        // number inside (the value is in the ring's help and VoiceOver
+        // value). Was a 28 pt ring with an 8 pt number.
+        XCTAssertEqual(GeekProcessorCoreLayout.ringSize, 18)
+        XCTAssertEqual(GeekProcessorCoreLayout.lineWidth, 3)
+        XCTAssertEqual(GeekProcessorCoreLayout.rowPitch, 24)
     }
 
     func testMissingSamplesRemainUnknownInsteadOfBorrowingAnotherLevelOrShowingZero() {
@@ -119,6 +129,7 @@ final class GeekProcessorCorePresentationTests: XCTestCase {
         XCTAssertEqual(groups.map(\.averageUsagePercent), Array(repeating: 30, count: 5))
         XCTAssertTrue(groups.allSatisfy { $0.colorRole != nil })
         XCTAssertEqual(groups.last?.sourceOffset, 16)
-        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 20, groupCount: 5), 175)
+        // D119 (2026-10-18): two ring rows and five legend rows; was 175.
+        XCTAssertEqual(GeekProcessorCoreLayout.cardHeight(for: 20, groupCount: 5), 135)
     }
 }

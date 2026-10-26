@@ -4,12 +4,16 @@ import SwiftUI
 
 struct FileAnalysisLightfieldView: View {
     @Environment(\.moduleTheme) private var theme
+    /// D154 batch 3G: the studio shows the Space Lens page; the classic
+    /// layout keeps this D70 page.
+    @Environment(\.careStudioClassicResults) private var usesClassicPages
     @ObservedObject var workspace: LargeFilesStore
     @State private var surface = 0
     @State private var showingScopes = false
     @State private var showingDetails = false
     @State private var showingCapacityNotes = false
     @State private var showingLocalModels = false
+    @State private var showingDeviceBackups = false
     @State private var showingCloudCopies = false
     @State private var types: [LightfieldChartItem] = []
     @State private var largest: [StorageTreemapEntry] = []
@@ -17,7 +21,7 @@ struct FileAnalysisLightfieldView: View {
 
     var body: some View {
         if let result = workspace.storageAnalysis {
-            resultPage(result)
+            page(result)
             .popover(isPresented: $showingScopes) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(workspace.storageMapTargets) { target in
@@ -52,6 +56,10 @@ struct FileAnalysisLightfieldView: View {
                 LocalModelInventorySheet(onClose: { showingLocalModels = false })
                     .environment(\.locale, L10n.locale).environment(\.moduleTheme, theme)
             }
+            .sheet(isPresented: $showingDeviceBackups) {
+                MobileDeviceBackupInventorySheet(onClose: { showingDeviceBackups = false })
+                    .environment(\.locale, L10n.locale).environment(\.moduleTheme, theme)
+            }
             .task(id: "\(result.target.id)|\(result.scanSeconds)|\(result.inspectedItemCount)|\(result.rootSnapshot.measuredBytes)") {
                 // Presentation aggregation uses the completed immutable index, never a new walk.
                 let index = result.index
@@ -64,11 +72,41 @@ struct FileAnalysisLightfieldView: View {
             }
         }
     }
+    @ViewBuilder private func page(_ result: StorageMapAnalysisResult) -> some View {
+        if usesClassicPages {
+            resultPage(result)
+        } else {
+            CareStudioSpaceLensPage(result: result, navigation: workspace.storageMapNavigation,
+                types: types, largest: largest, fileCount: indexedFileCount, surface: $surface,
+                mapStyle: $workspace.storageMapStyle, mapColorMode: $workspace.storageMapColorMode,
+                dataVersion: workspace.storageMapDataVersion,
+                isBusy: workspace.trashPhase != .idle || workspace.storageMapBrowsePhase.isLoading,
+                browseFailed: browseFailed,
+                checkedPaths: Set(workspace.trashSelections.map(\.path)),
+                selectionState: workspace.trashSelectionState, selectedBytes: workspace.selectedTrashBytes,
+                selectionReclaim: workspace.selectionReclaim, isEstimatingReclaim: workspace.isEstimatingSelectionReclaim,
+                status: status, canReview: workspace.canReviewTrash, onReview: workspace.requestTrashReview,
+                onToggle: workspace.toggleTrashSelection,
+                onOpen: { workspace.openStorageMapDirectory($0) },
+                onBreadcrumb: { workspace.showStorageMapSnapshot(at: $0) },
+                onOpenFromRoot: { workspace.openStorageMapDirectory($0, fromLevel: 0) },
+                onForward: workspace.showNextStorageMapLevel,
+                notice: browseNotice,
+                onRetry: browseFailed ? { workspace.retryStorageMapBrowse() } : nil,
+                onChangeScope: workspace.canStartStorageAnalysis ? { showingScopes = true } : nil,
+                onDetails: { showingDetails = true },
+                onCapacityNotes: { showingCapacityNotes = true },
+                onLocalModels: { showingLocalModels = true },
+                onDeviceBackups: { showingDeviceBackups = true },
+                onCloudCopies: { showingCloudCopies = true },
+                onReveal: { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: $0)]) })
+        }
+    }
     private func resultPage(_ result: StorageMapAnalysisResult) -> some View {
         let amount = FileLightfieldPresentation.amount(result.rootSnapshot.measuredBytes)
         return FeatureLightfieldPage(module: .largeFiles, phase: .result, title: ReviewFilter.largeFiles.sidebarTitle,
                 status: status, safety: L10n.text("目录索引 · 移到废纸篓前确认", "Directory index · Confirm before moving to Trash"),
-                actionTitle: L10n.text("移到废纸篓 · 已选 \(workspace.trashSelections.count)", "Move to Trash · \(workspace.trashSelections.count) selected"),
+                actionTitle: L10n.text("移到废纸篓 · 已选 \(ByteFormat.count(workspace.trashSelections.count))", "Move to Trash · \(ByteFormat.count(workspace.trashSelections.count)) selected"),
                 actionEnabled: workspace.canReviewTrash, showsArtwork: false,
                 statusActionTitle: L10n.text("更换范围", "Change Scope"), statusActionEnabled: workspace.canStartStorageAnalysis, statusAction: { showingScopes = true },
                 action: workspace.requestTrashReview) {
@@ -89,6 +127,7 @@ struct FileAnalysisLightfieldView: View {
                         onDetails: { showingDetails = true },
                         onCapacityNotes: { showingCapacityNotes = true },
                         onLocalModels: { showingLocalModels = true },
+                        onDeviceBackups: { showingDeviceBackups = true },
                         onCloudCopies: { showingCloudCopies = true },
                         onReveal: { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: $0)]) })
                 }
@@ -105,7 +144,7 @@ struct FileAnalysisLightfieldView: View {
             return StorageCapacityPresentation.movedToTrashSummary(count: outcome.movedPaths.count, bytes: outcome.movedBytes)
                 + " · " + selection
         }
-        if workspace.trashPutBackCount > 0 { return L10n.text("已恢复 \(workspace.trashPutBackCount) 项 · ", "Restored \(workspace.trashPutBackCount) items · ") + selection }
+        if workspace.trashPutBackCount > 0 { return L10n.text("已恢复 \(ByteFormat.count(workspace.trashPutBackCount)) 项 · ", "Restored \(ByteFormat.count(workspace.trashPutBackCount)) items · ") + selection }
         return selection
     }
     private var browseNotice: String? {
@@ -134,8 +173,8 @@ struct FileAnalysisLightfieldView: View {
                                 : FileAnalysisTrashPresentation.otherTrashNote(volumes: outcome.externalVolumeNames))
                         }
                         if outcome.notRestorableHereCount > 0 {
-                            Text(L10n.text("\(outcome.notRestorableHereCount) 项的结果需要核实，请刷新操作记录。",
-                                "Refresh Operation History to verify \(outcome.notRestorableHereCount) items."))
+                            Text(L10n.text("\(ByteFormat.count(outcome.notRestorableHereCount)) 项的结果需要核实，请刷新操作记录。",
+                                "Refresh Operation History to verify \(ByteFormat.count(outcome.notRestorableHereCount)) items."))
                         }
                         ForEach(outcome.skipped) { item in Text(item.title + " · " + item.reason).help(item.path) }
                     }
@@ -174,6 +213,8 @@ struct FileAnalysisLightfieldBody: View {
     var onCapacityNotes: (() -> Void)? = nil
     /// D86：本地 AI 模型只读盘点。
     var onLocalModels: (() -> Void)? = nil
+    /// D116 G11：iPhone、iPad 备份只读盘点。
+    var onDeviceBackups: (() -> Void)? = nil
     var onCloudCopies: (() -> Void)? = nil
     var onReveal: (String) -> Void = { _ in }
     @State private var quickLookURL: URL?
@@ -234,13 +275,19 @@ struct FileAnalysisLightfieldBody: View {
             }
             if let onCapacityNotes {
                 Button(L10n.text("容量口径", "Size Basis"), action: onCapacityNotes).buttonStyle(FeatureLightfieldRowButtonStyle())
-                    .help(L10n.text("本地占用、逻辑大小、下限与云端占位的区别", "Local usage, logical size, lower bounds and cloud placeholders"))
+                    .help(L10n.text("本地占用、下限与云端占位的区别", "Local usage, lower bounds and cloud placeholders"))
                     .lightfieldComponentProbe("lightfield.analysis.capacityNotes")
             }
             if let onLocalModels {
                 Button(L10n.text("本地 AI 模型", "Local AI Models"), action: onLocalModels).buttonStyle(FeatureLightfieldRowButtonStyle())
                     .help(L10n.text("只读盘点 Ollama 与 LM Studio 模型占用", "Read-only inventory of Ollama and LM Studio models"))
                     .lightfieldComponentProbe("lightfield.analysis.localModels")
+            }
+            if let onDeviceBackups {
+                Button(L10n.text("设备备份", "Device Backups"), action: onDeviceBackups).buttonStyle(FeatureLightfieldRowButtonStyle())
+                    .help(L10n.text("只读查看 iPhone、iPad 备份的占用（需要完全磁盘访问权限）",
+                                    "Read-only view of iPhone and iPad backups (needs Full Disk Access)"))
+                    .lightfieldComponentProbe("lightfield.analysis.deviceBackups")
             }
             if let onCloudCopies {
                 Button(L10n.text("云文件本地副本", "Cloud Local Copies"), action: onCloudCopies)
@@ -260,7 +307,7 @@ struct FileAnalysisLightfieldBody: View {
                 .frame(height: 34).frame(maxWidth: .infinity, alignment: .leading)
             if surface == 1 {
                 LightfieldDonutChart(items: types, centerValue: ByteFormat.storageString(result.rootSnapshot.measuredBytes),
-                    centerLabel: L10n.text("\(fileCount) 个文件", "\(fileCount) files"), selectedID: highlightedType,
+                    centerLabel: L10n.text("\(ByteFormat.count(fileCount)) 个文件", "\(ByteFormat.count(fileCount)) files"), selectedID: highlightedType,
                     onSelect: toggleType)
                     .frame(maxHeight: .infinity)
             } else {

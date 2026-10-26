@@ -192,9 +192,13 @@ final class MiniWindowRangeSwitchTests: XCTestCase {
             XCTAssertTrue(call.contains("configuration:") && call.contains("duration"),
                           "\(kind): the window stays part of the cache key")
         }
-        // The disk summary feeds the chart, its legend and the peak row.
+        // The disk summary feeds the chart and its legend. D146: the peak row
+        // shows the graph's peaks (`GeekMirroredChartPeaksKey`) and prepares
+        // no summary of its own (was 1 in GeekDiskView, its
+        // `GeekPreparedDiskPeakRow`).
         XCTAssertEqual(charts.components(separatedBy: "shape: GeekPreparedDiskSummary.preparationShape").count - 1, 1)
-        XCTAssertEqual(disk.components(separatedBy: "shape: GeekPreparedDiskSummary.preparationShape").count - 1, 1)
+        XCTAssertEqual(disk.components(separatedBy: "shape: GeekPreparedDiskSummary.preparationShape").count - 1, 0)
+        XCTAssertTrue(disk.contains(".overlayPreferenceValue(GeekMirroredChartPeaksKey.self)"))
     }
 
     // MARK: - The hosting card redraws when the window arrives
@@ -243,6 +247,40 @@ final class MiniWindowRangeSwitchTests: XCTestCase {
 
         let liveCard = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarLiveCard.swift")
         XCTAssertTrue(liveCard.contains("activeHistoryMetric: activeInlineTertiaryRequest?.chartRangeMetric"))
+    }
+
+    func testTheHardwareControlCardRedrawsWhenAShownFanReadingChanges() throws {
+        // D119 (2026-10-18): the sensors page's fan group lives in the
+        // hardware-control card. Its speeds and thermal row come from the
+        // sensor sample, which the card's fingerprint did not cover, so the
+        // rows only followed a battery or control refresh. A new sample with
+        // the same readings still does not redraw the card.
+        func fingerprint(rpm: Int, at date: Date, thermal: SystemThermalState = .nominal,
+                         fanCount: Int? = nil) -> MenuBarCardFingerprint {
+            var value = MenuBarCardFingerprint()
+            let readings = rpm < 0 ? [] : [
+                SystemFanReading(index: 0, actualRPM: rpm, minimumRPM: 1_000, maximumRPM: 4_000, targetRPM: nil)
+            ]
+            value.appendFanGroupReadings(SystemMonitorSnapshot(
+                generatedAt: date, metrics: [], networkThroughput: nil, thermalState: thermal,
+                fanCount: fanCount, fanReadings: readings
+            ))
+            return value
+        }
+        let now = Date()
+        XCTAssertEqual(fingerprint(rpm: 2_000, at: now), fingerprint(rpm: 2_000, at: now.addingTimeInterval(2)))
+        XCTAssertNotEqual(fingerprint(rpm: 2_000, at: now), fingerprint(rpm: 2_150, at: now))
+        XCTAssertNotEqual(fingerprint(rpm: 2_000, at: now), fingerprint(rpm: 2_000, at: now, thermal: .serious))
+        XCTAssertNotEqual(fingerprint(rpm: -1, at: now, fanCount: 0), fingerprint(rpm: -1, at: now),
+                          "a fanless Mac and a fan sample in progress show different rows")
+
+        let liveCard = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarLiveCard.swift")
+        let controls = try XCTUnwrap(liveCard.components(separatedBy: "case .controls:\n            value.dates").last?
+            .components(separatedBy: "case .availability:").first)
+        XCTAssertTrue(controls.contains("value.appendFanGroupReadings(monitorSnapshot)"))
+        let sensors = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekSensorsView.swift")
+        XCTAssertTrue(sensors.contains("liveCard(.controls) { geekHardwareControlSummaryCard }"))
+        XCTAssertTrue(sensors.contains("FanTelemetryState.resolve(snapshot: monitorSnapshot)"))
     }
 
     // MARK: - The plot says that it is updating

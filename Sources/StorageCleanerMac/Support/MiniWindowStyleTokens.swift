@@ -4,33 +4,44 @@ import SwiftUI
 /// Values are expressed in points; one physical-pixel decoration uses the
 /// SwiftUI display scale at the drawing site.
 enum MiniWindowStyleTokens {
-    static let overviewSize = CGSize(width: 304, height: 544)
-    // The CPU detail keeps a fixed nine-column core grid. Its page and card
-    // insets need this width so the first and last rings do not touch the shell.
-    static let detailWidth: CGFloat = 312
-    // Power uses two 96-point rings and needs less horizontal breathing room
-    // than the CPU grid. Keeping this distinct avoids widening every detail page.
-    static let powerDetailWidth: CGFloat = 264
-    // A 380-point history shell leaves a 360-point plot after the shared
-    // 8-point content inset and 2-point chart inset: 120 × 3-point slots.
-    static let historyWidth: CGFloat = 380
-    static let compactHistoryWidth: CGFloat = 380
-    // History inspectors share one plot viewport. Extra vertical space stays
-    // above the plot, so its baseline and any legend remain near the shell's
-    // lower edge across CPU, memory, disk, network, sensor and power pages.
-    static let historyHeight: CGFloat = 216
-    // One history plot block: the chart plus its axis row (start / gap legend
-    // / scale / now) directly below it. The block keeps the 154-point height
-    // the plot had before the axis row existed, so every history shell keeps
-    // its height, including the pages with rows below the chart.
-    static let historyPlotHeight: CGFloat = 154
+    // D118: iStat Menus 7.30's combined menu (`configureMenubar` 301 pt,
+    // measured 2x capture): 8 pt around the cards, 7 pt between them, and the
+    // six level-one cards at 120, 112, 42, 100, 88 and 40 pt.
+    static let overviewSize = CGSize(width: 301, height: 553)
+    // D119: iStat's module menus (`setWidth:` in each `loadItems`): CPU 272,
+    // memory 270 and power 240; disks, network and sensors keep the 301 pt
+    // default, and so does our cleanup page. Was 312, and 264 for power.
+    static let detailWidth: CGFloat = 301
+    static let processorDetailWidth: CGFloat = 272
+    static let memoryDetailWidth: CGFloat = 270
+    static let powerDetailWidth: CGFloat = 240
+    // D121: iStat's history submenu (`loadWithClass:` sets 391): one graph
+    // card of 375 × 200 (`itemWithConfig:` 516 × 200 squeezed to the menu)
+    // 8 pt inside the window, so the window is 216 tall. The plot is 8 pt in
+    // from the card's sides: 359 pt, 120 bars of 2 pt with 1 pt gaps. Was a
+    // 380 pt shell with a 2 pt chart inset.
+    static let historyWidth: CGFloat = 391
+    static let compactHistoryWidth: CGFloat = historyWidth
+    static let historyCardHeight: CGFloat = 200
+    static let historyHeight: CGFloat = historyCardHeight + 2 * contentInset
+    // The card's title row, then from 25 the plot block: the chart plus our
+    // axis row (start / gap legend / scale / now) directly below it, ending
+    // 8 pt above the card's bottom; iStat's single graph height H − 33 = 167.
+    // Was 154 below a free-standing header.
+    static let historyPlotTop: CGFloat = 25
+    static let historyPlotHeight: CGFloat = historyCardHeight - historyPlotTop - contentInset
     static let historyAxisRowHeight: CGFloat = 14
     static let historyChartHeight = historyPlotHeight - historyAxisRowHeight
+    static let historyChartInset: CGFloat = contentInset
     static let historyContentHeight = historyHeight - 2 * contentInset
-    static let anchorGap: CGFloat = 0
+    // D118: the level-one panel's top is 2 pt below the menu bar and its left
+    // edge 2 pt left of the status item (iStat `updateFrame`).
+    static let anchorGap: CGFloat = 2
+    static let statusItemLeadingOverhang: CGFloat = 2
     static let cascadeGap: CGFloat = 0
 
-    static let outerCornerRadius: CGFloat = 12
+    // D118: iStat's scroller corner (16) and card corner (8).
+    static let outerCornerRadius: CGFloat = 16
     static let outerCornerExtent = continuousCornerExtent(radius: outerCornerRadius)
 
     /// Read the platform shape's curve extent instead of treating a continuous
@@ -56,12 +67,12 @@ enum MiniWindowStyleTokens {
         }
         return extent
     }
-    static let cardCornerRadius: CGFloat = 10
+    static let cardCornerRadius: CGFloat = 8
     static let controlCornerRadius: CGFloat = 6
-    // iStat-like density: one equal inset on all four shell edges, with a
-    // smaller repeated gap between sibling cards.
+    // iStat density: one equal inset on all four shell edges, with a smaller
+    // repeated gap between sibling cards (7 pt on the measured capture).
     static let contentInset: CGFloat = 8
-    static let cardSpacing: CGFloat = 6
+    static let cardSpacing: CGFloat = 7
     static let cardHorizontalInset: CGFloat = 8
     static let cardVerticalInset: CGFloat = 6
     static let rowSpacing: CGFloat = 4
@@ -300,6 +311,13 @@ struct MetricPanelShell<Content: View>: View {
         content
             .background {
                 if let panelChromePalette {
+                    // D135: a transparent theme shows the menu material
+                    // behind its clear surface (the system makes the material
+                    // opaque under Reduce Transparency, as for iStat).
+                    if let appearance = panelChromePalette.menuMaterialAppearance {
+                        IStatMenuMaterialBackdrop(appearanceName: appearance)
+                            .clipShape(shape)
+                    }
                     shape.fill(panelChromePalette.shell)
                 } else if colorScheme == .dark {
                     shape
@@ -346,11 +364,7 @@ struct MetricPanelShell<Content: View>: View {
                 }
                 .allowsHitTesting(false)
             }
-            .shadow(
-                color: .black.opacity(showsShadow ? shellShadowOpacity : 0),
-                radius: showsShadow ? shellShadowRadius : 0,
-                y: showsShadow ? MiniWindowStyleTokens.shellShadowYOffset : 0
-            )
+            .modifier(MetricPanelShellShadow(isShown: showsShadow, opacity: shellShadowOpacity, radius: shellShadowRadius))
     }
 
     private var opaqueSurface: Color {
@@ -382,6 +396,25 @@ struct MetricPanelShell<Content: View>: View {
     }
 }
 
+/// D135: a shell with its own shadow (the Settings previews) casts one shadow
+/// for the whole panel, as the attached panel does around its levels; per
+/// layer, every card and line of text shadowed the surface under it.
+private struct MetricPanelShellShadow: ViewModifier {
+    let isShown: Bool
+    let opacity: Double
+    let radius: CGFloat
+
+    func body(content: Content) -> some View {
+        if isShown {
+            content
+                .compositingGroup()
+                .shadow(color: .black.opacity(opacity), radius: radius, y: MiniWindowStyleTokens.shellShadowYOffset)
+        } else {
+            content
+        }
+    }
+}
+
 private struct MiniWindowPageProvidesInsetKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -393,25 +426,57 @@ extension EnvironmentValues {
     }
 }
 
+enum MiniWindowTooltipStyle {
+    /// A themed card with a hairline border and a shadow (fan curve editor).
+    case panel
+    /// D121: iStat's history tooltip: a dark box with corner 8 in every
+    /// theme, no border or shadow.
+    case history
+
+    static let historyCornerRadius: CGFloat = 8
+    static let historyFillOpacity = 0.86
+}
+
 private struct MiniWindowTooltipChrome: ViewModifier {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.panelChromePalette) private var panelChromePalette
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    let style: MiniWindowTooltipStyle
 
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
-        content
-            .background(shape.fill(panelChromePalette?.card ?? AppAppearanceColors.tooltip))
-            .overlay {
-                shape
-                    .strokeBorder(panelChromePalette?.border ?? AppAppearanceColors.ink.opacity(0.16), lineWidth: MiniWindowPixel.onePhysicalPixel(displayScale: displayScale))
-                    .allowsHitTesting(false)
-            }
-            .shadow(color: .black.opacity(0.24), radius: 5, y: 2)
+        switch style {
+        case .panel:
+            let shape = RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
+            content
+                .background(shape.fill(panelChromePalette?.card ?? AppAppearanceColors.tooltip))
+                // D135: a theme's card may be translucent or absent; it sits
+                // on the theme's opaque surface (drawn behind it).
+                .background {
+                    if let opaqueSurface = panelChromePalette?.opaqueSurface {
+                        shape.fill(opaqueSurface)
+                    }
+                }
+                .overlay {
+                    shape
+                        .strokeBorder(panelChromePalette?.border ?? AppAppearanceColors.ink.opacity(0.16), lineWidth: MiniWindowPixel.onePhysicalPixel(displayScale: displayScale))
+                        .allowsHitTesting(false)
+                }
+                // D135: one shadow for the whole tooltip; per layer, the
+                // translucent card's own shadow darkened the surface under it.
+                .compositingGroup()
+                .shadow(color: .black.opacity(0.24), radius: 5, y: 2)
+        case .history:
+            content
+                .background(
+                    RoundedRectangle(cornerRadius: MiniWindowTooltipStyle.historyCornerRadius, style: .continuous)
+                        .fill(Color.black.opacity(reduceTransparency ? 1 : MiniWindowTooltipStyle.historyFillOpacity))
+                )
+        }
     }
 }
 
 extension View {
-    func miniWindowTooltipChrome() -> some View {
-        modifier(MiniWindowTooltipChrome())
+    func miniWindowTooltipChrome(_ style: MiniWindowTooltipStyle = .panel) -> some View {
+        modifier(MiniWindowTooltipChrome(style: style))
     }
 }

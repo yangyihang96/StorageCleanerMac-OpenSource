@@ -1,46 +1,53 @@
 import SwiftUI
 
 struct GeekPowerPreparationKernel: Sendable {
+    /// A usable sample; `weight` is the number of samples it stands for (a
+    /// folded minute's sample count, else 1).
+    typealias Point = (date: Date, value: Double, isCharging: Bool?, powerSource: BatteryPowerSource?, weight: Double)
+
     let points: [MenuBarPowerHistoryPoint]
     let metric: GeekPowerHistoryMetric
     let duration: TimeInterval
     let displayScale: CGFloat
-    func usablePoints(endingAt referenceDate: Date) -> [(
-        date: Date,
-        value: Double,
-        isCharging: Bool?,
-        powerSource: BatteryPowerSource?
-    )] {
+    /// D132: iStat's battery graph; nil keeps the earlier projection.
+    var batteryGraph: GeekIStatBatteryGraph? = nil
+
+    func usablePoints(endingAt referenceDate: Date) -> [Point] {
         let end = referenceDate
-        let start = end.addingTimeInterval(-duration)
+        let start = end.addingTimeInterval(-(batteryGraph?.span(for: duration) ?? duration))
         let latestAllowedDate = end.addingTimeInterval(
             GeekChartWindow.futureSampleTolerance
         )
-        return points.compactMap { point in
+        let key = metric == .charge ? "charge" : "batteryPower"
+        return points.compactMap { point -> Point? in
+            // D132: iStat's buckets average every sample, so a folded minute
+            // counts with its mean (the projection keeps its last charge).
+            let folded = point.bucketStatistics?.metrics[key]
             guard point.date >= start, point.date <= latestAllowedDate,
-                  let value = metric == .charge ? metric.value(in: point)
-                    : point.bucketStatistics?.metrics["batteryPower"]?.mean ?? metric.value(in: point),
+                  let value = metric == .charge && batteryGraph == nil ? metric.value(in: point)
+                    : folded?.mean ?? metric.value(in: point),
                   value.isFinite else { return nil }
             return (
                 min(point.date, end),
                 value,
                 point.isCharging,
-                point.powerSource
+                point.powerSource,
+                Double(max(1, folded?.sampleCount ?? 1))
             )
         }.sorted { $0.date < $1.date }
     }
 
     func batteryBuckets(
-        _ livePoints: [(
-            date: Date,
-            value: Double,
-            isCharging: Bool?,
-            powerSource: BatteryPowerSource?
-        )],
+        _ livePoints: [Point],
         plot: CGRect,
         referenceDate: Date
     ) -> [GeekChartBucketSnapshot] {
         let dates = livePoints.map(\.date)
+        if let batteryGraph {
+            return GeekIStatHistoryBuckets.buckets(dates: dates, interval: batteryGraph.interval(for: duration),
+                count: batteryGraph.barCount, plotRect: plot, referenceDate: referenceDate,
+                displayScale: displayScale, weight: { livePoints[$0].weight })
+        }
         guard !dates.isEmpty else { return [] }
         let visibleRange = GeekChartWindow.barRange(
             for: dates,
@@ -73,12 +80,7 @@ struct GeekPowerPreparationKernel: Sendable {
     }
 
     func preparedBatteryBuckets(
-        _ livePoints: [(
-            date: Date,
-            value: Double,
-            isCharging: Bool?,
-            powerSource: BatteryPowerSource?
-        )],
+        _ livePoints: [Point],
         plot: CGRect,
         referenceDate: Date
     ) -> [GeekPreparedPowerBucket] {
@@ -87,6 +89,10 @@ struct GeekPowerPreparationKernel: Sendable {
             plot: plot,
             referenceDate: referenceDate
         )
+        if let batteryGraph {
+            return iStatBatteryBuckets(buckets, livePoints: livePoints,
+                                       interval: batteryGraph.interval(for: duration))
+        }
         let rawPayloads = buckets.map { bucket -> GeekPowerBucketPayload? in
                 guard let latestIndex = bucket.indices.last,
                       let value = (bucket.averagingGroups != nil
@@ -135,6 +141,38 @@ struct GeekPowerPreparationKernel: Sendable {
         }
     }
 
+    /// D132: a bucket's mean charge, on AC when at least half of its
+    /// samples with a known source were (iStat averages `source` and draws
+    /// ≥ 0.5 in the charging color); an empty bucket takes its newer
+    /// neighbor's value (`GeekIStatBatteryGraph.filled`), never one before
+    /// the first recorded sample. A filled bar looks like any other, as
+    /// iStat's; `isEstimated` keeps where it came from.
+    private func iStatBatteryBuckets(
+        _ buckets: [GeekChartBucketSnapshot], livePoints: [Point], interval: TimeInterval
+    ) -> [GeekPreparedPowerBucket] {
+        let payloads = buckets.map { bucket -> GeekPowerBucketPayload? in
+            guard let value = bucket.mean({ livePoints[$0].value }) else { return nil }
+            var onAC = 0.0, known = 0.0
+            for index in bucket.indices {
+                switch livePoints[index].powerSource {
+                case .acPower?: onAC += livePoints[index].weight; known += livePoints[index].weight
+                case .batteryPower?: known += livePoints[index].weight
+                case .unknown?, nil: break
+                }
+            }
+            let source: BatteryPowerSource? = known > 0 ? (onAC / known >= 0.5 ? .acPower : .batteryPower) : nil
+            let latest = bucket.indices.last { livePoints[$0].powerSource == source } ?? bucket.indices.last
+            return GeekPowerBucketPayload(value: value, isCharging: latest.flatMap { livePoints[$0].isCharging },
+                                          powerSource: source)
+        }
+        let firstRecorded = points.lazy.map(\.date).min() ?? .distantFuture
+        let oldestFillable = buckets.firstIndex { $0.end > firstRecorded } ?? buckets.count
+        let filled = GeekIStatBatteryGraph.filled(payloads, interval: interval, oldestFillable: oldestFillable)
+        return buckets.indices.compactMap { index in
+            filled[index].map { GeekPreparedPowerBucket(bucket: buckets[index], payload: $0.value, isEstimated: $0.isFill) }
+        }
+    }
+
     func valueRange(for values: [Double]) -> ClosedRange<Double> {
         switch metric {
         case .charge:
@@ -157,7 +195,7 @@ struct GeekPowerPreparationKernel: Sendable {
 
     func bucketValue(
         _ indices: [Int],
-        in points: [(date: Date, value: Double, isCharging: Bool?, powerSource: BatteryPowerSource?)]
+        in points: [Point]
     ) -> Double? {
         let values = indices.map { points[$0].value }
         return switch metric {
@@ -171,7 +209,7 @@ struct GeekPowerPreparationKernel: Sendable {
 }
 
 struct GeekPreparedPowerFrame: Sendable {
-    typealias Point = (date: Date, value: Double, isCharging: Bool?, powerSource: BatteryPowerSource?)
+    typealias Point = GeekPowerPreparationKernel.Point
     let points: [Point]
     let rawBuckets: [GeekChartBucketSnapshot]
     let buckets: [GeekPreparedPowerBucket]

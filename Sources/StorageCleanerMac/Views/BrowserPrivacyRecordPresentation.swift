@@ -281,7 +281,7 @@ enum BrowserPrivacyPageListText {
         if hidden > 0 { lines.append("• " + BrowserPrivacyDisclosurePolicy.sensitiveSummary(hidden)) }
         if visible.count > limit {
             let remaining = visible.count - limit
-            lines.append(L10n.text("等 \(remaining) 个页面", "and \(remaining) more pages"))
+            lines.append(L10n.text("等 \(ByteFormat.count(remaining)) 个页面", "and \(ByteFormat.count(remaining)) more pages"))
         }
         return lines
     }
@@ -295,7 +295,7 @@ enum BrowserPrivacyPageListText {
         let shown = domains.prefix(limit).joined(separator: L10n.text("、", ", "))
         guard domains.count > limit else { return shown }
         let remaining = domains.count - limit
-        return L10n.text("\(shown) 等 \(domains.count) 个网站", "\(shown) and \(remaining) more sites")
+        return L10n.text("\(shown) 等 \(ByteFormat.count(domains.count)) 个网站", "\(shown) and \(ByteFormat.count(remaining)) more sites")
     }
 }
 
@@ -303,13 +303,13 @@ enum BrowserPrivacyPageListText {
 /// each other.
 enum BrowserPrivacyCountText {
     static func pages(_ count: Int) -> String {
-        if L10n.usesChinese { return "\(count) 个页面" }
-        return count == 1 ? "1 page" : "\(count) pages"
+        if L10n.usesChinese { return "\(ByteFormat.count(count)) 个页面" }
+        return count == 1 ? "1 page" : "\(ByteFormat.count(count)) pages"
     }
 
     static func visits(_ count: Int) -> String {
-        if L10n.usesChinese { return "\(count) 次访问" }
-        return count == 1 ? "1 visit" : "\(count) visits"
+        if L10n.usesChinese { return "\(ByteFormat.count(count)) 次访问" }
+        return count == 1 ? "1 visit" : "\(ByteFormat.count(count)) visits"
     }
 
     static func pagesAndVisits(pages pageCount: Int, visits visitCount: Int) -> String {
@@ -324,7 +324,7 @@ enum BrowserPrivacyCountText {
     ) -> String {
         let total = pagesAndVisits(pages: pageCount, visits: visitCount)
         return L10n.text(
-            "\(total) · 已选 \(selectedVisits) 次访问",
+            "\(total) · 已选 \(ByteFormat.count(selectedVisits)) 次访问",
             "\(total) · \(visits(selectedVisits)) selected"
         )
     }
@@ -419,7 +419,7 @@ struct BrowserPrivacyRecordIdentityView: View {
 
     @ViewBuilder
     private var browserIcon: some View {
-        if let path = item.browser.applicationURL?.path {
+        if let path = item.browser.iconPath {
             CachedAppIconView(path: path, size: 32) {
                 fallbackIcon
             }

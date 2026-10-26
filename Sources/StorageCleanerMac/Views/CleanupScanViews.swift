@@ -1,12 +1,15 @@
 import SwiftUI
 
 struct CleanupScanOverviewView: View {
+    @Environment(\.careStudioClassicResults) private var usesClassicResults
     @ObservedObject var store: ScanStore
     let session: ScanSession
 
     var body: some View {
         Group {
-            if session.smartScanScopes == [.health] {
+            // D141: the studio results show health-only scans too; the
+            // classic list keeps its own health page.
+            if session.smartScanScopes == [.health], usesClassicResults {
                 SmartScanPageShell(alignsWithFeatureFlow: true) {
                     AppPageHeader(title: ReviewFilter.overview.title, isHero: true, role: .landing) {
                         Button { store.rescanAfterV2Cleanup() } label: {
@@ -49,6 +52,9 @@ struct CleanupScanResultsView: View {
     @State private var expandedLightfieldSubcategoryIDs: Set<String> = []
     /// The list has scrolled under the fixed header (shows the hairline).
     @State private var isListScrolled = false
+    @Environment(\.careStudioClassicResults) private var usesClassicResults
+    /// D141: the classic list opened from the studio review panel.
+    @State private var showsClassicList = false
 
     private var categories: [CleanupScanCategory] {
         filter == .devCaches
@@ -150,6 +156,14 @@ struct CleanupScanResultsView: View {
         return store.cleanupSelection.selectedCandidates(in: session)
             .filter { candidateIDs.contains($0.id) }
             .reduce(0) { CleanupByteCount.adding($1.estimatedSizeBytes, to: $0) }
+    }
+
+    /// D100 G1: what the selection frees once the Trash is emptied; review
+    /// A-R2: full clones are matched across the selected items.
+    private var selectedReclaimable: CleanupSelectionReclaimable {
+        let candidateIDs = Set(categories.flatMap(\.selectableCandidateIDs))
+        return CleanupSelectionReclaimable(candidates: store.cleanupSelection.selectedCandidates(in: session)
+            .filter { candidateIDs.contains($0.id) })
     }
 
     private var selectionQuitNotice: String? {
@@ -289,7 +303,34 @@ struct CleanupScanResultsView: View {
         Set(tierCandidates.filter { $0.risk == risk }.map(\.id))
     }
 
+    /// D141: the CleanMyMac-style results (tiles and the review panel) are
+    /// the default; this tiered list stays as the classic list, opened from
+    /// the review panel or forced with `careStudioClassicResults`.
     var body: some View {
+        Group {
+            if usesClassicResults || showsClassicList {
+                classicBody
+                    .overlay(alignment: .topTrailing) {
+                        if showsClassicList && !usesClassicResults {
+                            Button(L10n.text("返回卡片视图", "Back to Cards")) { showsClassicList = false }
+                                .buttonStyle(.link)
+                                .font(.system(size: 12, weight: .semibold))
+                                .padding(.top, 14)
+                                .padding(.trailing, 18)
+                        }
+                    }
+            } else {
+                CareStudioJunkResultsPage(
+                    store: store,
+                    module: CareStudioModule.junkFlow(route: filter),
+                    filter: filter,
+                    session: session,
+                    onShowClassicList: { showsClassicList = true })
+            }
+        }
+    }
+
+    private var classicBody: some View {
         Group {
             if filter == .green { lightfieldResults } else { legacyResults }
         }
@@ -403,6 +444,9 @@ struct CleanupScanResultsView: View {
                             }
                             .buttonStyle(ResponsivePlainButtonStyle())
                             .help(resultDetailedSummary)
+                        }
+                        if let notice = store.accessReturnNotice, notice.sessionID == session.id {
+                            CleanupAccessReturnBanner(store: store, notice: notice)
                         }
                         if filter == .devCaches {
                             DeveloperCleanupThresholdControl(
@@ -526,6 +570,9 @@ struct CleanupScanResultsView: View {
                 .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).warningColor)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+        if let notice = store.accessReturnNotice, notice.sessionID == session.id {
+            CleanupAccessReturnBanner(store: store, notice: notice)
+        }
         // D93: a checked row whose app is running is named as soon as it is
         // checked, not only when the cleanup skips it.
         if let quitNotice = selectionQuitNotice {
@@ -538,7 +585,8 @@ struct CleanupScanResultsView: View {
         if let trash = trashCandidates.first,
            resultFilter == .all || (resultFilter == .selected && isTrashSelected) {
             let entryCount = trash.permanentDeletionEntries?.count ?? 0
-            DisclosureGroup(L10n.text("清空废纸篓 · 永久删除", "Empty Trash · Permanent deletion")) {
+            CleanupListDisclosure(title: L10n.text("清空废纸篓 · 永久删除", "Empty Trash · Permanent deletion"),
+                                  probe: "lightfield.cleanup.trashDisclosure") {
                 ForEach(trashCandidates) { candidate in
                     CleanupCandidateRow(store: store, session: session, candidate: candidate,
                         cleanupScopeIDs: selectionScopeIDs, usesLightfield: true)
@@ -547,8 +595,8 @@ struct CleanupScanResultsView: View {
             // D23 scope note (restored from V1): only what was already in the
             // Trash at scan time is deleted; this cleanup's moves are not.
             Text(L10n.text(
-                "单独一项，默认不选。只永久删除扫描时废纸篓里已有的 \(entryCount) 项，本次移入废纸篓的文件不受影响；执行前单独二次确认。",
-                "A separate item, off by default. It permanently deletes only the \(entryCount) item(s) already in the Trash during the scan; files this cleanup moves to Trash are not affected. Confirmed twice on its own."
+                "单独一项，默认不选。只永久删除扫描时废纸篓里已有的 \(ByteFormat.count(entryCount)) 项，本次移入废纸篓的文件不受影响；执行前单独二次确认。",
+                "A separate item, off by default. It permanently deletes only the \(ByteFormat.count(entryCount)) item(s) already in the Trash during the scan; files this cleanup moves to Trash are not affected. Confirmed twice on its own."
             ))
             .font(.system(size: 13))
             .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
@@ -579,11 +627,12 @@ struct CleanupScanResultsView: View {
             .layoutProbe("lightfield.cleanup.trashDenied")
 #endif
         }
-        DisclosureGroup(L10n.text("扫描详情与权限", "Scan Details & Permissions")) {
+        CleanupListDisclosure(title: L10n.text("扫描详情与权限", "Scan Details & Permissions"),
+                              probe: "lightfield.cleanup.detailsDisclosure") {
             lightfieldScanDetails
         }
         if let summary = store.cleanupDryRunSummary, summary.sessionID == session.id {
-            Text(L10n.text("已核对 \(summary.selectedCount) 项 · 文件系统改动：0", "\(summary.selectedCount) validated · File-system changes: 0"))
+            Text(L10n.text("已核对 \(ByteFormat.count(summary.selectedCount)) 项 · 文件系统改动：0", "\(ByteFormat.count(summary.selectedCount)) validated · File-system changes: 0"))
         }
     }
 
@@ -701,10 +750,10 @@ struct CleanupScanResultsView: View {
         VStack(alignment: .leading, spacing: 12) {
             if let system = session.system, system.diskTotalBytes > 0 {
                 Text(system.diskName)
-                Text(L10n.text("总容量", "Total") + " · " + ByteFormat.string(system.diskTotalBytes))
-                Text(L10n.text("已使用", "Used") + " · " + ByteFormat.string(system.diskUsedBytes))
-                Text(L10n.text("可用空间", "Available") + " · " + ByteFormat.string(system.diskFreeBytes))
-                Text(L10n.text("其余已用", "Other Used") + " · " + ByteFormat.string(max(0, system.diskUsedBytes - min(system.diskUsedBytes, identifiedBytes))))
+                Text(L10n.text("总容量", "Total") + " · " + ByteFormat.storageString(system.diskTotalBytes))
+                Text(L10n.text("已使用", "Used") + " · " + ByteFormat.storageString(system.diskUsedBytes))
+                Text(L10n.text("可用空间", "Available") + " · " + ByteFormat.storageString(system.diskFreeBytes))
+                Text(L10n.text("其余已用", "Other Used") + " · " + ByteFormat.storageString(max(0, system.diskUsedBytes - min(system.diskUsedBytes, identifiedBytes))))
             }
             ForEach([CleanupRisk.safe, .reviewOnly, .protected], id: \.rawValue) { risk in
                 Text(riskTitle(risk) + " · " + riskValueText(risk) + " · " + riskCaption(for: risk))
@@ -718,13 +767,14 @@ struct CleanupScanResultsView: View {
                     Text(candidate.sourceURL.lastPathComponent + " · " + CleanupMeasurementPresentation.aggregateValue([candidate]))
                 }.buttonStyle(FeatureLightfieldRowButtonStyle())
             }
-            Text(L10n.text("已读取范围", "Readable Scopes") + " · \(session.permissions.filter { $0.status == .readable }.count)/\(session.permissions.count)")
+            Text(L10n.text("已读取范围", "Readable Scopes") + " · \(session.permissions.filter { $0.status == .readable }.count)/\(ByteFormat.count(session.permissions.count))")
+            Text(session.metrics.ignoredSummary)
             Text(L10n.text("扫描耗时", "Duration") + " · " + String(format: "%.1fs", session.metrics.duration))
-            Text(L10n.text("完整容量", "Complete Measurements") + " · \(session.metrics.completeMeasurementCandidateCount)")
-            Text(L10n.text("至少值 / 失败", "Lower Bounds / Failed") + " · \(session.metrics.lowerBoundMeasurementCandidateCount) / \(session.metrics.failedMeasurementCandidateCount)")
-            Text(L10n.text("目录 / 条目", "Directories / Entries") + " · \(session.metrics.visitedDirectoryCount) / \(session.metrics.visitedEntryCount)")
-            Text(L10n.text("权限失败 / 云文件 / 超时 / 未列出", "Permission Failures / Cloud / Timeouts / Not Listed") + " · \(session.metrics.permissionFailureCount) / \(session.metrics.cloudSkippedCount) / \(session.metrics.timedOutRuleCount) / \(session.metrics.notActionableCandidateCount)")
-            Text(L10n.text("候选截断", "Truncated Candidates") + " · \(session.metrics.truncatedCandidateCount)")
+            Text(L10n.text("完整容量", "Complete Measurements") + " · \(ByteFormat.count(session.metrics.completeMeasurementCandidateCount))")
+            Text(L10n.text("至少值 / 失败", "Lower Bounds / Failed") + " · \(ByteFormat.count(session.metrics.lowerBoundMeasurementCandidateCount)) / \(ByteFormat.count(session.metrics.failedMeasurementCandidateCount))")
+            Text(L10n.text("目录 / 条目", "Directories / Entries") + " · \(ByteFormat.count(session.metrics.visitedDirectoryCount)) / \(ByteFormat.count(session.metrics.visitedEntryCount))")
+            Text(L10n.text("权限失败 / 云文件 / 超时 / 未列出", "Permission Failures / Cloud / Timeouts / Not Listed") + " · \(ByteFormat.count(session.metrics.permissionFailureCount)) / \(ByteFormat.count(session.metrics.cloudSkippedCount)) / \(ByteFormat.count(session.metrics.timedOutRuleCount)) / \(ByteFormat.count(session.metrics.notActionableCandidateCount))")
+            Text(L10n.text("候选截断", "Truncated Candidates") + " · \(ByteFormat.count(session.metrics.truncatedCandidateCount))")
             Text(L10n.text("先核对绿色，再逐项判断黄色；红色项目双重确认；永久清空废纸篓单独确认。", "Review green items first, then yellow individually; red items require two confirmations; emptying Trash requires separate confirmation."))
             Text(L10n.text("定期复查缓存和开发产物；系统内容交给 macOS 或原应用；个人文件先核对备份可恢复，再归档。", "Review caches and build artifacts periodically; let macOS or the owning app manage system content; verify a restorable backup before archiving personal files."))
         }.font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
@@ -753,15 +803,16 @@ struct CleanupScanResultsView: View {
         }
     }
 
-    private var resultHeaderSubtitle: String {
-        switch session.outcome {
-        case .complete:
-            L10n.text("扫描完成 · 请审阅结果", "Scan complete · Review results")
-        case .partial:
-            L10n.text("扫描结束 · 部分结果可供审阅", "Scan finished · Partial results available")
-        case .cancelled:
-            L10n.text("扫描已取消 · 保留已完成结果", "Scan cancelled · Completed results kept")
+    private var resultHeaderSubtitle: String { Self.resultHeaderSubtitle(for: session) }
+
+    nonisolated static func resultHeaderSubtitle(for session: ScanSession) -> String {
+        if session.outcome == .cancelled {
+            return L10n.text("扫描已取消 · 保留已完成结果", "Scan cancelled · Completed results kept")
         }
+        // D192 + D179: deliberate skips do not make the classic heading partial.
+        return session.coverageLimits.isLimited
+            ? L10n.text("扫描结束 · 部分结果可供审阅", "Scan finished · Partial results available")
+            : L10n.text("扫描完成 · 请审阅结果", "Scan complete · Review results")
     }
 
     private var resultDetailedSummary: String {
@@ -772,18 +823,21 @@ struct CleanupScanResultsView: View {
                 "; the Trash holds another \(CleanupMeasurementPresentation.aggregateValue(trashCandidates)) that can be emptied separately"
             )
         let summary = L10n.text(
-            "扫描完成：发现 \(ByteFormat.string(safeBytes)) 可安全清理，另有 \(CleanupMeasurementPresentation.aggregateValue(reviewCandidates)) 需要人工判断、\(CleanupMeasurementPresentation.aggregateValue(protectedCandidates)) 需双重确认\(trashSuffix)。",
-            "Scan complete: \(ByteFormat.string(safeBytes)) is safe to clean, \(CleanupMeasurementPresentation.aggregateValue(reviewCandidates)) needs review, and \(CleanupMeasurementPresentation.aggregateValue(protectedCandidates)) needs two confirmations\(trashSuffix)."
+            "扫描完成：发现 \(ByteFormat.storageString(safeBytes)) 可安全清理，另有 \(CleanupMeasurementPresentation.aggregateValue(reviewCandidates)) 需要人工判断、\(CleanupMeasurementPresentation.aggregateValue(protectedCandidates)) 需双重确认\(trashSuffix)。",
+            "Scan complete: \(ByteFormat.storageString(safeBytes)) is safe to clean, \(CleanupMeasurementPresentation.aggregateValue(reviewCandidates)) needs review, and \(CleanupMeasurementPresentation.aggregateValue(protectedCandidates)) needs two confirmations\(trashSuffix)."
         )
         guard let outcomeNotice else { return summary }
         return "\(summary) · \(outcomeNotice)"
     }
 
     private var selectionHeaderSummary: String {
-        L10n.text(
-            "已选择 \(selectedCount) 项 · \(ByteFormat.string(selectedBytes))",
-            "\(selectedCount) selected · \(ByteFormat.string(selectedBytes))"
+        let summary = L10n.text(
+            "已选择 \(ByteFormat.count(selectedCount)) 项 · \(ByteFormat.storageString(selectedBytes))",
+            "\(ByteFormat.count(selectedCount)) selected · \(ByteFormat.storageString(selectedBytes))"
         )
+        let reclaimable = selectedReclaimable
+        guard let note = reclaimable.note(ofSelected: selectedBytes) else { return summary }
+        return summary + " · " + note
     }
 
     /// Why some found items are not listed: cleanup skips anything that holds
@@ -795,12 +849,12 @@ struct CleanupScanResultsView: View {
         var chinese = [String]()
         var english = [String]()
         if excluded > 0 {
-            chinese.append("\(excluded) 项包含你排除的路径")
-            english.append("\(excluded) contain a path you excluded")
+            chinese.append("\(ByteFormat.count(excluded)) 项包含你排除的路径")
+            english.append("\(ByteFormat.count(excluded)) contain a path you excluded")
         }
         if protected > 0 {
-            chinese.append("\(protected) 项含本地历史记录等个人数据")
-            english.append("\(protected) hold personal data such as local history")
+            chinese.append("\(ByteFormat.count(protected)) 项含本地历史记录等个人数据")
+            english.append("\(ByteFormat.count(protected)) hold personal data such as local history")
         }
         guard !chinese.isEmpty else { return ("", "") }
         return (
@@ -816,8 +870,8 @@ struct CleanupScanResultsView: View {
         case .partial:
             if session.metrics.notActionableCandidateCount > 0 {
                 L10n.text(
-                    "部分范围已因安全边界跳过（\(session.metrics.notActionableCandidateCount) 项无法安全处理，未列出\(notListedReasonDetail.chinese)）",
-                    "Some scopes were safely skipped (\(session.metrics.notActionableCandidateCount) items could not be handled safely and are not listed\(notListedReasonDetail.english))"
+                    "部分范围已因安全边界跳过（\(ByteFormat.count(session.metrics.notActionableCandidateCount)) 项无法安全处理，未列出\(notListedReasonDetail.chinese)）",
+                    "Some scopes were safely skipped (\(ByteFormat.count(session.metrics.notActionableCandidateCount)) items could not be handled safely and are not listed\(notListedReasonDetail.english))"
                 )
             } else if session.metrics.timedOutRuleCount == 0,
                       session.metrics.permissionFailureCount == 0,
@@ -863,7 +917,7 @@ struct CleanupScanResultsView: View {
     ) -> some View {
         HStack(spacing: layout.cardSpacing) {
             ForEach(Array(risks.enumerated()), id: \.element.rawValue) { index, risk in
-                // Wide enough for "At least 30.5 GiB" (about 253 pt) beside
+                // Wide enough for "At least 32.75 GB" (about 253 pt) beside
                 // the icon; narrower windows wrap to two columns instead of
                 // truncating the value.
                 riskSummaryButton(risk: risk, captionBelow: captionBelow, action: { onSelect(risk) })
@@ -953,8 +1007,8 @@ struct CleanupScanResultsView: View {
         .layoutProbe(LayoutProbeID.cleanupRiskSummary(risk))
 #endif
         .accessibilityLabel(L10n.text(
-            "\(riskTitle(risk))，\(count) 项，\(riskValueText(risk))，\(selection)",
-            "\(riskTitle(risk)), \(count) items, \(riskValueText(risk)), \(selection)"
+            "\(riskTitle(risk))，\(ByteFormat.count(count)) 项，\(riskValueText(risk))，\(selection)",
+            "\(riskTitle(risk)), \(ByteFormat.count(count)) items, \(riskValueText(risk)), \(selection)"
         ))
         .accessibilityHint(L10n.text(
             "定位到此风险分组，不会改变选择。",
@@ -1117,8 +1171,8 @@ struct CleanupScanResultsView: View {
             return L10n.text("无可操作项目", "No actionable items")
         }
         return L10n.text(
-            "已选 \(selectedDecisionCount(for: risk))/\(selectableCount) 个可操作分组",
-            "\(selectedDecisionCount(for: risk))/\(selectableCount) actionable groups selected"
+            "已选 \(selectedDecisionCount(for: risk))/\(ByteFormat.count(selectableCount)) 个可操作分组",
+            "\(selectedDecisionCount(for: risk))/\(ByteFormat.count(selectableCount)) actionable groups selected"
         )
     }
 
@@ -1128,7 +1182,7 @@ struct CleanupScanResultsView: View {
             if !safeCandidates.isEmpty {
                 CleanupResultSummaryCard(
                     title: L10n.text("可安全清理", "Safe to Clean"),
-                    value: ByteFormat.string(safeBytes),
+                    value: ByteFormat.storageString(safeBytes),
                     detail: L10n.items(safeCandidates.count),
                     tint: AppDesignTokens.Palette.success
                 )
@@ -1146,8 +1200,8 @@ struct CleanupScanResultsView: View {
                     title: L10n.text("红色高风险", "Red High Risk"),
                     value: CleanupMeasurementPresentation.aggregateValue(protectedCandidates),
                     detail: L10n.text(
-                        "\(protectedCandidates.count) 项可手动选择",
-                        "\(protectedCandidates.count) manually selectable"
+                        "\(ByteFormat.count(protectedCandidates.count)) 项可手动选择",
+                        "\(ByteFormat.count(protectedCandidates.count)) manually selectable"
                     ),
                     tint: AppDesignTokens.Palette.destructive
                 )
@@ -1190,8 +1244,8 @@ struct CleanupScanResultsView: View {
 
     private var selectionCountLabel: some View {
             Text(L10n.text(
-                "已勾选 \(selectedLeafCount)/\(selectableLeafCount) 项 · \(selectedCount) 组",
-                "\(selectedLeafCount) of \(selectableLeafCount) selected · \(selectedCount) groups"
+                "已勾选 \(ByteFormat.count(selectedLeafCount))/\(ByteFormat.count(selectableLeafCount)) 项 · \(ByteFormat.count(selectedCount)) 组",
+                "\(ByteFormat.count(selectedLeafCount)) of \(ByteFormat.count(selectableLeafCount)) selected · \(ByteFormat.count(selectedCount)) groups"
             ))
             .font(AppDesignTokens.Typography.metadata)
             .foregroundStyle(.secondary)
@@ -1302,21 +1356,21 @@ struct CleanupScanResultsView: View {
                 LazyVGrid(columns: summaryGridColumns, spacing: layout.cardSpacing) {
                     CleanupSpaceMetric(
                         title: L10n.text("总容量", "Total"),
-                        value: ByteFormat.string(system.diskTotalBytes),
+                        value: ByteFormat.storageString(system.diskTotalBytes),
                         detail: system.diskName,
                         systemImage: "internaldrive",
                         tint: AppDesignTokens.Palette.storage
                     )
                     CleanupSpaceMetric(
                         title: L10n.text("已使用", "Used"),
-                        value: ByteFormat.string(system.diskUsedBytes),
+                        value: ByteFormat.storageString(system.diskUsedBytes),
                         detail: L10n.text("系统报告值", "System reported"),
                         systemImage: "chart.pie.fill",
                         tint: AppDesignTokens.Palette.information
                     )
                     CleanupSpaceMetric(
                         title: L10n.text("可用空间", "Available"),
-                        value: ByteFormat.string(system.diskFreeBytes),
+                        value: ByteFormat.storageString(system.diskFreeBytes),
                         detail: L10n.text("当前可用", "Currently available"),
                         systemImage: "checkmark.circle.fill",
                         tint: AppDesignTokens.Palette.success
@@ -1339,7 +1393,7 @@ struct CleanupScanResultsView: View {
                 LazyVGrid(columns: legendGridColumns, alignment: .leading, spacing: layout.cardSpacing) {
                     CleanupStorageLegend(
                         title: L10n.text("绿色可清理", "Green safe"),
-                        value: ByteFormat.string(safeBytes),
+                        value: ByteFormat.storageString(safeBytes),
                         tint: AppDesignTokens.Palette.success
                     )
                     CleanupStorageLegend(
@@ -1354,7 +1408,7 @@ struct CleanupScanResultsView: View {
                     )
                     CleanupStorageLegend(
                         title: L10n.text("其余已用", "Other used"),
-                        value: ByteFormat.string(max(
+                        value: ByteFormat.storageString(max(
                             0,
                             system.diskUsedBytes - min(system.diskUsedBytes, identifiedBytes)
                         )),
@@ -1425,8 +1479,8 @@ struct CleanupScanResultsView: View {
                     number: 1,
                     title: L10n.text("先确认默认勾选的绿色项目", "Review the selected green items first"),
                     detail: L10n.text(
-                        "当前可安全清理 \(ByteFormat.string(safeBytes))；实际执行仍经过预检、确认和废纸篓。",
-                        "\(ByteFormat.string(safeBytes)) is safe to review; execution still uses preflight, confirmation, and Trash."
+                        "当前可安全清理 \(ByteFormat.storageString(safeBytes))；实际执行仍经过预检、确认和废纸篓。",
+                        "\(ByteFormat.storageString(safeBytes)) is safe to review; execution still uses preflight, confirmation, and Trash."
                     ),
                     tint: AppDesignTokens.Palette.success
                 )
@@ -1571,23 +1625,23 @@ struct CleanupScanResultsView: View {
         switch risk {
         case .safe:
             L10n.text(
-                "全部可操作的绿色项目（\(selectableCount) 项）",
-                "All actionable green items (\(selectableCount))"
+                "全部可操作的绿色项目（\(ByteFormat.count(selectableCount)) 项）",
+                "All actionable green items (\(ByteFormat.count(selectableCount)))"
             )
         case .reviewOnly:
             L10n.text(
-                "全部可操作的黄色项目（\(selectableCount) 项）",
-                "All actionable yellow items (\(selectableCount))"
+                "全部可操作的黄色项目（\(ByteFormat.count(selectableCount)) 项）",
+                "All actionable yellow items (\(ByteFormat.count(selectableCount)))"
             )
         case .protected:
             L10n.text(
-                "全部可操作的红色高风险项目（\(selectableCount) 项）",
-                "All actionable red high-risk items (\(selectableCount))"
+                "全部可操作的红色高风险项目（\(ByteFormat.count(selectableCount)) 项）",
+                "All actionable red high-risk items (\(ByteFormat.count(selectableCount)))"
             )
         case .informational:
             L10n.text(
-                "全部可操作的信息项目（\(selectableCount) 项）",
-                "All actionable informational items (\(selectableCount))"
+                "全部可操作的信息项目（\(ByteFormat.count(selectableCount)) 项）",
+                "All actionable informational items (\(ByteFormat.count(selectableCount)))"
             )
         }
     }
@@ -1677,10 +1731,10 @@ struct CleanupScanResultsView: View {
                 )
                 CleanupResultSummaryCard(
                     title: L10n.text("完整容量", "Complete Measurements"),
-                    value: "\(session.metrics.completeMeasurementCandidateCount)",
+                    value: ByteFormat.count(session.metrics.completeMeasurementCandidateCount),
                     detail: L10n.text(
-                        "至少值 \(session.metrics.lowerBoundMeasurementCandidateCount) · 失败 \(session.metrics.failedMeasurementCandidateCount)",
-                        "Lower bounds \(session.metrics.lowerBoundMeasurementCandidateCount) · failed \(session.metrics.failedMeasurementCandidateCount)"
+                        "至少值 \(ByteFormat.count(session.metrics.lowerBoundMeasurementCandidateCount)) · 失败 \(ByteFormat.count(session.metrics.failedMeasurementCandidateCount))",
+                        "Lower bounds \(ByteFormat.count(session.metrics.lowerBoundMeasurementCandidateCount)) · failed \(ByteFormat.count(session.metrics.failedMeasurementCandidateCount))"
                     ),
                     tint: session.metrics.lowerBoundMeasurementCandidateCount == 0
                         && session.metrics.failedMeasurementCandidateCount == 0
@@ -1689,19 +1743,19 @@ struct CleanupScanResultsView: View {
                 )
                 CleanupResultSummaryCard(
                     title: L10n.text("已访问目录", "Visited Directories"),
-                    value: "\(session.metrics.visitedDirectoryCount)",
+                    value: ByteFormat.count(session.metrics.visitedDirectoryCount),
                     detail: L10n.text(
-                        "条目 \(session.metrics.visitedEntryCount)",
-                        "\(session.metrics.visitedEntryCount) entries"
+                        "条目 \(ByteFormat.count(session.metrics.visitedEntryCount))",
+                        "\(ByteFormat.count(session.metrics.visitedEntryCount)) entries"
                     ),
                     tint: AppDesignTokens.Palette.information
                 )
                 CleanupResultSummaryCard(
                     title: L10n.text("安全跳过", "Safely Skipped"),
-                    value: "\(session.metrics.permissionFailureCount)",
+                    value: ByteFormat.count(session.metrics.permissionFailureCount),
                     detail: L10n.text(
-                        "权限失败 · 云文件 \(session.metrics.cloudSkippedCount) · 超时 \(session.metrics.timedOutRuleCount) · 未列出 \(session.metrics.notActionableCandidateCount)",
-                        "permission failures · cloud \(session.metrics.cloudSkippedCount) · timeouts \(session.metrics.timedOutRuleCount) · not listed \(session.metrics.notActionableCandidateCount)"
+                        "权限失败 · 云文件 \(ByteFormat.count(session.metrics.cloudSkippedCount)) · 超时 \(ByteFormat.count(session.metrics.timedOutRuleCount)) · 未列出 \(ByteFormat.count(session.metrics.notActionableCandidateCount))",
+                        "permission failures · cloud \(ByteFormat.count(session.metrics.cloudSkippedCount)) · timeouts \(ByteFormat.count(session.metrics.timedOutRuleCount)) · not listed \(ByteFormat.count(session.metrics.notActionableCandidateCount))"
                     ),
                     tint: session.metrics.permissionFailureCount == 0
                         && session.metrics.timedOutRuleCount == 0
@@ -1711,7 +1765,7 @@ struct CleanupScanResultsView: View {
                 )
                 CleanupResultSummaryCard(
                     title: L10n.text("候选截断", "Truncated Candidates"),
-                    value: "\(session.metrics.truncatedCandidateCount)",
+                    value: ByteFormat.count(session.metrics.truncatedCandidateCount),
                     detail: session.metrics.truncatedCandidateCount == 0
                         ? L10n.text("结果未触及上限", "Result limit not reached")
                         : L10n.text("其余候选未显示", "Additional candidates are hidden"),
@@ -1789,8 +1843,8 @@ struct CleanupScanResultsView: View {
                 CleanupReportSectionHeader(
                     title: L10n.text("清空废纸篓 · 不可恢复", "Empty Trash · Cannot Be Undone"),
                     detail: L10n.text(
-                        "单独一项，默认不选。只永久删除扫描时废纸篓里已有的 \(entryCount) 项，本次移入废纸篓的文件不受影响；执行前单独二次确认。",
-                        "A separate item, off by default. It permanently deletes only the \(entryCount) item(s) already in the Trash during the scan; files this cleanup moves to Trash are not affected. Confirmed twice on its own."
+                        "单独一项，默认不选。只永久删除扫描时废纸篓里已有的 \(ByteFormat.count(entryCount)) 项，本次移入废纸篓的文件不受影响；执行前单独二次确认。",
+                        "A separate item, off by default. It permanently deletes only the \(ByteFormat.count(entryCount)) item(s) already in the Trash during the scan; files this cleanup moves to Trash are not affected. Confirmed twice on its own."
                     ),
                     systemImage: "trash.slash",
                     tint: tint
@@ -1936,7 +1990,7 @@ struct CleanupScanResultsView: View {
                     )
                 } else {
                     AppButton(
-                        title: L10n.text("生成 Dry-run · \(ByteFormat.string(selectedBytes))", "Create Dry Run · \(ByteFormat.string(selectedBytes))"),
+                        title: L10n.text("生成 Dry-run · \(ByteFormat.storageString(selectedBytes))", "Create Dry Run · \(ByteFormat.storageString(selectedBytes))"),
                         systemImage: "checkmark.shield",
                         kind: .primary,
                         tint: AppDesignTokens.Palette.steadyChrome,
@@ -1951,8 +2005,8 @@ struct CleanupScanResultsView: View {
                summary.sessionID == session.id {
                 Label(
                     L10n.text(
-                        "已核对 \(summary.selectedCount) 项、\(ByteFormat.string(summary.selectedBytes))；文件系统改动：0",
-                        "\(summary.selectedCount) item(s), \(ByteFormat.string(summary.selectedBytes)) validated; file-system changes: 0"
+                        "已核对 \(ByteFormat.count(summary.selectedCount)) 项、\(ByteFormat.storageString(summary.selectedBytes))；文件系统改动：0",
+                        "\(ByteFormat.count(summary.selectedCount)) item(s), \(ByteFormat.storageString(summary.selectedBytes)) validated; file-system changes: 0"
                     ),
                     systemImage: "checkmark.seal.fill"
                 )
@@ -1966,12 +2020,12 @@ struct CleanupScanResultsView: View {
     private var cleanupActionTitle: String {
         selectedReviewCandidates.isEmpty && selectedProtectedCandidates.isEmpty && !isTrashSelected
             ? L10n.text(
-                "安全清理 · \(ByteFormat.string(selectedBytes))",
-                "Safe Cleanup · \(ByteFormat.string(selectedBytes))"
+                "安全清理 · \(ByteFormat.storageString(selectedBytes))",
+                "Safe Cleanup · \(ByteFormat.storageString(selectedBytes))"
             )
             : L10n.text(
-                "清理所选 · \(ByteFormat.string(selectedBytes))",
-                "Clean Selected · \(ByteFormat.string(selectedBytes))"
+                "清理所选 · \(ByteFormat.storageString(selectedBytes))",
+                "Clean Selected · \(ByteFormat.storageString(selectedBytes))"
             )
     }
 
@@ -1987,31 +2041,31 @@ struct CleanupScanResultsView: View {
     /// Rows, like the confirmation sheet (coordinator note, D53 V0); the
     /// number of groups follows as a hint.
     private var selectionActionSummaryChinese: String {
-        let lead = "已选择 \(selectedLeafCount) 项（\(selectedCount) 组）"
+        let lead = "已选择 \(ByteFormat.count(selectedLeafCount)) 项（\(ByteFormat.count(selectedCount)) 组）"
         if isTrashSelected {
             return "\(lead) · 含永久清空废纸篓"
         }
         if !selectedProtectedCandidates.isEmpty {
-            return "\(lead) · 红色 \(selectedProtectedCandidates.count) 项需双重确认"
+            return "\(lead) · 红色 \(ByteFormat.count(selectedProtectedCandidates.count)) 项需双重确认"
         }
         if !selectedReviewCandidates.isEmpty {
-            return "\(lead) · 黄色 \(selectedReviewCandidates.count) 项需确认"
+            return "\(lead) · 黄色 \(ByteFormat.count(selectedReviewCandidates.count)) 项需确认"
         }
-        return "\(lead) · \(ByteFormat.string(selectedBytes))"
+        return "\(lead) · \(ByteFormat.storageString(selectedBytes))"
     }
 
     private var selectionActionSummaryEnglish: String {
-        let lead = "\(selectedLeafCount) selected (\(selectedCount) groups)"
+        let lead = "\(ByteFormat.count(selectedLeafCount)) selected (\(ByteFormat.count(selectedCount)) groups)"
         if isTrashSelected {
             return "\(lead) · includes permanently emptying the Trash"
         }
         if !selectedProtectedCandidates.isEmpty {
-            return "\(lead) · \(selectedProtectedCandidates.count) red item(s) need two confirmations"
+            return "\(lead) · \(ByteFormat.count(selectedProtectedCandidates.count)) red item(s) need two confirmations"
         }
         if !selectedReviewCandidates.isEmpty {
-            return "\(lead) · \(selectedReviewCandidates.count) yellow item(s) need confirmation"
+            return "\(lead) · \(ByteFormat.count(selectedReviewCandidates.count)) yellow item(s) need confirmation"
         }
-        return "\(lead) · \(ByteFormat.string(selectedBytes))"
+        return "\(lead) · \(ByteFormat.storageString(selectedBytes))"
     }
 
     private func matchesCurrentFilter(_ candidate: ScanCandidate) -> Bool {
@@ -2047,6 +2101,7 @@ struct DeveloperCleanupThresholdControl: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
             ProjectArtifactEntryButton(coordinator: store.heavyWorkCoordinator)
+            SimulatorCleanupEntryButton(coordinator: store.heavyWorkCoordinator)
             HStack(alignment: .center, spacing: AppDesignTokens.Spacing.medium) {
                 Label {
                     VStack(alignment: .leading, spacing: 3) {
@@ -2251,7 +2306,7 @@ private struct CleanupTopCandidateRow: View {
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .monospacedDigit()
             AppIconButton(
-                title: L10n.text("在 Finder 中显示", "Show in Finder"),
+                title: L10n.text("在访达中显示", "Show in Finder"),
                 systemImage: "folder",
                 action: reveal
             )
@@ -2329,13 +2384,20 @@ private enum CleanupResultSort: String, CaseIterable, Identifiable {
 
 enum CleanupMeasurementPresentation {
     static func value(_ candidate: ScanCandidate) -> String {
+        if candidate.ruleID == "trash.icloud-drive", !candidate.measurementCompleteness.isFailed {
+            let cloud = ByteFormat.storageString(candidate.snapshot.logicalSizeBytes)
+            let local = candidate.snapshot.allocatedSizeBytes.map { ByteFormat.storageString($0) } ?? L10n.text("未知", "Unknown")
+            return candidate.measurementCompleteness.isComplete
+                ? L10n.text("iCloud 中 \(cloud) · 本机 \(local)", "iCloud \(cloud) · On this Mac \(local)")
+                : L10n.text("iCloud 中至少 \(cloud) · 本机至少 \(local)", "iCloud at least \(cloud) · On this Mac at least \(local)")
+        }
         switch candidate.measurementCompleteness {
         case .complete:
-            return ByteFormat.string(candidate.estimatedSizeBytes)
+            return ByteFormat.storageString(candidate.estimatedSizeBytes)
         case .lowerBound:
             return L10n.text(
-                "至少 \(ByteFormat.string(candidate.estimatedSizeBytes))",
-                "At least \(ByteFormat.string(candidate.estimatedSizeBytes))"
+                "至少 \(ByteFormat.storageString(candidate.estimatedSizeBytes))",
+                "At least \(ByteFormat.storageString(candidate.estimatedSizeBytes))"
             )
         case .failed:
             return L10n.text("无法计算", "Unavailable")
@@ -2343,17 +2405,17 @@ enum CleanupMeasurementPresentation {
     }
 
     static func aggregateValue(_ candidates: [ScanCandidate]) -> String {
-        guard !candidates.isEmpty else { return ByteFormat.string(0) }
+        guard !candidates.isEmpty else { return ByteFormat.storageString(0) }
         let measured = candidates.filter { !$0.measurementCompleteness.isFailed }
         guard !measured.isEmpty else { return L10n.text("无法计算", "Unavailable") }
         let bytes = CleanupByteCount.sum(measured.map(\.estimatedSizeBytes))
         guard candidates.allSatisfy({ $0.measurementCompleteness.isComplete }) else {
             return L10n.text(
-                "至少 \(ByteFormat.string(bytes))",
-                "At least \(ByteFormat.string(bytes))"
+                "至少 \(ByteFormat.storageString(bytes))",
+                "At least \(ByteFormat.storageString(bytes))"
             )
         }
-        return ByteFormat.string(bytes)
+        return ByteFormat.storageString(bytes)
     }
 
     static func status(_ candidate: ScanCandidate) -> String {
@@ -2474,8 +2536,8 @@ private struct CleanupSubcategorySelectionView: View {
         }
         if selectable < total {
             return L10n.text(
-                "\(L10n.items(total)) · \(selectable) 项可选择",
-                "\(L10n.items(total)) · \(selectable) selectable"
+                "\(L10n.items(total)) · \(ByteFormat.count(selectable)) 项可选择",
+                "\(L10n.items(total)) · \(ByteFormat.count(selectable)) selectable"
             )
         }
         guard subcategory.risk != .safe else { return L10n.items(total) }
@@ -2651,6 +2713,36 @@ private struct CleanupSubcategorySelectionView: View {
     }
 }
 
+/// D100 G5: roots this scan could not read became readable after the app
+/// came back. Only the user's click scans again (the page's own scope).
+private struct CleanupAccessReturnBanner: View {
+    @ObservedObject var store: ScanStore
+    let notice: ScanAccessReturnNotice
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.medium) {
+            Label(notice.text, systemImage: "lock.open")
+                .font(AppDesignTokens.Typography.metadata)
+                .foregroundStyle(AppDesignTokens.Palette.information)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button(L10n.text("重新扫描这些位置", "Scan These Locations")) { store.rescanAfterAccessReturn() }
+                .appButtonChrome(.secondary)
+                .disabled(store.isPreparingScan)
+            AppIconButton(title: L10n.text("不再提示", "Dismiss"), systemImage: "xmark") {
+                store.dismissAccessReturnNotice()
+            }
+        }
+        .padding(AppDesignTokens.Layout.compactPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassPanel(
+            cornerRadius: AppDesignTokens.Layout.cardRadius,
+            tint: AppDesignTokens.Palette.information,
+            prominence: .quiet
+        )
+    }
+}
+
 private struct CleanupCandidateRow: View {
     @Environment(\.windowLayoutMetrics) private var layout
     @ObservedObject var store: ScanStore
@@ -2708,6 +2800,7 @@ private struct CleanupCandidateRow: View {
     private var lightfieldDetail: String {
         CleanupRuleExplanation.lightfieldDetail(
             rebuildCost: CleanupCandidateRowHint.rebuildCost(for: candidate)?.text,
+            reclaimable: CleanupCandidateRowHint.reclaimable(for: candidate)?.text,
             ownerStatus: lightfieldNote == nil ? ownerStatusLine?.text : nil,
             ownership: candidate.ruleExplanation.ownership,
             path: candidate.snapshot.standardizedPath
@@ -2718,6 +2811,7 @@ private struct CleanupCandidateRow: View {
         let parts: [String?] = [
             candidate.reason, ownerStatusLine?.text, developerArtifactLine,
             applicationVersionLine, CleanupCandidateRowHint.rebuildCost(for: candidate)?.text,
+            CleanupCandidateRowHint.reclaimable(for: candidate)?.text,
             candidate.ruleExplanation.summary
         ]
         return parts.compactMap { $0 }.joined(separator: " · ")
@@ -2795,7 +2889,7 @@ private struct CleanupCandidateRow: View {
 
             AppIconButton(
                 title: L10n.text(
-                    "在 Finder 中显示 \(candidate.sourceURL.lastPathComponent)",
+                    "在访达中显示 \(candidate.sourceURL.lastPathComponent)",
                     "Show \(candidate.sourceURL.lastPathComponent) in Finder"
                 ),
                 systemImage: "folder"
@@ -2858,6 +2952,13 @@ private struct CleanupCandidateRow: View {
                     Label(rebuildCost.text, systemImage: rebuildCost.systemImage)
                         .font(AppDesignTokens.Typography.metadata)
                         .foregroundStyle(Self.style(for: rebuildCost.tone))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // D100 G1: the row frees noticeably less than its size.
+                if let reclaimable = CleanupCandidateRowHint.reclaimable(for: candidate) {
+                    Label(reclaimable.text, systemImage: reclaimable.systemImage)
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(Self.style(for: reclaimable.tone))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -2947,6 +3048,12 @@ private struct CleanupCandidateRow: View {
                     Label(detail, systemImage: "exclamationmark.triangle.fill")
                         .font(AppDesignTokens.Typography.metadata)
                         .foregroundStyle(AppDesignTokens.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let reclaimable = CleanupCandidateRowHint.reclaimable(for: candidate) {
+                    Label(reclaimable.text, systemImage: reclaimable.systemImage)
+                        .font(AppDesignTokens.Typography.metadata)
+                        .foregroundStyle(Self.style(for: reclaimable.tone))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -3147,7 +3254,7 @@ private struct CleanupCandidateRow: View {
                 )
             case .selectableWithReview:
                 return L10n.text(
-                    "按空格切换选择；黄色项目在执行前还需要风险确认。文件夹按钮只在 Finder 中显示。",
+                    "按空格切换选择；黄色项目在执行前还需要风险确认。文件夹按钮只在访达中显示。",
                     "Press Space to toggle; yellow items need another risk confirmation before execution. The folder button only reveals in Finder."
                 )
             case .selectableWithProtectedReview:
@@ -3160,7 +3267,7 @@ private struct CleanupCandidateRow: View {
             }
         }
         return canSelect
-            ? L10n.text("按空格切换选择；文件夹按钮只在 Finder 中显示。", "Press Space to toggle selection; the folder button only reveals the item in Finder.")
+            ? L10n.text("按空格切换选择；文件夹按钮只在访达中显示。", "Press Space to toggle selection; the folder button only reveals the item in Finder.")
             : L10n.text("此项目不能加入清理计划。", "This item cannot be added to the cleanup plan.")
     }
 
@@ -3574,7 +3681,7 @@ struct AnimatedByteCount: View {
         ByteCountText(value: shown)
             .onAppear { animate(to: Double(bytes), fromZero: true) }
             .onChange(of: bytes) { _, value in animate(to: Double(value), fromZero: false) }
-            .accessibilityLabel(ByteFormat.string(bytes))
+            .accessibilityLabel(ByteFormat.storageString(bytes))
     }
 
     private func animate(to value: Double, fromZero: Bool) {
@@ -3596,7 +3703,46 @@ private struct ByteCountText: View, @preconcurrency Animatable {
     }
 
     var body: some View {
-        Text(ByteFormat.string(Int64(max(0, value.rounded()))))
+        Text(ByteFormat.storageString(Int64(max(0, value.rounded()))))
             .monospacedDigit()
+    }
+}
+
+/// D216: the classic list's two closing disclosures (emptying the Trash, the
+/// scan details) as one button each — the title and the row-end arrow — so
+/// VoiceOver reads their names and state. Their `DisclosureGroup` triangles
+/// had no name in the accessibility tree and were read as “disclosure
+/// triangle” (second report, 5.2 #12).
+struct CleanupListDisclosure<Content: View>: View {
+    let title: String
+    var probe: String? = nil
+    @ViewBuilder let content: Content
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: 13))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    FeatureLightfieldDisclosureChevron(expanded: isExpanded,
+                                                       probe: probe.map { $0 + ".chevron" })
+                }
+                .frame(minHeight: 28)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(FeatureLightfieldRowButtonStyle())
+            .accessibilityLabel(title)
+            .accessibilityValue(isExpanded ? L10n.text("已展开", "Expanded") : L10n.text("已收起", "Collapsed"))
+#if DEBUG
+            .layoutProbe(probe ?? "lightfield.cleanup.disclosure")
+#endif
+            if isExpanded {
+                content
+            }
+        }
     }
 }

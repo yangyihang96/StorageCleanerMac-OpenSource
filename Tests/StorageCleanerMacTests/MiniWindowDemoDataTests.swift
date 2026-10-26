@@ -438,6 +438,130 @@ final class MiniWindowDemoDataTests: XCTestCase {
         XCTAssertFalse(missing.contains { $0.chargePercent == 0 })
     }
 
+    /// D147: the fixture is compiled only with DEBUG or STORAGE_CLEANER_BETA,
+    /// so every use of it must be too; the release build failed to compile
+    /// at two that were not (`uptimeBreakdownTexts`,
+    /// `GeekUptimeFormat.awakeSeconds`). A use is compiled with it inside an
+    /// `#if` or `#elseif` branch naming either condition without a negation;
+    /// an `#else` branch is not. Reads the package's sources only.
+    func testEveryUseOfTheFixtureIsCompiledOnlyWithIt() throws {
+        let root = URL(fileURLWithPath: "\(#filePath)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/StorageCleanerMac")
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThan(files.count, 100)
+        func compilesWithTheFixture(_ condition: Substring) -> Bool {
+            (condition.contains("DEBUG") || condition.contains("STORAGE_CLEANER_BETA")) && !condition.contains("!")
+        }
+        var uses = 0
+        var outside: [String] = []
+        for file in files {
+            var branches: [Bool] = []
+            let lines = try String(contentsOf: file, encoding: .utf8).components(separatedBy: "\n")
+            for (index, line) in lines.enumerated() {
+                let text = line.trimmingCharacters(in: .whitespaces)
+                if text.hasPrefix("#if ") {
+                    branches.append(compilesWithTheFixture(text.dropFirst(4)))
+                } else if text.hasPrefix("#elseif "), !branches.isEmpty {
+                    branches[branches.count - 1] = compilesWithTheFixture(text.dropFirst(8))
+                } else if text.hasPrefix("#else"), !branches.isEmpty {
+                    branches[branches.count - 1] = false
+                } else if text.hasPrefix("#endif"), !branches.isEmpty {
+                    branches.removeLast()
+                } else if line.contains("MiniWindowDemoData"), !text.hasPrefix("//") {
+                    uses += 1
+                    if !branches.contains(true) {
+                        outside.append("\(file.lastPathComponent):\(index + 1)")
+                    }
+                }
+            }
+            XCTAssertTrue(branches.isEmpty, "unbalanced #if in \(file.lastPathComponent)")
+        }
+        XCTAssertGreaterThan(uses, 100, "the scan sees the fixture's uses")
+        XCTAssertEqual(outside, [])
+    }
+
+    /// D147, continued: with the sources fixed, the release test build
+    /// (`verify.sh`'s `swift test -c release`) failed in two test files that
+    /// used the fixture and the offscreen hook `menuBarChartsPreparedInline`
+    /// (compiled with DEBUG alone) outside any condition. Every use in code
+    /// (not in a string a source check reads, nor in a comment) sits in a
+    /// branch compiled with what it uses: the fixture's names DEBUG or
+    /// STORAGE_CLEANER_BETA, the hook's DEBUG without an alternative.
+    func testTheTestsUseTheDebugOnlyHooksOnlyWhereTheyAreCompiled() throws {
+        let package = URL(fileURLWithPath: "\(#filePath)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func withTheFixture(_ condition: Substring) -> Bool {
+            (condition.contains("DEBUG") || condition.contains("STORAGE_CLEANER_BETA")) && !condition.contains("!")
+        }
+        func withTheHook(_ condition: Substring) -> Bool {
+            condition.contains("DEBUG") && !condition.contains("!") && !condition.contains("||")
+        }
+        let fixture = try Self.codeUses(of: "MiniWindowDemoData",
+                                        in: package.appendingPathComponent("Tests/StorageCleanerMacTests"),
+                                        compiledWith: withTheFixture)
+        XCTAssertGreaterThan(fixture.files, 100)
+        XCTAssertGreaterThan(fixture.uses, 100, "the scan sees the fixture's uses")
+        XCTAssertEqual(fixture.outside, [])
+        for directory in ["Sources/StorageCleanerMac", "Tests/StorageCleanerMacTests"] {
+            let hook = try Self.codeUses(of: "menuBarChartsPreparedInline",
+                                         in: package.appendingPathComponent(directory), compiledWith: withTheHook)
+            XCTAssertGreaterThan(hook.uses, 1, directory)
+            XCTAssertEqual(hook.outside, [], directory)
+        }
+    }
+
+    /// The lines under `directory` that use `name` in code, and those of them
+    /// outside every `#if` or `#elseif` branch `compiled` accepts (an `#else`
+    /// branch never is one). Comments and string literals, multi-line ones
+    /// too, are not code.
+    private static func codeUses(of name: String, in directory: URL,
+                                 compiledWith compiled: (Substring) -> Bool) throws
+        -> (files: Int, uses: Int, outside: [String]) {
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+        var uses = 0
+        var outside: [String] = []
+        for file in files {
+            var branches: [Bool] = []
+            var inBlock = false
+            let lines = try String(contentsOf: file, encoding: .utf8).components(separatedBy: "\n")
+            for (index, line) in lines.enumerated() {
+                let text = line.trimmingCharacters(in: .whitespaces)
+                if !inBlock, text.hasPrefix("//") { continue }
+                let quotes = line.components(separatedBy: "\"\"\"").count - 1
+                if inBlock || quotes > 0 {
+                    if quotes % 2 == 1 { inBlock.toggle() }
+                    continue
+                }
+                if text.hasPrefix("#if ") {
+                    branches.append(compiled(text.dropFirst(4)))
+                } else if text.hasPrefix("#elseif "), !branches.isEmpty {
+                    branches[branches.count - 1] = compiled(text.dropFirst(8))
+                } else if text.hasPrefix("#else"), !branches.isEmpty {
+                    branches[branches.count - 1] = false
+                } else if text.hasPrefix("#endif"), !branches.isEmpty {
+                    branches.removeLast()
+                } else {
+                    let code = line.replacingOccurrences(of: #""(?:\\.|[^"\\])*""#, with: "\"\"",
+                                                         options: .regularExpression)
+                        .components(separatedBy: "//")[0]
+                    if code.contains(name) {
+                        uses += 1
+                        if !branches.contains(true) {
+                            outside.append("\(file.lastPathComponent):\(index + 1)")
+                        }
+                    }
+                }
+            }
+            XCTAssertTrue(branches.isEmpty && !inBlock, "unbalanced #if or \"\"\" in \(file.lastPathComponent)")
+        }
+        return (files.count, uses, outside)
+    }
+
     private func assertSlowSteps(_ levels: [Double], increasing: Bool) {
         XCTAssertFalse(levels.isEmpty)
         for (previous, next) in zip(levels, levels.dropFirst()) {

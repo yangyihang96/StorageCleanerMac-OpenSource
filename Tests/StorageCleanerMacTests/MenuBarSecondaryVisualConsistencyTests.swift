@@ -22,9 +22,12 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
             XCTAssertEqual(volume.usageProgress, ratio)
             for dark in [false, true] {
                 let bitmap = try render(GeekDiskVolumeCapacityRing(volume: volume, tint: .blue).padding(6), dark: dark)
-                XCTAssertEqual(CGFloat(bitmap.pixelsWide) / 2, 47, accuracy: 0.5)
-                XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 47, accuracy: 0.5)
-                try assertGlyphsInsideRing(bitmap, size: 35, padding: 6, dark: dark)
+                // D119 (2026-10-18): iStat's 26 pt volume ring with a 2 pt
+                // line (was 35 pt, 47 with the padding).
+                XCTAssertEqual(CGFloat(bitmap.pixelsWide) / 2, 38, accuracy: 0.5)
+                XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 38, accuracy: 0.5)
+                try assertGlyphsInsideRing(bitmap, size: GeekDiskVolumeLayout.ringSize, padding: 6, dark: dark,
+                                           lineWidth: GeekDiskVolumeLayout.ringLineWidth)
                 try export(bitmap, name: "capacity-\(percent.map { String($0) } ?? "unknown")-\(dark ? "dark" : "light")")
             }
         }
@@ -34,7 +37,9 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
     // keeps a legend marker in the ring-track color (the unfilled ring).
     func testMemoryCompositionTermsFollowLanguageAndFreeUsesRingTrackMarker() throws {
         let chinese = SecondaryMenuLanguageScope(.zhHans)
-        XCTAssertEqual(GeekMemoryComponent.allCases.map(\.title), ["应用", "联动", "压缩", "可用"])
+        // D138: iStat's 'Memory.App', 'Memory.Wired', 'Memory.Compressed'
+        // (were 应用, 联动, 压缩); the color roles keep their short names.
+        XCTAssertEqual(GeekMemoryComponent.allCases.map(\.title), ["App内存", "联动内存", "已压缩", "可用"])
         XCTAssertEqual([PanelMetricColorRole.memoryApp, .memoryWired, .memoryCompressed].map(\.title),
                        ["应用", "联动", "压缩"])
         for component in GeekMemoryComponent.allCases {
@@ -93,21 +98,28 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
             defer { languageScope.restore() }
             for dark in [false, true] {
                 let card = GeekDiskIOCard {
-                    GeekSecondaryTransferValue(title: L10n.text("读取", "Read"),
+                    // D138: the production titles, iStat's 'Disks.Read' and
+                    // 'Disks.Write' (were 读取, 写入).
+                    GeekSecondaryTransferValue(title: L10n.text("读", "Read"),
                         value: "99999.9 GiB/s", tint: .pink)
                 } write: {
-                    GeekSecondaryTransferValue(title: L10n.text("写入", "Write"),
+                    GeekSecondaryTransferValue(title: L10n.text("写", "Write"),
                         value: "0 B/s", tint: .blue)
                 } chart: {
                     probe
-                } peak: {
+                } peak: { _ in
+                    // D146: the slot is handed the graph's peaks (was `peak: {`).
                     GeekDiskPeakRow(readPeak: "1023.9 TiB/s", writePeak: "8.0 EiB/s")
                 }
                 .frame(width: 296)
                 let bitmap = try render(card, dark: dark)
                 try export(bitmap, name: "disk-io-card-\(language.rawValue)-\(dark ? "dark" : "light")")
+                // D119 (2026-10-18): iStat's activity section is 130 tall:
+                // the plot from 47, H − 74 = 56 tall, x 8 and W − 14 wide, the
+                // peak row at H − 21 (was 180 with the plot at 45, 280 × 110,
+                // the last text above 174).
                 XCTAssertEqual(CGFloat(bitmap.pixelsWide) / 2, 296, accuracy: 0.5)
-                XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 180, accuracy: 0.5)
+                XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 130, accuracy: 0.5)
                 // NSBitmapImageRep(cgImage:) and the exported PNG can resolve
                 // color components differently. Obtain the native expected
                 // pigment through the same renderer/conversion as the card;
@@ -115,23 +127,23 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                 let probeBitmap = try render(probe.frame(width: 1, height: 1), dark: dark)
                 let nativeProbe = try XCTUnwrap(probeBitmap.colorAt(x: 0, y: 0))
                 let expectedProbe = try XCTUnwrap(nativeProbe.usingColorSpace(.sRGB))
-                let chartCenter = try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide / 2, y: 200))
+                let chartCenter = try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide / 2, y: 150))
                 let resolvedChartCenter = try XCTUnwrap(chartCenter.usingColorSpace(.sRGB))
                 print("Disk IO native color spaces: card=\(bitmap.colorSpace), probe=\(probeBitmap.colorSpace); center=\(chartCenter), sRGB=\(resolvedChartCenter); reference=\(nativeProbe), sRGB=\(expectedProbe)")
                 let chart = try colorBounds(bitmap, red: expectedProbe.redComponent,
                     green: expectedProbe.greenComponent, blue: expectedProbe.blueComponent)
                 XCTAssertEqual(chart.minX / 2, 8, accuracy: 0.5)
-                XCTAssertEqual(chart.minY / 2, 45, accuracy: 0.5)
-                XCTAssertEqual(chart.width / 2, 280, accuracy: 0.5)
-                XCTAssertEqual(chart.height / 2, 110, accuracy: 0.5)
+                XCTAssertEqual(chart.minY / 2, 47, accuracy: 0.5)
+                XCTAssertEqual(chart.width / 2, 282, accuracy: 0.5)
+                XCTAssertEqual(chart.height / 2, 56, accuracy: 0.5)
                 let peak = try lastTextLineBounds(bitmap, dark: dark)
                 XCTAssertGreaterThanOrEqual(peak.minY / 2, chart.maxY / 2 + 3 - 0.5,
                     "Peak values must occupy their separate readable row below the plot")
-                XCTAssertLessThanOrEqual(peak.maxY / 2, 174 + 0.5,
+                XCTAssertLessThanOrEqual(peak.maxY / 2, 124 + 0.5,
                     "The complete last peak row must remain above the six-point bottom inset")
                 let glyphs = try textBounds(bitmap, dark: dark)
                 XCTAssertGreaterThanOrEqual(glyphs.minY / 2, 6 - 0.5)
-                XCTAssertLessThanOrEqual(glyphs.maxY / 2, 174 + 0.5)
+                XCTAssertLessThanOrEqual(glyphs.maxY / 2, 124 + 0.5)
             }
         }
     }
@@ -145,12 +157,20 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
         for dark in [false, true] {
             // ImageRenderer draws the initial live-context tree without a
             // window/Store. First content is explicit unknown, not blank/zero.
-            let initial = try render(GeekPreparedDiskPeakRow(points: [point], duration: 3_600)
+            // D146: the row shows the peaks of the card's graph, which has no
+            // frame before its worker delivers (was the row's own summary,
+            // `GeekPreparedDiskPeakRow(points: [point], duration: 3_600)` at
+            // 280 × 16 against `GeekDiskPeakRow` at 280 × 16).
+            let initial = try render(GeekDiskIOCard { EmptyView() } write: { EmptyView() } chart: {
+                GeekDiskIOChart(points: [point], accessibilityLabel: "", duration: 3_600,
+                                showsLegend: false, showsTimelineLabels: false, bucketing: .samples)
+            } peak: { GeekDiskPeakRow(peaks: $0) }
                 .environment(\.miniWindowPreviewDate, point.date)
                 .environment(\.menuBarChartContext, context)
-                .frame(width: 280, height: 16), dark: dark)
-            let expected = try render(GeekDiskPeakRow(readPeak: "--", writePeak: "--")
-                .frame(width: 280, height: 16), dark: dark)
+                .frame(width: 280), dark: dark)
+            let expected = try render(GeekDiskIOCard { EmptyView() } write: { EmptyView() } chart: { Color.clear }
+                peak: { _ in GeekDiskPeakRow(readPeak: "--", writePeak: "--") }
+                .frame(width: 280), dark: dark)
             XCTAssertEqual(initial.pixelsWide, expected.pixelsWide)
             XCTAssertEqual(initial.pixelsHigh, expected.pixelsHigh)
             XCTAssertTrue(textMask(initial, dark: dark).elementsEqual(textMask(expected, dark: dark)))
@@ -186,15 +206,17 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                 GeekSecondaryTransferValue(title: "Read", value: "0 B/s", tint: .pink)
             } write: {
                 GeekSecondaryTransferValue(title: "Write", value: "99999.9 GiB/s", tint: .blue)
-            } chart: { Color.clear } peak: {
+            } chart: { Color.clear } peak: { _ in
+                // D146: the slot is handed the graph's peaks (was `peak: {`).
                 GeekDiskPeakRow(readPeak: "1023.9 TiB/s", writePeak: "8.0 EiB/s")
             }
             .environment(\.geekCombinedCardIsSelected, true)
             .environment(\.panelChromePalette, palette)
             .frame(width: 296)
             let bitmap = try render(card, dark: dark)
+            // D119 (2026-10-18): iStat's 130 pt activity section (was 180).
             XCTAssertEqual(CGFloat(bitmap.pixelsWide) / 2, 296, accuracy: 0.5)
-            XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 180, accuracy: 0.5)
+            XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 130, accuracy: 0.5)
             let pigment = try render(accent.frame(width: 1, height: 1), dark: dark)
             let color = try XCTUnwrap(pigment.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB))
             let border = try colorBounds(bitmap, red: color.redComponent,
@@ -213,7 +235,7 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                 }
             }
             let peak = try lastTextLineBounds(bitmap, dark: dark)
-            XCTAssertLessThanOrEqual(peak.maxY / 2, 174 + 0.5)
+            XCTAssertLessThanOrEqual(peak.maxY / 2, 124 + 0.5)
             try export(bitmap, name: "disk-selected-outer-card-\(dark ? "dark" : "light")")
         }
     }
@@ -248,15 +270,16 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                         name: "Long running process \(index)", iconPath: "",
                         downloadBytesPerSecond: Int64.max, uploadBytesPerSecond: 1_024)))
                 }
-                let content = GeekCombinedCard(height: GeekSecondaryTransferLayout.processCardHeight(rowCount: rowCount)) {
-                    VStack(spacing: GeekSecondaryTransferLayout.processSpacing) {
-                        Text("PROCESSES").font(.system(size: 11))
-                            .frame(height: GeekSecondaryTransferLayout.processRowHeight)
-                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in row }
-                    }
+                // D119 (2026-10-18): the pages' iStat process section, the
+                // title row at 5 and the rows from 22 on the 17 pt pitch,
+                // 25 + 17n tall (was a 6 pt padded card of 16 pt rows 4 pt
+                // apart, 12 + 20 + 16n + 4(n − 1)).
+                let content = GeekIStatProcessCard(title: "PROCESSES", rowCapacity: rowCount) {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in row }
                 }.frame(width: 296)
                 let bitmap = try render(content, dark: true)
-                let expectedHeight: CGFloat = 12 + 16 + 4 + CGFloat(rowCount) * 16 + CGFloat(rowCount - 1) * 4
+                let expectedHeight: CGFloat = 25 + 17 * CGFloat(rowCount)
+                XCTAssertEqual(GeekSecondaryTransferLayout.processCardHeight(rowCount: rowCount), expectedHeight)
                 XCTAssertEqual(CGFloat(bitmap.pixelsWide) / 2, 296, accuracy: 0.5)
                 XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, expectedHeight, accuracy: 0.5)
                 let bounds = try textBounds(bitmap, dark: true)
@@ -268,23 +291,40 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
         }
         // Check the production readout-column budget against complete native glyphs,
         // independently of the process name's intentional one-line truncation.
+        // D128 (2026-10-19): the columns show iStat's short process rates,
+        // which stop at G (network "12 K", disk "12K", "-" under 1 KB/s), with
+        // 9 pt units (was processByteString's KiB…TiB then PiB/EiB: "8.0 EiB",
+        // "1.0 PiB", "1024.0 TiB", "1023.9 TiB", ByteFormat.string(1_024),
+        // with a 10 pt unit always after a space).
         let columnWidth = GeekSecondaryTransferLayout.processValueColumnWidth
-        let nearTiBBoundary: Int64 = (10_239 * (1 << 40)) / 10
-        XCTAssertEqual(GeekSecondaryTransferLayout.processByteString(Int64.max), "8.0 EiB")
-        XCTAssertEqual(GeekSecondaryTransferLayout.processByteString(1 << 50), "1.0 PiB")
-        XCTAssertEqual(GeekSecondaryTransferLayout.processByteString((1 << 50) - 1), "1024.0 TiB")
-        XCTAssertEqual(GeekSecondaryTransferLayout.processByteString(nearTiBBoundary), "1023.9 TiB")
-        XCTAssertEqual(GeekSecondaryTransferLayout.processByteString(1_024), ByteFormat.string(1_024))
-        for value in [GeekSecondaryTransferLayout.processByteString(Int64.max),
-                      GeekSecondaryTransferLayout.processByteString((1 << 50) - 1),
-                      GeekSecondaryTransferLayout.processByteString(nearTiBBoundary),
-                      ByteFormat.string(1_024), "—"] {
+        let us = Locale(identifier: "en_US")
+        let widestGigabytes = 999.9 * 1_073_741_824
+        XCTAssertEqual(IStatNumberFormat.bandwidth(1_024, style: .process, locale: us), "1 K")
+        XCTAssertEqual(IStatNumberFormat.diskActivity(1_024, style: .process, locale: us), "1K")
+        XCTAssertEqual(IStatNumberFormat.diskActivity(512, style: .process, locale: us), "-")
+        XCTAssertEqual(IStatNumberFormat.bandwidth(999_999_999, style: .process, locale: us), "954 M")
+        XCTAssertEqual(IStatNumberFormat.bandwidth(widestGigabytes, style: .process, locale: us), "999.9 G")
+        XCTAssertEqual(IStatNumberFormat.diskActivity(999_999, style: .process, locale: us), "977K")
+        XCTAssertEqual(IStatNumberFormat.diskActivity(widestGigabytes, style: .process, locale: us), "999.9G")
+        XCTAssertEqual(GeekSecondaryTransferLayout.processUnitFontSize, 9)
+        for value in [IStatNumberFormat.bandwidth(widestGigabytes, style: .process, locale: us),
+                      IStatNumberFormat.bandwidth(999_999_999, style: .process, locale: us),
+                      IStatNumberFormat.diskActivity(widestGigabytes, style: .process, locale: us),
+                      IStatNumberFormat.diskActivity(999_999, style: .process, locale: us),
+                      "-", "—"] {
             let parts = GeekCombinedRing.splitReadout(value)
+            let gap = parts.map { value.dropFirst($0.number.count).first == " " ? " " : "" } ?? ""
+            // D119 (2026-10-18): the production 12 pt values with the 10 pt
+            // unit in the 64 pt column (was 11 pt in 60). D128: 9 pt unit.
+            XCTAssertEqual(GeekSecondaryTransferLayout.processNumberFontSize, 12)
+            XCTAssertEqual(columnWidth, 64)
             let actual = try render(GeekSecondaryTransferReadout(value: value,
-                numberFontSize: 11, unitFontSize: 10, minimumScale: 0.9)
+                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
+                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
+                minimumScale: GeekSecondaryTransferLayout.processMinimumScale)
                 .foregroundStyle(.primary).frame(width: columnWidth, height: 16, alignment: .trailing), dark: true)
-            let expected = try render((Text(parts?.number ?? value).font(.system(size: 11, weight: .regular))
-                + Text(parts.map { " " + $0.unit } ?? "").font(.system(size: 10, weight: .regular)))
+            let expected = try render((Text(parts?.number ?? value).font(.system(size: 12, weight: .regular))
+                + Text(parts.map { gap + $0.unit } ?? "").font(.system(size: 9, weight: .regular)))
                 .monospacedDigit().foregroundStyle(.primary).fixedSize()
                 .frame(width: columnWidth, height: 16, alignment: .trailing), dark: true)
             XCTAssertTrue(textMask(actual, dark: true).elementsEqual(textMask(expected, dark: true)),
@@ -293,34 +333,46 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
     }
 
     func testSensorSummaryKeepsThreeRealReadoutShapesInsideCalibratedCard() throws {
-        XCTAssertEqual(GeekSensorSummaryLayout.ringSize, 62)
-        XCTAssertEqual(GeekSensorSummaryLayout.spacing, 24)
+        // D119 (2026-10-18): the sensors page draws the overview card's iStat
+        // rings, 72 pt with a 2 pt line in 87 pt cells on an 88 pt card of
+        // the 301 pt page (was 62 pt rings 24 pt apart on a 74 pt card).
+        XCTAssertEqual(GeekSensorSummaryLayout.ringSize, 72)
+        XCTAssertEqual(GeekSensorSummaryLayout.cardHeight, 88)
+        let ringSize = GeekSensorSummaryLayout.ringSize
         let fans = fanTelemetry(rpm: 12_345, count: 2)
         let fanCaption = GeekSensorFanRingPresentation(telemetry: fans).caption
         for dark in [false, true] {
-            let card = GeekSensorSummaryCard {
-                sensorRing(title: "CPU", value: "100°C", detail: nil)
-                sensorRing(title: "GPU", value: "—", detail: "Unavailable")
-                GeekSensorFanRing(telemetry: fans, tint: .blue)
-            }.frame(width: 296)
+            let card = GeekIStatCard(height: GeekSensorSummaryLayout.cardHeight) {
+                GeekIStatSensorCells {
+                    sensorRing(title: "CPU", value: "100°C", detail: nil).frame(width: ringSize, height: ringSize)
+                    sensorRing(title: "GPU", value: "—", detail: "Unavailable").frame(width: ringSize, height: ringSize)
+                    GeekSensorFanRing(telemetry: fans, tint: .blue).frame(width: ringSize, height: ringSize)
+                }
+                .geekIStatLayer(top: (GeekSensorSummaryLayout.cardHeight - ringSize) / 2, height: ringSize,
+                                leading: 0, trailing: 0)
+            }.frame(width: 301)
             let bitmap = try render(card, dark: dark)
-            XCTAssertEqual(CGFloat(bitmap.pixelsWide) / 2, 296, accuracy: 0.5)
-            XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 74, accuracy: 0.5)
+            XCTAssertEqual(CGFloat(bitmap.pixelsWide) / 2, 301, accuracy: 0.5)
+            XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / 2, 88, accuracy: 0.5)
             try export(bitmap, name: "sensors-summary-\(dark ? "dark" : "light")")
             for (title, value, detail) in [
                 ("CPU", "100°C", Optional<String>.none), ("GPU", "—", Optional("Unavailable")),
                 ("FANS", "12,345", Optional(fanCaption)), ("风扇", "—", Optional("检测中")),
             ] {
                 let ring = try render(sensorRing(title: title, value: value, detail: detail).padding(6), dark: dark)
-                try assertGlyphsInsideRing(ring, size: 62, padding: 6, dark: dark)
+                try assertGlyphsInsideRing(ring, size: ringSize, padding: 6, dark: dark,
+                                           lineWidth: GeekIStatCardGeometry.sensorRingLineWidth)
             }
         }
     }
 
     func testFanCaptionKeepsCompleteUnitsAndRealStateMeaningInBothLanguages() throws {
+        // D119: the fan ring is the overview's iStat ring, its caption the
+        // 11 pt Thin detail line inside the 2 pt line (was 8.5 pt regular).
         let size = GeekSensorSummaryLayout.ringSize
-        let side = GeekCombinedRing.contentDiameter(size: size,
-            lineWidth: GeekVisualTokens.gaugeStrokeWidth(size: size)) / sqrt(2)
+        let lineWidth = GeekIStatCardGeometry.sensorRingLineWidth
+        let captionFont = GeekIStatCardGeometry.sensorDetailFontSize
+        let side = GeekCombinedRing.contentDiameter(size: size, lineWidth: lineWidth) / sqrt(2)
         for language in [AppLanguage.english, .zhHans] {
             let languageScope = SecondaryMenuLanguageScope(language)
             defer { languageScope.restore() }
@@ -337,7 +389,7 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                 XCTAssertEqual(presentation.caption, caption)
                 XCTAssertFalse(presentation.caption.contains("…"))
                 XCTAssertLessThanOrEqual((caption as NSString).size(withAttributes:
-                    [.font: NSFont.systemFont(ofSize: 8.5)]).width, side + 0.5,
+                    [.font: NSFont.systemFont(ofSize: captionFont, weight: .thin)]).width, side + 0.5,
                     "The complete caption must fit at its original readable font size")
                 XCTAssertTrue(presentation.helpText.contains(presentation.accessibilityValue))
                 XCTAssertTrue(presentation.helpText.contains(language == .english ? "System fan telemetry" : "系统风扇读数"))
@@ -357,7 +409,7 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                 }
                 for dark in [false, true] {
                     let actual = try render(GeekSensorFanRing(telemetry: telemetry, tint: .blue).padding(6), dark: dark)
-                    let reference = try render(Text(caption).font(.system(size: 8.5, weight: .regular))
+                    let reference = try render(Text(caption).font(.system(size: captionFont, weight: .thin))
                         .foregroundStyle(.primary.opacity(0.77)).monospacedDigit()
                         .allowsTightening(true).fixedSize().padding(6), dark: dark)
                     // Preserve the native bitmaps even if a visibility or
@@ -365,7 +417,7 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                     try export(actual, name: "fan-caption-\(language.rawValue)-\(name)-\(dark ? "dark" : "light")")
                     try export(reference, name: "fan-caption-reference-\(language.rawValue)-\(name)-\(dark ? "dark" : "light")")
                     print("Fan caption native fixture: \(language.rawValue) \(name) \(dark ? "dark" : "light"), primary(actual/reference)=\(textMask(actual, dark: dark).filter { $0 }.count)/\(textMask(reference, dark: dark).filter { $0 }.count), caption(actual/reference)=\(captionTextMask(actual, dark: dark).filter { $0 }.count)/\(captionTextMask(reference, dark: dark).filter { $0 }.count)")
-                    try assertGlyphsInsideRing(actual, size: size, padding: 6, dark: dark)
+                    try assertGlyphsInsideRing(actual, size: size, padding: 6, dark: dark, lineWidth: lineWidth)
                     let actualCaption = try lastTextLineBounds(actual, dark: dark)
                     let completeCaption = try captionTextBounds(reference, dark: dark)
                     let inset = 6 + (size - side) / 2
@@ -395,10 +447,10 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
             isSampling: sampling, isFanless: fanless, readings: readings)
     }
 
+    /// D119: the production sensors-page ring (the overview card's).
     private func sensorRing(title: String, value: String, detail: String?) -> some View {
-        GeekCombinedRing(title: title, value: value, detail: detail, progress: value == "—" ? nil : 1,
-            tint: .blue, size: GeekSensorSummaryLayout.ringSize, labelPlacement: .aboveValue,
-            fixedDetailFontSize: 8.5)
+        GeekIStatSensorRing(title: title, value: value, detail: detail, progress: value == "—" ? nil : 1,
+            tint: .blue)
     }
 
     private func volume(capacity: StorageCapacitySnapshot?) -> GeekDiskVolumePresentation {
@@ -523,9 +575,10 @@ final class MenuBarSecondaryVisualConsistencyTests: XCTestCase {
                       width: CGFloat(maxX - minX + 1), height: CGFloat(lastY - firstY + 1))
     }
 
-    private func assertGlyphsInsideRing(_ bitmap: NSBitmapImageRep, size: CGFloat, padding: CGFloat, dark: Bool) throws {
+    private func assertGlyphsInsideRing(_ bitmap: NSBitmapImageRep, size: CGFloat, padding: CGFloat, dark: Bool,
+                                        lineWidth: CGFloat? = nil) throws {
         let side = GeekCombinedRing.contentDiameter(size: size,
-            lineWidth: GeekVisualTokens.gaugeStrokeWidth(size: size)) / sqrt(2)
+            lineWidth: lineWidth ?? GeekVisualTokens.gaugeStrokeWidth(size: size)) / sqrt(2)
         let inset = padding + (size - side) / 2
         let bounds = try textBounds(bitmap, dark: dark)
         XCTAssertGreaterThanOrEqual(bounds.minX / 2, inset - 0.5)

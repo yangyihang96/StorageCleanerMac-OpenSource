@@ -149,14 +149,23 @@ final class NetworkPathPreflightTests: XCTestCase {
         return try await NetworkPathPreflight(sourceFactory: { source }).probe()
     }
 
+    /// D147: waits on the clock, up to 2 s like
+    /// `AppUpdatePresentationIntegrationTests`, checking every 2 ms like
+    /// `AppDelegateBenchmarkTerminationTests`. The fake source delivers on a
+    /// dispatch queue; in the full Release run the old budget, 1,000
+    /// `Task.yield()`s (`attempts: Int = 1_000`), ran out in 7 ms before that
+    /// queue had run.
     private func waitUntil(
-        attempts: Int = 1_000,
+        timeout: Duration = .seconds(2),
         _ predicate: @escaping @Sendable () -> Bool
     ) async {
-        for _ in 0..<attempts {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
             if predicate() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(2))
         }
+        if predicate() { return }
         XCTFail("Timed out waiting for asynchronous fake source state")
     }
 }

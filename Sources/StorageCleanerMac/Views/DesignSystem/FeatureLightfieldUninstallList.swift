@@ -40,7 +40,7 @@ struct FeatureLightfieldUninstallList: View {
                 .contextMenu {
                     Button(L10n.text("查看卸载预览", "Review Uninstall")) { review(app) }
                     if let copyPath { Button(L10n.text("复制路径", "Copy Path")) { copyPath(app) } }
-                    if let reveal { Button(L10n.text("在 Finder 中显示", "Show in Finder")) { reveal(app) } }
+                    if let reveal { Button(L10n.text("在访达中显示", "Show in Finder")) { reveal(app) } }
                 }
                 .id(app.id)
                 .lightfieldRowEntrance(index)

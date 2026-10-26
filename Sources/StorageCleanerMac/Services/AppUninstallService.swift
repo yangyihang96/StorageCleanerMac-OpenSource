@@ -510,9 +510,10 @@ enum AppUninstallService {
 
     /// Read-only identity check for a Finder handoff. A running app can still
     /// be revealed so the user can quit it before asking Finder to move it.
-    static func scannedApplicationStillAtPath(_ app: InstalledAppItem) -> Bool {
-        guard UninstallCandidatePathPolicy.isSafeComponent(app.bundleIdentifier),
-              app.path == PathSafety.lexicalPath(app.path),
+    static func scannedApplicationStillAtPath(_ app: InstalledAppItem, allowMissingBundleIdentifier: Bool = false) -> Bool {
+        guard (allowMissingBundleIdentifier && app.bundleIdentifier.isEmpty)
+                || UninstallCandidatePathPolicy.isSafeComponent(app.bundleIdentifier) else { return false }
+        guard app.path == PathSafety.lexicalPath(app.path),
               !PathSafety.containsSymbolicLinkComponent(in: app.path),
               let currentIdentity = uninstallFileIdentity(at: app.path),
               currentIdentity.entryKind == .directory else {
@@ -540,11 +541,14 @@ enum AppUninstallService {
         try? FoundationReadOnlyFileSystem().aggregateSnapshot(at: URL(fileURLWithPath: path)).identity
     }
 
+    /// Inside an app-data root, and (D101 G4-2) never a location no flow
+    /// may touch, such as Screen Time's Knowledge store or the Shortcuts
+    /// group containers, nor a folder holding one.
     static func isSafeRelatedPath(_ path: String, homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
         let normalized = PathSafety.normalizedPath(path)
         return safeRelatedRootPaths(homeDirectory: homeDirectory).contains { root in
             normalized.hasPrefix(root + "/")
-        }
+        } && !ProtectedLocations.protects(path: normalized, homePath: PathSafety.normalizedPath(homeDirectory.path))
     }
 
     private static func safeRelatedRootPaths(homeDirectory: URL) -> [String] {

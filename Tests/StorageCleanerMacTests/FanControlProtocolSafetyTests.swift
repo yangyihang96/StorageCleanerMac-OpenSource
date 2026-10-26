@@ -246,6 +246,41 @@ final class FanControlProtocolSafetyTests: XCTestCase {
         }
     }
 
+    /// D102 L7: when the system ends the connection because the helper is not
+    /// signed like this app, the message says so and the usual backed-off
+    /// reconnect follows (an updated helper can match again). When this
+    /// build's own signature gives no requirement, the message says that and
+    /// nothing is retried.
+    @MainActor
+    func testSigningRequirementFailuresAreNamedAndOnlyAMismatchIsRetried() async throws {
+        let mismatch = NSError(domain: NSCocoaErrorDomain, code: NSXPCConnectionCodeSigningRequirementFailure)
+        for (failure, first, retries) in [
+            (mismatch as Error, L10n.text("辅助程序的签名与本应用不一致，已拒绝连接。",
+                                          "The helper is not signed like this app, so the connection was refused."), true),
+            (FanControlConnectionError.helperRequirementUnavailable as Error,
+             L10n.text("未连接辅助程序，不会自动重试。", "Not connected to the helper; it will not retry automatically."), false),
+        ] {
+            var sleeps = 0
+            let coordinator = FanControlCoordinator(
+                defaults: TestPreferenceDomain.make(for: self), helperStatusOverride: .enabled,
+                requestSender: TestOperationFactory(for: self).fanRequestSender(handling: [.ping]) { _ in throw failure },
+                reconnectSleeper: { _ in sleeps += 1; throw CancellationError() },
+                legacyArtifactsPresentProvider: { false }, legacyArtifactsCurrentProvider: { false },
+                serviceStatusProvider: { .enabled })
+            await coordinator.connectHelper()
+            for _ in 0..<50 where sleeps == 0 { await Task.yield() }
+
+            let message = try XCTUnwrap(coordinator.lastMessage)
+            XCTAssertEqual(message.components(separatedBy: "\n").first, first, message)
+            XCTAssertTrue(message.contains(failure.localizedDescription), message)
+            XCTAssertEqual(sleeps > 0, retries, message)
+            XCTAssertFalse(coordinator.hasTrustedHelper)
+        }
+        XCTAssertEqual(FanControlConnectionError.helperRequirementUnavailable.localizedDescription, L10n.text(
+            "无法读取本应用的签名证书，未连接风扇控制辅助程序。",
+            "This app's signing certificate could not be read, so it did not connect to the fan-control helper."))
+    }
+
     @MainActor
     func testUnsafeLegacyArtifactsAreNeverMigratedOrUnregistered() async {
         for metadata in [

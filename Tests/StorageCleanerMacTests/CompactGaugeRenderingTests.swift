@@ -7,19 +7,22 @@ import XCTest
 @MainActor
 final class CompactGaugeRenderingTests: XCTestCase {
     func testProcessorCardRendersCalibratedGeometryWithReadoutAtTrailingInset() throws {
-        XCTAssertEqual(GeekPanelLayout.overviewProcessorCardHeight, 106)
-        // User 2026-10-11 (c): the CPU plot sits directly under its header, as in iStat.
-        XCTAssertEqual(GeekPanelLayout.overviewProcessorChartHeight, 60)
+        // D118 (iStat `cpu-cpu`): 120 pt card, graph from 25 to H − 24
+        // (was 106 / 60). User 2026-10-11 (c) still holds: the CPU plot
+        // sits directly under its header, as in iStat.
+        XCTAssertEqual(GeekPanelLayout.overviewProcessorCardHeight, 120)
+        XCTAssertEqual(GeekPanelLayout.overviewProcessorChartHeight, 71)
+        XCTAssertEqual(GeekIStatCardGeometry.processorGraphTop,
+                       GeekIStatCardGeometry.titleTop + GeekIStatCardGeometry.titleHeight + 5)
         let width = MiniWindowStyleTokens.overviewSize.width - 2 * MiniWindowStyleTokens.contentInset
         let scale: CGFloat = 2
         let sampleDate = Date(timeIntervalSinceReferenceDate: 800_000_000)
         let clock = PanelChartClock(anchor: .init(wallDate: sampleDate, instant: ContinuousClock().now))
-        // Batch 2b review (P2 #4): the readout carries its own data color and
-        // the icon and title the section-header color. A color unlike the
-        // header and chart colors identifies the readout's pixels. D43: the
-        // readout is the frequency and the temperature (was the total, which
-        // now only the legend expresses), whatever the total is.
-        let loadTint = Color(red: 0, green: 0.78, blue: 0)
+        // Batch 2b review (P2 #4): the readout is not in the title's
+        // section-header color. D118: it is in the value color (iStat), so
+        // its pixels are the neutral ones that contrast with the card. D43:
+        // the readout is the frequency and the temperature (was the total,
+        // which now only the legend expresses), whatever the total is.
         for dark in [false, true] {
             for total: Double? in [0, 100, nil] {
                 let point = MenuBarTelemetryPoint(
@@ -30,7 +33,7 @@ final class CompactGaugeRenderingTests: XCTestCase {
                 let view = GeekProcessorPresentation(
                     cpuChartHistory: [point], cpuChartRange: .oneMinute, samplingInterval: 1,
                     processorTint: .orange, geekCPUUserBarColor: .blue, geekCPUSystemBarColor: .pink,
-                    headerFrequencyText: "4.43 GHz", headerTemperatureText: "80°C", headerReadoutTint: loadTint
+                    headerFrequencyText: "4.43 GHz", headerTemperatureText: "80°C"
                 )
                 .frame(width: width)
                 .environment(\.colorScheme, dark ? .dark : .light)
@@ -43,8 +46,8 @@ final class CompactGaugeRenderingTests: XCTestCase {
                 XCTAssertEqual(CGFloat(bitmap.pixelsWide) / scale, width, accuracy: 0.5)
                 XCTAssertEqual(CGFloat(bitmap.pixelsHigh) / scale,
                                GeekPanelLayout.overviewProcessorCardHeight, accuracy: 0.5)
-                let headerBounds = try readoutHeaderBounds(in: bitmap, scale: scale)
-                XCTAssertEqual(headerBounds.maxX, width - GeekVisualTokens.cardHorizontalPadding,
+                let headerBounds = try readoutHeaderBounds(in: bitmap, scale: scale, dark: dark)
+                XCTAssertEqual(headerBounds.maxX, width - GeekIStatCardGeometry.inset,
                                accuracy: 2, "The current readout must end at the card inset, including 0%, 100% and unknown")
                 if let path = ProcessInfo.processInfo.environment["STORAGE_CLEANER_MENU_CALIBRATION_EVIDENCE"] {
                     let directory = URL(fileURLWithPath: path, isDirectory: true)
@@ -57,24 +60,26 @@ final class CompactGaugeRenderingTests: XCTestCase {
         }
     }
 
-    private func readoutHeaderBounds(in bitmap: NSBitmapImageRep, scale: CGFloat) throws -> CGRect {
+    private func readoutHeaderBounds(in bitmap: NSBitmapImageRep, scale: CGFloat, dark: Bool) throws -> CGRect {
         var minimumX = bitmap.pixelsWide
         var maximumX = -1
-        // Only the header is inspected: the CPU icon and label use the
-        // section-header color, the numeric readout the load color (green
-        // here). Exclude the graph and legend.
-        let headerBottom = Int((GeekVisualTokens.cardVerticalPadding + MiniWindowStyleTokens.dataRowHeight) * scale)
+        // Only the header row is inspected: the CPU title uses the
+        // section-header color, the readout the neutral value color.
+        // Exclude the graph and legend.
+        let headerBottom = Int((GeekIStatCardGeometry.titleTop + GeekIStatCardGeometry.titleHeight) * scale)
         for y in 0..<min(bitmap.pixelsHigh, headerBottom) {
             for x in 0..<bitmap.pixelsWide {
                 guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
-                let isLoadTint = color.greenComponent > 0.5
-                    && color.redComponent < 0.3 && color.blueComponent < 0.3
-                guard color.alphaComponent > 0.8, isLoadTint else { continue }
+                let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                let neutral = (channels.max() ?? 0) - (channels.min() ?? 0) < 0.1
+                let brightness = channels.reduce(0, +) / 3
+                let isValueColor = neutral && (dark ? brightness > 0.75 : brightness < 0.3)
+                guard color.alphaComponent > 0.8, isValueColor else { continue }
                 minimumX = min(minimumX, x)
                 maximumX = max(maximumX, x)
             }
         }
-        XCTAssertGreaterThanOrEqual(maximumX, minimumX, "The load-colored header readout must be visible")
+        XCTAssertGreaterThanOrEqual(maximumX, minimumX, "The value-colored header readout must be visible")
         return CGRect(x: CGFloat(minimumX) / scale, y: 0,
                       width: CGFloat(maximumX - minimumX + 1) / scale, height: CGFloat(headerBottom) / scale)
     }

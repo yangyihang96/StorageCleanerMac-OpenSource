@@ -89,6 +89,11 @@ enum MenuBarPanelPlacement {
         return statusItemFrame
     }
 
+    /// D123 (iStat Menus 7.30 `-[BBRMenu updateFrame]`): the level-one panel's
+    /// left edge is 2 pt left of the status item, or its right edge is the
+    /// status item's right edge when the panel would leave the screen; its top
+    /// is 2 pt below the status item, at the menu bar. Was centred below the
+    /// status item and kept 8 pt below the menu bar.
     static func frame(
         anchor: NSRect,
         contentSize: NSSize,
@@ -97,12 +102,14 @@ enum MenuBarPanelPlacement {
         gap: CGFloat = MiniWindowStyleTokens.anchorGap,
         backingScaleFactor: CGFloat = 1
     ) -> NSRect {
-        let bounds = visibleFrame.insetBy(dx: margin, dy: margin)
+        let bounds = menuBounds(visibleFrame, margin: margin)
         let width = min(contentSize.width, bounds.width)
         let height = min(contentSize.height, bounds.height)
-        let preferredX = anchor.midX - width / 2
-        let maximumX = bounds.maxX - width
-        let x = min(max(preferredX, bounds.minX), maximumX)
+        var x = anchor.minX - MiniWindowStyleTokens.statusItemLeadingOverhang
+        if x + width > bounds.maxX {
+            x = anchor.maxX - width
+        }
+        x = min(max(x, bounds.minX), bounds.maxX - width)
         let preferredY = anchor.minY - gap - height
         let y = min(max(preferredY, bounds.minY), bounds.maxY - height)
 
@@ -110,6 +117,19 @@ enum MenuBarPanelPlacement {
             NSRect(x: x, y: y, width: width, height: height),
             scale: backingScaleFactor,
             within: bounds
+        )
+    }
+
+    /// Where the menus may go: `margin` inside the screen's sides and bottom,
+    /// and up to the menu bar, which iStat's menus reach (D123; was `margin`
+    /// below the menu bar too).
+    static func menuBounds(_ visibleFrame: NSRect, margin: CGFloat) -> NSRect {
+        let inset = visibleFrame.insetBy(dx: margin, dy: margin)
+        return NSRect(
+            x: inset.minX,
+            y: inset.minY,
+            width: inset.width,
+            height: visibleFrame.maxY - inset.minY
         )
     }
 

@@ -3,25 +3,6 @@ import FanControlShared
 import SwiftUI
 
 extension FanStatusPresentation {
-    static func connectionTitle(_ state: HelperState) -> String {
-        switch state {
-        case .enabled: L10n.text("已连接", "Connected")
-        case .notRegistered, .requiresApproval: L10n.text("未连接", "Not Connected")
-        case .connectionInterrupted: L10n.text("连接中断", "Connection Interrupted")
-        case .signatureRejected: L10n.text("验证失败", "Verification Failed")
-        case .unavailable: L10n.text("连接不可用", "Connection Unavailable")
-        }
-    }
-
-    static func approvalTitle(_ state: HelperState) -> String {
-        switch state {
-        case .enabled, .connectionInterrupted: L10n.text("已批准", "Approved")
-        case .requiresApproval: L10n.text("等待批准", "Awaiting Approval")
-        case .notRegistered: L10n.text("尚未申请", "Not Requested")
-        case .unavailable, .signatureRejected: L10n.text("未确认", "Unconfirmed")
-        }
-    }
-
     static func controlTitle(_ capability: FanControlCapability) -> String {
         capability == .controllable
             ? L10n.text("可提交控制", "Ready to Submit")
@@ -38,10 +19,11 @@ extension FanStatusPresentation {
 extension View {
     /// Measure the page's ideal height at its actual column width, independently
     /// of the panel's previous height. A window resize must not feed back into
-    /// this measurement when switching compact/full controls or the editor.
+    /// this measurement when the content changes (the manual section's
+    /// sliders, the notes).
     func controlPaletteContentLayout(_ presentation: ControlPalettePresentationState) -> some View {
         MiniWindowMeasuredPage(
-            initialSize: ControlPaletteMetrics.size(kind: presentation.kind, fanPage: presentation.fanPage),
+            initialSize: ControlPaletteMetrics.size(kind: presentation.kind),
             reportSize: presentation.reportNaturalContentSize
         ) {
             self
@@ -50,20 +32,12 @@ extension View {
 }
 
 struct ControlPaletteRootView: View {
-    @Environment(\.colorScheme) private var inheritedColorScheme
     @ObservedObject private var presentation: ControlPalettePresentationState
     @ObservedObject private var fanControl: FanControlCoordinator
     @ObservedObject private var computerHealthStore: ComputerHealthStore
     @ObservedObject private var monitorState: MenuBarMonitorState
     @ObservedObject private var auxiliaryState: MenuBarAuxiliaryMonitorState
     @State private var chargeLimitConsumerID = UUID()
-
-    @AppStorage(L10n.appearanceDefaultsKey) private var appearanceRawValue = AppAppearance.system.rawValue
-    @AppStorage(PanelAppearancePreferences.miniWindowAppearanceKey) private var miniWindowAppearanceRawValue = ""
-    @AppStorage(PanelAppearancePreferences.colorThemeKey) private var panelColorTheme = PanelColorTheme.graphite.rawValue
-    @AppStorage(PanelAppearancePreferences.backgroundColorKey) private var panelBackgroundColor = ""
-    @AppStorage(PanelAppearancePreferences.chartColorKey) private var panelChartColor = ""
-    @AppStorage(PanelPalettePreferences.surfaceThemeKey) private var panelSurfacePresetRaw = ""
 
     init(
         presentation: ControlPalettePresentationState,
@@ -85,18 +59,14 @@ struct ControlPaletteRootView: View {
             VStack(alignment: .leading, spacing: 0) {
                 switch presentation.kind {
                 case .fan:
-                    if presentation.fanPage == .curveEditor {
-                        fanCurveEditor
-                    } else {
-                        FanControlPaletteView(
-                            presentation: presentation,
-                            fanControl: fanControl,
-                            telemetry: FanTelemetryState.resolve(
-                                snapshot: monitorState.snapshot
-                            ),
-                            thermalState: monitorState.snapshot?.thermalState ?? .nominal
-                        )
-                    }
+                    FanControlPaletteView(
+                        presentation: presentation,
+                        fanControl: fanControl,
+                        telemetry: FanTelemetryState.resolve(
+                            snapshot: monitorState.snapshot
+                        ),
+                        thermalState: monitorState.snapshot?.thermalState ?? .nominal
+                    )
                 case .power:
                     powerPalette
                 case .networkConnection:
@@ -113,16 +83,8 @@ struct ControlPaletteRootView: View {
             .controlSize(.small)
             .padding(GeekPanelLayout.contentPadding)
         }
-        .foregroundStyle(panelChrome?.text ?? MiniWindowColorPalette.primaryText,
-                         panelChrome?.secondaryText ?? MiniWindowColorPalette.secondaryText,
-                         panelChrome?.tertiaryText ?? MiniWindowColorPalette.tertiaryText)
-        .tint(panelChrome?.accent ?? MiniWindowColorPalette.blue)
-        .environment(\.panelBackgroundTint, panelChrome == nil ? paletteBackgroundTint : nil)
-        .environment(\.panelChartAccentColor, paletteChartTint)
-        .modifier(PanelMetricColorEnvironment())
-        .environment(\.miniWindowVisualMode, visualMode)
-        .environment(\.panelChromePalette, panelChrome)
-        .environment(\.colorScheme, panelChrome?.controlScheme ?? .dark)
+        // D135: the panel's iStat theme, resolved as on the panel itself.
+        .modifier(PanelAppearanceEnvironment())
         .controlPaletteContentLayout(presentation)
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
             presentation.beginInteraction()
@@ -136,38 +98,12 @@ struct ControlPaletteRootView: View {
         }
     }
 
-    private var fanCurveEditor: some View {
-        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.cardSpacing) {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Button {
-                    presentation.showFanControls()
-                } label: {
-                    Label(L10n.text("风扇控制", "Fan Control"), systemImage: "chevron.backward")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(ResponsivePlainButtonStyle())
-                .font(AdvancedPanelTypography.captionStrong)
-                .controlSize(.small)
-                .accessibilityLabel(L10n.text("返回风扇控制", "Back to Fan Control"))
-
-                Spacer(minLength: 0)
-
-                Text(L10n.text("编辑曲线", "Edit Curve"))
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .foregroundStyle(AppDesignTokens.Palette.tertiary)
-            }
-
-            FanCurveEditor(
-                fanControl: fanControl,
-                fanReadings: fanControl.latestFanReadings,
-                compact: true
-            )
-        }
-    }
-
+    /// D124: iStat's energy-mode menu (the battery and AC sections) with our
+    /// charge-limit and Mac mini sections after it, cards 7 pt apart; the
+    /// helper's state stays first because every control here needs it (was
+    /// Mac mini mode first and 6 pt apart).
     private var powerPalette: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            MacMiniModeControls(fanControl: fanControl, hasInternalBattery: hasInternalBattery)
+        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.cardSpacing) {
             if fanControl.helperState != .enabled {
                 ControlPaletteHelperStatusView(
                     helperState: fanControl.helperState,
@@ -223,6 +159,7 @@ struct ControlPaletteRootView: View {
                     }
                 }
             )
+            MacMiniModeControls(fanControl: fanControl, hasInternalBattery: hasInternalBattery)
         }
         .task {
             guard allowsLiveChargeLimitControls else { return }
@@ -265,70 +202,42 @@ struct ControlPaletteRootView: View {
             || computerHealthStore.snapshot?.battery != nil
     }
 
-    private var paletteBackgroundTint: Color? {
-        PanelColorTheme.backgroundTint(
-            storedTheme: panelColorTheme,
-            backgroundHex: panelBackgroundColor,
-            chartHex: panelChartColor
-        )
-    }
-
-    private var paletteChartTint: Color? {
-        PanelColorTheme.chartColor(
-            storedTheme: panelColorTheme,
-            backgroundHex: panelBackgroundColor,
-            customHex: panelChartColor
-        )
-    }
-
-    private var visualMode: MiniWindowVisualMode {
-        MiniWindowVisualMode.resolve(
-            miniWindowRawValue: miniWindowAppearanceRawValue,
-            appRawValue: appearanceRawValue,
-            systemColorScheme: inheritedColorScheme
-        )
-    }
-
-    private var panelChrome: PanelChromePalette? {
-        PanelSurfacePreset(rawValue: panelSurfacePresetRaw)?.palette(for: visualMode)
-    }
-
 }
 
+/// D152: iStat Menus 7.30's fan submenu (`-[SensorsMenu loadItems]` and the
+/// submenu's open handler): a text section per mode with iStat's toggle on
+/// its major label, in iStat's order — Automatic, Custom Fan Curve, Manual —
+/// and our Maximum after them. The toggles are one choice
+/// (`setDisableOffSelection:`): turning one on switches the mode at once, the
+/// one that is on does nothing. The manual section holds the Sync tick row
+/// (two fans or more) and the sliders, which store their values in any mode
+/// and write them in manual mode. Our notes follow the sections: the
+/// helper's setup, the preview, why a mode is unavailable and the
+/// coordinator's last message. Was D64's draft of single-choice cards with
+/// Apply and Cancel, a title, a status capsule and the details.
 struct FanControlPaletteView: View {
     @ObservedObject var presentation: ControlPalettePresentationState
     @ObservedObject var fanControl: FanControlCoordinator
     @ObservedObject private var curveStore: FanCurveStore
     let telemetry: FanTelemetryState
     let thermalState: SystemThermalState
-    var showsExpandedControls = false
-    @State private var draft: FanControlDraft
-    @State private var submittedConfiguration: FanControlDraft.Configuration?
-    @State private var isSubmitting = false
-    @State private var submissionFailed = false
-    @State private var localMessage: String?
-    @State private var showsCapabilityDetails = false
-    private var isExpanded: Bool { presentation.fanControlsExpanded ?? showsExpandedControls }
 
     init(
         presentation: ControlPalettePresentationState,
         fanControl: FanControlCoordinator,
         telemetry: FanTelemetryState,
-        thermalState: SystemThermalState,
-        showsExpandedControls: Bool = false
+        thermalState: SystemThermalState
     ) {
         self.presentation = presentation
         self.fanControl = fanControl
         self.curveStore = fanControl.curveStore
         self.telemetry = telemetry
         self.thermalState = thermalState
-        self.showsExpandedControls = showsExpandedControls
-        _draft = State(initialValue: FanControlDraft(
-            telemetry: telemetry, observedMode: fanControl.observedMode,
-            synchronizesFans: fanControl.synchronizesManualFans,
-            confirmedFractions: fanControl.confirmedManualFractionByFan
-        ))
     }
+
+    /// The {spacer} rows of iStat's manual section.
+    static let syncSpacerHeight: CGFloat = 2
+    static let sliderSpacerHeight: CGFloat = 16
 
     var body: some View {
         if telemetry.isFanless {
@@ -336,493 +245,193 @@ struct FanControlPaletteView: View {
                 .font(AdvancedPanelTypography.caption)
                 .foregroundStyle(.secondary)
         } else {
-            paletteContent
-        }
-    }
-
-    private var paletteContent: some View {
-        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(L10n.text("风扇控制", "Fan Control"))
-                Spacer(minLength: 4)
-                MiniWindowStatusCapsule(title: statusTitle, tint: statusTint, isBusy: isBusy)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(statusTitle)
-                    .accessibilityIdentifier("fan-control-status")
-                Button { showsCapabilityDetails.toggle() } label: {
-                    AppSymbolGlyph(systemImage: showsCapabilityDetails ? "info.circle.fill" : "info.circle",
-                                   size: MiniWindowStyleTokens.moduleIconGlyphSize)
-                        .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
+            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.cardSpacing) {
+                ForEach(sections) { choice in
+                    section(choice)
                 }
-                .buttonStyle(ResponsivePlainButtonStyle())
-                .accessibilityLabel(L10n.text("风扇详细信息", "Fan Details"))
-                .accessibilityIdentifier("fan-capability-details")
-            }
-            .font(AdvancedPanelTypography.captionStrong)
-
-            if isExpanded || showsCapabilityDetails {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(currentFanTitle)
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                if isSnapshotStale && !fanControl.isDataOnlyFixture {
-                    AppSymbolGlyph(systemImage: "clock.badge.exclamationmark",
-                                   size: MiniWindowStyleTokens.statusGlyphSize)
-                        .foregroundStyle(AppDesignTokens.Palette.warning)
-                        .frame(width: MiniWindowStyleTokens.statusIconSlotSize,
-                               height: MiniWindowStyleTokens.statusIconSlotSize)
-                        .accessibilityLabel(L10n.text("快照已过期", "Stale Snapshot"))
-                }
-                Text(currentFanRPM)
-                    .monospacedDigit()
-                    .lineLimit(1)
-            }
-            .font(AdvancedPanelTypography.caption)
-            .help(sampleTimestampTitle)
-
-            }
-
-            // fix1: the automatic and maximum choices share a row; curve and
-            // manual retain the full width for their editor and slider controls.
-            MiniWindowGroup {
-                VStack(alignment: .leading, spacing: FanControlModeCard.spacing) {
-                    HStack(alignment: .top, spacing: FanControlModeCard.spacing) {
-                        fanModeSection(.systemAutomatic) { EmptyView() }
-                        fanModeSection(.maximum) { EmptyView() }
-                    }
-                    fanModeSection(.customCurve) {
-                        curveSummary
-                    }
-                    fanModeSection(.manual) {
-                        manualControls
-                    }
-                }
-            }
-
-            // Keep the concrete block reason visible even in the compact
-            // presentation. Opening a control palette never registers a helper
-            // or changes the observed hardware mode.
-            if fanControl.helperState != .enabled {
-                ControlPaletteHelperStatusView(
-                    helperState: fanControl.helperState,
-                    isFanControl: true,
-                    offersAction: fanControl.offersHelperConnectionAction,
-                    isBusy: fanControl.isPreparingHelper || fanControl.isRefreshingConnection,
-                    reconnectWaitSeconds: fanControl.helperReconnectWaitSeconds,
-                    enable: { Task { await fanControl.registerHelper() } },
-                    openSystemSettings: fanControl.openApprovalSettings,
-                    retry: { Task { await fanControl.reconnectHelper() } }
-                )
-                .disabled(fanControl.isDataOnlyFixture)
-            }
-            if fanControl.isDataOnlyFixture && displayedMode != .manual {
-                Text(L10n.text("模拟预览 · 不会更改风扇", "Preview · Fan Controls Disabled"))
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-            } else if !fanControl.isDataOnlyFixture, let reason = applyDisabledReason, fanControl.helperState == .enabled {
-                Text(reason).font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let message = fanControl.lastMessage, !message.isEmpty {
-                Text(message).font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if fanControl.observedMode != nil && fanControl.observedMode != .systemAutomatic
-                && !telemetry.telemetryAvailable {
-                // Recovery stays reachable even when RPM or range telemetry is
-                // missing. This is the existing system-automatic intent.
-                Button(L10n.text("恢复 macOS 自动控制", "Restore macOS Automatic Control")) {
-                    presentation.beginInteraction()
-                    Task { @MainActor in
-                        await fanControl.selectMode(.systemAutomatic)
-                    }
-                }
-                .disabled(isBusy || fanControl.helperState != .enabled || fanControl.isDataOnlyFixture)
-                .accessibilityIdentifier("fan-restore-system-automatic")
-                .help(L10n.text("请求交回系统控制；以回读状态为准。", "Requests system control; readback determines the result."))
-            }
-            if displayedMode != .manual && (hasPendingChanges || isBusy || submissionFailed) {
-                HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                    Spacer(minLength: 0)
-                    draftActions
-                }
-            }
-            if submissionFailed {
-                Text(L10n.text("未生效，请重试", "Not applied. Try again."))
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(AppDesignTokens.Palette.warning)
-                    .help(fanControl.lastMessage ?? "")
-            }
-
-            if showsCapabilityDetails || isExpanded {
-                MiniWindowGroup {
-                    paletteValueRow(L10n.text("采样时间", "Sampled"), sampleTimestampTitle)
-                    paletteValueRow(L10n.text("控制能力", "Control Capability"), FanStatusPresentation.controlTitle(capability))
-                    fanReadbackRows
-                    Button(isExpanded ? L10n.text("收起读数", "Hide Readings") : L10n.text("查看全部读数", "All Readings")) {
-                        presentation.setFanControlsExpanded(!isExpanded)
-                    }
-                    .buttonStyle(ResponsivePlainButtonStyle())
-                    .accessibilityIdentifier("fan-control-layout-toggle")
-                    if isExpanded {
-                        paletteValueRow(L10n.text("温度来源", "Temperature Source"), curveStore.draftProfile.sensor.displayTitle)
-                    }
-                    paletteValueRow(L10n.text("硬件量程", "Hardware Range"), hardwareRangeTitle)
-                    paletteValueRow(L10n.text("Helper 连接", "Helper Connection"), FanStatusPresentation.connectionTitle(fanControl.helperState))
-                    paletteValueRow(L10n.text("系统批准", "System Approval"), FanStatusPresentation.approvalTitle(fanControl.helperState))
-                    Button(L10n.text("复制风扇诊断", "Copy Fan Diagnostics"), action: copyFanDiagnostics)
-                        .accessibilityIdentifier("fan-copy-diagnostics")
-                        .help(L10n.text("仅复制已有读数，不读取私人文件、不修改风扇。", "Copies cached readings only; no private-file access or fan writes."))
-                }
-            }
-        }
-        .onChange(of: draft.configuration) { _, configuration in
-            if draft.hasChanges { presentation.beginInteraction() }
-            if draft.hasChanges && configuration != submittedConfiguration {
-                localMessage = nil
-                submittedConfiguration = nil
-            }
-        }
-        .onChange(of: telemetry.readings) { _, _ in refreshDraftIfUnedited() }
-        .onChange(of: fanControl.observedMode) { _, _ in
-            confirmSubmittedDraft()
-            refreshDraftIfUnedited()
-        }
-        .onChange(of: fanControl.confirmedManualFractionByFan) { _, _ in confirmSubmittedDraft() }
-        .onChange(of: fanControl.isApplying) { _, applying in if !applying { confirmSubmittedDraft() } }
-        .onChange(of: fanControl.isSwitchingMode) { _, switching in if !switching { confirmSubmittedDraft() } }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(L10n.text("风扇控制浮层", "Fan Control Palette"))
-    }
-
-    @ViewBuilder
-    private func fanModeSection<Content: View>(
-        _ mode: GeekFanControlMode, @ViewBuilder content: () -> Content
-    ) -> some View {
-        if FanControlPaletteAvailability.visibleModes(telemetry: telemetry).contains(mode),
-           let choice = FanControlModeChoice(mode: mode) {
-            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-                FanControlModeCard(
-                    choice: choice,
-                    selected: displayedMode == mode,
-                    isApplying: isRequesting(mode),
-                    isDisabled: isBusy || modeDisabledReason(mode) != nil,
-                    disabledReason: modeDisabledReason(mode),
-                    action: { choose(mode) }
-                )
-                .accessibilityIdentifier("fan-draft-mode-" + mode.rawValue)
-                .help(modeDisabledReason(mode) ?? choice.subtitle)
-
-                if displayedMode == mode {
-                    content()
-                        .padding(.horizontal, FanControlModeCard.contentInset)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var manualControls: some View {
-        if telemetry.hasVerifiedRanges {
-            FanManualSliderList(draft: $draft, telemetry: telemetry, isDisabled: isBusy || modeDisabledReason(.manual) != nil || displayedMode != .manual, compact: true,
-                compactFooter: { AnyView(manualFooter(fanID: $0)) })
-        } else {
-            Text(L10n.text("转速调节暂不可用", "Speed adjustment unavailable"))
-                .font(AdvancedPanelTypography.caption).foregroundStyle(AppDesignTokens.Palette.secondaryText)
-        }
-    }
-
-    /// Actual RPM and the local draft share one row with the explicit commit actions.
-    private func manualFooter(fanID: Int?) -> some View {
-        let actual = FanManualSliderList.actualRPM(fanID: fanID, telemetry: telemetry)
-        let target = draft.targetRPM(fanID: fanID, telemetry: telemetry)
-        let reading = L10n.text("实际 ", "Actual ") + (actual.map(SystemFanSpeedFormat.string) ?? "—")
-            + " · " + L10n.text("草稿目标 ", "Draft Target ") + (target.map(SystemFanSpeedFormat.string) ?? "—")
-        return HStack(spacing: MiniWindowStyleTokens.rowSpacing) {
-            Text((actual.map(SystemFanSpeedFormat.number) ?? "—") + " → "
-                + (target.map(SystemFanSpeedFormat.number) ?? "—") + " rpm")
-                .font(AdvancedPanelTypography.caption).monospacedDigit()
-                .lineLimit(1).minimumScaleFactor(0.75)
-                .help(reading)
-                .accessibilityLabel(reading)
-            Spacer(minLength: 0)
-            draftActions
-        }
-        .controlSize(.mini)
-    }
-
-    @ViewBuilder private var draftActions: some View {
-        if displayedMode == .manual || hasPendingChanges || isBusy || submissionFailed {
-            if hasPendingChanges || isBusy {
-                MiniWindowStatusCapsule(
-                    title: isBusy ? L10n.text("正在应用", "Applying") : L10n.text("待应用", "Pending"),
-                    tint: isBusy ? Color.accentColor : AppDesignTokens.Palette.warning,
-                    isBusy: isBusy
-                )
-            } else if fanControl.isDataOnlyFixture {
-                Text(L10n.text("预览", "Preview"))
-                    .font(AdvancedPanelTypography.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
-                    .help(L10n.text("模拟预览 · 不会更改风扇", "Preview · Fan Controls Disabled"))
-                    .accessibilityLabel(L10n.text("模拟预览 · 不会更改风扇", "Preview · Fan Controls Disabled"))
-            }
-            Button(L10n.text("取消", "Cancel"), action: cancelDraft)
-                .disabled(!hasPendingChanges || isBusy)
-            Button(L10n.text("应用", "Apply"), action: applyDraft)
-                .buttonStyle(.borderedProminent)
-                .disabled(!hasPendingChanges || applyDisabledReason != nil || isBusy)
-                .accessibilityHint(applyDisabledReason ?? L10n.text("提交后需要 Helper 回读确认", "Helper readback is required after submission"))
-        }
-    }
-
-    private var curveSummary: some View {
-        VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-            paletteValueRow(L10n.text("已应用曲线", "Applied Curve"), curveStore.appliedProfile?.name ?? L10n.text("尚未应用", "Not Active"))
-            paletteValueRow(telemetry.fanCount > 1 ? L10n.text("平均目标", "Average Target") : L10n.text("目标转速", "Target Speed"), draftTargetRPM.map(SystemFanSpeedFormat.string) ?? "—")
-            Button { presentation.showFanCurveEditor() } label: {
-                Text(L10n.text("编辑曲线", "Edit Curve"))
-                    .font(AdvancedPanelTypography.captionStrong)
-            }
-            .buttonStyle(ResponsivePlainButtonStyle())
-            .disabled(isBusy)
-            .accessibilityIdentifier(L10n.text("编辑曲线", "Edit Curve"))
-        }
-    }
-
-    @ViewBuilder private var fanReadbackRows: some View {
-        if telemetry.readings.isEmpty {
-            Text(telemetry.isFanless ? L10n.text("无风扇 · 被动散热", "No Fans · Passive Cooling")
-                : telemetry.isSampling ? L10n.text("正在检测风扇…", "Checking Fans…")
-                : L10n.text("风扇读数不可用", "Fan Readings Unavailable"))
-                .font(AdvancedPanelTypography.caption).foregroundStyle(AppDesignTokens.Palette.secondaryText)
-        } else if telemetry.readings.count > 4 {
-            Menu(L10n.text("查看全部 \(telemetry.readings.count) 个风扇", "View All \(telemetry.readings.count) Fans")) {
-                ForEach(telemetry.readings) { reading in Text(reading.displayName + " · " + reading.displayRPM) }
-            }
-            .font(AdvancedPanelTypography.caption)
-        } else {
-            ForEach(telemetry.readings) { reading in paletteValueRow(reading.displayName, reading.displayRPM) }
-        }
-    }
-
-    private func copyFanDiagnostics() {
-        func number(_ value: Int?) -> Any {
-            if let value { return value }
-            return NSNull()
-        }
-        let readings = telemetry.readings.map { reading -> [String: Any] in
-            ["index": reading.index, "actualRPM": reading.actualRPM,
-             "minimumRPM": number(reading.minimumRPM), "maximumRPM": number(reading.maximumRPM),
-             "targetRPM": number(reading.targetRPM)]
-        }
-        let payload: [String: Any] = [
-            "exportedAt": ISO8601DateFormatter().string(from: Date()),
-            "source": "cached-view-model-readings-not-a-new-hardware-probe",
-            "os": ProcessInfo.processInfo.operatingSystemVersionString,
-            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
-            "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
-            "helperState": String(describing: fanControl.helperState),
-            "observedMode": FanStatusPresentation.confirmedModeTitle(fanControl.observedMode),
-            "telemetryAvailable": telemetry.telemetryAvailable,
-            "verifiedRanges": telemetry.hasVerifiedRanges,
-            "fanCount": telemetry.fanCount, "readings": readings
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
-              let text = String(data: data, encoding: .utf8) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    private func paletteValueRow(_ title: String, _ value: String) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                Text(title).foregroundStyle(AppDesignTokens.Palette.secondaryText).fixedSize()
-                Spacer(minLength: 6)
-                Text(value).monospacedDigit().fixedSize()
-            }
-            VStack(alignment: .leading, spacing: MiniWindowStyleTokens.rowSpacing) {
-                Text(title).foregroundStyle(AppDesignTokens.Palette.secondaryText)
-                Text(value).monospacedDigit()
+                notes
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(L10n.text("风扇控制浮层", "Fan Control Palette"))
         }
-        .font(AdvancedPanelTypography.caption)
-        .frame(minHeight: MiniWindowStyleTokens.dataRowHeight)
-        .help(title + " · " + value)
     }
 
-    private var isCompactAutomatic: Bool {
-        Self.usesCompactAutomaticLayout(
-            isExpanded: isExpanded, observedMode: fanControl.observedMode,
-            draft: draft, hasPendingChanges: hasPendingChanges, isBusy: isBusy,
-            hasSubmittedDraft: submittedConfiguration != nil
+    private var sections: [FanControlModeChoice] {
+        let modes = FanControlPaletteAvailability.visibleModes(telemetry: telemetry)
+        return FanControlModeChoice.allCases.filter { modes.contains($0.mode) }
+    }
+
+    private func section(_ choice: FanControlModeChoice) -> some View {
+        GeekIStatTextSectionCard {
+            GeekIStatMajorLabelRow(title: choice.title, hasRowsBelow: choice == .manual) {
+                Toggle(isOn: Binding(
+                    get: { displayedMode == choice.mode },
+                    set: { isOn in if isOn { choose(choice.mode) } }
+                )) {
+                    EmptyView()
+                }
+                .toggleStyle(GeekIStatSwitchToggleStyle())
+                .disabled(disabledReason(choice.mode) != nil)
+                .accessibilityIdentifier("fan-mode-" + choice.mode.rawValue)
+                .accessibilityLabel(choice.title)
+                .accessibilityHint(disabledReason(choice.mode) ?? choice.subtitle)
+                .help(disabledReason(choice.mode) ?? choice.subtitle)
+#if DEBUG
+                .layoutProbe("fan.mode.switch." + choice.mode.rawValue)
+#endif
+            }
+            if choice == .manual {
+                manualRows
+            }
+        }
+#if DEBUG
+        .layoutProbe("fan.section." + choice.mode.rawValue)
+#endif
+    }
+
+    @ViewBuilder private var manualRows: some View {
+        if FanManualSliderList.isAvailable(for: telemetry) {
+            if telemetry.readings.count >= 2 {
+                Color.clear.frame(height: Self.syncSpacerHeight)
+                GeekIStatTickRow(
+                    title: L10n.text("同步", "Sync"),
+                    isSelected: fanControl.synchronizesManualFans
+                ) {
+                    presentation.beginInteraction()
+                    fanControl.setManualFansSynchronized(!fanControl.synchronizesManualFans)
+                }
+                .disabled(fanControl.isDataOnlyFixture)
+                .accessibilityIdentifier("fan-manual-sync")
+#if DEBUG
+                .layoutProbe("fan.manual.sync")
+#endif
+            }
+            Color.clear.frame(height: Self.sliderSpacerHeight)
+            FanManualSliderList(fanControl: fanControl, readings: telemetry.readings)
+                .disabled(fanControl.isDataOnlyFixture)
+        } else {
+            Text(L10n.text("转速调节暂不可用", "Speed adjustment unavailable"))
+                .geekIStatSectionNote()
+        }
+    }
+
+    @ViewBuilder private var notes: some View {
+        if fanControl.helperState != .enabled {
+            ControlPaletteHelperStatusView(
+                helperState: fanControl.helperState,
+                isFanControl: true,
+                offersAction: fanControl.offersHelperConnectionAction,
+                isBusy: fanControl.isPreparingHelper || fanControl.isRefreshingConnection,
+                reconnectWaitSeconds: fanControl.helperReconnectWaitSeconds,
+                enable: { Task { await fanControl.registerHelper() } },
+                openSystemSettings: fanControl.openApprovalSettings,
+                retry: { Task { await fanControl.reconnectHelper() } }
+            )
+            .disabled(fanControl.isDataOnlyFixture)
+        }
+        let messages = noteMessages
+        if !messages.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(messages, id: \.self) { message in
+                    Text(message).geekIStatSectionNote()
+                }
+            }
+        }
+    }
+
+    /// The preview, then why the other modes are unavailable (each reason
+    /// once), then the coordinator's last message. Internal so the
+    /// headless tests read it without a window.
+    var noteMessages: [String] {
+        var messages: [String] = []
+        if fanControl.isDataOnlyFixture {
+            messages.append(Self.previewNote)
+        } else if fanControl.helperState == .enabled {
+            for choice in sections where choice.mode != .systemAutomatic {
+                if let reason = disabledReason(choice.mode), !messages.contains(reason) {
+                    messages.append(reason)
+                }
+            }
+        }
+        if let message = fanControl.lastMessage, !message.isEmpty, !messages.contains(message) {
+            messages.append(message)
+        }
+        return messages
+    }
+
+    /// Computed, so it follows a language change as the other copy does.
+    static var previewNote: String { L10n.text("模拟预览 · 不会更改风扇", "Preview · Fan Controls Disabled") }
+
+    /// The switch that is on: the requested mode while it is being set up,
+    /// otherwise the coordinator's mode (a fixed fan set from Settings shows
+    /// as manual).
+    private var displayedMode: GeekFanControlMode {
+        Self.displayedMode(requested: fanControl.requestedMode, selected: fanControl.selectedMode)
+    }
+
+    static func displayedMode(requested: GeekFanControlMode?, selected: GeekFanControlMode) -> GeekFanControlMode {
+        let mode = requested ?? selected
+        return mode == .fanSet ? .manual : mode
+    }
+
+    private func disabledReason(_ mode: GeekFanControlMode) -> String? {
+        Self.disabledReason(
+            mode: mode, telemetry: telemetry, helperState: fanControl.helperState,
+            thermalState: thermalState, isDataOnlyFixture: fanControl.isDataOnlyFixture,
+            curveIsAvailable: fanControl.previewTemperature(for: curveStore.draftProfile.sensor) != nil
+                && curveStore.validationError == nil
         )
     }
 
-    static func usesCompactAutomaticLayout(
-        isExpanded: Bool,
-        observedMode: GeekFanControlMode?,
-        draft: FanControlDraft,
-        hasPendingChanges: Bool,
-        isBusy: Bool,
-        hasSubmittedDraft: Bool
-    ) -> Bool {
-        !isExpanded && observedMode == .systemAutomatic && draft.mode == .systemAutomatic
-            && !hasPendingChanges && !isBusy && !hasSubmittedDraft
-    }
-
-    private var displayedMode: GeekFanControlMode? { draft.mode }
-    private var focusedFan: SystemFanReading? {
-        telemetry.readings.first { $0.index == presentation.selectedFanIndex }
-            ?? (telemetry.readings.count == 1 ? telemetry.readings.first : nil)
-    }
-    private var currentFanTitle: String {
-        if let focusedFan { return focusedFan.displayName }
-        if telemetry.fanCount > 1 {
-            return L10n.text("\(telemetry.fanCount) 个风扇 · 平均转速", "\(telemetry.fanCount) Fans · Average Speed")
+    /// Why a toggle is unavailable: the preview, the helper's setup and the
+    /// fans (`FanControlPaletteAvailability`; a fan listed twice counts as
+    /// an unverified range, as the planner refuses it), thermal protection
+    /// for the modes that set speeds, a curve without a valid profile or a
+    /// temperature. iStat's toggles have none of these; they are our write
+    /// preconditions.
+    static func disabledReason(
+        mode: GeekFanControlMode, telemetry: FanTelemetryState, helperState: HelperState,
+        thermalState: SystemThermalState, isDataOnlyFixture: Bool, curveIsAvailable: Bool
+    ) -> String? {
+        if isDataOnlyFixture { return previewNote }
+        if let reason = FanControlPaletteAvailability.disabledReason(
+            mode: mode, telemetry: telemetry, helperState: helperState
+        ) {
+            return reason
         }
-        return L10n.text("当前转速", "Current Speed")
-    }
-    private var currentFanRPM: String {
-        if let focusedFan { return focusedFan.displayRPM }
-        if let actualRPM = telemetry.actualRPM { return SystemFanSpeedFormat.string(actualRPM) }
-        return telemetry.isSampling ? L10n.text("读取中", "Reading") : "—"
-    }
-    private var sampleTimestampTitle: String {
-        if fanControl.isDataOnlyFixture { return L10n.text("模拟快照", "Preview Snapshot") }
-        guard let timestamp = telemetry.timestamp else { return L10n.text("快照时间未知", "Snapshot Time Unknown") }
-        let timestampText = PanelTimestampFormat.detail(timestamp)
-        if isSnapshotStale {
-            return L10n.text("快照已过期 · \(timestampText)", "Stale Snapshot · \(timestampText)")
+        if mode != .systemAutomatic && !FanManualSliderList.isAvailable(for: telemetry) {
+            return L10n.text("风扇量程不可用 · 仅监测", "Fan Range Unavailable · Monitoring Only")
         }
-        return L10n.text("快照 \(timestampText)", "Snapshot \(timestampText)")
-    }
-    private var isSnapshotStale: Bool {
-        guard let timestamp = telemetry.timestamp else { return false }
-        return Date().timeIntervalSince(timestamp) > 10
-    }
-    private var isBusy: Bool { isSubmitting || fanControl.isSwitchingMode || fanControl.isApplying }
-    private var hasPendingChanges: Bool {
-        draft.hasChanges || (displayedMode == .customCurve && curveStore.hasUnappliedChanges)
-    }
-    private var capability: FanControlCapability {
-        FanControlCapability.resolve(telemetry: telemetry, helperState: fanControl.helperState)
-    }
-    private var applyDisabledReason: String? {
-        if fanControl.isDataOnlyFixture { return L10n.text("FIXTURE · 仅预览，禁止写入或申请 Helper", "FIXTURE · Preview only; writes and Helper registration blocked") }
-        if telemetry.isSampling { return L10n.text("正在读取风扇，暂不能应用", "Reading fans; Apply unavailable") }
-        if telemetry.isFanless { return L10n.text("无风扇设备 · 仅监测", "Fanless Device · Monitoring Only") }
-        if !telemetry.telemetryAvailable { return L10n.text("风扇读数不可用 · 仅监测", "Fan Readings Unavailable · Monitoring Only") }
-        if fanControl.helperState != .enabled {
-            return L10n.text("仅监测 · ", "Monitoring Only · ") + FanStatusPresentation.connectionTitle(fanControl.helperState)
-                + " / " + FanStatusPresentation.approvalTitle(fanControl.helperState)
+        if mode != .systemAutomatic && (thermalState == .serious || thermalState == .critical) {
+            return L10n.text("热保护中，只能使用自动控制", "Thermal protection: automatic control only")
         }
-        if displayedMode != .systemAutomatic && !telemetry.hasVerifiedRanges {
-            return L10n.text("量程不完整 · 仅监测", "Incomplete Range · Monitoring Only")
-        }
-        if displayedMode != .systemAutomatic && (thermalState == .serious || thermalState == .critical) {
-            return L10n.text("热保护中，暂不能应用自定义目标", "Thermal protection prevents custom targets")
-        }
-        if displayedMode == .customCurve && (currentDraftTemperature == nil || curveStore.validationError != nil) {
-            return L10n.text("曲线或温度来源不可用，暂不能应用", "Curve or temperature source unavailable; Apply blocked")
+        if mode == .customCurve && !curveIsAvailable {
+            return L10n.text("曲线或温度来源不可用", "Curve or temperature source unavailable")
         }
         return nil
     }
-    private var hardwareRangeTitle: String {
-        telemetry.hasVerifiedRanges ? L10n.text("已读取完整量程", "Complete Range Read") : L10n.text("量程不完整", "Incomplete Range")
-    }
-    private var currentDraftTemperature: Double? {
-        fanControl.previewTemperature(for: curveStore.draftProfile.sensor)
-    }
-    private var draftPreviewPercentage: Double? {
-        guard let currentDraftTemperature else { return nil }
-        return FanCurveInterpolator.percentage(at: currentDraftTemperature, points: curveStore.draftProfile.points)
-    }
-    private var draftTargetRPM: Int? {
-        guard let percentage = draftPreviewPercentage else { return nil }
-        return FanCurveEditor.targetRPM(percentage: percentage, fanReadings: telemetry.readings)
-    }
-    private var statusTitle: String {
-        if isBusy { return L10n.text("正在应用…", "Applying…") }
-        if fanControl.helperState != .enabled { return FanControlSetupPresentation.capsuleTitle(fanControl.helperState) }
-        return FanStatusPresentation.confirmedModeTitle(fanControl.observedMode)
-    }
-    private var statusTint: Color {
-        fanControl.helperState == .enabled ? AppDesignTokens.Palette.tertiary : AppDesignTokens.Palette.warning
-    }
-    private func isRequesting(_ mode: GeekFanControlMode) -> Bool { fanControl.requestedMode == mode && isBusy }
 
-    private func modeDisabledReason(_ mode: GeekFanControlMode) -> String? {
-        FanControlPaletteAvailability.disabledReason(mode: mode, telemetry: telemetry, helperState: fanControl.helperState)
-    }
-
+    /// iStat's handlers return when the mode is already on; the curve's
+    /// toggle applies the curve as Settings or the fan-curve page left it.
     private func choose(_ mode: GeekFanControlMode) {
-        guard !isBusy, modeDisabledReason(mode) == nil else { return }
+        guard mode != displayedMode, disabledReason(mode) == nil else { return }
         presentation.beginInteraction()
-        submissionFailed = false
-        draft.selectMode(mode)
-        submittedConfiguration = nil
-        localMessage = nil
-    }
-    private func cancelDraft() {
-        guard !isBusy else { return }
-        draft.cancel()
-        curveStore.discardDraft()
-        submittedConfiguration = nil
-        localMessage = nil
-        submissionFailed = false
-    }
-    private func applyDraft() {
-        guard hasPendingChanges, applyDisabledReason == nil, !isBusy else { return }
-        let submitted = draft
-        submittedConfiguration = submitted.configuration
-        localMessage = nil
-        isSubmitting = true
         Task { @MainActor in
-            let accepted = await submitted.submit(to: fanControl, telemetry: telemetry, thermalState: thermalState)
-            isSubmitting = false
-            submissionFailed = !accepted
-            if !accepted { submittedConfiguration = nil }
-            confirmSubmittedDraft()
+            if mode == .customCurve {
+                await fanControl.applyFanCurveDraft()
+            } else {
+                await fanControl.selectMode(mode)
+            }
         }
-    }
-    private func confirmSubmittedDraft() {
-        guard Self.confirmSubmittedDraft(
-            &draft, submittedConfiguration: submittedConfiguration,
-            isSubmitting: isSubmitting, fanControl: fanControl
-        ) else { return }
-        submittedConfiguration = nil
-    }
-
-    /// Existing readback may still describe the previous request while a new
-    /// submission is in flight. Only the settled result can confirm this draft.
-    static func confirmSubmittedDraft(
-        _ draft: inout FanControlDraft,
-        submittedConfiguration: FanControlDraft.Configuration?,
-        isSubmitting: Bool,
-        fanControl: FanControlCoordinator
-    ) -> Bool {
-        guard !isSubmitting, !fanControl.isSwitchingMode, !fanControl.isApplying,
-              submittedConfiguration == draft.configuration,
-              draft.mode != .customCurve || !fanControl.curveStore.hasUnappliedChanges,
-              draft.matchesReadback(mode: fanControl.observedMode, fractions: fanControl.confirmedManualFractionByFan) else { return false }
-        draft.markConfirmed()
-        return true
-    }
-    private func refreshDraftIfUnedited() {
-        guard !draft.hasChanges, submittedConfiguration == nil, !isBusy else { return }
-        draft = FanControlDraft(telemetry: telemetry, observedMode: fanControl.observedMode,
-            synchronizesFans: fanControl.synchronizesManualFans,
-            confirmedFractions: fanControl.confirmedManualFractionByFan)
     }
 }
 
-/// D73 fix1: four visible modes; fixed fan sets remain a Settings detail.
+/// D152: the fan submenu's sections in iStat's order with our Maximum last.
+/// The titles are iStat's (`Sensors.Automatic`, `Sensors.Custom Fan Curve`,
+/// `Sensors.Manual`; iStat's Chinese '扇曲线' is not copied, as D135) and the
+/// major label draws them in upper case (was 自动控制 and 手动控制 on cards
+/// with icons; fixed fan sets remain a Settings detail, D73 fix1).
 enum FanControlModeChoice: CaseIterable, Identifiable {
     case automatic
     case curve
@@ -852,9 +461,9 @@ enum FanControlModeChoice: CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .automatic: L10n.text("自动控制", "Automatic")
+        case .automatic: L10n.text("自动", "Automatic")
         case .curve: L10n.text("自定义风扇曲线", "Custom Fan Curve")
-        case .manual: L10n.text("手动控制", "Manual")
+        case .manual: L10n.text("手动", "Manual")
         case .maximum: GeekFanControlMode.maximum.title
         }
     }
@@ -867,129 +476,6 @@ enum FanControlModeChoice: CaseIterable, Identifiable {
         case .manual: L10n.text("直接设置目标转速", "Set a target speed directly")
         case .maximum: L10n.text("所有风扇使用硬件最大转速", "Use the hardware maximum RPM for every fan")
         }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .automatic: AppSymbols.Monitor.sensors
-        case .curve: AppSymbols.Monitor.advanced
-        case .manual: AppSymbols.Panel.settings
-        case .maximum: AppSymbols.Monitor.sensors
-        }
-    }
-}
-
-/// One mode as a vertical single-choice card (docs/mini-window-design.md
-/// "风扇控制", concept 117/118), simplified by D64: icon, title and a round selection
-/// mark on the right. The whole card is the click target. Choosing a card only
-/// edits the draft; nothing reaches the fans before "Apply".
-struct FanControlModeCard: View {
-    /// Cards sit close together like a list; only the chosen one is framed,
-    /// which keeps the compact palette within its height budget.
-    static let spacing: CGFloat = 2
-    /// The selected mode's controls line up with the card's text.
-    static let contentInset: CGFloat = 4
-    static let markSize: CGFloat = 16
-    static let horizontalPadding: CGFloat = 8
-
-    let choice: FanControlModeChoice
-    let selected: Bool
-    let isApplying: Bool
-    let isDisabled: Bool
-    var disabledReason: String? = nil
-    let action: () -> Void
-    @State private var isHovered = false
-
-    private var title: String { choice.title }
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing + 2) {
-                AppSymbolGlyph(systemImage: choice.systemImage, size: 14)
-                    .foregroundStyle(selected ? tint : AppDesignTokens.Palette.secondaryText)
-                    .frame(width: 20, height: 20)
-                    .accessibilityHidden(true)
-#if DEBUG
-                    .layoutProbe("fan.mode.icon")
-#endif
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-#if DEBUG
-                        .layoutProbe("fan.mode.title")
-#endif
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Group {
-                    if isApplying {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        FanControlModeSelectionMark(selected: selected, tint: tint)
-                    }
-                }
-                .frame(width: Self.markSize, height: Self.markSize)
-#if DEBUG
-                .layoutProbe("fan.mode.mark")
-#endif
-            }
-            .padding(.horizontal, Self.horizontalPadding)
-            .padding(.vertical, 3)
-            .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
-                    .fill(selected ? tint.opacity(0.14) : (isHovered ? tint.opacity(0.07) : Color.clear))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
-                    .strokeBorder(selected ? tint.opacity(0.85) : Color.clear, lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous))
-            .opacity(isDisabled ? 0.5 : 1)
-        }
-        .buttonStyle(ResponsivePlainButtonStyle())
-        .disabled(isDisabled)
-        .onHover { isHovered = $0 }
-#if DEBUG
-        .layoutProbe("fan.mode.card")
-#endif
-        // The Button itself is the one accessibility element (review P1-2):
-        // wrapping it in `.accessibilityElement(children: .ignore)` made a new
-        // element without the button's press action, so VoiceOver could not
-        // choose a mode. Only label, hint, value and the selected trait are set.
-        .accessibilityLabel(Text(title))
-        .accessibilityHint(Text(isDisabled ? (disabledReason ?? choice.subtitle) : choice.subtitle))
-        .accessibilityIdentifier(title)
-        .accessibilityValue(selected
-            ? L10n.text("已选择", "Selected")
-            : (isApplying ? L10n.text("正在应用", "Applying") : L10n.text("未选择", "Not Selected")))
-        .accessibilityAddTraits(selected ? [.isSelected] : [])
-    }
-
-    private var tint: Color {
-        AppDesignTokens.Palette.information
-    }
-}
-
-/// The round single-choice mark: a ring, filled in the middle when chosen.
-struct FanControlModeSelectionMark: View {
-    let selected: Bool
-    let tint: Color
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(selected ? tint : AppDesignTokens.Palette.secondaryText.opacity(0.6), lineWidth: 1.5)
-            if selected {
-                Circle()
-                    .fill(tint)
-                    .padding(4)
-            }
-        }
-        .frame(width: FanControlModeCard.markSize, height: FanControlModeCard.markSize)
-        .accessibilityHidden(true)
     }
 }
 

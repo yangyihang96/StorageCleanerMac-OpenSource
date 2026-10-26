@@ -59,6 +59,19 @@ struct StorageCapacitySnapshot: Equatable, Sendable {
         max(0, userAvailableBytes - availableBytes)
     }
 
+    /// D173: a reading without the important-usage figure, completed with
+    /// the purgeable space measured on an earlier reading; unchanged when
+    /// it carries its own figure or none was measured.
+    func addingPurgeableEstimate(_ purgeableBytes: Int64?) -> StorageCapacitySnapshot {
+        guard availableForImportantUsageBytes == nil, let purgeableBytes, purgeableBytes > 0 else { return self }
+        let sum = availableBytes.addingReportingOverflow(purgeableBytes)
+        return StorageCapacitySnapshot(
+            totalBytes: totalBytes,
+            availableBytes: availableBytes,
+            availableForImportantUsageBytes: sum.overflow ? totalBytes : sum.partialValue
+        )
+    }
+
     var userAvailableRatio: Double {
         guard totalBytes > 0 else { return 0 }
         return min(1, max(0, Double(userAvailableBytes) / Double(totalBytes)))
@@ -92,10 +105,15 @@ struct StorageCapacitySnapshot: Equatable, Sendable {
 }
 
 enum StorageCapacityService {
-    static func snapshot(path: String = "/") -> StorageCapacitySnapshot? {
+    /// `includeImportantUsage` false leaves out the important-usage figure:
+    /// reading it makes macOS ask CacheDelete, and every service registered
+    /// with it, for its purgeable space (D173: about 170 log lines a read; iStat
+    /// reads it every 5 minutes). Total and free space never need it.
+    static func snapshot(path: String = "/", includeImportantUsage: Bool = true) -> StorageCapacitySnapshot? {
         let url = URL(fileURLWithPath: path, isDirectory: true)
         let isInternalVolume = (try? url.resourceValues(forKeys: [.volumeIsInternalKey]))?.volumeIsInternal == true
-        let keys = resourceKeys(path: path, isInternalVolume: isInternalVolume)
+        let keys = resourceKeys(path: path, isInternalVolume: isInternalVolume,
+                                includeImportantUsage: includeImportantUsage)
         let values = try? url.resourceValues(forKeys: keys)
         let attributes = try? FileManager.default.attributesOfFileSystem(forPath: path)
 
@@ -123,12 +141,16 @@ enum StorageCapacityService {
         )
     }
 
-    static func resourceKeys(path: String, isInternalVolume: Bool = false) -> Set<URLResourceKey> {
+    static func resourceKeys(
+        path: String,
+        isInternalVolume: Bool = false,
+        includeImportantUsage: Bool = true
+    ) -> Set<URLResourceKey> {
         var keys: Set<URLResourceKey> = [
             .volumeTotalCapacityKey,
             .volumeAvailableCapacityKey,
         ]
-        if isInternalVolume || URL(fileURLWithPath: path).standardizedFileURL.path == "/" {
+        if includeImportantUsage, isInternalVolume || URL(fileURLWithPath: path).standardizedFileURL.path == "/" {
             keys.insert(.volumeAvailableCapacityForImportantUsageKey)
         }
         return keys

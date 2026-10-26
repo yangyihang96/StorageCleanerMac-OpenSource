@@ -27,8 +27,9 @@ struct HelperPowerMetricsView: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 2)) { context in
             VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
-                Text(HelperPowerMetricsPresentation.source)
+                Text(HelperPowerMetricsPresentation.title)
                     .font(lightfield ? .system(size: 13, weight: .medium) : (compact ? AdvancedPanelTypography.captionStrong : AppTypography.sectionTitle))
+                    .help(HelperPowerMetricsPresentation.source)
                 if compact {
                     ForEach(HelperPowerMetricsPresentation.rows(monitor.state, now: context.date)) { row in
                         HStack {

@@ -106,7 +106,7 @@ enum ComputerHealthEventEvidence: Codable, Equatable, Sendable {
             default: check.title + L10n.text("：", ": ")
             }
             return prefix + state.title(for: check)
-        case .availableBytes(let bytes): return ByteFormat.string(bytes)
+        case .availableBytes(let bytes): return ByteFormat.storageString(bytes)
         case .batteryMaximumCapacity(let percent): return L10n.text("最大容量 \(percent)%", "Maximum Capacity \(percent)%")
         case .security(let evidence):
             guard let securityCheck = check.securityCheck else { return state.title(for: check) }

@@ -107,7 +107,7 @@ struct ItemListView: View {
                 ItemListStatusMetric(
                     id: "cleanable",
                     title: L10n.text("可安全清理", "Safe to Clean"),
-                    value: "\(metrics.cleanableCount)"
+                    value: ByteFormat.count(metrics.cleanableCount)
                 )
             )
         }
@@ -116,7 +116,7 @@ struct ItemListView: View {
                 ItemListStatusMetric(
                     id: "review",
                     title: L10n.text("需确认", "Needs Review"),
-                    value: "\(metrics.reviewCount)"
+                    value: ByteFormat.count(metrics.reviewCount)
                 )
             )
         }
@@ -125,7 +125,7 @@ struct ItemListView: View {
                 ItemListStatusMetric(
                     id: "careful",
                     title: L10n.text("谨慎处理", "Handle Carefully"),
-                    value: "\(metrics.carefulCount)"
+                    value: ByteFormat.count(metrics.carefulCount)
                 )
             )
         }
@@ -327,7 +327,7 @@ struct ItemListView: View {
                         .font(AppDesignTokens.Typography.pageTitle)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    Text(L10n.itemBytes(metrics.visibleCount, ByteFormat.string(metrics.visibleBytes)))
+                    Text(L10n.itemBytes(metrics.visibleCount, ByteFormat.storageString(metrics.visibleBytes)))
                         .font(AppDesignTokens.Typography.pageSubtitle)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -478,14 +478,14 @@ struct ItemListView: View {
         if let latest = summary.latest {
             let latestText = latest.date.formatted(date: .abbreviated, time: .shortened)
             return L10n.text(
-                "最近 \(latest.itemCount) 项 · \(ByteFormat.string(latest.totalBytes)) · \(latestText)",
-                "Latest: \(latest.itemCount) item(s) · \(ByteFormat.string(latest.totalBytes)) · \(latestText)"
+                "最近 \(ByteFormat.count(latest.itemCount)) 项 · \(ByteFormat.storageString(latest.totalBytes)) · \(latestText)",
+                "Latest: \(ByteFormat.count(latest.itemCount)) item(s) · \(ByteFormat.storageString(latest.totalBytes)) · \(latestText)"
             )
         }
         if movedCount > 0 {
             return L10n.text(
-                "\(movedCount) 项已移入废纸篓，清空前仍可恢复。",
-                "\(movedCount) item(s) moved to Trash and recoverable until emptied."
+                "\(ByteFormat.count(movedCount)) 项已移入废纸篓，清空前仍可恢复。",
+                "\(ByteFormat.count(movedCount)) item(s) moved to Trash and recoverable until emptied."
             )
         }
         return ""
@@ -583,7 +583,7 @@ struct ItemListView: View {
     }
 
     private func itemAccessibilityValue(_ item: StorageItem, isSelected: Bool) -> String {
-        let size = ByteFormat.string(item.sizeBytes)
+        let size = ByteFormat.storageString(item.sizeBytes)
         var details = [item.kind, size, item.path]
         if item.status == .movedToTrash {
             details.append(L10n.text("已移入废纸篓", "Moved to Trash"))
@@ -647,7 +647,7 @@ private struct ItemRow: View {
 
             Spacer()
 
-            Text(ByteFormat.string(item.sizeBytes))
+            Text(ByteFormat.storageString(item.sizeBytes))
                 .font(AppDesignTokens.Typography.metadata)
                 .fontWeight(.semibold)
                 .monospacedDigit()

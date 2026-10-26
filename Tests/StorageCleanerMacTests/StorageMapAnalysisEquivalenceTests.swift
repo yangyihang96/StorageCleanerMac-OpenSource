@@ -208,8 +208,8 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
 
     // MARK: - Review P2-1: a cloud folder's state reaches its files
 
-    /// Files outside the known cloud locations are asked about their cloud
-    /// state only because their folder is a cloud item. A stand-in File
+    /// D192: local dataless flags classify the same placeholders as the old
+    /// injected FileProvider state, also outside known cloud locations. A stand-in File
     /// Provider makes two folders cloud folders: one at the top level, which
     /// a worker walks when there are workers, and one nested inside another
     /// top-level folder. Their files are placeholders, so they must come out
@@ -226,7 +226,8 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
         for concurrency in [1, 4] {
             let walked = try scanner.storageMapAnalysis(
                 target: tree.target,
-                options: DiskScanner.StorageMapAnalysisOptions(concurrency: concurrency, ubiquityLookup: .whereNeeded, cloudState: cloud)
+                options: DiskScanner.StorageMapAnalysisOptions(concurrency: concurrency, ubiquityLookup: .whereNeeded,
+                    cloudState: cloud, fileStatus: CloudFolderTree.fakeFileStatus)
             )
             let label = "concurrency \(concurrency)"
             for file in CloudFolderTree.cloudFiles {
@@ -279,7 +280,8 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
         let options = DiskScanner.StorageMapAnalysisOptions(
             concurrency: 4,
             ubiquityLookup: .whereNeeded,
-            cloudState: .custom { gate.cloudState(of: $0) },
+            // D192: 旧 gate 在云端查询处；现在用同样的 gate 挂在本机 stat 上。
+            fileStatus: { gate.fileStatus(of: $0) },
             startWorker: { _ in }
         )
         let thrown = Locked<Error?>(nil)
@@ -332,7 +334,8 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
         let options = DiskScanner.StorageMapAnalysisOptions(
             concurrency: 4,
             ubiquityLookup: .whereNeeded,
-            cloudState: .custom { gate.cloudState(of: $0) },
+            // D192: 旧 gate 在云端查询处；现在用同样的 gate 挂在本机 stat 上。
+            fileStatus: { gate.fileStatus(of: $0) },
             startWorker: { held.hold($0) }
         )
         let ended = DispatchSemaphore(value: 0)
@@ -446,7 +449,7 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
             self.topLevelFolders = topLevelFolders
         }
 
-        func cloudState(of url: URL) -> DiskScanner.StorageMapCloudState {
+        func fileStatus(of url: URL) -> stat? {
             let components = url.pathComponents
             let depth = components.firstIndex(of: rootName).map { components.count - $0 - 1 } ?? 0
             condition.lock()
@@ -458,7 +461,7 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
                 while !isOpen && condition.wait(until: deadline) {}
             }
             condition.unlock()
-            return DiskScanner.StorageMapCloudState(isUbiquitous: false, isCurrent: true)
+            return DiskScanner.storageMapFileStatus(at: url)
         }
 
         func waitForRootLevel(seconds: TimeInterval) -> Bool {
@@ -528,7 +531,7 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
             return topLevelLookups - 1
         }
 
-        func cloudState(of url: URL) -> DiskScanner.StorageMapCloudState {
+        func fileStatus(of url: URL) -> stat? {
             let components = url.pathComponents
             let depth = components.firstIndex(of: rootName).map { components.count - $0 - 1 } ?? 0
             condition.lock()
@@ -543,7 +546,7 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
                 }
             }
             condition.unlock()
-            return DiskScanner.StorageMapCloudState(isUbiquitous: false, isCurrent: true)
+            return DiskScanner.storageMapFileStatus(at: url)
         }
 
         func waitUntilBlocked(seconds: TimeInterval) -> Bool {
@@ -665,6 +668,17 @@ final class StorageMapAnalysisEquivalenceTests: XCTestCase {
                 isUbiquitous: inCloudFolder,
                 isCurrent: !inCloudFolder || isDirectory
             )
+        }
+
+        // D192: 旧夹具只注入 FileProvider 状态。为本机标志模式模拟同样的
+        // 占位文件，不在磁盘上设置标志，也不读取真实云盘。
+        static let fakeFileStatus: @Sendable (URL) -> stat? = { url in
+            guard var status = DiskScanner.storageMapFileStatus(at: url) else { return nil }
+            if status.st_mode & S_IFMT == S_IFREG,
+               url.path.contains("/CloudTop/") || url.path.contains("/CloudDeep/") {
+                status.st_flags |= UInt32(SF_DATALESS)
+            }
+            return status
         }
 
         let root: URL

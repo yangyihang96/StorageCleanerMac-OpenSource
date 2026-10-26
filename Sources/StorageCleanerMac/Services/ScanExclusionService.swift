@@ -3,16 +3,18 @@ import Foundation
 enum ScanExclusionService {
     static let defaultsKey = "scan.excludedPaths.v1"
 
-    static func excludedPaths(defaults: UserDefaults = .standard) -> [String] {
+    static func excludedPaths(defaults: UserDefaults = .standard, store: IgnoreListStore? = nil) -> [String] {
+        if let store = store ?? (defaults === UserDefaults.standard ? .shared : nil) { return store.snapshot().paths(for: .other) }
         let rawPaths = defaults.stringArray(forKey: defaultsKey) ?? []
         return normalizedUniquePaths(rawPaths)
     }
 
     @discardableResult
-    static func add(_ path: String, defaults: UserDefaults = .standard) -> Bool {
+    static func add(_ path: String, defaults: UserDefaults = .standard, store: IgnoreListStore? = nil) -> Bool {
         let normalized = normalizedPath(path)
         guard isAllowedExclusion(normalized) else { return false }
 
+        if let store = store ?? (defaults === UserDefaults.standard ? .shared : nil) { return store.add(normalized, category: .other) }
         let existing = excludedPaths(defaults: defaults)
         guard !existing.contains(normalized) else { return false }
 
@@ -20,18 +22,33 @@ enum ScanExclusionService {
         return true
     }
 
-    static func remove(_ path: String, defaults: UserDefaults = .standard) {
+    static func remove(_ path: String, defaults: UserDefaults = .standard, store: IgnoreListStore? = nil) {
         let normalized = normalizedPath(path)
+        if let store = store ?? (defaults === UserDefaults.standard ? .shared : nil) {
+            let entries = store.snapshot().entries.filter { $0.category == .other && $0.target.path == normalized }
+            _ = store.remove(ids: Set(entries.map(\.id)))
+            return
+        }
         let remaining = excludedPaths(defaults: defaults).filter { $0 != normalized }
         setExcludedPaths(remaining, defaults: defaults)
     }
 
-    static func clear(defaults: UserDefaults = .standard) {
+    static func clear(defaults: UserDefaults = .standard, store: IgnoreListStore? = nil) {
+        if let store = store ?? (defaults === UserDefaults.standard ? .shared : nil) {
+            _ = store.remove(ids: Set(store.snapshot().entries.filter { $0.category == .other }.map(\.id)))
+            return
+        }
         defaults.removeObject(forKey: defaultsKey)
     }
 
-    static func setExcludedPaths(_ paths: [String], defaults: UserDefaults = .standard) {
+    static func setExcludedPaths(_ paths: [String], defaults: UserDefaults = .standard, store: IgnoreListStore? = nil) {
         let normalized = normalizedUniquePaths(paths).filter(isAllowedExclusion)
+        if let store = store ?? (defaults === UserDefaults.standard ? .shared : nil) {
+            let removed = store.snapshot().entries.filter { $0.category == .other && !normalized.contains($0.target.path) }
+            _ = store.remove(ids: Set(removed.map(\.id)))
+            _ = store.add(normalized.map { IgnoreListTarget(path: $0) }, category: .other)
+            return
+        }
         defaults.set(normalized, forKey: defaultsKey)
     }
 
@@ -72,7 +89,7 @@ enum ScanExclusionService {
         lines.append("# \(L10n.text("扫描排除清单", "Scan Exclusion List"))")
         lines.append("")
         lines.append("- \(L10n.text("生成时间", "Generated")): \(displayDate(generatedAt))")
-        lines.append("- \(L10n.text("项目数量", "Items")): \(normalizedPaths.count)")
+        lines.append("- \(L10n.text("项目数量", "Items")): \(ByteFormat.count(normalizedPaths.count))")
         lines.append("- \(L10n.text("适用范围", "Applies to")): \(L10n.text("智能扫描与重复文件", "Smart scan and duplicate files"))")
         lines.append("- \(L10n.text("安全边界", "Safety boundary")): \(L10n.text("排除项不会被清理；包含排除项的父目录也不会作为整体移到废纸篓。", "Excluded items are not cleaned, and a parent containing an exclusion is never moved to Trash as a whole."))")
         lines.append("")

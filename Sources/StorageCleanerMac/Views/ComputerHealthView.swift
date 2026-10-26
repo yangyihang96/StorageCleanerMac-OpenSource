@@ -13,6 +13,7 @@ struct ComputerHealthView: View {
 
     @State private var pendingSpeedTestConsent: SpeedTestConsent? = nil
     @State private var isEvidenceExpanded = false
+    @Environment(\.colorScheme) private var colorScheme
 
     private let environmentColumns = [
         GridItem(.adaptive(minimum: 320, maximum: 500), spacing: 14, alignment: .top)
@@ -126,13 +127,14 @@ struct ComputerHealthView: View {
 
     private var speedTestConsentMessage: String {
         if pendingSpeedTestConsent == .compatibility {
-            let standardPayloadMiB = NetworkCompatibilitySpeedTestService
-                .standardApplicationPayloadBytes / 1_048_576
-            let maximumPayloadMiB = NetworkCompatibilitySpeedTestService
-                .maximumApplicationPayloadBytes / 1_048_576
+            // D178: decimal, as Finder writes sizes (was 120 MiB and 128 MiB).
+            let standardPayload = ByteFormat.storageString(Int64(NetworkCompatibilitySpeedTestService
+                .standardApplicationPayloadBytes))
+            let maximumPayload = ByteFormat.storageString(Int64(NetworkCompatibilitySpeedTestService
+                .maximumApplicationPayloadBytes))
             return L10n.text(
-                "兼容测速会连接公开测速端点 speed.cloudflare.com，标准测试约产生 \(standardPayloadMiB) MiB 应用层正文，最大预算 \(maximumPayloadMiB) MiB；HTTP、TLS、TCP/IP 开销和网络重传会产生额外流量。可随时取消，只保存完整结果，不保存服务器地址或 IP。",
-                "The compatibility test connects to the public speed-test endpoint speed.cloudflare.com. A standard test transfers about \(standardPayloadMiB) MiB of application payload, with a \(maximumPayloadMiB) MiB maximum budget; HTTP, TLS, TCP/IP overhead and retransmissions create additional traffic. You can cancel at any time. Only a complete result is stored; server addresses and IPs are not stored."
+                "兼容测速会连接公开测速端点 speed.cloudflare.com，标准测试约产生 \(standardPayload) 应用层正文，最大预算 \(maximumPayload)；HTTP、TLS、TCP/IP 开销和网络重传会产生额外流量。可随时取消，只保存完整结果，不保存服务器地址或 IP。",
+                "The compatibility test connects to the public speed-test endpoint speed.cloudflare.com. A standard test transfers about \(standardPayload) of application payload, with a \(maximumPayload) maximum budget; HTTP, TLS, TCP/IP overhead and retransmissions create additional traffic. You can cancel at any time. Only a complete result is stored; server addresses and IPs are not stored."
             )
         }
         return L10n.text(
@@ -161,10 +163,15 @@ struct ComputerHealthView: View {
 
     private var environmentSection: some View {
         VStack(spacing: 0) {
+            // A D67 section label, as “最近变化” below.
             Text(L10n.text("保护与当前状态（不计分）", "Protection & Current State (Not Scored)"))
-                .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
+                .font(.system(size: 13)).tracking(0.26).foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
+                .accessibilityAddTraits(.isHeader)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 20).padding(.bottom, 14)
+            FeatureLightfieldHairline()
             FeatureLightfieldStatusDisclosure(title: L10n.text("当前电源", "Current Power"),
-                    detail: currentPowerStatusText, value: currentPowerStatusText, status: healthStore.snapshot?.battery == nil ? .unknown : .normal) {
+                    detail: currentPowerDetailText, value: currentPowerStatusText, status: healthStore.snapshot?.battery == nil ? .unknown : .normal) {
                 currentPowerCard
             }
             FeatureLightfieldStatusDisclosure(title: L10n.text("数据保护", "Data Protection"),
@@ -352,7 +359,7 @@ struct ComputerHealthView: View {
 
                 HStack(spacing: 14) {
                     if let transferredBytes = result.transferredBytes {
-                        Text(ByteFormat.string(Int64(clamping: transferredBytes)))
+                        Text(ByteFormat.storageString(Int64(clamping: transferredBytes)))
                     }
                     if result.durationSeconds > 0 {
                         Text(String(format: "%.1f s", result.durationSeconds))
@@ -530,8 +537,8 @@ struct ComputerHealthView: View {
         VStack(alignment: .leading, spacing: 10) {
             if !snapshot.actionRequiredIssues.isEmpty {
                 Text(L10n.text(
-                    "系统明确标记需处理：\(snapshot.actionRequiredIssues.count) 项",
-                    "Explicit system action flags: \(snapshot.actionRequiredIssues.count)"
+                    "系统明确标记需处理：\(ByteFormat.count(snapshot.actionRequiredIssues.count)) 项",
+                    "Explicit system action flags: \(ByteFormat.count(snapshot.actionRequiredIssues.count))"
                 ))
                 .font(AppTypography.body)
                 .foregroundStyle(.secondary)
@@ -552,13 +559,13 @@ struct ComputerHealthView: View {
                     if let value = snapshot.capacity.availableBytes {
                         evidenceValueRow(
                             label: L10n.text("普通可用", "Available"),
-                            value: ByteFormat.string(value)
+                            value: ByteFormat.storageString(value)
                         )
                     }
                     if let value = snapshot.capacity.availableForImportantUsageBytes {
                         evidenceValueRow(
                             label: L10n.text("重要用途可用", "Important-usage Available"),
-                            value: ByteFormat.string(value)
+                            value: ByteFormat.storageString(value)
                         )
                     }
                     if let value = snapshot.capacity.sevenDayDeltaBytes {
@@ -660,6 +667,68 @@ struct ComputerHealthView: View {
         if let enabled = snapshot.isFileVaultEnabled {
             evidenceValueRow(label: L10n.text("卷加密", "Volume Encryption"), value: enabledText(enabled))
         }
+        if let celsius = snapshot.temperatureCelsius {
+            evidenceValueRow(label: L10n.text("温度", "Temperature"), value: "\(Int(celsius.rounded())) °C")
+        }
+        if let details = snapshot.smartDetails {
+            smartDetailRows(details)
+        }
+    }
+
+    /// D100 G8: each row only when macOS reports the key.
+    @ViewBuilder
+    private func smartDetailRows(_ details: DiskSMARTDetails) -> some View {
+        if let bytes = details.bytesWritten {
+            evidenceValueRow(label: L10n.text("累计写入", "Data Written"), value: smartBytesText(bytes))
+        }
+        if let bytes = details.bytesRead {
+            evidenceValueRow(label: L10n.text("累计读取", "Data Read"), value: smartBytesText(bytes))
+        }
+        if let hours = details.powerOnHours {
+            evidenceValueRow(
+                label: L10n.text("通电时间", "Power-On Time"),
+                value: L10n.text("\(smartCountText(hours)) 小时", "\(smartCountText(hours)) h")
+            )
+        }
+        if let count = details.powerCycles {
+            evidenceValueRow(label: L10n.text("通电次数", "Power Cycles"), value: smartCountText(count))
+        }
+        if let count = details.unsafeShutdowns {
+            evidenceValueRow(label: L10n.text("异常断电次数", "Unsafe Shutdowns"), value: smartCountText(count))
+        }
+        if let spare = details.availableSparePercent {
+            evidenceValueRow(
+                label: L10n.text("可用备用块", "Available Spare"),
+                value: details.availableSpareThresholdPercent.map {
+                    L10n.text("\(spare)%（阈值 \($0)%）", "\(spare)% (threshold \($0)%)")
+                } ?? "\(spare)%"
+            )
+        }
+        if let count = details.mediaErrors {
+            evidenceValueRow(label: L10n.text("介质错误", "Media Errors"), value: smartCountText(count))
+        }
+        if let warning = details.criticalWarning {
+            evidenceValueRow(
+                label: L10n.text("严重警告", "Critical Warning"),
+                value: warning == 0 ? L10n.text("无", "None") : "0x" + String(warning, radix: 16, uppercase: true)
+            )
+        }
+        Text(L10n.text(
+            "SMART 细节由系统提供，可能因机型而异；健康结论只采用硬盘自己报告的严重警告和寿命用量。",
+            "SMART details come from macOS and may vary by model; the health result uses only the drive's own critical warning and life used."
+        ))
+        .font(AppTypography.body)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// D228 (D178): through ByteFormat, so 0 reads "0 字节", not "Zero kB".
+    private func smartBytesText(_ bytes: Double) -> String {
+        ByteFormat.storageString(bytes >= Double(Int64.max) ? .max : Int64(max(0, bytes)))
+    }
+
+    private func smartCountText(_ value: Double) -> String {
+        value < 1e15 ? Int64(value).formatted() : value.formatted(.number.notation(.scientific))
     }
 
     @ViewBuilder
@@ -896,6 +965,17 @@ struct ComputerHealthView: View {
         }
     }
 
+    /// The row's second line. The value already shows the charge (or, without
+    /// one, the power source), so the line names the source only beside a
+    /// charge and does not repeat the value.
+    private var currentPowerDetailText: String {
+        if case .present(let battery)? = healthStore.snapshot?.batteryEvidence,
+           battery.currentChargePercent != nil, let source = battery.powerSource {
+            return powerSourceText(source)
+        }
+        return L10n.text("环境状态 · 不计分", "Environment · Not Scored")
+    }
+
     private var currentPowerStatusColor: Color {
         guard let evidence = healthStore.snapshot?.batteryEvidence,
               case .present = evidence else {
@@ -1079,7 +1159,7 @@ struct ComputerHealthView: View {
 
     private func capacityDeltaText(_ value: Int64) -> String {
         if value == 0 { return L10n.text("无明显变化", "No Material Change") }
-        let amount = ByteFormat.string(value == .min ? .max : abs(value))
+        let amount = ByteFormat.storageString(value == .min ? .max : abs(value))
         return value > 0
             ? L10n.text("可用增加 \(amount)", "Available Increased by \(amount)")
             : L10n.text("可用减少 \(amount)", "Available Decreased by \(amount)")

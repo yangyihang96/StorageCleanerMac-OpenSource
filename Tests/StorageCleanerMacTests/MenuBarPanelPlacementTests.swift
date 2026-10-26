@@ -39,9 +39,17 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
         for density in [PanelDensity.complex, .geek] {
             for section in PanelSection.allCases where section != .overview {
-                let expectedWidth = section == .power
-                    ? GeekPanelPresentationMetrics.powerDetailWidth
-                    : GeekPanelPresentationMetrics.detailWidth
+                // D119 (2026-10-18): iStat's menus differ in width (CPU 272,
+                // memory 270, battery 240, the rest 301), so the processor
+                // and memory pages have their own tokens (was: power or the
+                // shared detail width).
+                let expectedWidth: CGFloat = switch section {
+                case .processor: GeekPanelPresentationMetrics.processorDetailWidth
+                case .memory: GeekPanelPresentationMetrics.memoryDetailWidth
+                case .power: GeekPanelPresentationMetrics.powerDetailWidth
+                default: GeekPanelPresentationMetrics.detailWidth
+                }
+                XCTAssertEqual(GeekPanelPresentationMetrics.detailWidth(for: section), expectedWidth)
                 XCTAssertEqual(
                     GeekPanelPresentationMetrics.detailSize(
                         for: section,
@@ -54,7 +62,11 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         }
     }
 
-    func testAnchoredOverviewStaysCenteredAndCascadeUsesAvailableSide() {
+    /// D123 (2026-10-19): the overview hangs 2 pt left of the status item and
+    /// 2 pt below it, as iStat Menus 7.30's level-one menu (was
+    /// `testAnchoredOverviewStaysCenteredAndCascadeUsesAvailableSide`, centred
+    /// below the status item).
+    func testAnchoredOverviewHangsFromTheStatusItemAndCascadeUsesAvailableSide() {
         let visible = NSRect(x: 0, y: 0, width: 1_800, height: 900)
         let anchor = NSRect(x: 1_400, y: 900, width: 24, height: 22)
         let overview = MenuBarPanelPlacement.frame(
@@ -71,7 +83,8 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             visibleFrame: visible
         )
 
-        XCTAssertEqual(overview.midX, anchor.midX, accuracy: 0.001)
+        XCTAssertEqual(overview.minX, anchor.minX - MiniWindowStyleTokens.statusItemLeadingOverhang, accuracy: 0.001)
+        XCTAssertEqual(overview.maxY, anchor.minY - MiniWindowStyleTokens.anchorGap, accuracy: 0.001)
         XCTAssertEqual(layout.direction, .left)
         XCTAssertEqual(layout.tertiaryPresentationMode, .column)
         XCTAssertEqual(layout.childFrames.count, 2)
@@ -87,10 +100,16 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             visibleFrame: visible
         )
 
-        XCTAssertEqual(overview.midX, anchor.midX, accuracy: 0.001)
+        // D123 (2026-10-19): iStat's status alignment, 2 pt left of the item
+        // (was centred on it).
+        XCTAssertEqual(overview.minX, anchor.minX - MiniWindowStyleTokens.statusItemLeadingOverhang, accuracy: 0.001)
     }
 
-    func testAnchoredOverviewClampsAtTheVisibleRightEdgeWithoutChangingWidth() {
+    /// D123 (2026-10-19): when the overview would leave the screen, its right
+    /// edge is the status item's right edge, as iStat Menus 7.30's (was
+    /// `testAnchoredOverviewClampsAtTheVisibleRightEdgeWithoutChangingWidth`,
+    /// 8 pt inside the screen's right edge).
+    func testAnchoredOverviewRightAlignsWithTheStatusItemNearTheScreenEdgeWithoutChangingWidth() {
         let visible = NSRect(x: 0, y: 0, width: 1_352, height: 900)
         let anchor = NSRect(x: 1_200, y: 900, width: 24, height: 22)
         let overview = MenuBarPanelPlacement.frame(
@@ -99,7 +118,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             visibleFrame: visible
         )
 
-        XCTAssertEqual(overview.maxX, visible.maxX - 8, accuracy: 0.001)
+        XCTAssertEqual(overview.maxX, anchor.maxX, accuracy: 0.001)
         XCTAssertEqual(overview.width, MiniWindowStyleTokens.overviewSize.width)
     }
 
@@ -199,9 +218,11 @@ final class MenuBarPanelPlacementTests: XCTestCase {
     }
 
     func testTouchingPanelsShareOneStraightBorderAndKeepEveryCornerRounded() {
-        XCTAssertEqual(MiniWindowStyleTokens.outerCornerRadius, 12)
-        XCTAssertEqual(MiniWindowStyleTokens.cardCornerRadius, 10)
-        XCTAssertEqual(MiniWindowStyleTokens.anchorGap, 0)
+        // D118 (2026-10-18): iStat's scroller corner 16 and card corner 8,
+        // and its level-one panel 2 pt below the menu bar (were 12, 10, 0).
+        XCTAssertEqual(MiniWindowStyleTokens.outerCornerRadius, 16)
+        XCTAssertEqual(MiniWindowStyleTokens.cardCornerRadius, 8)
+        XCTAssertEqual(MiniWindowStyleTokens.anchorGap, 2)
         XCTAssertEqual(MiniWindowStyleTokens.cascadeGap, 0)
 
         let parent = NSRect(x: 620, y: 200, width: 304, height: 553)
@@ -439,7 +460,8 @@ final class MenuBarPanelPlacementTests: XCTestCase {
             availableVisibleFrames: [visible]
         )
         XCTAssertNotEqual(resolvedCustom.origin, customFrame.origin)
-        XCTAssertEqual(resolvedCustom.midX, 612, accuracy: 0.001)
+        // D123 (2026-10-19): 2 pt left of the status item (was centred on it).
+        XCTAssertEqual(resolvedCustom.minX, 600 - MiniWindowStyleTokens.statusItemLeadingOverhang, accuracy: 0.001)
         XCTAssertEqual(resolvedCustom.size, PanelDensity.geek.idealSize)
     }
 
@@ -500,7 +522,8 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
         XCTAssertTrue(preferred.insetBy(dx: 8, dy: 8).contains(resolved))
         XCTAssertFalse(secondary.intersects(resolved))
-        XCTAssertEqual(resolved.midX, 612, accuracy: 0.001)
+        // D123 (2026-10-19): 2 pt left of the status item (was centred on it).
+        XCTAssertEqual(resolved.minX, 600 - MiniWindowStyleTokens.statusItemLeadingOverhang, accuracy: 0.001)
         XCTAssertEqual(resolved.size, PanelDensity.geek.idealSize)
     }
 
@@ -523,7 +546,8 @@ final class MenuBarPanelPlacementTests: XCTestCase {
 
         XCTAssertTrue(bounds.contains(resolved))
         XCTAssertEqual(resolved.size, PanelDensity.complex.idealSize)
-        XCTAssertEqual(resolved.midX, 612, accuracy: 0.001)
+        // D123 (2026-10-19): 2 pt left of the status item (was centred on it).
+        XCTAssertEqual(resolved.minX, 600 - MiniWindowStyleTokens.statusItemLeadingOverhang, accuracy: 0.001)
         XCTAssertEqual(
             resolved.maxY,
             830 - MiniWindowStyleTokens.anchorGap,
@@ -531,7 +555,10 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         )
     }
 
-    func testPlacementCentersBelowAnchorAndKeepsEveryDensityInsideVisibleFrame() {
+    /// D123 (2026-10-19): every density hangs 2 pt left of the status item
+    /// (was `testPlacementCentersBelowAnchorAndKeepsEveryDensityInsideVisibleFrame`,
+    /// centred below it).
+    func testPlacementHangsBelowAnchorAndKeepsEveryDensityInsideVisibleFrame() {
         let anchor = NSRect(x: 488, y: 875, width: 24, height: 24)
         let visible = NSRect(x: 0, y: 0, width: 1_000, height: 900)
 
@@ -549,7 +576,7 @@ final class MenuBarPanelPlacementTests: XCTestCase {
                 anchor.minY - MiniWindowStyleTokens.anchorGap,
                 accuracy: 0.001
             )
-            XCTAssertEqual(frame.midX, anchor.midX, accuracy: 0.001)
+            XCTAssertEqual(frame.minX, anchor.minX - MiniWindowStyleTokens.statusItemLeadingOverhang, accuracy: 0.001)
         }
     }
 
@@ -563,7 +590,8 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         XCTAssertTrue(negativeVisible.insetBy(dx: 8, dy: 8).contains(negativeFrame))
 
         let smallVisible = NSRect(x: 10, y: 20, width: 500, height: 400)
-        let bounds = smallVisible.insetBy(dx: 8, dy: 8)
+        // D123 (2026-10-19): up to the menu bar (was 8 pt below it).
+        let bounds = MenuBarPanelPlacement.menuBounds(smallVisible, margin: 8)
         let oversizedFrame = MenuBarPanelPlacement.frame(
             anchor: NSRect(x: 240, y: 390, width: 24, height: 24),
             contentSize: NSSize(width: 1_000, height: 900),
@@ -587,6 +615,104 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         XCTAssertEqual(
             MenuBarPanelPlacement.anchor(statusItemFrame: .zero, fallbackPoint: mouse),
             NSRect(x: 420, y: 310, width: 1, height: 1)
+        )
+    }
+
+    // MARK: D123 (2026-10-19): iStat Menus 7.30 `-[BBRMenu updateFrame]`
+
+    func testTheFirstChildOpensFlushOnTheRightWhenItFitsAndTheParentStays() {
+        let visible = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let parent = NSRect(x: 200, y: 345, width: 301, height: 553)
+        let layout = MenuBarPanelPlacement.reflowingCascade(
+            parentFrame: parent,
+            childSizes: [NSSize(width: 301, height: 300), NSSize(width: 391, height: 216)],
+            visibleFrame: visible,
+            preferredDirection: .left
+        )
+
+        XCTAssertEqual(layout.direction, .right, "iStat's default side, whatever the last one was")
+        XCTAssertEqual(layout.parentFrame, parent)
+        XCTAssertFalse(layout.isCompact)
+        XCTAssertEqual(layout.childFrames.count, 2)
+        XCTAssertEqual(layout.childFrames[0].minX, parent.maxX, accuracy: 0.001)
+        XCTAssertEqual(layout.childFrames[1].minX, layout.childFrames[0].maxX, accuracy: 0.001)
+    }
+
+    func testTheFirstChildOpensOnTheLeftOnlyWhenItWouldLeaveTheScreenOnTheRight() {
+        let visible = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let fits = NSRect(x: visible.maxX - 8 - 301 - 301, y: 345, width: 301, height: 553)
+        let right = MenuBarPanelPlacement.reflowingCascade(
+            parentFrame: fits, childSizes: [NSSize(width: 301, height: 300)], visibleFrame: visible
+        )
+        XCTAssertEqual(right.direction, .right, "Exactly to the edge still fits")
+        XCTAssertEqual(right.parentFrame, fits)
+
+        let parent = fits.offsetBy(dx: 1, dy: 0)
+        let layout = MenuBarPanelPlacement.reflowingCascade(
+            parentFrame: parent,
+            childSizes: [NSSize(width: 301, height: 300), NSSize(width: 391, height: 216)],
+            visibleFrame: visible,
+            preferredDirection: .right
+        )
+        XCTAssertEqual(layout.direction, .left)
+        XCTAssertEqual(layout.parentFrame, parent)
+        XCTAssertEqual(layout.childFrames[0].maxX, parent.minX, accuracy: 0.001)
+        XCTAssertEqual(layout.childFrames[1].maxX, layout.childFrames[0].minX, accuracy: 0.001,
+                       "The deeper page keeps its parent's side")
+    }
+
+    func testEachChildTopIsItsRowsTopAndTheMenusMayReachTheMenuBar() {
+        let visible = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let parent = NSRect(x: 900, y: 900 - 2 - 553, width: 301, height: 553)
+        let layout = MenuBarPanelPlacement.reflowingCascade(
+            parentFrame: parent,
+            childSizes: [NSSize(width: 301, height: 300), NSSize(width: 391, height: 216)],
+            visibleFrame: visible,
+            childTopOffsets: [0, 120]
+        )
+
+        XCTAssertEqual(layout.parentFrame, parent, "2 pt below the menu bar stays (was pushed 8 pt below)")
+        XCTAssertEqual(layout.childFrames[0].maxY, parent.maxY, accuracy: 0.001)
+        XCTAssertEqual(layout.childFrames[1].maxY, parent.maxY - 120, accuracy: 0.001)
+    }
+
+    func testAPageTheRuleWouldCutOffStaysOnScreen() {
+        let visible = NSRect(x: 0, y: 0, width: 1_000, height: 900)
+        let parent = NSRect(x: 500, y: 345, width: 301, height: 553)
+        let layout = MenuBarPanelPlacement.reflowingCascade(
+            parentFrame: parent,
+            childSizes: [NSSize(width: 301, height: 300), NSSize(width: 391, height: 216)],
+            visibleFrame: visible
+        )
+
+        // iStat would put both pages on the left and the history page past
+        // the screen's left edge.
+        XCTAssertEqual(layout.childFrames.count, 2)
+        for frame in layout.visibleFrames {
+            XCTAssertTrue(MenuBarPanelPlacement.menuBounds(visible, margin: 8).contains(frame), "\(frame)")
+        }
+    }
+
+    func testAPageOpensEightPointsAboveItsCardOrRowSoTheirFirstCardsLineUp() {
+        XCTAssertEqual(GeekPanelPresentationMetrics.submenuTopOffset(forItemTop: 135), 127)
+        XCTAssertEqual(GeekPanelPresentationMetrics.submenuTopOffset(forItemTop: 8), 0, "The first card")
+        XCTAssertEqual(
+            GeekPanelPresentationMetrics.tertiaryVerticalOffset(
+                for: .memory, density: .geek, detailTopOffset: 40, sourceOffset: 120
+            ),
+            40 + 112
+        )
+        XCTAssertEqual(
+            GeekPanelPresentationMetrics.tertiaryVerticalOffset(
+                for: .memory, density: .geek, detailTopOffset: 40, sourceOffset: 4
+            ),
+            40
+        )
+        XCTAssertEqual(
+            GeekPanelPresentationMetrics.tertiaryVerticalOffset(
+                for: .memory, density: .geek, detailTopOffset: 40, sourceOffset: nil
+            ),
+            40
         )
     }
 
@@ -895,7 +1021,9 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let bounds = visibleFrame.insetBy(dx: 8, dy: 8)
+        // D123 (2026-10-19): the menus may reach the menu bar, as iStat's do
+        // (was 8 pt below it as well).
+        let bounds = MenuBarPanelPlacement.menuBounds(visibleFrame, margin: 8)
         for frame in frames {
             XCTAssertTrue(bounds.contains(frame), "\(frame) outside \(bounds)", file: file, line: line)
         }
@@ -912,6 +1040,11 @@ final class MenuBarPanelPlacementTests: XCTestCase {
         }
     }
 
+    /// The anchored overview is centered under the status item, then aligned
+    /// to whole backing pixels (`MenuBarPanelPlacement.pixelAligned`, 1x
+    /// here). D118's odd 301 pt width puts the exact center on a half point,
+    /// which rounds 0.5 pt right; at the even 304 pt width it was exact.
+    /// R2 replaces centering with iStat's leading alignment.
     private func makeGeometryFixture() throws -> (
         store: PanelGeometryStore,
         defaults: UserDefaults,

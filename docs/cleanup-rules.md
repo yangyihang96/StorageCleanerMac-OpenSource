@@ -25,10 +25,11 @@
 | 诊断日志 | `system-log.diagnostics` | 绿 | 是 | 是（无所属应用）；7 天内仍有写入的行内注明 | |
 | Codex 应用日志 | `application-log.codex` | 绿 | 是 | 是，Codex 正在运行时除外 | |
 | 开发工具日志（9 类） | `developer.*-logs` | 绿 | 是 | 是，所属应用正在运行时除外 | 不按活动时间分级；WorkBuddy 只列 `logs`、`traces`，`audit-log` 是审计记录，不列 |
-| 开发缓存与临时文件 | `developer.*`（npm、Homebrew、uv、Xcode DerivedData、pip、SwiftPM、Clang、Bun、Playwright MCP 与各 AI 工具缓存；D47 补充起还有 `~/Library/Caches` 下的 Go 构建缓存 go-build、gopls、golangci-lint、Playwright 浏览器 ms-playwright／ms-playwright-go、pnpm、Yarn、node-gyp、TypeScript、Deno、Electron／electron-builder、Cypress、Poetry、CocoaPods、Carthage、sccache、Flutter 引擎、Claude Code 命令行缓存 claude-cli-nodejs） | 按活动时间：超过一年绿、超过阈值黄、阈值内红 | 是 | 绿色档（超过一年）预选，所属应用正在运行时除外；黄、红不预选 | 部分内容无法读取时为红色、可选、不预选 |
+| 开发缓存与临时文件 | `developer.*`（npm、Homebrew、uv、Xcode DerivedData、pip、SwiftPM、Clang、Bun、Playwright MCP 与各 AI 工具缓存；D47 补充起还有 `~/Library/Caches` 下的 Go 构建缓存 go-build、gopls、golangci-lint、Playwright 浏览器 ms-playwright／ms-playwright-go、pnpm、Yarn、node-gyp、TypeScript、Deno、Electron／electron-builder、Cypress、Poetry、CocoaPods、Carthage、sccache、Flutter 引擎、Claude Code 命令行缓存 claude-cli-nodejs；D101 G10 起还有 Bun 安装缓存 `~/.bun/install/cache`，`~/.bun` 下其他内容不列出） | 按活动时间：超过一年绿、超过阈值黄、阈值内红 | 是 | 绿色档（超过一年）预选，所属应用正在运行时除外；D101 G10 起，G1 行内提示共享且保守预计释放不到 1 MiB 或不到列出大小十分之一的也不预选；黄、红不预选 | 部分内容无法读取时为红色、可选、不预选 |
 | CloudKit 缓存 | `system-cache.cloudkit` | 黄 | 是 | 否（需判断） | |
 | 邮件附件副本（Mail Downloads） | `mail.downloaded-attachments` | 黄 | 是 | 否（需判断） | 打开附件时系统另存的副本；需先退出“邮件” |
 | 下载目录安装包、大项目 | `downloads.installers`、`downloads.large-items` | 黄 | 是 | 否（需判断） | |
+| iStat Menus 历史记录（Setapp 版） | `user-data.istat-menus-setapp-history` | 黄 | 是 | 否（需判断） | D101 G7：只列本机核实过的 `~/Library/Application Support/iStat Menus 7 (Setapp)/history` 整个文件夹，移入废纸篓后历史图表清空；主程序、辅助程序、history 服务、菜单栏程序任一在运行则跳过 |
 | 重复安装的应用副本 | `applications.duplicate-installed-apps` | 红 | 是 | 否 | 应用标识、版本、构建号都相同才算；整组勾选时自动保留一份，见下文 |
 | 清空废纸篓 | `trash.user-trash` | 红（单独一节） | 是 | 否 | 不可恢复，执行前单独二次确认，见下文 |
 | 照片图库、微信、Chrome 用户数据、Codex 等会话与检查点（含 `~/.codex/.tmp`）、ego lite、CrossOver、邮件库内附件 | — | — | — | — | 已移出垃圾结果（D19、D24） |
@@ -54,7 +55,7 @@ IDE 的本地编辑历史是用户自己的数据，有的应用把它放在缓�
 
 ## 默认预选与所属应用（D47，取代 D22 的“识别不出所属应用不预选”和 D40 的 7 天规则）
 
-- **默认勾选全部绿色项，唯一例外是所属应用正在运行的行**（执行时也会跳过，勾上只会误导）。黄色、红色项目和“清空废纸篓”（D23）永不预选。判断在 `ScanCandidate.isPreselectedByDefault`：可直接移入废纸篓的绿色行（`selectionEligibility == .selectable`）且所属应用不在运行；规则里的 `defaultSelection` 对绿色行只剩 `forbidden` 一种取值起作用（内置规则里没有绿色的 `forbidden`；开发缓存规则里的“可选、不选”是占位，由活动分档取代，绿色档为选中）。
+- **默认勾选全部绿色项，例外是所属应用正在运行的行**（执行时也会跳过，勾上只会误导），以及 D101 G10 起释放过少的行（见下）。黄色、红色项目和“清空废纸篓”（D23）永不预选。判断在 `ScanCandidate.isPreselectedByDefault`：可直接移入废纸篓的绿色行（`selectionEligibility == .selectable`）且所属应用不在运行；规则里的 `defaultSelection` 对绿色行只剩 `forbidden` 一种取值起作用（内置规则里没有绿色的 `forbidden`；开发缓存规则里的“可选、不选”是占位，由活动分档取代，绿色档为选中）。
 - 扫描完成时读取一次正在运行和已安装的应用（`NSWorkspace`），之后不随时间变化。
 - 所属应用的来源：规则写明的 `requiredClosedBundleIDs`；按行列出的缓存与日志用目录名推断——名称或其反向域名前缀（至少三段，如 `com.vendor.app.Helper` → `com.vendor.app`）是已安装应用的标识才算识别成功；`DiagnosticReports` 视为无所属应用；重复副本以应用包本身为准。
 - 识别不出所属应用的缓存行也预选，徽标与其他绿色行一样显示“推荐”，行内注明“未识别所属应用，清理前无法确认它是否在运行”（警示色）。日志行不依赖所属应用是否识别（D40 原样保留）。
@@ -62,6 +63,7 @@ IDE 的本地编辑历史是用户自己的数据，有的应用把它放在缓�
 - 日志（第 10 项）：用户日志、诊断日志、开发工具日志仍记录该行最近一次写入（取可读部分的最新修改时间，只跳过符号链接时仍算可确认），但不再决定预选：7 天内仍有写入的行预选并在行内显示“最近 7 天内仍有写入”；部分内容无法读取、不能确认的行预选并显示“无法确认最近 7 天内是否有写入”。
 - 大体积缓存（D47）：单行估算占用不少于 5 GiB 的缓存行（浏览器、应用、系统与开发缓存，不论风险等级；日志、下载、邮件附件副本、重复应用副本、废纸篓除外）在行内提示“体积较大：重建需要重新下载或生成，可能较慢”（`CleanupRebuildCostPolicy`）。
 - 所属应用正在运行的行不预选，行内显示“正在运行，清理前需退出”。执行前会再查一次运行状态，规则写明的和从目录名识别出的应用仍在运行则跳过该项。
+- 释放过少（D101 G10，D116 修订）：G1 在行内提示共享（克隆或本地快照占了明显一部分）、且可能释放的量不到 1 MiB 或不到列出大小十分之一的绿色行不预选，行内写明“清空废纸篓后预计释放不到 1 MiB 或不到列出大小的十分之一，本次不预选”（`ScanCandidate.freesTooLittleToPreselect`，原因 `freesLittle`）。可能释放的量 = 保守预计数 + 成员全部在本行内的完整克隆组（每组一份；清理本行会删掉组里每个成员）；有成员在本行以外的克隆组（例如 uv、pnpm、Bun 缓存克隆进项目的部分）和本地快照占用的部分仍算保留，跨行、要看最终选择才能算的条件数也不计入。被留下的行保守数和这个合计都在门槛以下，所以行内文字不变。没读到共享信息或共享很少的行照常预选。仍可手动勾选。所属应用正在运行时先显示运行原因。
 - “选择推荐项目”取规则推荐（`recommended`）且所属应用不在运行的项；内置规则的绿色行都是推荐，因此与默认预选一致。“恢复默认选择”回到上述 D47 预选。“全选绿色”仍可手动选中运行中的项，执行时按上一条跳过。
 - 结果页出现时、以及有应用启动或退出时，重新读取运行状态并更新各行的“正在运行”，不改动已勾选的内容（A2）。
 - 已勾选且所属应用在运行、并且可以请求退出的行提供“正常退出并清理”；确认面板中因“相关应用仍在运行”跳过的项目也提供同一操作。先列出将退出的每个实例（同一应用开了多个时写明个数）请用户确认，只发送正常退出请求，不强制结束；退出与等待复用浏览器隐私的 `requestNormalTermination`（每个实例 `terminate()`，按时钟截止时间每 100 ms 检查一次，最长 5 秒）。之后重新检查：从行进入则对当前页的选择发起清理，从确认面板进入则对同一冻结计划重新预检；若等待期间扫描结果或计划已变，只刷新行状态、不自动发起。没有退出的应用逐个点名，相关项目照常跳过。菜单栏或后台应用、Finder、本应用不能请求退出，行与确认面板改写“需手动退出：…”，不会再说“已经退出”；重复应用副本不提供（A2，第三轮 P2-1、P2-2、P2-3、P2-6）。
@@ -127,7 +129,7 @@ Skill 使用 `du -sk`，App 使用文件系统 allocated bytes 优先、logical 
 
 `ScanSession`／`ScanCandidate`、`CleanPlan`／`CleanPlanItem`、`CleanReport`／`CleanReportItem` 顺次保留指纹、规则 ID 与修订。生成计划、预检和执行再次核对有效指纹，JSON 标签相同也能拒绝过期计划。带维护元数据的规则所产生的候选必须带指纹与本项修订，缺失即拒绝生成计划；只有没有候选的会话（仅健康扫描、空智能扫描）可以没有指纹。回执事件追加与冷回放保留且锁定追溯字段，未知移动的核对更新也保留它们。旧回执缺少字段时为 nil，不推测修订；无维护元数据的合成测试／重复文件哨兵规则继续兼容。
 
-`Resources/CleanupRules.baseline.json` 同时保存初始 79 条规则的修订／规范化内容哈希，以及集成 `52f722ac` 修改前的 73 条原规则。维护测试要求变更内容时修订递增，禁止以自动重写基线替代修订；基线更新须随规则变更一起审阅。迁移测试逐字段锁定原规则，并在隔离目录中比较原候选 ID、风险、执行选择资格与默认选择集合。
+`Resources/CleanupRules.baseline.json` 同时保存已审阅规则的修订／规范化内容哈希（初始 79 条；D101 G10 新增 `developer.bun-install-cache`、G7 新增 `user-data.istat-menus-setapp-history`，均为修订 1，共 81 条），以及集成 `52f722ac` 修改前的 73 条原规则。维护测试要求变更内容时修订递增，禁止以自动重写基线替代修订；基线更新须随规则变更一起审阅。迁移测试逐字段锁定原规则，并在隔离目录中比较原候选 ID、风险、执行选择资格与默认选择集合。
 
 结果行预留 `applicationOwnershipText`（属于什么应用）、`cleanupImpactText`（处理后影响）、`preselectionExplanationText`（为什么预选或未预选）；这些字段反映已有策略，不改变选择。视图尚未接入。
 

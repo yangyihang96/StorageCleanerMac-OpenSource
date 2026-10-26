@@ -135,12 +135,23 @@ final class DesignSystemV2ReviewTests: XCTestCase {
 
         for (path, count) in [("Sources/StorageCleanerMac/Views/ModulePresentation.swift", 1),
                               ("Sources/StorageCleanerMac/Views/DesignSystem/PageHero.swift", 1),
-                              ("Sources/StorageCleanerMac/Views/ContentView.swift", 2),
-                              ("Sources/StorageCleanerMac/Views/SidebarView.swift", 2),
+                              // D176: the first scan folds the sidebar with the
+                              // same Reduce Motion layout animation (was 2).
+                              ("Sources/StorageCleanerMac/Views/ContentView.swift", 3),
                               ("Sources/StorageCleanerMac/Views/CleanupScanViews.swift", 4)] {
             let text = try source(path)
             XCTAssertEqual(text.components(separatedBy: "AppMotion.layout(reduceMotion: reduceMotion)").count - 1, count, path)
         }
+        // D154: the sidebar is CleanMyMac's flat module list; its folding
+        // groups (the two layout animations) are gone. Its only motion, the
+        // selection block and the hover, still honors Reduce Motion.
+        let sidebar = try source("Sources/StorageCleanerMac/Views/SidebarView.swift")
+        XCTAssertEqual(sidebar.components(separatedBy: "AppMotion.layout(reduceMotion: reduceMotion)").count - 1, 0)
+        XCTAssertEqual(sidebar.components(separatedBy: "withAnimation(").count - 1,
+                       sidebar.components(separatedBy: "withAnimation(AppMotion.selection(reduceMotion: reduceMotion))").count - 1)
+        XCTAssertGreaterThanOrEqual(sidebar.components(separatedBy: "withAnimation(AppMotion.selection(reduceMotion: reduceMotion))").count - 1, 1)
+        XCTAssertEqual(sidebar.components(separatedBy: ".animation(").count - 1,
+                       sidebar.components(separatedBy: ".animation(AppMotion.resolved(.hover, reduceMotion: reduceMotion), value: isHovered)").count - 1)
         // Symbol bounces and replacements stay still under Reduce Motion.
         let runtime = try source("Sources/StorageCleanerMac/Views/RuntimeWorkflowPresentation.swift")
         XCTAssertTrue(runtime.contains(".symbolEffect(.bounce, value: !reduceMotion && state == .completed)"))

@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import FileOperationShared
 import Foundation
 
 /// Everything a File Analysis move to the Trash touches (D46), so tests run
@@ -112,7 +113,8 @@ struct FileAnalysisTrashEnvironment: Sendable {
 enum FileAnalysisTrashService {
     static let ruleID = "file-analysis.trash.v1"
 
-    private static let lockFlags = UInt32(UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND | SF_RESTRICTED | SF_NOUNLINK)
+    /// D101 G4-2: every flag that blocks a move, owner's and system's alike.
+    private static let lockFlags = FileProtectionFlags.all
 
     // MARK: - Rules for one analysis
 
@@ -305,21 +307,31 @@ enum FileAnalysisTrashService {
         index: StorageMapAnalysisIndex,
         policy: FileAnalysisTrashPolicy,
         environment: FileAnalysisTrashEnvironment,
-        externalVolumeName: String?
+        externalVolumeName: String?,
+        storageSharing: (String) -> FileStorageSharing.Reading = { FileStorageSharing.read(at: URL(fileURLWithPath: $0)) }
     ) -> FileAnalysisTrashReview {
         FileAnalysisTrashReview(items: selections.map { selection in
             let status: FileAnalysisTrashReviewItem.Status
             var otherLinks = false
+            var estimate: CleanupReclaimableEstimate?
             switch check(selection, index: index, policy: policy, environment: environment) {
             case .success(let identity):
                 status = .ready(identity)
                 otherLinks = !selection.isDirectory && hasOtherHardLinks(selection.path)
+                // D104 G1: read-only metadata of the file itself; its volume
+                // keeps clones on different volumes apart in the review total.
+                if !selection.isDirectory, !otherLinks {
+                    estimate = CleanupReclaimableEstimate.file(storageSharing(selection.path),
+                                                               allocatedBytes: selection.bytes,
+                                                               deviceID: identity.deviceID)
+                }
             case .failure(let block):
                 status = .blocked(block)
             }
             return FileAnalysisTrashReviewItem(selection: selection, status: status,
                                                externalVolumeName: externalVolumeName,
-                                               hasOtherHardLinks: otherLinks)
+                                               hasOtherHardLinks: otherLinks,
+                                               reclaimableEstimate: estimate)
         }, unknownRunningApplicationNames: policy.unknownRunningApplicationNames)
     }
 

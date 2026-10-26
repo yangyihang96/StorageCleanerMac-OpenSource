@@ -1,6 +1,7 @@
 # Private Apple API used on purpose. Checked by script/check_private_api.py.
 # Format: kind | file | target | reason
 # Every use must fail closed when the API is missing on a future macOS.
+dlsym | Sources/StorageCleanerMac/Services/UniversalBinarySafety.swift | * | D184: SecAssessmentCreate, SecAssessmentCopyResult and the exported operation/execute/verdict constants from public Security.framework, absent from this SDK headers; native execution assessment of the original and clone, no process; missing symbols or incomplete results refuse thinning
 
 dlopen | Sources/StorageCleanerMac/Services/BatteryFullChargeService.swift | /System/Library/PrivateFrameworks/PowerUI.framework/PowerUI | Charge limit and the user-initiated "charge to 100%" use the same smart-charging client as Control Center; never triggered by background sampling (DECISIONS D5)
 objc | Sources/StorageCleanerMac/Services/BatteryFullChargeService.swift | PowerUISmartChargeClient | Class of the PowerUI client above
@@ -9,3 +10,5 @@ dlopen | Sources/StorageCleanerMac/Services/CPUPerformanceStateService.swift | /
 dlsym | Sources/StorageCleanerMac/Services/CPUPerformanceStateService.swift | * | IOReport channel functions from libIOReport, read-only: copy channels in group, create subscription, create samples and deltas, channel name, subgroup and unit label, state count/name/residency, simple integer value
 dlsym | Sources/StorageCleanerMac/Services/AppleSiliconTemperatureService.swift | * | IOHIDEventSystemClient symbols in IOKit for read-only Apple silicon temperature sensors
 dlsym | Sources/StorageCleanerMac/Features/LargeFiles/Services/FileAnalysisRunningApplicationResolver.swift | * | D54、复核 P2-3、r2-fa-followups P2-2：只读查询 SecTranslocateIsTranslocatedURL 和 SecTranslocateCreateOriginalPathForURL，保护转移运行应用的原始位置；路径在应用转移挂载下而还原失败（含符号缺失）时判为未知，文件夹不能整块移走；不在转移挂载下的应用（包括包已不存在的）按自身路径处理
+kvc | Sources/StorageCleanerMac/Support/AppArtwork.swift | <non-literal> | Public, not private: CIFilter inputs set through the SDK constants kCIInputImageKey, kCIInputTargetImageKey and kCIInputTimeKey, CIFilter's documented key-value interface; listed only because the checker cannot read a non-literal key
+kvc | Sources/FanControlHelper/main.swift | auditToken | NSXPCConnection.auditToken is not declared in the public SDK; the root fan-control helper reads the connected client's audit token so SecCodeCopyGuestWithAttributes checks the signature of that exact process, never a reusable PID; a missing or malformed value refuses the connection (fails closed)

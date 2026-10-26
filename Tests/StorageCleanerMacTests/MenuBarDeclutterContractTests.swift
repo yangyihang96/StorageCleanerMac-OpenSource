@@ -39,12 +39,19 @@ enum D64MenuBarSource {
 }
 
 final class MenuBarDeclutterContractTests: XCTestCase {
+    /// D152: the palette's curve editor page and its back button are gone
+    /// (F6: the curve is edited in Settings and on the fan-curve detail); the
+    /// compact surface's Back keeps the arrow and the style (was the same
+    /// checks on both, the curve page returning through
+    /// presentation.showFanControls() with 返回风扇控制 as its label).
     func testBackButtonsKeepTheSameNavigationArrowAndStyle() throws {
         let palette = try D64MenuBarSource.source("MenuBarAdvanced/ControlPaletteViews.swift")
         let chrome = try D64MenuBarSource.source("MenuBarPanelChrome.swift")
-        let curve = try r2SourceDeclaration("private var fanCurveEditor:", in: palette)
+        XCTAssertFalse(palette.contains("private var fanCurveEditor:"))
+        XCTAssertFalse(palette.contains("presentation.showFanControls()"))
+        XCTAssertFalse(palette.contains("返回风扇控制"))
         let compact = try r2SourceDeclaration("private func compactSurface(", in: chrome)
-        for surface in [curve, compact] {
+        for surface in [compact] {
             let end = try XCTUnwrap(surface.range(of: "Spacer(minLength:"))
             let backButton = String(surface[..<end.lowerBound])
             XCTAssertTrue(backButton.contains("systemImage: \"chevron.backward\""))
@@ -53,37 +60,40 @@ final class MenuBarDeclutterContractTests: XCTestCase {
             XCTAssertTrue(backButton.contains(".font(AdvancedPanelTypography.captionStrong)"))
             XCTAssertTrue(backButton.contains(".controlSize(.small)"))
         }
-        XCTAssertTrue(curve.contains("presentation.showFanControls()"))
-        XCTAssertTrue(curve.contains(".accessibilityLabel(L10n.text(\"返回风扇控制\", \"Back to Fan Control\"))"))
         XCTAssertTrue(compact.contains("hoverCoordinator?.dismissHistory()"))
         XCTAssertTrue(compact.contains("hoverCoordinator?.reset()"))
     }
 
+    /// D152: iStat's Sync is one tick row of the manual section, above the
+    /// sliders and outside the slider list, shown with two fans or more; it
+    /// switches the coordinator's stored choice. The list stacks full-width
+    /// sliders, one shared or one per fan, with no fan menu (was the compact
+    /// header's FanSyncToggleRow switch, a 24 pt row with the
+    /// "fan.sync.toggle" probe editing the draft, beside an 80 pt target-fan
+    /// menu, above the slider branches).
     func testCompactFanSyncUsesOneFullWidthHeaderOutsideSliderBranches() throws {
         let controls = try D64MenuBarSource.source("MenuBarAdvanced/FanControlInlineControls.swift")
+        let palette = try D64MenuBarSource.source("MenuBarAdvanced/ControlPaletteViews.swift")
         let manual = try r2SourceDeclaration("struct FanManualSliderList:", in: controls)
         let body = try r2SourceDeclaration("var body: some View", in: manual)
-        XCTAssertTrue(body.contains("compactFanHeader"))
-        XCTAssertTrue(body.contains("manualSlider"))
-        XCTAssertFalse(body.contains("draft.synchronizesFans"))
+        XCTAssertTrue(body.contains("ForEach(Self.sliders(readings: readings, synchronizes: fanControl.synchronizesManualFans)) { slider in"))
+        XCTAssertTrue(body.contains("FanControlSlider("))
         XCTAssertTrue(body.contains(".frame(maxWidth: .infinity, alignment: .leading)"))
-        let header = try r2SourceDeclaration("private var compactFanHeader:", in: manual)
-        XCTAssertTrue(header.contains("if !draft.synchronizesFans"))
-        XCTAssertTrue(header.contains("compactTargetFanMenu(reading: reading)"))
-        XCTAssertTrue(header.contains("FanSyncToggleRow(draft: $draft, isDisabled: isDisabled)"))
-        XCTAssertTrue(header.contains(".frame(maxWidth: .infinity, minHeight: MiniWindowStyleTokens.dataRowHeight, alignment: .trailing)"))
-        let slider = try r2SourceDeclaration("private func sliderRow", in: manual)
-        XCTAssertFalse(slider.contains("FanSyncToggleRow("))
-        XCTAssertEqual(manual.components(separatedBy: "FanSyncToggleRow(").count - 1, 1)
-        let toggle = try r2SourceDeclaration("struct FanSyncToggleRow:", in: controls)
-        XCTAssertTrue(toggle.contains(".frame(maxWidth: .infinity, minHeight: MiniWindowStyleTokens.controlRowHeight, alignment: .trailing)"))
-        XCTAssertTrue(toggle.contains(".layoutProbe(\"fan.sync.toggle\")"))
-        XCTAssertTrue(toggle.contains("draft.setSynchronized(!draft.synchronizesFans)"))
-        XCTAssertTrue(toggle.contains(".accessibilityValue(draft.synchronizesFans"))
-        let menu = try r2SourceDeclaration("private func compactTargetFanMenu", in: manual)
-        XCTAssertTrue(menu.contains(".frame(width: 80)"))
-        XCTAssertTrue(menu.contains(".help(presentation.fullName)"))
-        XCTAssertTrue(menu.contains(".tag(fan.index)"))
+        XCTAssertFalse(manual.contains("GeekIStatTickRow("))
+        XCTAssertFalse(controls.contains("FanSyncToggleRow"))
+        XCTAssertFalse(controls.contains("compactTargetFanMenu"))
+        XCTAssertFalse(controls.contains("fan.sync.toggle"))
+        XCTAssertFalse(controls.contains("draft."))
+        let view = try r2SourceDeclaration("struct FanControlPaletteView: View", in: palette)
+        let rows = try r2SourceDeclaration("@ViewBuilder private var manualRows: some View", in: view)
+        XCTAssertEqual(rows.components(separatedBy: "GeekIStatTickRow(").count - 1, 1)
+        XCTAssertTrue(rows.contains("if telemetry.readings.count >= 2 {"))
+        XCTAssertTrue(rows.contains("isSelected: fanControl.synchronizesManualFans"))
+        XCTAssertTrue(rows.contains("fanControl.setManualFansSynchronized(!fanControl.synchronizesManualFans)"))
+        XCTAssertTrue(rows.contains(".layoutProbe(\"fan.manual.sync\")"))
+        let sync = try XCTUnwrap(rows.range(of: "GeekIStatTickRow("))
+        let list = try XCTUnwrap(rows.range(of: "FanManualSliderList(fanControl: fanControl, readings: telemetry.readings)"))
+        XCTAssertLessThan(sync.lowerBound, list.lowerBound, "Sync stays above the sliders")
     }
 
     @MainActor
@@ -95,10 +105,13 @@ final class MenuBarDeclutterContractTests: XCTestCase {
         let section = try r2SourceDeclaration("var selectedSection:", in: root)
         XCTAssertTrue(section.contains("get { panelCoordinator.selectedSection }"))
         XCTAssertTrue(section.contains("panelCoordinator.selectModule(newValue)"))
+        // D123 (2026-10-19): a card click opens its module unpinned, as hover
+        // does in iStat Menus 7.30 (was `selectModule(section)` and
+        // `selectHardwareDetail(focus)`, which pinned).
         for (marker, call) in [
-            ("func selectGeekSection", "panelCoordinator.selectModule(section)"),
+            ("func selectGeekSection", "panelCoordinator.openModule(section)"),
             ("func previewGeekSection", "panelCoordinator.previewModule(section)"),
-            ("func selectGeekHardwareDetail", "panelCoordinator.selectHardwareDetail(focus)"),
+            ("func selectGeekHardwareDetail", "panelCoordinator.openHardwareDetail(focus)"),
             ("func previewGeekHardwareDetail", "panelCoordinator.previewHardwareDetail(focus)"),
         ] {
             let action = try r2SourceDeclaration(marker, in: geek)
@@ -233,7 +246,12 @@ final class MenuBarDeclutterContractTests: XCTestCase {
         let components = try D64MenuBarSource.source("MenuBarAdvanced/GeekPanelComponents.swift")
         XCTAssertFalse(components.contains("struct GeekSection<"))
         let header = try r2SourceDeclaration("struct GeekModuleHeader<", in: components)
-        XCTAssertTrue(header.contains("GeekModuleLabel(systemImage:"), "D64 #2 keeps the clickable module identity")
+        // D118 (2026-10-18): iStat titles are text only, so the module
+        // identity is the title; the card's module button keeps it clickable.
+        // Was `GeekModuleLabel(systemImage:` in the header.
+        XCTAssertTrue(header.contains("Text(title)"), "D64 #2 keeps the clickable module identity")
+        XCTAssertTrue(header.contains(".accessibilityAddTraits(.isHeader)"))
+        XCTAssertFalse(header.contains("GeekModuleLabel("))
         let live = try D64MenuBarSource.liveSources()
         XCTAssertTrue(live.contains("GeekOverviewModuleButton(destination:"))
         XCTAssertTrue(live.contains("CachedAppIconView("))
@@ -303,7 +321,11 @@ final class MenuBarDeclutterContractTests: XCTestCase {
         let result = try r2SourceDeclaration("private struct GeekMemoryQuitResultCard:", in: memory)
         XCTAssertFalse(result.contains("checkmark.seal.fill"))
         XCTAssertFalse(D64MenuBarSource.containsLabelRenderer(in: result))
-        XCTAssertTrue(result.contains("Image(systemName: \"arrow.right\")"))
+        // D126: iStat's text section with label and value rows; the before
+        // and after rings and the arrow between them are gone (was
+        // XCTAssertTrue(result.contains("Image(systemName: \"arrow.right\")"))).
+        XCTAssertFalse(result.contains("Image(systemName: \"arrow.right\")"))
+        XCTAssertTrue(result.contains("GeekIStatTextSectionCard {"))
         XCTAssertTrue(result.contains("targetResults"))
         XCTAssertTrue(memory.contains("Text(summary.confirmationMessage)"))
         XCTAssertTrue(memory.contains("systemImage: isSelected ? \"checkmark.circle.fill\" : \"circle\""))
@@ -333,35 +355,53 @@ final class MenuBarDeclutterContractTests: XCTestCase {
         for evidence in ["测量值，不是协商功率", "Measured input power from the adapter (not the negotiated rating)", "依据键名推断"] {
             XCTAssertTrue(sensors.contains(evidence), "D64 #10 preserves level-three source notes: \(evidence)")
         }
+        // D152: a mode section draws only iStat's title and switch; the
+        // subtitle stays the switch's hint and help, replaced by the reason
+        // while the mode is unavailable (was FanControlModeCard with the
+        // choice's icon glyph, its selection mark and the same hint).
         let palette = try D64MenuBarSource.source("MenuBarAdvanced/ControlPaletteViews.swift")
-        let mode = try r2SourceDeclaration("struct FanControlModeCard:", in: palette)
-        XCTAssertTrue(mode.contains("AppSymbolGlyph(systemImage: choice.systemImage"))
-        XCTAssertTrue(mode.contains("FanControlModeSelectionMark("))
-        let body = try r2SourceDeclaration("var body: some View", in: mode)
-        XCTAssertFalse(body.contains("Text(choice.subtitle)\n"))
-        XCTAssertFalse(body.contains("fan.mode.subtitle"))
-        XCTAssertTrue(mode.contains(".accessibilityHint(Text(isDisabled ? (disabledReason ?? choice.subtitle) : choice.subtitle))"))
+        XCTAssertFalse(palette.contains("struct FanControlModeCard:"))
+        XCTAssertFalse(palette.contains("FanControlModeSelectionMark("))
+        let view = try r2SourceDeclaration("struct FanControlPaletteView: View", in: palette)
+        let section = try r2SourceDeclaration("private func section(_ choice: FanControlModeChoice)", in: view)
+        XCTAssertFalse(section.contains("AppSymbolGlyph("))
+        XCTAssertFalse(section.contains("Text(choice.subtitle)"))
+        XCTAssertFalse(palette.contains("fan.mode.subtitle"))
+        XCTAssertTrue(section.contains(".accessibilityHint(disabledReason(choice.mode) ?? choice.subtitle)"))
+        XCTAssertTrue(section.contains(".help(disabledReason(choice.mode) ?? choice.subtitle)"))
     }
 
     func testNetworkTypeAndWarningsKeepTheirMeaningWithoutTitleDecoration() throws {
         let disk = try D64MenuBarSource.source("MenuBarAdvanced/GeekDiskView.swift")
-        let volume = try r2SourceDeclaration("struct GeekDiskVolumeSummary:", in: disk)
-        XCTAssertTrue(volume.contains("if volume.isNetwork {"))
+        // D119 (2026-10-18): a network drive is a row of iStat's network
+        // disks section with its globe (was a branch of the volume card).
+        XCTAssertTrue(disk.contains("if volume.isNetwork {\n                GeekDiskNetworkVolumeRow(volume: volume)"))
+        let volume = try r2SourceDeclaration("struct GeekDiskNetworkVolumeRow:", in: disk)
         XCTAssertTrue(volume.contains("systemImage: AppSymbols.Panel.networkGlobe"))
         XCTAssertFalse(volume.contains("AppSymbols.Monitor.storage"))
+        XCTAssertFalse(try r2SourceDeclaration("struct GeekDiskVolumeSummary:", in: disk).contains("AppSymbols.Monitor.storage"))
         let network = try D64MenuBarSource.source("MenuBarAdvanced/GeekNetworkView.swift")
         let vpn = try r2SourceDeclaration("struct GeekVPNHoverDetail", in: network)
         XCTAssertFalse(vpn.contains("systemImage: \"lock.shield\""))
         XCTAssertTrue(vpn.contains("vpnStatusText(tunnel.status)"))
         XCTAssertTrue(network.contains("GeekModuleIcon(systemImage: symbol"))
         let hardware = try D64MenuBarSource.source("MenuBarAdvanced/ControlPaletteViews.swift")
-        XCTAssertTrue(hardware.contains("clock.badge.exclamationmark"))
+        // D152: the fan palette shows no readings, as iStat's fan submenu, so
+        // the readings row's stale-snapshot clock went with it (was
+        // hardware.contains("clock.badge.exclamationmark")); the helper's
+        // warning and the preview note keep their meaning.
+        XCTAssertFalse(hardware.contains("clock.badge.exclamationmark"))
+        XCTAssertFalse(hardware.contains("isSnapshotStale"))
         XCTAssertTrue(hardware.contains("exclamationmark.shield"))
         XCTAssertTrue(hardware.contains("Preview · Fan Controls Disabled"))
         let control = try D64MenuBarSource.source("MenuBarAdvanced/GeekSensorsPowerHoverDetails.swift")
         let charge = try r2SourceDeclaration("private var fullChargeButton:", in: control)
         XCTAssertFalse(charge.contains("Image("))
-        XCTAssertTrue(charge.contains("GeekDisclosureIcon("))
+        // D124: an action row of the text section, without the disclosure
+        // chevron (iStat's rows have none).
+        XCTAssertTrue(charge.contains("GeekIStatTickRow("))
+        XCTAssertTrue(charge.contains("showsCheck: false"))
+        XCTAssertFalse(charge.contains("GeekDisclosureIcon("))
         XCTAssertTrue(charge.contains("requestFullCharge()"))
     }
 }

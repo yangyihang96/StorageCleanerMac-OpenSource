@@ -21,13 +21,19 @@ enum OperationRecordPresentation {
     }
 
     static func title(rulesVersion: String, subject: String?, itemCount: Int = 1) -> String {
+        if rulesVersion == RecentItemsCleanupService.ruleID {
+            return L10n.text("最近使用项目 · 移到废纸篓", "Recent Items · Moved to Trash")
+        }
         if rulesVersion == FileAnalysisTrashService.ruleID {
             // D46: "File Analysis · <first item> (and N more)".
             guard let subject else { return L10n.text("文件分析 · 移到废纸篓", "File Analysis · Moved to Trash") }
             let name = L10n.text("文件分析", "File Analysis") + " · " + subject
             return itemCount > 1
-                ? name + L10n.text(" 等 \(itemCount) 项", " and \(itemCount - 1) more")
+                ? name + L10n.text(" 等 \(ByteFormat.count(itemCount)) 项", " and \(itemCount - 1) more")
                 : name
+        }
+        if let title = ToolboxOperationTitles.title(rulesVersion: rulesVersion, subject: subject, itemCount: itemCount) {
+            return title
         }
         if rulesVersion == ExternalDriveMigrationService.originalRuleID {
             return L10n.text("文件搬家", "File Move") + " · "

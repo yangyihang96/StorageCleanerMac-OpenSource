@@ -852,6 +852,7 @@ struct BrowserPrivacyProviderRegistry: Sendable {
         RegisteredBrowserPrivacyProvider.opera,
         RegisteredBrowserPrivacyProvider.operaGX,
         RegisteredBrowserPrivacyProvider.vivaldi,
+        RegisteredBrowserPrivacyProvider.qqBrowser,
         RegisteredBrowserPrivacyProvider.orion,
         RegisteredBrowserPrivacyProvider.zen,
         RegisteredBrowserPrivacyProvider.libreWolf,
@@ -1765,6 +1766,18 @@ private extension RegisteredBrowserPrivacyProvider {
         name: "Vivaldi",
         bundleIDs: ["com.vivaldi.Vivaldi"],
         roots: ["Library/Application Support/Vivaldi"]
+    )
+
+    /// D-FP6 (竞品对比 2026-10-20): Tencent Lemon cleans QQ Browser's
+    /// history from `~/Library/Application Support/QQBrowser2/Default`
+    /// (`LemonPrivacyClean`). QQ Browser is Chromium-based, so it goes
+    /// through the same verified Chromium contract: a database that is not
+    /// exactly that schema stays read-only.
+    static let qqBrowser = chromium(
+        id: "qq-browser",
+        name: "QQ浏览器",
+        bundleIDs: ["com.tencent.QQBrowser"],
+        roots: ["Library/Application Support/QQBrowser2"]
     )
 
     static let orion = Self(

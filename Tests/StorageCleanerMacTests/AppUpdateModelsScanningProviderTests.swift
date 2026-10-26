@@ -933,11 +933,14 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
         let provider = HomebrewProvider(
             homebrewExecutableProvider: { URL(fileURLWithPath: "/opt/homebrew/bin/brew") }
         )
+        // D190: an outdated cask whose app is already at ("equal") or past
+        // ("lower") Homebrew's version is current, not a reinstall or a
+        // downgrade (old values: both `true`, target = Homebrew's version).
         let cases: [(name: String, current: String?, outdated: Bool, expectedAutomatic: Bool)] = [
             ("newer", "2.0", true, true),
             ("not-outdated", "2.0", false, false),
-            ("equal", "1.0", true, true),
-            ("lower", "0.9", true, true),
+            ("equal", "1.0", true, false),
+            ("lower", "0.9", true, false),
             ("latest", ":latest", true, true),
         ]
 
@@ -961,6 +964,11 @@ final class AppUpdateModelsScanningProviderTests: XCTestCase {
             let check = try await provider.checkForUpdate(application)
             if testCase.name == "not-outdated" {
                 XCTAssertEqual(check.status, .upToDate)
+            } else if ["equal", "lower"].contains(testCase.name) {
+                XCTAssertEqual(check.status, .upToDate, testCase.name)
+                XCTAssertNil(check.availableVersion, testCase.name)
+                XCTAssertNil(HomebrewAutomaticUpdateSafety.batchTargetVersion(
+                    metadata: try XCTUnwrap(application.homebrewMetadata), installedVersion: application.installedVersion), testCase.name)
             } else if testCase.expectedAutomatic {
                 XCTAssertEqual(check.status, .automaticallyUpdatable)
                 XCTAssertEqual(check.availableVersion, ApplicationVersion(marketing: testCase.current!))

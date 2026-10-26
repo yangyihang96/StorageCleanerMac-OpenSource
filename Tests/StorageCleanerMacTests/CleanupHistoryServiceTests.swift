@@ -277,7 +277,8 @@ final class CleanupHistoryServiceTests: XCTestCase {
         let markdown = CleanupHistoryService.markdown(for: entry)
 
         XCTAssertTrue(markdown.contains("Green cache cleanup"))
-        XCTAssertTrue(markdown.contains("4 KiB"))
+        // D178: decimal, as Finder writes sizes (was "4 KiB").
+        XCTAssertTrue(markdown.contains("4 KB"))
         XCTAssertTrue(markdown.contains("废纸篓") || markdown.contains("Trash"))
         XCTAssertTrue(markdown.contains("/Users/fixture/Library/Caches/one"))
         XCTAssertTrue(markdown.contains("/Users/fixture/Library/Caches/two"))

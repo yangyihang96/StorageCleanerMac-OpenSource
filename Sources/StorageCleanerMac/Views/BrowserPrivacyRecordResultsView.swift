@@ -226,6 +226,11 @@ struct BrowserPrivacyRecordResultsView: View {
     @ObservedObject var store: BrowserPrivacyStore
     /// D91: opens the cookie/other-data page from the skeleton's status bar.
     var onShowDataTypes: (() -> Void)? = nil
+    /// D154 batch 2: back to the Protection results tiles.
+    var onShowResults: (() -> Void)? = nil
+    /// D154 batch 3E: the same records, selection and confirmations in the
+    /// Protection manager panel instead of the D67 page.
+    var presentsManager = false
     @Environment(\.moduleTheme) private var theme
     /// Reads the recovery folder only when "Recent Deletions" is opened.
     @StateObject private var recoveryStore = BrowserPrivacyRecoveryStore()
@@ -245,23 +250,7 @@ struct BrowserPrivacyRecordResultsView: View {
     @State private var runningBrowserConfirmationMessage = ""
 
     var body: some View {
-        FeatureLightfieldPage(module: .privacy, phase: .result, title: ReviewFilter.privacy.title,
-            status: selectionSummaryDetail,
-            safety: L10n.text("只删除所选浏览记录 · 保留书签和密码", "Delete selected history only · Keep bookmarks and passwords"),
-            actionTitle: lightfieldActionTitle,
-            actionEnabled: !store.isFiltering && !store.selectedRecordIDs.isEmpty && !store.isProcessing
-                && !store.isRunningBrowserPreflight && store.state != .scanning,
-            showsArtwork: false,
-            statusActionTitle: BrowserPrivacyWorkspaceView.dataTypesTitle,
-            statusActionEnabled: !store.isProcessing && store.state != .scanning,
-            statusAction: onShowDataTypes, action: beginProcessingConfirmation) {
-            BrowserPrivacyLightfieldResults(store: store, searchQuery: $searchQuery,
-                notices: { lightfieldNotices }, utilities: { lightfieldUtilities },
-                showsRecords: !store.isProcessing && store.processingReport == nil,
-                pageRow: { AnyView(lightfieldPageRow($0)) },
-                selectAll: { if !store.isFiltering { isShowingReviewSelectionConfirmation = true } },
-                requestSelection: requestGroupSelection)
-        }
+        page
         .confirmationDialog(
             processingConfirmationTitle,
             isPresented: $isShowingProcessingConfirmation,
@@ -355,12 +344,40 @@ struct BrowserPrivacyRecordResultsView: View {
         }
     }
 
+    @ViewBuilder private var page: some View {
+        if presentsManager {
+            managerPage
+        } else {
+            FeatureLightfieldPage(module: .privacy, phase: .result, title: ReviewFilter.privacy.title,
+                status: selectionSummaryDetail,
+                safety: L10n.text("只删除所选浏览记录 · 保留书签和密码", "Delete selected history only · Keep bookmarks and passwords"),
+                actionTitle: lightfieldActionTitle,
+                actionEnabled: canProcessSelection,
+                showsArtwork: false,
+                statusActionTitle: BrowserPrivacyWorkspaceView.dataTypesTitle,
+                statusActionEnabled: !store.isProcessing && store.state != .scanning,
+                statusAction: onShowDataTypes, action: beginProcessingConfirmation) {
+                BrowserPrivacyLightfieldResults(store: store, searchQuery: $searchQuery,
+                    notices: { lightfieldNotices }, utilities: { lightfieldUtilities },
+                    showsRecords: !store.isProcessing && store.processingReport == nil,
+                    pageRow: { AnyView(lightfieldPageRow($0)) },
+                    selectAll: { if !store.isFiltering { isShowingReviewSelectionConfirmation = true } },
+                    requestSelection: requestGroupSelection)
+            }
+        }
+    }
+
+    private var canProcessSelection: Bool {
+        !store.isFiltering && !store.selectedRecordIDs.isEmpty && !store.isProcessing
+            && !store.isRunningBrowserPreflight && store.state != .scanning
+    }
+
     private var lightfieldActionTitle: String {
         if store.isProcessing { return L10n.text("正在处理", "Processing") }
         if !store.selectedRecordIDs.isEmpty && !store.selectedRecordsContainVerifiedDeletionCandidate {
-            return L10n.text("在浏览器内处理 · \(store.selectedRecordIDs.count) 条", "Handle in browser · \(store.selectedRecordIDs.count) records")
+            return L10n.text("在浏览器内处理 · \(ByteFormat.count(store.selectedRecordIDs.count)) 条", "Handle in browser · \(ByteFormat.count(store.selectedRecordIDs.count)) records")
         }
-        return L10n.text("删除所选记录 · \(store.selectedVerifiedDeletionCandidateCount) 条", "Delete selected records · \(store.selectedVerifiedDeletionCandidateCount) records")
+        return L10n.text("删除所选记录 · \(ByteFormat.count(store.selectedVerifiedDeletionCandidateCount)) 条", "Delete selected records · \(ByteFormat.count(store.selectedVerifiedDeletionCandidateCount)) records")
     }
 
     @ViewBuilder private var lightfieldNotices: some View {
@@ -396,6 +413,10 @@ struct BrowserPrivacyRecordResultsView: View {
     @Environment(\.colorScheme) private var lightfieldScheme
 
     @ViewBuilder private var utilityButtons: some View {
+        if let onShowResults {
+            Button(action: onShowResults) { Label(L10n.text("结果概览", "Results"), systemImage: "chevron.left") }
+                .buttonStyle(FeatureLightfieldRowButtonStyle()).disabled(store.isProcessing)
+        }
         Button(L10n.text("重新扫描", "Scan Again"), action: store.startScan)
             .buttonStyle(FeatureLightfieldRowButtonStyle()).disabled(store.isProcessing || store.state == .scanning)
         Button(L10n.text("读取状态", "Read Status")) { showsCoverageDetails.toggle() }
@@ -764,8 +785,8 @@ struct BrowserPrivacyRecordResultsView: View {
         }
         let permissionCount = store.coverage.count { $0.requiresFullDiskAccess }
         return L10n.text(
-            "覆盖：\(fullyReadBrowserCount) 个完整读取 · \(partialBrowserCount) 个部分读取 · 其中 \(permissionCount) 个需完全磁盘访问权限",
-            "Coverage: \(fullyReadBrowserCount) fully read · \(partialBrowserCount) partial · \(permissionCount) need Full Disk Access"
+            "覆盖：\(ByteFormat.count(fullyReadBrowserCount)) 个完整读取 · \(ByteFormat.count(partialBrowserCount)) 个部分读取 · 其中 \(ByteFormat.count(permissionCount)) 个需完全磁盘访问权限",
+            "Coverage: \(ByteFormat.count(fullyReadBrowserCount)) fully read · \(ByteFormat.count(partialBrowserCount)) partial · \(ByteFormat.count(permissionCount)) need Full Disk Access"
         )
     }
 
@@ -837,6 +858,224 @@ struct BrowserPrivacyRecordResultsView: View {
     }
 
 
+}
+
+// MARK: - D154 batch 3E: the Protection manager
+
+extension BrowserPrivacyRecordResultsView {
+    /// CleanMyMac's Protection manager: the browsers on the left with their
+    /// record counts, the browser/profile/site rows on the right (sensitive
+    /// sites stay masked and folded), the selection and one pink action in
+    /// the footer. The confirmations, the running-browser check, backups,
+    /// the report and Recent Deletions are this view's own, as on the D67 page.
+    var managerPage: some View {
+        CareStudioManagerChrome(
+            module: .protection,
+            title: L10n.text("安全防护管理器", "Protection Manager"),
+            query: $searchQuery,
+            searchPrompt: L10n.text("搜索域名或页面", "Search domain or page"),
+            sortTitle: store.resultSort.title,
+            sortOptions: BrowserPrivacyResultSort.allCases.map { (id: $0.rawValue, title: $0.title) },
+            onSort: { id in if let sort = BrowserPrivacyResultSort(rawValue: id) { store.resultSort = sort } },
+            categoryWidth: 230,
+            selectionSummary: selectionSummaryDetail,
+            primaryTitle: managerPrimaryTitle,
+            primaryEnabled: canProcessSelection,
+            onPrimary: beginProcessingConfirmation,
+            onBack: { onShowResults?() },
+            categories: { managerCategories },
+            content: { managerRecords },
+            footerDetail: { managerFooter })
+    }
+
+    /// Records deleted directly say Remove; a selection the browser must
+    /// handle itself leads to the in-browser steps, as on the D67 page.
+    private var managerPrimaryTitle: String {
+        if store.isProcessing { return L10n.text("正在处理", "Processing") }
+        return store.selectedRecordIDs.isEmpty || store.selectedRecordsContainVerifiedDeletionCandidate
+            ? L10n.text("删除", "Remove")
+            : L10n.text("在浏览器内处理", "Handle in Browser")
+    }
+
+    private var managerLocked: Bool {
+        store.isProcessing || store.state == .scanning || store.isRunningBrowserPreflight
+    }
+
+    private var managerCategories: some View {
+        let snapshot = store.resultPresentation
+        return VStack(alignment: .leading, spacing: 0) {
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 2) {
+                    CareStudioManagerCategoryRow(module: .protection, title: L10n.text("全部浏览记录", "All History"),
+                                                 systemImage: "clock.arrow.circlepath", detail: ByteFormat.count(store.records.count),
+                                                 isSelected: store.filters.browserID == nil, art: .tileHistory) {
+                        browserFilterBinding.wrappedValue = nil
+                    }
+                    ForEach(snapshot?.browsers ?? []) { browser in
+                        CareStudioManagerCategoryRow(
+                            module: .protection,
+                            title: BrowserPrivacyDisplayText.sanitized(browser.displayName, maximumLength: 80) ?? browser.id,
+                            systemImage: "globe", detail: snapshot?.recordCountByBrowser[browser.id].map { "\($0)" },
+                            isSelected: store.filters.browserID == browser.id,
+                            appIconPath: browser.iconPath) {
+                            browserFilterBinding.wrappedValue = browser.id
+                        }
+                    }
+                    Text(L10n.text("其他", "Other"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(CareStudioManagerInk.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 12)
+                        .padding(.bottom, 2)
+                    CareStudioManagerCategoryRow(module: .protection, title: BrowserPrivacyWorkspaceView.dataTypesTitle,
+                                                 systemImage: "tray.full", isSelected: false, art: .tileCookies) {
+                        onShowDataTypes?()
+                    }
+                    .disabled(onShowDataTypes == nil)
+                    CareStudioManagerCategoryRow(module: .protection, title: L10n.text("最近的删除", "Recent Deletions"),
+                                                 systemImage: "arrow.uturn.backward", isSelected: false, art: .tileRestore) {
+                        showsRecentDeletions = true
+                    }
+                    .popover(isPresented: $showsRecentDeletions) {
+                        BrowserPrivacyRecentDeletionsView(recoveryStore: recoveryStore,
+                            isBusy: store.state == .scanning || store.isProcessing,
+                            onRescan: { showsRecentDeletions = false; store.startScan() })
+                    }
+                }
+                .padding(10)
+                .disabled(managerLocked)
+            }
+            Rectangle().fill(CareStudioManagerInk.separator).frame(height: 1)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(coverageSummary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(CareStudioManagerInk.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(L10n.text("读取状态", "Read Status")) { showsCoverageDetails.toggle() }
+                    .buttonStyle(CareStudioRowButtonStyle())
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(CareStudioManagerInk.accent)
+                    .popover(isPresented: $showsCoverageDetails) { coverageDetails }
+            }
+            .padding(12)
+        }
+#if DEBUG
+        .layoutProbe("careStudio.manager.protection.categories")
+#endif
+    }
+
+    private var managerRecords: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(managerRecordsTitle)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(CareStudioManagerInk.primary)
+                    .accessibilityAddTraits(.isHeader)
+                Text(L10n.text("只删除所选记录，书签和密码保留 · 删除前先备份，7 天内可在“最近的删除”恢复 · 敏感网站默认打码折叠",
+                               "Only selected records are deleted; bookmarks and passwords stay · Backed up first, restorable from Recent Deletions for 7 days · Sensitive sites stay masked and folded"))
+                    .font(.system(size: 12))
+                    .foregroundStyle(CareStudioManagerInk.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+            managerToolbar
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 10) { lightfieldNotices }
+                    if !store.isProcessing && store.processingReport == nil {
+                        ForEach(store.resultPresentation?.browserGroups ?? []) { group in
+                            BrowserPrivacyLightfieldBrowser(store: store, group: group,
+                                pageRow: { AnyView(lightfieldPageRow($0)) }, requestSelection: requestGroupSelection)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+#if DEBUG
+                .layoutProbe("careStudio.manager.document")
+#endif
+            }
+            // The D67 rows draw their own light-field lines on the light panel.
+            .environment(\.careStudioSurface, false)
+#if DEBUG
+            .layoutProbe("careStudio.manager.protection.list")
+#endif
+        }
+    }
+
+    private var managerRecordsTitle: String {
+        guard let browserID = store.filters.browserID,
+              let browser = store.resultPresentation?.browsers.first(where: { $0.id == browserID }) else {
+            return L10n.text("全部浏览记录", "All History")
+        }
+        return BrowserPrivacyDisplayText.sanitized(browser.displayName, maximumLength: 80) ?? browser.id
+    }
+
+    /// Time, the selection helpers and Bulk Select, as the D67 list's
+    /// filter row has them; a whole-filter selection still asks first.
+    private var managerToolbar: some View {
+        HStack(spacing: 14) {
+            ToolboxFilterMenu(title: L10n.text("时间：", "Time: "), valueTitle: managerDateTitle) {
+                ForEach(BrowserPrivacyLightfieldPresentation.datePresets) { preset in
+                    Button(preset.title) {
+                        var filters = store.filters
+                        preset.apply(to: &filters, now: Date())
+                        store.filters = filters
+                    }
+                }
+            }
+            Spacer(minLength: 8)
+            Button(L10n.text("全选", "Select All")) {
+                if !store.isFiltering { isShowingReviewSelectionConfirmation = true }
+            }
+            Button(L10n.text("反选", "Invert")) {
+                guard !store.isFiltering else { return }
+                let ids = BrowserPrivacyLightfieldPresentation.deletableIDs(store.filteredRecords)
+                let additions = BrowserPrivacyLightfieldPresentation.invertedIDs(records: store.filteredRecords,
+                                                                                selected: store.selectedRecordIDs)
+                requestGroupSelection(additions, ids.subtracting(additions),
+                                      L10n.text("当前筛选（反选）", "Current filter (invert)"))
+            }
+            Button(L10n.text("批量选择", "Bulk Select")) { showsBulkSelection.toggle() }
+                .popover(isPresented: $showsBulkSelection) {
+                    if let snapshot = store.resultPresentation {
+                        BrowserPrivacyBulkSelectionView(presentation: snapshot.bulk,
+                            isDisabled: store.isFiltering || store.state == .scanning || store.isProcessing,
+                            onSelect: requestBulkSelection)
+                    }
+                }
+        }
+        .buttonStyle(CareStudioRowButtonStyle())
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(CareStudioManagerInk.accent)
+        .disabled(store.isFiltering || managerLocked)
+    }
+
+    private var managerDateTitle: String {
+        BrowserPrivacyDatePreset.matching(store.filters, now: Date())?.title ?? L10n.text("自定义", "Custom")
+    }
+
+    private var managerFooter: some View {
+        HStack(spacing: 12) {
+            Menu(L10n.text("更多", "More")) {
+                Button(L10n.text("重新扫描", "Scan Again"), action: store.startScan)
+                    .disabled(store.isProcessing || store.state == .scanning)
+                Button(L10n.text("取消选择", "Clear Selection")) {
+                    store.setSelection(false, recordIDs: store.selectedRecordIDs)
+                }
+                .disabled(store.selectedRecordIDs.isEmpty || store.isProcessing)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            advancedFiltersMenu
+        }
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(CareStudioManagerInk.accent)
+    }
 }
 
 private struct BrowserPrivacyRefreshStatus: View {
@@ -915,8 +1154,8 @@ private struct BrowserPrivacyCoverageRow: View {
                 }
 
                 Text(L10n.text(
-                    "\(coverage.profileCount) 个配置文件 · \(coverage.recordCount) 条记录",
-                    "\(coverage.profileCount) profiles · \(coverage.recordCount) records"
+                    "\(ByteFormat.count(coverage.profileCount)) 个配置文件 · \(ByteFormat.count(coverage.recordCount)) 条记录",
+                    "\(ByteFormat.count(coverage.profileCount)) profiles · \(ByteFormat.count(coverage.recordCount)) records"
                 ))
                 .font(AppTypography.caption.monospacedDigit())
                 .foregroundStyle(AppDesignTokens.Palette.secondaryText)
@@ -1124,8 +1363,8 @@ struct BrowserPrivacyProcessingReportView: View {
                                 copyDomains(for: group)
                             } label: {
                                 Text(L10n.text(
-                                        "复制 \(group.domains.count) 个域名",
-                                        "Copy \(group.domains.count) Domains"
+                                        "复制 \(ByteFormat.count(group.domains.count)) 个域名",
+                                        "Copy \(ByteFormat.count(group.domains.count)) Domains"
                                     ))
                             }
                             .appButtonChrome(.secondary)
@@ -1291,8 +1530,8 @@ struct BrowserPrivacyProcessingReportView: View {
         }
         manualActionFeedback = BrowserPrivacyClipboard.write(text, to: NSPasteboard.general)
             ? L10n.text(
-                "已复制 \(group.browser.displayName) 的 \(group.domains.count) 个域名。",
-                "Copied \(group.domains.count) domains for \(group.browser.displayName)."
+                "已复制 \(group.browser.displayName) 的 \(ByteFormat.count(group.domains.count)) 个域名。",
+                "Copied \(ByteFormat.count(group.domains.count)) domains for \(group.browser.displayName)."
             )
             : L10n.text(
                 "剪贴板未接受内容，请重试。",
@@ -1362,13 +1601,13 @@ struct BrowserPrivacyProcessingReportView: View {
     private var reportSummary: String {
         if isManualGuidanceOnly {
             return L10n.text(
-                "所选 \(report.selectedRecordCount) 次访问只能在浏览器内手动处理。请按以下四步操作；本应用未修改浏览器数据库，也未自动删除任何记录。",
+                "所选 \(ByteFormat.count(report.selectedRecordCount)) 次访问只能在浏览器内手动处理。请按以下四步操作；本应用未修改浏览器数据库，也未自动删除任何记录。",
                 "The \(BrowserPrivacyCountText.visits(report.selectedRecordCount)) selected can only be handled manually in the browser. Follow the four steps below; this app did not change a browser database or delete any record automatically."
             )
         }
         return L10n.text(
-            "共 \(report.selectedRecordCount) 次访问 · 已删除并重新读取确认 \(report.verifiedDeletedRecordCount) 次 · 结果未确认 \(report.indeterminateRecordCount) 次 · 失败 \(report.failedRecordCount) 次 · 需在浏览器内处理 \(report.manualRecordCount) 次。只有重新读取确认已不存在的记录才从列表移除。",
-            "\(BrowserPrivacyCountText.visits(report.selectedRecordCount)) requested · \(report.verifiedDeletedRecordCount) deleted and confirmed by a fresh read · \(report.indeterminateRecordCount) unconfirmed · \(report.failedRecordCount) failed · \(report.manualRecordCount) to handle in the browser. Only records confirmed absent by the fresh read left the list."
+            "共 \(ByteFormat.count(report.selectedRecordCount)) 次访问 · 已删除并重新读取确认 \(ByteFormat.count(report.verifiedDeletedRecordCount)) 次 · 结果未确认 \(ByteFormat.count(report.indeterminateRecordCount)) 次 · 失败 \(ByteFormat.count(report.failedRecordCount)) 次 · 需在浏览器内处理 \(ByteFormat.count(report.manualRecordCount)) 次。只有重新读取确认已不存在的记录才从列表移除。",
+            "\(BrowserPrivacyCountText.visits(report.selectedRecordCount)) requested · \(ByteFormat.count(report.verifiedDeletedRecordCount)) deleted and confirmed by a fresh read · \(ByteFormat.count(report.indeterminateRecordCount)) unconfirmed · \(ByteFormat.count(report.failedRecordCount)) failed · \(ByteFormat.count(report.manualRecordCount)) to handle in the browser. Only records confirmed absent by the fresh read left the list."
         )
     }
 
@@ -1436,8 +1675,8 @@ private struct BrowserPrivacyReverificationStatusView: View {
             L10n.text("新扫描不再发现所选记录", "Selected Records No Longer Found")
         case let .stillPresent(remainingCount, _):
             L10n.text(
-                "仍发现 \(remainingCount) 条所选记录",
-                "\(remainingCount) Selected Records Still Present"
+                "仍发现 \(ByteFormat.count(remainingCount)) 条所选记录",
+                "\(ByteFormat.count(remainingCount)) Selected Records Still Present"
             )
         case .coverageIncomplete:
             L10n.text("覆盖不完整，无法确认处理结果", "Incomplete Coverage; Result Unconfirmed")
@@ -1448,23 +1687,23 @@ private struct BrowserPrivacyReverificationStatusView: View {
         switch status {
         case let .checking(totalCount):
             L10n.text(
-                "正在用新的只读快照复核 \(totalCount) 条稳定记录指纹；上次报告和分组保持可见。",
-                "A new read-only snapshot is checking \(totalCount) stable record fingerprints; the previous report and groups remain visible."
+                "正在用新的只读快照复核 \(ByteFormat.count(totalCount)) 条稳定记录指纹；上次报告和分组保持可见。",
+                "A new read-only snapshot is checking \(ByteFormat.count(totalCount)) stable record fingerprints; the previous report and groups remain visible."
             )
         case let .noLongerFound(totalCount):
             L10n.text(
-                "相关浏览器已完整读取，\(totalCount) 条记录均不再出现。",
-                "The relevant browsers were read completely and none of the \(totalCount) records appeared again."
+                "相关浏览器已完整读取，\(ByteFormat.count(totalCount)) 条记录均不再出现。",
+                "The relevant browsers were read completely and none of the \(ByteFormat.count(totalCount)) records appeared again."
             )
         case let .stillPresent(remainingCount, totalCount):
             L10n.text(
-                "相关浏览器已完整读取；\(totalCount) 条记录中仍有 \(remainingCount) 条存在，可回到浏览器继续处理。",
-                "The relevant browsers were read completely; \(remainingCount) of \(totalCount) records remain. Continue in the browser if needed."
+                "相关浏览器已完整读取；\(ByteFormat.count(totalCount)) 条记录中仍有 \(ByteFormat.count(remainingCount)) 条存在，可回到浏览器继续处理。",
+                "The relevant browsers were read completely; \(ByteFormat.count(remainingCount)) of \(ByteFormat.count(totalCount)) records remain. Continue in the browser if needed."
             )
         case let .coverageIncomplete(totalCount):
             L10n.text(
-                "权限受限、部分扫描、超时或浏览器忙碌时，未看到 \(totalCount) 条记录也不能证明它们已移除。请检查上方覆盖状态后再试。",
-                "With restricted access, a partial scan, timeout, or busy browser, not seeing \(totalCount) records does not prove removal. Review coverage above and try again."
+                "权限受限、部分扫描、超时或浏览器忙碌时，未看到 \(ByteFormat.count(totalCount)) 条记录也不能证明它们已移除。请检查上方覆盖状态后再试。",
+                "With restricted access, a partial scan, timeout, or busy browser, not seeing \(ByteFormat.count(totalCount)) records does not prove removal. Review coverage above and try again."
             )
         }
     }
@@ -1537,11 +1776,26 @@ private struct BrowserPrivacyRecordsEmptyState: View {
         )
     }
 
+    /// D166: the state picture for each outcome (none while reading).
+    private var stateArt: GeneratedArt? {
+        switch kind {
+        case .scanning: nil
+        case .filtered: .stateEmpty
+        case .permissionRequired: .statePermission
+        case .partial: .stateError
+        case .completed: .stateAllClear
+        }
+    }
+
     var body: some View {
         VStack(spacing: AppDesignTokens.Spacing.small) {
             if kind == .scanning {
                 ProgressView()
                     .controlSize(.small)
+            } else if let stateArt {
+                GeneratedArtView(art: stateArt, variant: .header) { EmptyView() }
+                    .frame(width: 64, height: 64)
+                    .accessibilityHidden(true)
             }
             Text(title)
                 .font(AppTypography.emptyStateTitle)

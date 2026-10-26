@@ -65,8 +65,11 @@ extension GeekDashboardConfigurationStore {
         if configuration.modules.contains(where: { $0.module == .sensors && $0.isVisible }),
            !draft.modules.contains(where: { $0.module == .sensors && $0.isVisible }) {
             let fan = fanControlProvider()
+            // D152: stored slider values are settings, not edits; only a value
+            // not yet written holds the fan controls open (was: any per-fan value
+            // the helper had not confirmed).
             guard !fan.isApplying, !fan.isSwitchingMode, !fan.curveStore.hasUnsavedDraftChanges,
-                  fan.manualFractionByFan == fan.confirmedManualFractionByFan else { throw CommitFailure.activeControl }
+                  !fan.hasPendingManualCommit else { throw CommitFailure.activeControl }
         }
         try apply(draft)
     }

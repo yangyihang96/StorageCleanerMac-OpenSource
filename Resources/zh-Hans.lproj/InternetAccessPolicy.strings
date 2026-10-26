@@ -1,0 +1,27 @@
+/* D116: Little Snitch shows these with InternetAccessPolicy.plist. Keys are the English texts in that file. */
+
+"This app scans and cleans up your Mac on the Mac itself. It goes online only for its own updates, app update checks, the network speed test, the public IP display and the benchmark leaderboard. It does not upload scan results or file contents." = "本应用在这台 Mac 上本地扫描和清理。只有自身更新、应用更新检查、网络测速、公网 IP 显示和跑分排行榜会联网；不上传扫描结果和文件内容。";
+
+"Checks for and downloads updates to this app, reads the signed list of official app download sources, and downloads the official GitHub releases of apps you update." = "检查并下载本应用自身的更新，读取带签名的官方下载来源列表，并下载你要更新的应用在 GitHub 上的官方发布版本。";
+"This app cannot check for or install its own updates, and apps released on GitHub cannot be updated." = "本应用无法检查或安装自身更新，在 GitHub 上发布的应用也无法更新。";
+
+"Looks up the latest official release of apps that publish their updates on GitHub, when App Updates checks for updates." = "“应用更新”检查更新时，查询在 GitHub 上发布更新的应用的最新官方版本。";
+"Apps that publish their updates on GitHub are not checked for updates." = "在 GitHub 上发布更新的应用不会被检查更新。";
+
+"Looks up the current App Store version of apps installed from the App Store, when App Updates checks for updates." = "“应用更新”检查更新时，查询从 App Store 安装的应用在 App Store 上的当前版本。";
+"Apps installed from the App Store are not checked for updates." = "从 App Store 安装的应用不会被检查更新。";
+
+"Downloads and uploads test data for the network speed test, only when you start the test and confirm it." = "只在你开始并确认网络测速时，下载和上传测试数据。";
+"The network speed test cannot run." = "无法进行网络测速。";
+
+"Shows your public IPv4 and IPv6 addresses in the Mini Window's network view while it is open. On by default; you can turn it off in Settings › Access." = "小窗的网络页面打开时，显示你的公网 IPv4 和 IPv6 地址。默认开启，可在“设置 › 权限”里关闭。";
+"Your public IP address is not shown." = "不显示公网 IP 地址。";
+
+"Looks up the country or region of your public IP address, only after you allow it separately in Settings › Access. The address is sent to this service." = "只在你另行在“设置 › 权限”里同意后，查询公网 IP 所属的国家或地区；这个地址会发给该服务。";
+"The country or region of your IP address is not shown." = "不显示 IP 所属的国家或地区。";
+
+"Shows the benchmark leaderboard and, only after you confirm, publishes or removes your benchmark result." = "显示跑分排行榜；只在你确认后，发布或撤下你的跑分结果。";
+"The leaderboard cannot be shown, and benchmark results cannot be published or removed." = "无法显示排行榜，也无法发布或撤下跑分结果。";
+
+"Checks for and downloads updates of other apps from their developers' own update feeds and official download sites, when App Updates checks for or installs updates. The addresses come from each app or from the signed list of official sources." = "“应用更新”检查或安装更新时，从各应用开发者自己的更新源和官方下载网站检查并下载更新。地址来自应用本身或带签名的官方来源列表。";
+"Apps that update from their developer's own site cannot be checked or updated." = "通过开发者自己网站更新的应用无法检查或更新。";

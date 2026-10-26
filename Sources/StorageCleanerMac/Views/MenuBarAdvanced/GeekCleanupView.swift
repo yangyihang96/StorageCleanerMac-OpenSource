@@ -10,7 +10,7 @@ extension MenuBarAdvancedStatusView {
                     model: cleanupDetailsModel,
                     source: MiniWindowCleanupSource(store: store),
                     diskTile: geekCleanupDiskTile,
-                    diskAvailableText: storageSnapshot.map { ByteFormat.storageString($0.userAvailableBytes) } ?? "--",
+                    diskAvailableText: storageSnapshot.map { IStatNumberFormat.space($0.userAvailableBytes) } ?? "--",
                     showsExtendedDetails: showsExtendedGeekDetails, actions: geekCleanupActions
                 )
             }
@@ -51,7 +51,7 @@ extension MenuBarAdvancedStatusView {
         ) {
             GeekTelemetryRow(title: L10n.text("可安全清理", "Safe Cleanup"), value: cleanupPageBytesText, tint: AppDesignTokens.Palette.success)
             GeekTelemetryRow(title: L10n.text("项目数", "Items"), value: cleanupPageCountText, tint: AppDesignTokens.Palette.success)
-            GeekTelemetryRow(title: L10n.text("启动卷可用", "Startup Disk Available"), value: storageSnapshot.map { ByteFormat.storageString($0.userAvailableBytes) } ?? "--", tint: AppDesignTokens.Palette.information)
+            GeekTelemetryRow(title: L10n.text("启动卷可用", "Startup Disk Available"), value: storageSnapshot.map { IStatNumberFormat.space($0.userAvailableBytes) } ?? "--", tint: AppDesignTokens.Palette.information)
         }
     }
 

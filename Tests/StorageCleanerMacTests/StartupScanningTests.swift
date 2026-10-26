@@ -452,6 +452,39 @@ final class StartupScanningTests: XCTestCase {
         XCTAssertEqual(result.state.process, .stopped)
     }
 
+    /// D192: Open at Login apps and login-item helper apps are not launchd
+    /// jobs under their BTM identifier; the application list gives their run
+    /// state, and launchctl is not asked about them.
+    func testLoginItemApplicationsTakeTheirRunStateFromTheApplicationList() async throws {
+        let runner = RecordingStartupRunner(responses: [])
+        var app = fixtureCandidate(label: "2.com.example.app")
+        app.kind = .openAtLogin
+        app.executableURL = URL(fileURLWithPath: "/Applications/Example.app/", isDirectory: true)
+        var helper = fixtureCandidate(label: "4.com.example.helper")
+        helper.kind = .loginItem
+        helper.executableURL = URL(fileURLWithPath: "/Applications/Example.app/Contents/Library/LoginItems/Helper.app",
+                                   isDirectory: true)
+        let scanner = LaunchdRuntimeScanner(
+            runner: runner,
+            executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            runningApplications: {
+                [StartupRunningApplication(bundleURL: URL(fileURLWithPath: "/Applications/Example.app"), pid: 42)]
+            }
+        )
+
+        let results = try await scanner.scan(context: StartupScanContext(
+            applicationDirectories: [],
+            seedCandidates: [app, helper],
+            currentUserID: 501
+        ))
+
+        XCTAssertEqual(results.count, 2)
+        XCTAssertEqual(results.first { $0.label == "2.com.example.app" }?.state.process, .running(pid: 42))
+        XCTAssertEqual(results.first { $0.label == "4.com.example.helper" }?.state.process, .stopped)
+        let recordedArguments = await runner.recordedArguments()
+        XCTAssertTrue(recordedArguments.isEmpty)
+    }
+
     func testRuntimeTreatsMissingOverrideAsEnabledOnlyAfterSuccessfulQuery() async throws {
         let successful = LaunchdRuntimeScanner(
             runner: RoutingStartupRunner(disabledQuerySucceeds: true),

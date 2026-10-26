@@ -55,15 +55,17 @@ final class MiniWindowCleanupPresentationTests: XCTestCase {
                 let scope = MiniWindowLogicLanguageScope(language)
                 defer { scope.restore() }
                 XCTAssertEqual(presentation.title, L10n.text("可安全清理", "Safe Cleanup"))
-                XCTAssertEqual(presentation.bytesText, ByteFormat.string(totals.safeBytes))
+                // D128 (old value: ByteFormat.string, KiB-based): iStat's disk-space format.
+                XCTAssertEqual(presentation.bytesText, IStatNumberFormat.space(totals.safeBytes))
                 XCTAssertEqual(presentation.countText, L10n.text("6 项", "6 items"))
                 XCTAssertEqual(presentation.actionableCountText, "5", "Count all default rows, not the four-row preview")
                 XCTAssertEqual(presentation.actionableDetail, L10n.text("默认可清理", "Default Cleanup Items"))
                 XCTAssertEqual(presentation.notice, L10n.text("默认可清理 5 项。在主窗口确认。", "5 default cleanup items. Confirm in the main window."))
                 XCTAssertFalse(presentation.notice.contains(L10n.text("重新扫描", "Rescan")))
                 let lowerBound = try XCTUnwrap(details.items.first { $0.measurementCompleteness.isLowerBound })
+                // D178: decimal, as the main window writes it (was `ByteFormat.string`, binary).
                 XCTAssertEqual(CleanupMeasurementPresentation.value(lowerBound),
-                               L10n.text("至少 \(ByteFormat.string(lowerBound.estimatedSizeBytes))", "At least \(ByteFormat.string(lowerBound.estimatedSizeBytes))"))
+                               L10n.text("至少 \(ByteFormat.storageString(lowerBound.estimatedSizeBytes))", "At least \(ByteFormat.storageString(lowerBound.estimatedSizeBytes))"))
             }
         }
     }
@@ -81,7 +83,8 @@ final class MiniWindowCleanupPresentationTests: XCTestCase {
                 defer { scope.restore() }
                 let time = session.completedAt.formatted(.dateTime.year().month().day().hour().minute().locale(L10n.locale))
                 XCTAssertEqual(presentation.title, L10n.text("上次扫描 · \(time)", "Last Scan · \(time)"))
-                XCTAssertEqual(presentation.bytesText, ByteFormat.string(history.entry.greenBytes))
+                // D128 (old value: ByteFormat.string, KiB-based): iStat's disk-space format.
+                XCTAssertEqual(presentation.bytesText, IStatNumberFormat.space(history.entry.greenBytes))
                 XCTAssertEqual(presentation.countText, L10n.text("\(history.entry.greenCount) 项", "\(history.entry.greenCount) items"))
                 XCTAssertEqual(presentation.actionableDetail, hasItems ? L10n.text("需重新扫描", "Rescan Required") : L10n.text("历史摘要", "Scan Summary"))
                 XCTAssertEqual(presentation.notice, hasItems
@@ -234,11 +237,12 @@ final class MiniWindowCleanupPresentationTests: XCTestCase {
             XCTAssertEqual(view.staleCleanupSummaryNotice,
                            L10n.text("需重新扫描后才能清理", "Rescan before cleanup"))
             XCTAssertEqual(view.cleanupActionableDetail, L10n.text("需重新扫描", "Rescan Required"))
-            XCTAssertEqual(view.cleanupPageBytesText, ByteFormat.string(history.greenBytes))
+            // D128 (old value: ByteFormat.string, KiB-based): iStat's disk-space format.
+            XCTAssertEqual(view.cleanupPageBytesText, IStatNumberFormat.space(history.greenBytes))
             XCTAssertEqual(view.cleanupPageCountText, L10n.text("6 项", "6 items"))
             let items = (1...6).map { legacyItem($0) }
             store.result = ScanResult(generatedAt: Date(), scanSeconds: 1, system: system(), groups: [], items: items, deniedPaths: [])
-            XCTAssertEqual(view.cleanupPageBytesText, ByteFormat.string(history.greenBytes),
+            XCTAssertEqual(view.cleanupPageBytesText, IStatNumberFormat.space(history.greenBytes),
                            "Legacy page rows do not replace the global Smart Scan number")
             let expected = Array(store.items(for: .green).filter(\.canMoveToTrash).prefix(4))
             XCTAssertEqual(view.actionableCleanupItems, expected)

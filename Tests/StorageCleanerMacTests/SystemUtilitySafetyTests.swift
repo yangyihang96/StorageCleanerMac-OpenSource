@@ -924,7 +924,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(markdown.contains("应用文件和关联文件一起移到废纸篓"))
         XCTAssertTrue(markdown.contains("复制或导出只会生成复核清单"))
         XCTAssertTrue(markdown.contains("不会卸载应用、移动关联文件或清空废纸篓"))
-        XCTAssertTrue(markdown.contains(ByteFormat.string(app.totalFootprintBytes)))
+        // D178: decimal (was `ByteFormat.string`, binary).
+        XCTAssertTrue(markdown.contains(ByteFormat.storageString(app.totalFootprintBytes)))
         XCTAssertTrue(markdown.contains("Old Tool"))
         XCTAssertTrue(markdown.contains("/tmp/Old Tool-cache"))
     }
@@ -988,65 +989,47 @@ final class SystemUtilitySafetyTests: XCTestCase {
             source.range(of: "private struct InstalledAppIcon", range: rowStart.upperBound..<source.endIndex)
         )
         let rowSource = String(source[rowStart.lowerBound..<rowEnd.lowerBound])
-
-        // Native List selection and accessibility activation open review, never execute cleanup.
         XCTAssertEqual(rowSource.components(separatedBy: "store.requestUninstall(app)").count - 1, 0)
-        XCTAssertTrue(source.contains("FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,"))
-        // D67 round 6 (main-session review): selecting a row, by click or arrow
-        // keys, never opens the preview; the primary action does, and closing
-        // the preview keeps the selection. Native coverage:
-        // FeatureLightfieldContractTests.testProductionUninstallRowSelectionNeverOpensPreview.
-        XCTAssertFalse(source.contains(".onChange(of: selectedApplicationID)"))
-        let page = try XCTUnwrap(source.range(of: "private var resultContent: some View"))
-        let pageEnd = try XCTUnwrap(source.range(of: "private var lightfieldResultControls: some View", range: page.upperBound..<source.endIndex))
-        let pageSource = String(source[page.lowerBound..<pageEnd.lowerBound])
-        XCTAssertEqual(pageSource.components(separatedBy: "store.requestUninstall(app)").count - 1, 1,
-            "Only the primary action opens the preview")
-        XCTAssertTrue(pageSource.contains("actionTitle: L10n.text(\"卸载所选\", \"Uninstall Selected\")"))
-        let binding = try XCTUnwrap(source.range(of: "private var uninstallPreviewBinding: Binding<Bool>"))
-        let bindingEnd = try XCTUnwrap(source.range(of: "private var uninstallSortMenu", range: binding.upperBound..<source.endIndex))
-        XCTAssertFalse(source[binding.lowerBound..<bindingEnd.lowerBound].contains("selectedApplicationID = nil"),
-            "Closing the preview keeps the selection")
-        let list = try String(contentsOf: viewURL.deletingLastPathComponent()
-            .appendingPathComponent("DesignSystem/FeatureLightfieldUninstallList.swift"), encoding: .utf8)
-        XCTAssertTrue(list.contains("Button { select(app) } label: {"))
-        let move = try XCTUnwrap(list.range(of: ".onMoveCommand"))
-        XCTAssertFalse(list[move.lowerBound...].contains("review("), "Arrow keys only select")
-        XCTAssertTrue(rowSource.contains(".appButtonChrome(.selectionRow)"))
-        XCTAssertTrue(rowSource.contains("Button(action: select)"))
         XCTAssertFalse(rowSource.contains("confirmUninstall"))
-        XCTAssertTrue(rowSource.contains(".contextMenu {"))
-        let menuStart = try XCTUnwrap(rowSource.range(of: ".contextMenu {")?.lowerBound)
-        let menuEnd = rowSource.endIndex
-        let contextActions = String(rowSource[menuStart..<menuEnd])
-        XCTAssertTrue(contextActions.contains("store.copyPath(app.path)"))
-        XCTAssertTrue(contextActions.contains("store.reveal(app.path)"))
-        XCTAssertFalse(contextActions.contains("requestUninstall"))
-        XCTAssertTrue(rowSource.contains("Text(app.name)"))
-        XCTAssertTrue(rowSource.contains("Text(app.versionDisplay)"))
-        XCTAssertTrue(rowSource.contains("ByteFormat.string(app.sizeBytes)"))
-        XCTAssertFalse(rowSource.contains("建议卸载"))
-        XCTAssertTrue(rowSource.contains(".help(app.path)"))
-        XCTAssertFalse(rowSource.contains("openExternalAppManager"))
-        XCTAssertFalse(rowSource.contains("confirmRelatedAppCleanup"))
+
+        // CleanMyMac Applications manager: a row, a group or an item checkbox
+        // only changes the selection; the page's primary action is the one
+        // place a removal starts (tiles run their own items through the same
+        // model call), and the running-app sheet comes before any move.
+        let manager = try String(contentsOf: viewURL.deletingLastPathComponent()
+            .appendingPathComponent("ApplicationsManager/ApplicationsManagerView.swift"), encoding: .utf8)
+        XCTAssertEqual(manager.components(separatedBy: "model.requestRemoval()").count - 1, 1)
+        // D154: the one action is the manager footer's primary button.
+        XCTAssertTrue(manager.contains("onPrimary: { model.requestRemoval() }"))
+        XCTAssertTrue(manager.contains("Button { model.toggle(entry) } label: {"))
+        XCTAssertFalse(manager.contains("confirmUninstall"))
+        XCTAssertFalse(manager.contains("store.requestUninstall("))
+        XCTAssertTrue(manager.contains(".sheet(isPresented: terminatorBinding) { ApplicationTerminatorSheet(model: model) }"))
+        // Resuming from Operation History keeps the existing review sheet.
+        XCTAssertTrue(manager.contains("if let app = store.pendingUninstallApp { UninstallPreviewSheet(store: store, app: app) }"))
+        let model = try String(contentsOf: viewURL.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Features/AppLifecycle/Uninstaller/ApplicationsManagerModel.swift"), encoding: .utf8)
+        XCTAssertTrue(model.contains("guard phase == .browsing, hasSelection else { return }"))
     }
 
     func testUninstallPageUsesOneInAppTrashEligibilityFilter() throws {
-        let viewURL = URL(fileURLWithPath: #filePath)
+        let viewsURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
-        let source = try String(contentsOf: viewURL, encoding: .utf8)
+            .appendingPathComponent("Sources/StorageCleanerMac/Views")
+        let source = try String(contentsOf: viewsURL.appendingPathComponent("SystemUtilitiesView.swift"), encoding: .utf8)
         let viewStart = try XCTUnwrap(source.range(of: "struct AppUninstallerView: View"))
-        let viewEnd = try XCTUnwrap(
-            source.range(of: "private struct InstalledAppRow: View", range: viewStart.upperBound..<source.endIndex)
-        )
+        let viewEnd = try XCTUnwrap(source.range(of: "struct RelatedAppFilesReviewSheet: View", range: viewStart.upperBound..<source.endIndex))
         let viewSource = String(source[viewStart.lowerBound..<viewEnd.lowerBound])
-
-        XCTAssertTrue(viewSource.contains("store.installedApps.filter(\\.canMoveToTrash)"))
-        XCTAssertTrue(viewSource.contains("apps: manageableApps"))
+        XCTAssertTrue(viewSource.contains("ApplicationsManagerView(store: store)"))
         XCTAssertFalse(viewSource.contains("openExternalAppManager"))
+        // The manager keeps the page's one eligibility rule for its inventory.
+        let manager = try String(contentsOf: viewsURL.appendingPathComponent("ApplicationsManager/ApplicationsManagerView.swift"), encoding: .utf8)
+        XCTAssertTrue(manager.contains("store.installedApps.filter(\\.canMoveToTrash)"))
+        XCTAssertTrue(manager.contains("model.load(inventory: manageableApps, readsDisk: readsDisk)"))
+        XCTAssertFalse(manager.contains("model.load(inventory: store.installedApps)"))
+        XCTAssertFalse(manager.contains("openExternalAppManager"))
     }
 
     func testActionMessagesSeparateTrashMoveFromFreedSpace() throws {
@@ -1058,7 +1041,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
         let source = try String(contentsOf: storeURL, encoding: .utf8)
 
         XCTAssertTrue(source.contains("已移到废纸篓，清空前可恢复"))
-        XCTAssertTrue(source.contains("\\(movedCount) 个可安全清理项目已移到废纸篓，清空后才释放空间"))
+        // D178: the count is grouped (was "\\(movedCount) 个…").
+        XCTAssertTrue(source.contains("\\(ByteFormat.count(movedCount)) 个可安全清理项目已移到废纸篓，清空后才释放空间"))
         XCTAssertTrue(source.contains("已将 \\(app.name) 移到废纸篓，清空前可恢复"))
         XCTAssertTrue(source.contains("清空后才释放空间"))
         XCTAssertTrue(source.contains("space is freed after Trash is emptied"))
@@ -2711,7 +2695,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
         let energyPage = try String(contentsOf: sourceURL.deletingLastPathComponent().appendingPathComponent("LightfieldEnergyPage.swift"), encoding: .utf8)
         XCTAssertTrue(energyPage.contains("EnergyImpactListPresenter.presentation("))
         XCTAssertTrue(source.contains("LightfieldEnergyPage(snapshot: snapshot"))
-        XCTAssertTrue(source.contains("store.installedApps.filter(\\.canMoveToTrash)"))
+        let manager = try String(contentsOf: sourceURL.deletingLastPathComponent()
+            .appendingPathComponent("ApplicationsManager/ApplicationsManagerView.swift"), encoding: .utf8)
+        XCTAssertTrue(manager.contains("store.installedApps.filter(\\.canMoveToTrash)"))
         XCTAssertFalse(source.contains("openExternalAppManager"))
         XCTAssertFalse(source.contains("没有可在此关闭的登录项"))
         XCTAssertFalse(source.contains("按应用查看累计能耗与当前功率"))
@@ -2793,7 +2779,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             versionFile.components(separatedBy: "DEFAULT_APP_BUILD=").count - 1,
             1
         )
-        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=2.0.0"))
+        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=2.0.1"))
         XCTAssertNotNil(
             versionFile.range(
                 of: #"(?m)^DEFAULT_APP_BUILD=\d{14}$"#,
@@ -3178,7 +3164,8 @@ final class SystemUtilitySafetyTests: XCTestCase {
             "store.refreshStartupItems(includeBackgroundTaskDiagnostic: true)"
         ))
         XCTAssertTrue(utilitiesSource.contains("store.performRecommendedMemoryAction()"))
-        XCTAssertTrue(utilitiesSource.contains("store.refreshInstalledApps()"))
+        let managerSource = try String(contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift"), encoding: .utf8)
+        XCTAssertTrue(managerSource.contains("store.refreshInstalledApps()"))
         // r2-perf-startup task 1: explicit demand cancels the bounded launch wait,
         // then invokes the same inventory scan through the existing page action.
         XCTAssertTrue(appUpdatesSource.contains("onScan: refreshImmediately"))
@@ -3215,7 +3202,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             .map { try String(contentsOf: $0, encoding: .utf8) }
             .joined(separator: "\n")
 
-        XCTAssertTrue(packageSource.contains("exact: \"2.9.4\""))
+        XCTAssertTrue(packageSource.contains("exact: \"2.10.0\""))
         XCTAssertTrue(updaterSource.contains("SPUStandardUpdaterController"))
         XCTAssertTrue(updaterSource.contains("checkForUpdates(nil)"))
         XCTAssertFalse(applicationSource.contains("api.github.com/repos/yangyihang96/StorageCleanerMac/releases/latest"))
@@ -3323,15 +3310,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         )
 
         XCTAssertTrue(appSource.contains("CommandMenu(L10n.text(\"导航\", \"Navigate\"))"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.overview.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.healthHub.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.performance.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.green.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.privacy.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.devCaches.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.largeFiles.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.migration.title"))
-        XCTAssertTrue(appSource.contains("ReviewFilter.duplicates.title"))
+        // D154: CleanMyMac's View menu — its modules in sidebar order, ⌘1–⌘9.
+        XCTAssertTrue(appSource.contains("ForEach(Array(CareStudioFamily.allCases.enumerated()), id: \\.element) { index, family in"))
+        XCTAssertTrue(appSource.contains("store.showFilter(family.primaryRoute)"))
+        XCTAssertTrue(appSource.contains(".keyboardShortcut(KeyEquivalent(Character(\"\\(index + 1)\")), modifiers: [.command])"))
         XCTAssertFalse(appSource.contains("ReviewFilter.scanHistory.title"))
         XCTAssertFalse(appSource.contains("keyboardShortcut(\"7\""))
     }
@@ -3404,37 +3386,32 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
         XCTAssertFalse(sidebarSource.contains("@Binding var isCompact: Bool"))
         XCTAssertFalse(sidebarSource.contains("SidebarBrandHeader"))
+        // D154: CleanMyMac's ten modules, eight above and My Tools / My
+        // Activity at the foot, without group titles; a window tiled below
+        // the minimum scrolls the list (it fits otherwise).
         XCTAssertTrue(sidebarSource.contains("ScrollView(.vertical)"))
-        XCTAssertTrue(sidebarSource.contains("ForEach(SidebarGroup.allCases)"))
-        XCTAssertTrue(sidebarSource.contains("ReviewFilter.sidebarItems(in: group)"))
-        XCTAssertTrue(sidebarSource.contains("struct SidebarSectionView<Content: View>: View"))
-        XCTAssertTrue(sidebarSource.contains("@AppStorage private var isExpanded: Bool"))
-        XCTAssertTrue(sidebarSource.contains("struct SidebarFooter: View"))
-        XCTAssertTrue(sidebarSource.contains("SettingsLink"))
-        // D53 §2.2: the footer also has an icon-rail form.
-        XCTAssertTrue(sidebarSource.contains("SidebarFooter(isRail: isRail)"))
+        XCTAssertTrue(sidebarSource.contains("ForEach(CareStudioFamily.allCases.filter { !$0.isFooter })"))
+        XCTAssertTrue(sidebarSource.contains("ForEach(CareStudioFamily.allCases.filter(\\.isFooter))"))
+        XCTAssertFalse(sidebarSource.contains("ForEach(SidebarGroup.allCases)"))
+        XCTAssertFalse(sidebarSource.contains("struct SidebarSectionView"))
+        // Settings is in the app menu (⌘,), as on CleanMyMac; the foot keeps
+        // the version line with the Beta mark (D94) and the fold button.
+        XCTAssertFalse(sidebarSource.contains("SettingsLink"))
+        XCTAssertTrue(sidebarSource.contains("Text(SidebarVersionLabel.text)"))
+        XCTAssertTrue(appSource.contains("Settings {"))
         XCTAssertFalse(sidebarSource.contains(".overlay(alignment: .bottom)"))
         XCTAssertFalse(sidebarSource.contains("AppDesignTokens.Layout.sidebarFooterHeight"))
         XCTAssertFalse(sidebarSource.contains(".scrollIndicators(.hidden)"))
-        // D53 §2.2 / audit 2.16: the fixed title area replaces the extra
-        // 44 pt traffic-light spacer (the sidebar already clears the toolbar band).
-        XCTAssertTrue(sidebarSource.contains("AppDesignTokens.Layout.sidebarTopInset"))
-        XCTAssertTrue(sidebarSource.contains("title ?? filter.sidebarTitle"))
         let navigationRow = try XCTUnwrap(
-            sidebarSource.components(separatedBy: "private struct SidebarNavigationRow: View").last?
-                .components(separatedBy: "private struct SidebarFooter: View").first
+            sidebarSource.components(separatedBy: "private struct SidebarModuleRow: View").last?
+                .components(separatedBy: "private struct SidebarSelectionBlock: View").first
         )
-        // D67: clickable navigation uses 20 pt approved art and keeps module selection/hover.
-        XCTAssertTrue(navigationRow.contains("FeatureLightfieldArtwork(art:"))
-        XCTAssertTrue(navigationRow.contains(".frame(width: 20, height: 20)"))
-        XCTAssertTrue(navigationRow.contains("GeneratedArt.module(for: filter)"))
-        XCTAssertTrue(navigationRow.contains("pigment: pigment"))
-        // The highlighted row draws the one sliding selection block and white
-        // text; other rows only show the hover fill.
-        XCTAssertTrue(navigationRow.contains("if isHighlighted {\n                    SidebarSelectionBlock(pigment: pigment)\n                        .matchedGeometryEffect(id: \"sidebar.selection\", in: namespace)"))
-        XCTAssertTrue(navigationRow.contains(".foregroundStyle(isHighlighted ? Color.white : surfaces.textPrimary)"))
-        XCTAssertTrue(navigationRow.contains("if !isHighlighted {\n                    RoundedRectangle(cornerRadius: AppDesignTokens.Corner.row, style: .continuous)\n                        .fill(isHovered ? surfaces.hover : .clear)"))
-        XCTAssertTrue(sidebarSource.contains("filter.moduleTheme.pigment"))
+        // The module mark, the one sliding selection block, and hover on the others.
+        XCTAssertTrue(navigationRow.contains("FeatureLightfieldArtwork(art: family.art, variant: .header)"))
+        XCTAssertTrue(navigationRow.contains("if isHighlighted {\n                    SidebarSelectionBlock(family: family, onStudio: onStudio)\n                        .matchedGeometryEffect(id: \"sidebar.selection\", in: namespace)"))
+        XCTAssertTrue(navigationRow.contains("if !isHighlighted {"))
+        XCTAssertTrue(navigationRow.contains("Text(family.title)"))
+        XCTAssertTrue(sidebarSource.contains("family.primaryRoute.moduleTheme.pigment"))
         XCTAssertTrue(sidebarSource.contains("AppMotion.resolved(.hover, reduceMotion: reduceMotion)"))
         XCTAssertTrue(sidebarSource.contains("accessibilityAddTraits(isSelected ? .isSelected : [])"))
         XCTAssertFalse(sidebarSource.contains("sidebarSystemImage"))
@@ -3444,7 +3421,6 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(sidebarSource.contains("Button(action: action)"))
         XCTAssertTrue(sidebarSource.contains(".buttonStyle(ResponsivePlainButtonStyle())"))
         XCTAssertFalse(sidebarSource.contains("sidebar.left"))
-        XCTAssertTrue(sidebarSource.contains("if isExpanded"))
         XCTAssertTrue(moduleThemeSource.contains("enum SidebarGroup"))
         XCTAssertTrue(moduleThemeSource.contains("var expansionDefaultsKey"))
         XCTAssertTrue(utilitySource.contains("struct SystemUtilitiesHubView"))
@@ -3471,14 +3447,23 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertFalse(contentSource.contains("SettingsLink"))
         XCTAssertFalse(contentSource.contains("sidebar.compact.v1"))
         XCTAssertTrue(contentSource.contains(".toolbar(removing: .sidebarToggle)"))
-        // D53 §2.2: full sidebar or icon rail, sized by its presentation.
-        XCTAssertTrue(contentSource.contains("FeatureLightfield.owns(activePresentationFilter)"))
+        // D53 §2.2: full sidebar or icon rail, sized by its presentation. The
+        // full sidebar is 210 pt on every page (round 6); since D94 nothing in
+        // the window chrome depends on whether the page is a D67 page.
+        XCTAssertTrue(contentSource.contains("ideal: sidebarMode == .full ? FeatureLightfield.sidebarWidth : sidebarMode.idealWidth"))
         XCTAssertTrue(contentSource.contains("FeatureLightfield.sidebarWidth : sidebarMode.idealWidth"))
         XCTAssertTrue(contentSource.contains(".focusedSceneValue("))
-        XCTAssertTrue(contentSource.contains("#selector(NSSplitViewController.toggleSidebar(_:))"))
+        // D175: ⌃⌘S folds the sidebar to icons and back and never hides the
+        // column (was XCTAssertTrue: ContentView sent toggleSidebar).
+        XCTAssertFalse(contentSource.contains("#selector(NSSplitViewController.toggleSidebar(_:))"))
+        XCTAssertTrue(contentSource.contains("MainWindowSidebarAction { toggleSidebarPresentation() }"))
+        XCTAssertTrue(contentSource.contains("private func toggleSidebarPresentation() {\n        withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {\n            sidebarPresentation.toggle()"))
+        XCTAssertTrue(modulePresentationSource.contains("coordinator.keepSidebarShown(in: window)"))
+        XCTAssertTrue(modulePresentationSource.contains("sidebarItem.canCollapse = false"))
         XCTAssertTrue(appSource.contains("MainWindowSidebarCommands()"))
         XCTAssertTrue(appSource.contains("CommandGroup(replacing: .sidebar)"))
-        XCTAssertTrue(appSource.contains("显示或隐藏边栏"))
+        // D175: the item says what it does now (was "显示或隐藏边栏").
+        XCTAssertTrue(appSource.contains("L10n.text(\"展开或收起侧栏\", \"Expand or Collapse Sidebar\")"))
         XCTAssertTrue(appSource.contains(".disabled(sidebarAction == nil)"))
         XCTAssertFalse(appSource.contains("#selector(NSSplitViewController.toggleSidebar(_:))"))
         XCTAssertFalse(glassSource.contains("window.toolbar = nil"))
@@ -3641,7 +3626,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(sidebarSource.contains("Task { @MainActor in\n            selection = filter"))
+        // D154: a module row selects its first page after the view update.
+        XCTAssertTrue(sidebarSource.contains("Task { @MainActor in\n            let route = family.primaryRoute"))
+        XCTAssertTrue(sidebarSource.contains("            selection = route\n"))
         XCTAssertTrue(contentSource.contains(".onChange(of: navigationState.route) { _, newRoute in\n            Task { @MainActor in"))
     }
 
@@ -3675,11 +3662,16 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertFalse(storeSource.contains("@Published var selectedUtilityFilter"))
         XCTAssertTrue(storeSource.contains("@Published var hasScannedInstalledApps = false"))
         XCTAssertFalse(utilitySource.contains("Task.sleep(for: .milliseconds(300))"))
-        XCTAssertTrue(utilitySource.contains("AppUninstallScanLandingView(store: store)"))
+        // D154: CleanMyMac's Applications landing on the studio page.
+        XCTAssertTrue(utilitySource.contains("CareStudioApplicationsStart(store: store)"))
         XCTAssertTrue(utilitySource.contains("!store.hasScannedInstalledApps"))
         XCTAssertFalse(utilitySource.contains("!store.hasScannedInstalledApps || store.isLoadingInstalledApps"))
         XCTAssertTrue(utilitySource.contains("List {"))
-        XCTAssertTrue(utilitySource.contains("FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,"))
+        // CleanMyMac Applications manager (handoffs/app-lifecycle-cmm.md):
+        // the scanned inventory feeds one manager with lazy rows.
+        XCTAssertTrue(utilitySource.contains("ApplicationsManagerView(store: store)"))
+        let managerSource = try String(contentsOf: projectRoot.appendingPathComponent("Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift"), encoding: .utf8)
+        XCTAssertTrue(managerSource.contains("LazyVStack(spacing: 0)"))
         XCTAssertTrue(utilitySource.contains("!store.hasScannedStartupItems"))
         XCTAssertTrue(utilitySource.contains("ForEach(apps)"))
         XCTAssertFalse(utilitySource.contains(".id(selectedTool.wrappedValue)"))
@@ -4462,14 +4454,14 @@ final class SystemUtilitySafetyTests: XCTestCase {
         store.confirmTrashAllGreen()
         XCTAssertEqual(store.pendingBulkTrashItems.map(\.id), [cache.id])
 
-        store.pendingEmptyTrashSummary = TrashSummary(itemCount: 1, totalBytes: 42)
-        store.confirmEmptyTrash()
-        XCTAssertEqual(store.pendingEmptyTrashSummary, TrashSummary(itemCount: 1, totalBytes: 42))
+        store.pendingEmptyTrash = FrozenTrash.testFixture(names: ["fixture"])
+        store.confirmEmptyTrash(acknowledgesPermanentDeletion: true, acknowledgesTrashContentsReviewed: true)
+        XCTAssertEqual(store.pendingEmptyTrash, FrozenTrash.testFixture(names: ["fixture"]))
         XCTAssertFalse(store.isEmptyingTrash)
 
         store.pendingTrashItem = nil
         store.pendingBulkTrashItems = []
-        store.pendingEmptyTrashSummary = nil
+        store.pendingEmptyTrash = nil
         store.isCheckingTrashSummary = false
         store.isCheckingScanReadiness = true
 
@@ -4488,9 +4480,9 @@ final class SystemUtilitySafetyTests: XCTestCase {
         store.confirmTrashAllGreen()
         XCTAssertEqual(store.pendingBulkTrashItems.map(\.id), [cache.id])
 
-        store.pendingEmptyTrashSummary = TrashSummary(itemCount: 1, totalBytes: 42)
-        store.confirmEmptyTrash()
-        XCTAssertEqual(store.pendingEmptyTrashSummary, TrashSummary(itemCount: 1, totalBytes: 42))
+        store.pendingEmptyTrash = FrozenTrash.testFixture(names: ["fixture"])
+        store.confirmEmptyTrash(acknowledgesPermanentDeletion: true, acknowledgesTrashContentsReviewed: true)
+        XCTAssertEqual(store.pendingEmptyTrash, FrozenTrash.testFixture(names: ["fixture"]))
         XCTAssertFalse(store.isEmptyingTrash)
         XCTAssertEqual(operations.unexpectedCalls, [])
     }
@@ -4835,7 +4827,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             installedRowSource.components(separatedBy: "store.requestUninstall(app)").count - 1,
             0
         )
-        XCTAssertTrue(utilitySource.contains("FeatureLightfieldUninstallList(apps: presentation.apps, selectedID: selectedApplicationID,"))
+        XCTAssertTrue(utilitySource.contains("ApplicationsManagerView(store: store)"))
         XCTAssertTrue(installedRowSource.contains(".appButtonChrome(.selectionRow)"))
         XCTAssertTrue(installedRowSource.contains("Button(action: select)"))
         XCTAssertFalse(installedRowSource.contains("confirmUninstall"))
@@ -5102,14 +5094,14 @@ final class SystemUtilitySafetyTests: XCTestCase {
 
         store.requestTrash(cache)
         store.requestTrashAllGreen()
-        store.pendingEmptyTrashSummary = TrashSummary(itemCount: 1, totalBytes: 42)
+        store.pendingEmptyTrash = FrozenTrash.testFixture(names: ["fixture"])
         store.previewOneClickAppUpdates()
 
         let activeOwner = await coordinator.activeOwner
         XCTAssertNil(activeOwner)
         XCTAssertNotNil(store.pendingTrashItem)
         XCTAssertFalse(store.pendingBulkTrashItems.isEmpty)
-        XCTAssertNotNil(store.pendingEmptyTrashSummary)
+        XCTAssertNotNil(store.pendingEmptyTrash)
         XCTAssertNotNil(store.pendingOneClickUpdatePlan)
     }
 

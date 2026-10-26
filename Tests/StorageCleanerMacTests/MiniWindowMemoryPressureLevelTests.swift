@@ -199,15 +199,19 @@ final class MiniWindowMemoryPressureLevelTests: XCTestCase {
     @MainActor
     func testPressureHistoryDrawsEachBarInItsOwnLevelColor() throws {
         let end = Date(timeIntervalSince1970: 1_800_000_000)
-        // The first half minute normal at 40 %, the second critical at 90 %.
-        let points = (0..<60).map { index in
-            sample(at: end.timeIntervalSince1970 - Double(59 - index), percent: index < 30 ? 40 : 90, code: index < 30 ? 1 : 4)
+        // The first five minutes normal at 40 %, the next five critical at
+        // 90 %. D130 (2026-10-19): a history is one of iStat's windows, here
+        // 10 minutes of 5 s buckets, one sample each; 60 s is no longer one
+        // (was 60 samples 1 s apart, half normal, `duration: 60`).
+        let points = (0..<120).map { index in
+            sample(at: end.timeIntervalSince1970 - Double(119 - index) * 5,
+                   percent: index < 60 ? 40 : 90, code: index < 60 ? 1 : 4)
         }
         let snapshot = memorySnapshot(headroom: 10, available: 0.1, compressed: 0.3, swapGiB: 4, measured: .critical)
         let scale: CGFloat = 2
         let width = MiniWindowStyleTokens.historyWidth - 2 * MiniWindowStyleTokens.contentInset
         let view = GeekMemoryHistoryHoverDetail(
-            points: points, duration: 60, currentValue: "90%", pressure: "高", snapshot: snapshot
+            points: points, duration: 600, currentValue: "90%", pressure: "高", snapshot: snapshot
         )
         .environment(\.miniWindowPageProvidesInset, true)
         .frame(width: width)

@@ -1,4 +1,5 @@
 import AppKit
+import CombinedStatusIcon
 
 @MainActor
 enum MenuBarStatusRenderer {
@@ -33,7 +34,9 @@ enum MenuBarStatusRenderer {
         deviceStatus: MenuBarDeviceStatusSnapshot = .empty,
         appearance: NSAppearance? = nil, highlighted: Bool = false,
         statusPreset: PanelStatusColorPreset = .original,
-        statusCustomDayHex: String = "", statusCustomNightHex: String = ""
+        statusCustomDayHex: String = "", statusCustomNightHex: String = "",
+        combinedStatus: StatusSnapshot = .placeholder,
+        combinedStatusSettings: CombinedStatusIconSettings = .standard
     ) -> NSImage {
         let ink = statusPreset.ink(
             dark: appearance?.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
@@ -45,6 +48,14 @@ enum MenuBarStatusRenderer {
                                                     highlighted: highlighted, statusPreset: statusPreset,
                                                     statusCustomDayHex: statusCustomDayHex,
                                                     statusCustomNightHex: statusCustomNightHex)
+        case .combinedStatus:
+            // D153: a still frame of the combined icon (no charging effect);
+            // the status item draws it live through its own presenter.
+            let size = CGFloat(combinedStatusSettings.iconSize)
+            return CombinedStatusIconStatusItemPresenter.previewImage(
+                snapshot: combinedStatus, settings: combinedStatusSettings, size: size,
+                scale: NSScreen.main?.backingScaleFactor ?? 2, appearance: appearance, foreground: ink
+            ) ?? NSImage(size: NSSize(width: size, height: size))
         case .memory:
             return recolored(image(for: snapshot), with: ink)
         case .cpu:

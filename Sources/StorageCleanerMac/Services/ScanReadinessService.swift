@@ -198,8 +198,8 @@ enum ScanReadinessService {
             let deniedCount = lastDeniedCount ?? 0
             let detail = deniedCount > 0
                 ? L10n.text(
-                    "上次扫描 \(deniedCount) 处受限，点击检查当前状态",
-                    "Last scan had \(deniedCount) access gaps; check current status"
+                    "上次扫描 \(ByteFormat.count(deniedCount)) 处受限，点击检查当前状态",
+                    "Last scan had \(ByteFormat.count(deniedCount)) access gaps; check current status"
                 )
                 : L10n.text("点击检查当前关键位置", "Check current key locations")
 
@@ -230,8 +230,8 @@ enum ScanReadinessService {
             return ScanReadinessDisplayText(
                 title: L10n.text("完整磁盘访问已生效", "Full Disk Access Active"),
                 detail: L10n.text(
-                    "\(summary.blockedCount) 个位置仍未读取，通常重启本应用或重新检查即可，不需要重复授权文件夹。",
-                    "\(summary.blockedCount) location(s) still did not read; restart or check again instead of granting duplicate folder access."
+                    "\(ByteFormat.count(summary.blockedCount)) 个位置仍未读取，通常重启本应用或重新检查即可，不需要重复授权文件夹。",
+                    "\(ByteFormat.count(summary.blockedCount)) location(s) still did not read; restart or check again instead of granting duplicate folder access."
                 ),
                 actionTitle: L10n.text("检查当前", "Check Current"),
                 actionSystemImage: "checklist"
@@ -250,8 +250,8 @@ enum ScanReadinessService {
         return ScanReadinessDisplayText(
             title: L10n.text("当前权限受限", "Current Access Limited"),
             detail: L10n.text(
-                "当前 \(summary.blockedCount) 处未读取；若已开启完整磁盘访问，请重启本应用后检查。",
-                "\(summary.blockedCount) location(s) did not read; if Full Disk Access is already enabled, restart the app and check again."
+                "当前 \(ByteFormat.count(summary.blockedCount)) 处未读取；若已开启完整磁盘访问，请重启本应用后检查。",
+                "\(ByteFormat.count(summary.blockedCount)) location(s) did not read; if Full Disk Access is already enabled, restart the app and check again."
             ),
             actionTitle: L10n.text("检查当前", "Check Current"),
             actionSystemImage: "checklist"
@@ -283,6 +283,11 @@ enum ScanReadinessService {
     ) -> ScanReadinessStatus {
         guard fileExists(path) else { return .missing }
         return canReadDirectory(path) ? .readable : .needsPermission
+    }
+
+    /// D100 G5: the folders among `paths` that can be listed now (read-only).
+    static func readableDirectories(_ paths: [String]) -> Set<String> {
+        Set(paths.filter { canReadDirectory($0) })
     }
 
     private static func pathExists(_ path: String) -> Bool {

@@ -21,6 +21,10 @@ struct PerformanceBenchmarkWorkspaceView: View {
     @State private var helperAvailable = false
     @State private var exportFeedback: String?
     private var displayedResult: BenchmarkV7Result? { selectedRecord ?? benchmarkStore.v7LatestResult }
+    /// D72/v11 is the current entry: legacy results keep the landing; only a
+    /// v11 result or an opened record replaces it. The entry check uses the
+    /// same test, so a landing over a legacy history is checked too.
+    private var showsLandingPage: Bool { showsLanding || (selectedRecord == nil && displayedResult?.mSeriesV11 == nil) }
 
     /// Reconstructed Workspaces read the same Store-owned frozen session.
     var runningPresentation: MSeriesV11PagePresentation.Run {
@@ -51,12 +55,13 @@ struct PerformanceBenchmarkWorkspaceView: View {
                             PerformanceBenchmarkV11HistoryList(history: benchmarkStore.v7History, onOpen: openRecord)
                         }
                     }
-            } else if showsLanding || (selectedRecord == nil && displayedResult?.mSeriesV11 == nil) {
+            } else if showsLandingPage {
                 // D72/v11 is the current entry. Legacy results stay accessible
                 // through history, never replace the approved current landing.
                 PerformanceBenchmarkLandingView(canStart: canStartBenchmark, explanation: explanation,
                     onStart: startV11, onShowSaved: { showsLanding = false; showsSavedDashboard = true }, identity: identity, catalog: catalog,
-                    preflight: benchmarkStore.v7Preflight, helperAvailable: helperAvailable, selection: $selection)
+                    preflight: benchmarkStore.v7Preflight, isPreflighting: benchmarkStore.isV7Preflighting,
+                    helperAvailable: helperAvailable, selection: $selection)
             } else if let result = displayedResult, result.mSeriesV11 != nil {
                 PerformanceBenchmarkV11ResultPage(result: result, history: benchmarkStore.v7History,
                     catalog: catalog, canStart: canStartBenchmark, onStart: prepareNewTest, onOpenHistory: openRecord,
@@ -124,7 +129,7 @@ struct PerformanceBenchmarkWorkspaceView: View {
             catalog = loaded
             identity = AppleSiliconIdentifier.identify(evidence, catalog: loaded)
             helperAvailable = helperMonitor.capabilityAvailability == .ready
-            if displayedResult == nil && !benchmarkStore.isRunning {
+            if showsLandingPage && !showsSavedDashboard && !benchmarkStore.isRunning {
                 benchmarkStore.preflightV7(plan: MSeriesV11Protocol.plan(mode: selection.mode), targetDirectory: MSeriesProtocol.temporaryRoot)
             }
         }

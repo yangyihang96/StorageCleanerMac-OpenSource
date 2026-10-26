@@ -15,6 +15,7 @@ enum OperationSurface: String, CaseIterable, Sendable {
     case duplicateFiles
     case fileAnalysis
     case browserHistory
+    case emptyTrash
 
     var title: String {
         switch self {
@@ -25,6 +26,7 @@ enum OperationSurface: String, CaseIterable, Sendable {
         case .duplicateFiles: L10n.text("重复文件", "Duplicate Files")
         case .fileAnalysis: L10n.text("文件分析移到废纸篓", "File Analysis: Move to Trash")
         case .browserHistory: L10n.text("浏览器隐私历史删除", "Browser History Deletion")
+        case .emptyTrash: L10n.text("清空废纸篓", "Empty Trash")
         }
     }
 }
@@ -42,20 +44,6 @@ extension OperationSurface {
         if fromSmartScan { return .smartScan }
         if !items.isEmpty, items.allSatisfy({ $0.ruleID.hasPrefix("developer.") }) { return .developerTools }
         return .safeCleanup
-    }
-}
-
-/// 同一页面只用一种字节单位（P2-1）：清理计划、重复文件、卸载与回执页沿用
-/// `ByteFormat.string`；文件分析沿用 `ByteFormat.storageString`。
-enum OperationByteStyle: Sendable, Equatable {
-    case binary
-    case storage
-
-    func string(_ bytes: Int64) -> String {
-        switch self {
-        case .binary: ByteFormat.string(bytes)
-        case .storage: ByteFormat.storageString(bytes)
-        }
     }
 }
 
@@ -209,6 +197,9 @@ struct OperationConfirmationFacts: Equatable, Sendable {
     var physicalReleaseUnknown: Bool = false
     /// 其中移到废纸篓／隔离区的部分（不释放空间）。
     var trashBytes: Int64 = 0
+    /// D104 G1：移到废纸篓的部分里有明显一部分与 APFS 克隆共享或被本地快照占用时，
+    /// 清空废纸篓后预计释放的量；文件夹不逐项读取，按完整大小计。
+    var trashReclaimable: TrashReclaimable? = nil
     var quarantineBytes: Int64 = 0
     /// 其中永久删除的部分（删除后回读确认才计为释放）。
     var permanentDeletionBytes: Int64 = 0
@@ -219,7 +210,6 @@ struct OperationConfirmationFacts: Equatable, Sendable {
     var recordCount: Int? = nil
     /// 对象字段的额外警示（例如卸载勾选了含个人资料的项目）。
     var objectWarnings: [String] = []
-    var byteStyle: OperationByteStyle = .binary
 
     var itemCount: Int { items.count }
     /// 将执行的数量，与确认表头部“检查通过”同数。
@@ -240,12 +230,12 @@ struct OperationConfirmationFacts: Equatable, Sendable {
             var text: String
             if let recordCount {
                 let names = items.map(\.title).joined(separator: L10n.text("、", ", "))
-                text = L10n.text("\(recordCount) 条浏览记录（\(names)）", "\(recordCount) browsing records (\(names))")
+                text = L10n.text("\(ByteFormat.count(recordCount)) 条浏览记录（\(names)）", "\(ByteFormat.count(recordCount)) browsing records (\(names))")
             } else if notRunCount > 0 {
                 // P1-1：总数拆成将执行与不会执行，不把跳过的项目算两次。
                 text = L10n.text(
-                    "共 \(itemCount) 项：\(readyCount) 项将执行，\(notRunCount) 项不会执行（原因见清单）",
-                    "\(itemCount) items in total: \(readyCount) will run, \(notRunCount) will not (reasons in the list)"
+                    "共 \(ByteFormat.count(itemCount)) 项：\(ByteFormat.count(readyCount)) 项将执行，\(ByteFormat.count(notRunCount)) 项不会执行（原因见清单）",
+                    "\(ByteFormat.count(itemCount)) items in total: \(ByteFormat.count(readyCount)) will run, \(ByteFormat.count(notRunCount)) will not (reasons in the list)"
                 )
             } else {
                 text = L10n.items(itemCount)
@@ -287,19 +277,19 @@ struct OperationConfirmationFacts: Equatable, Sendable {
         guard names.count > limit else { return names.joined(separator: L10n.text("、", ", ")) }
         let shown = names.prefix(limit).joined(separator: L10n.text("、", ", "))
         let rest = names.count - limit
-        return L10n.text("\(shown) 等 \(names.count) 个", "\(shown) and \(rest) more")
+        return L10n.text("\(shown) 等 \(ByteFormat.count(names.count)) 个", "\(shown) and \(ByteFormat.count(rest)) more")
     }
 
     var capacityText: String {
         guard let localBytes else {
             return L10n.text("不涉及磁盘空间（只删除记录，不释放本地占用）", "No disk space involved (records only; no local space is freed)")
         }
-        let format = byteStyle.string
+        let format: (Int64) -> String = { ByteFormat.storageString($0) }
         // “至少”只用于大小未知或只量到下限（真正的下限）。
         let lowerBound = bytesAreLowerBound ? L10n.text("至少 ", "at least ") : ""
         // 有不会执行的项目时写明口径：只算将执行的项目，与表头同一组数字。
         let scope = notRunCount > 0 && recordCount == nil
-            ? L10n.text("（将执行的 \(readyCount) 项）", " (the \(readyCount) that will run)") : ""
+            ? L10n.text("（将执行的 \(ByteFormat.count(readyCount)) 项）", " (the \(ByteFormat.count(readyCount)) that will run)") : ""
         var parts = [L10n.text(
             "本地占用\(scope) \(lowerBound)\(format(localBytes))",
             "Local usage\(scope) \(lowerBound)\(format(localBytes))"
@@ -310,6 +300,18 @@ struct OperationConfirmationFacts: Equatable, Sendable {
                 parts.append(L10n.text(
                     "其中 \(format(trashBytes)) 移到废纸篓；清空废纸篓后最多释放 \(format(trashBytes))，可回收量待确认（APFS 克隆或硬链接可能不释放空间）",
                     "\(format(trashBytes)) goes to the Trash; emptying it frees at most \(format(trashBytes)), actual amount unconfirmed (APFS clones or hard links may free nothing)"
+                ))
+            } else if let trashReclaimable {
+                // D104 G1：与扫描结果表头同一口径。
+                let possible = trashReclaimable.possibleCloneBytes > 0
+                    ? L10n.text("，所选完整克隆另可能释放 \(format(trashReclaimable.possibleCloneBytes))",
+                                ", plus up to \(format(trashReclaimable.possibleCloneBytes)) from clones selected together")
+                    : ""
+                let folders = trashReclaimable.countsFoldersWhole
+                    ? L10n.text("；文件夹按完整大小计", "; folders count at full size") : ""
+                parts.append(L10n.text(
+                    "其中 \(format(trashBytes)) 移到废纸篓；清空废纸篓后预计释放 \(format(trashReclaimable.bytes))\(possible)；与 APFS 克隆共享或被本地快照占用的部分不释放\(folders)",
+                    "\(format(trashBytes)) goes to the Trash; emptying it frees about \(format(trashReclaimable.bytes))\(possible); blocks shared with APFS clones or held by a local snapshot stay\(folders)"
                 ))
             } else {
                 parts.append(L10n.text(
@@ -331,6 +333,15 @@ struct OperationConfirmationFacts: Equatable, Sendable {
             ))
         }
         return parts.joined(separator: L10n.text("；", "; "))
+    }
+
+    /// D104 G1：清空废纸篓后预计释放的量。
+    struct TrashReclaimable: Equatable, Sendable {
+        let bytes: Int64
+        /// 所选项目包含同一组的全部完整克隆时，可能另外释放的一份；0 表示不提。
+        var possibleCloneBytes: Int64 = 0
+        /// 将移走的项目里有文件夹：其内容没有读取共享情况，按完整大小计。
+        var countsFoldersWhole = false
     }
 
     /// 只能用纯文本的确认框（例如系统确认对话框）使用的同一组字段。
@@ -395,7 +406,6 @@ struct OperationCompletionTally: Equatable, Sendable {
     var unverifiedMovedBytes: Int64 = 0
     /// 已恢复到原位置的体积；不再计入“已移到废纸篓”。
     var restoredBytes: Int64 = 0
-    var byteStyle: OperationByteStyle = .binary
 
     func count(_ bucket: OperationCompletionBucket) -> Int {
         entries.filter { $0.bucket == bucket }.reduce(0) { $0 + $1.count }
@@ -427,7 +437,7 @@ struct OperationCompletionTally: Equatable, Sendable {
         guard affectsDiskSpace else {
             return [L10n.text("删除浏览记录不涉及释放磁盘空间", "Deleting browsing history does not free disk space")]
         }
-        let format = byteStyle.string
+        let format: (Int64) -> String = { ByteFormat.storageString($0) }
         var lines: [String] = []
         if movedToTrashBytes > 0 {
             if reclaimableUnknown {
@@ -575,7 +585,6 @@ struct OperationCompletionTally: Equatable, Sendable {
                     bucket: .completed, detail: L10n.text("已移到废纸篓（未释放）", "Moved to the Trash (not freed)"))
             }, movedToTrashBytes: max(0, outcome.movedBytes))
         }
-        tally.byteStyle = .storage
         // P1-2：移走的文件另有硬链接时，清空废纸篓后不一定释放。
         if !outcome.otherHardLinkPaths.isDisjoint(with: outcome.movedPaths) {
             tally.reclaimableUnknown = tally.movedToTrashBytes > 0
@@ -628,12 +637,15 @@ struct OperationCompletionTally: Equatable, Sendable {
 /// 处理后影响、为什么预选（或为什么不预选）。数据来自 D82 规则来源；
 /// 缺失时用保守文案，不留空白。
 enum CleanupPreselectionReason: String, CaseIterable, Sendable {
-    case ownerRunning, preselected, permanentDeletion, protected, reviewRequired, notReady
+    case ownerRunning, freesLittle, preselected, permanentDeletion, protected, reviewRequired, notReady
 
     var title: String {
         switch self {
         case .ownerRunning:
             L10n.text("所属应用正在运行，本次不预选", "Not preselected: its app is running")
+        case .freesLittle:
+            L10n.text("清空废纸篓后预计释放不到 1 MB 或不到列出大小的十分之一，本次不预选",
+                      "Not preselected: emptying the Trash is expected to free under 1 MB or under a tenth of its size")
         case .preselected:
             L10n.text("绿色项目符合本次安全策略，按默认规则预选；执行前仍会复查", "Preselected: a green item that meets the safety policy; rechecked before cleanup")
         case .permanentDeletion:
@@ -715,9 +727,10 @@ struct CleanupRuleExplanation: Equatable, Sendable {
     }
 
     /// lightfield 单行结果的详情：D47 重建代价提示放最前（中间截断时保住开头），
-    /// 其后是所属状态、“属于 X”，最后是路径（P2-6）。
-    static func lightfieldDetail(rebuildCost: String?, ownerStatus: String?, ownership: String, path: String) -> String {
-        let parts: [String?] = [rebuildCost, ownerStatus, L10n.text("属于 ", "Belongs to ") + ownership, path]
+    /// 其后是 D100 G1 预计释放提示、所属状态、“属于 X”，最后是路径（P2-6）。
+    static func lightfieldDetail(rebuildCost: String?, reclaimable: String? = nil, ownerStatus: String?,
+                                 ownership: String, path: String) -> String {
+        let parts: [String?] = [rebuildCost, reclaimable, ownerStatus, L10n.text("属于 ", "Belongs to ") + ownership, path]
         return parts.compactMap { $0 }.joined(separator: " · ")
     }
 }
@@ -726,6 +739,8 @@ struct CleanupRuleExplanation: Equatable, Sendable {
 /// 每条中文说明在这里有一条英文，测试核对所有已加载规则都有译文。
 enum CleanupImpactText {
     static let englishByChinese: [String: String] = [
+        "应用会恢复默认设置并按需重新生成设置文件":
+            "The app returns to its default settings and creates a new settings file as needed",
         "应用或工具会重新生成缓存，首次使用可能稍慢或需要联网":
             "The app or tool rebuilds its cache; first use may be slower or need the internet",
         "应用会重新生成缓存，首次打开可能稍慢或需要联网":
@@ -738,16 +753,24 @@ enum CleanupImpactText {
             "The app writes new logs; old diagnostic records move to the Trash",
         "工具会重新生成日志，旧诊断记录将移入废纸篓":
             "The tool writes new logs; old diagnostic records move to the Trash",
-        "下载的个人文件将移入废纸篓，请先确认不再需要":
-            "Downloaded personal files move to the Trash; make sure you no longer need them",
         "Xcode 会重新构建派生文件，下次编译可能较慢":
             "Xcode rebuilds derived data; the next build may be slower",
+        "Bun 下次安装时会重新下载；启用全局存储（globalStore）的项目需要重新运行 bun install":
+            "Bun downloads the packages again on the next install; projects that use its global store (globalStore) need bun install again",
+        "iStat Menus 的历史图表会清空，之后重新开始记录":
+            "iStat Menus history charts start empty and recording begins again",
         "重复应用副本将移入废纸篓，保留的同版本副本不受影响":
             "The duplicate app copy moves to the Trash; the kept copy of the same version is not affected",
         "已打开附件的下载副本将移入废纸篓，邮件原件不受影响":
             "Downloaded copies of opened attachments move to the Trash; the original emails are not affected",
+        "附件将移入废纸篓，可放回。IMAP 等服务器邮件打开时会重新下载附件；仅存本机的邮件（如 POP 或“我的 Mac 上”邮箱）需从废纸篓放回附件后才能再查看":
+            "Attachments move to the Trash and can be put back. Mail downloads them again when you open messages on a server, such as IMAP. For messages stored only on this Mac, including POP or On My Mac mailboxes, put the attachments back from the Trash to view them again",
         "将永久删除扫描时已有的废纸篓项目，无法通过本应用恢复":
             "Items already in the Trash at scan time are deleted permanently and cannot be restored with this app",
+        "会从你所有设备上的 iCloud 云盘永久删除，不能撤销":
+            "Permanently deletes from iCloud Drive on all your devices; this cannot be undone",
+        "将永久删除扫描时外接硬盘废纸篓里已有的项目，无法通过本应用恢复":
+            "Items already in another drive's Trash at scan time are deleted permanently and cannot be restored with this app",
     ]
 
     static func english(for chinese: String) -> String? {
@@ -760,6 +783,9 @@ extension ScanCandidate {
     var preselectionReason: CleanupPreselectionReason {
         if isOwnerRunning { return .ownerRunning }
         if isPreselectedByDefault { return .preselected }
+        if freesTooLittleToPreselect, selectionEligibility == .selectable, defaultSelection != .forbidden {
+            return .freesLittle
+        }
         if action == .emptyTrash { return .permanentDeletion }
         if risk == .protected { return .protected }
         if risk == .reviewOnly { return .reviewRequired }
@@ -779,7 +805,7 @@ enum OperationQuitNotice {
         guard !names.isEmpty else { return nil }
         let running = candidates.filter(\.isOwnerRunning).count
         return L10n.text(
-            "已勾选的 \(running) 项属于正在运行的 \(names.joined(separator: "、"))：清理前需正常退出，否则这些项目会被跳过",
+            "已勾选的 \(ByteFormat.count(running)) 项属于正在运行的 \(names.joined(separator: "、"))：清理前需正常退出，否则这些项目会被跳过",
             "\(L10n.items(running)) you checked belong to running \(names.joined(separator: ", ")): quit normally before cleanup, or these items are skipped"
         )
     }
@@ -850,8 +876,7 @@ extension OperationConfirmationFacts {
         skipped: [UUID: CleanSkipReason],
         surface: OperationSurface,
         appsToQuit: [String],
-        permission: OperationPermissionCoverage,
-        byteStyle: OperationByteStyle = .binary
+        permission: OperationPermissionCoverage
     ) -> OperationConfirmationFacts {
         // P2-11：按 Set 过滤，大型计划（几千项、几百项跳过）保持 O(n)。
         let planIDs = Set(planItems.map(\.id))
@@ -897,25 +922,24 @@ extension OperationConfirmationFacts {
             permanentDeletionBytes: deleteBytes,
             appsToQuit: appsToQuit,
             recovery: recovery,
-            permission: permission,
-            byteStyle: byteStyle
+            permission: permission
         )
     }
 
     /// P2-12：计划确认表标题，与表头“项目”和“对象”字段同一口径——全部计划项，
     /// 有不会执行的项目时写明将执行几项。
     func cleanupPlanTitle(planHasMoves: Bool, planHasPermanentDeletion: Bool) -> String {
-        let zhScope = notRunCount > 0 ? "（将执行 \(readyCount) 项）" : ""
-        let enScope = notRunCount > 0 ? " (\(readyCount) will run)" : ""
+        let zhScope = notRunCount > 0 ? "（将执行 \(ByteFormat.count(readyCount)) 项）" : ""
+        let enScope = notRunCount > 0 ? " (\(ByteFormat.count(readyCount)) will run)" : ""
         if !planHasPermanentDeletion {
-            return L10n.text("清理 \(itemCount) 个项目\(zhScope)？", "Clean \(itemCount) Item(s)\(enScope)?")
+            return L10n.text("清理 \(ByteFormat.count(itemCount)) 个项目\(zhScope)？", "Clean \(ByteFormat.count(itemCount)) Item(s)\(enScope)?")
         }
         if !planHasMoves {
-            return L10n.text("清空废纸篓：\(itemCount) 个项目\(zhScope)？", "Empty Trash: \(itemCount) Item(s)\(enScope)?")
+            return L10n.text("清空废纸篓：\(ByteFormat.count(itemCount)) 个项目\(zhScope)？", "Empty Trash: \(ByteFormat.count(itemCount)) Item(s)\(enScope)?")
         }
         return L10n.text(
-            "清理 \(itemCount) 个项目并清空废纸篓\(zhScope)？",
-            "Clean \(itemCount) Item(s) and Empty Trash\(enScope)?"
+            "清理 \(ByteFormat.count(itemCount)) 个项目并清空废纸篓\(zhScope)？",
+            "Clean \(ByteFormat.count(itemCount)) Item(s) and Empty Trash\(enScope)?"
         )
     }
 
@@ -929,7 +953,7 @@ extension OperationConfirmationFacts {
                 "None of the items to move to the Trash will run; nothing will be moved this time."
             )
         }
-        let format = byteStyle.string
+        let format: (Int64) -> String = { ByteFormat.storageString($0) }
         return L10n.text(
             "清空废纸篓后最多可释放 \(format(trashBytes))；当前立即释放取决于废纸篓和文件系统状态。",
             "Up to \(format(trashBytes)) may be released after Trash is emptied; immediate release depends on Trash and file-system state."
@@ -962,7 +986,7 @@ extension OperationConfirmationFacts {
             let count = selected.filter { UninstallVendorRules.highValueData(path: $0.path) == kind }.count
             guard count > 0 else { continue }
             warnings.append(L10n.text(
-                "其中 \(count) 项\(kind.title)，会一并移到废纸篓，请先确认已备份",
+                "其中 \(ByteFormat.count(count)) 项\(kind.title)，会一并移到废纸篓，请先确认已备份",
                 "includes \(L10n.items(count)) marked “\(kind.title)” that also move to the Trash; back them up first"
             ))
         }
@@ -992,6 +1016,8 @@ extension OperationConfirmationFacts {
                     + block.explanation(naming: review.unknownRunningApplicationNames)
             } else if item.hasOtherHardLinks {
                 detail = FileAnalysisTrashPresentation.otherHardLinksNote
+            } else {
+                detail = FileAnalysisTrashPresentation.reclaimableNote(item)
             }
             return OperationConfirmationItem(id: item.id, title: item.selection.title, path: item.selection.path,
                                              bytes: item.selection.bytes, detail: detail)
@@ -1015,10 +1041,26 @@ extension OperationConfirmationFacts {
             // P1-2：硬链接时 X 是上限，不是“至少”。
             physicalReleaseUnknown: review.readyItems.contains { $0.hasOtherHardLinks },
             trashBytes: review.readyBytes,
+            trashReclaimable: fileAnalysisReclaimable(review),
             appsToQuit: apps,
             recovery: recovery,
-            permission: permission,
-            byteStyle: .storage
+            permission: permission
+        )
+    }
+
+    /// D104 G1：只在克隆或本地快照明显占住一部分时写出预计释放；另有硬链接时
+    /// 大小本身已是上限（P1-2），沿用“最多释放”。
+    static func fileAnalysisReclaimable(_ review: FileAnalysisTrashReview) -> TrashReclaimable? {
+        guard !review.readyItems.contains(where: \.hasOtherHardLinks) else { return nil }
+        let total = review.readyBytes
+        let reclaimable = review.reclaimable
+        let kept = total - reclaimable.freedBytes
+        guard CleanupReclaimableEstimate.isNoticeable(kept, of: total) else { return nil }
+        return TrashReclaimable(
+            bytes: reclaimable.freedBytes,
+            possibleCloneBytes: CleanupReclaimableEstimate.isNoticeable(reclaimable.possibleCloneBytes, of: kept)
+                ? reclaimable.possibleCloneBytes : 0,
+            countsFoldersWhole: review.readyItems.contains { $0.selection.isDirectory }
         )
     }
 
@@ -1051,5 +1093,24 @@ extension OperationConfirmationFacts {
         )
         facts.recordCount = directRecordCount + manualRecordCount
         return facts
+    }
+
+    /// D101 L5：菜单“清空废纸篓”。数量和大小取自打开确认时冻结的清单；
+    /// 当前用户自己的废纸篓不需要额外权限。
+    static func emptyTrash(_ frozen: FrozenTrash) -> OperationConfirmationFacts {
+        let bytes = frozen.summary.totalBytes
+        let items = frozen.entries.map { entry in
+            OperationConfirmationItem(
+                id: entry.name,
+                title: entry.name,
+                path: frozen.trashURL.appendingPathComponent(entry.name).path,
+                bytes: entry.allocatedBytes
+            )
+        }
+        return OperationConfirmationFacts(
+            surface: .emptyTrash, actions: [.permanentDeletion], items: items,
+            localBytes: bytes, permanentDeletionBytes: bytes,
+            recovery: [.notRecoverable], permission: .notRequired
+        )
     }
 }

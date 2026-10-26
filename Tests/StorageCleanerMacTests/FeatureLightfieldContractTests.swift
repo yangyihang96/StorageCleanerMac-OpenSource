@@ -18,7 +18,9 @@ final class FeatureLightfieldContractTests: XCTestCase {
         let skeleton = ["lightfield.title", "lightfield.content", "lightfield.primary", "lightfield.status"]
         for dark in [true, false] {
             for module in FeatureLightfield.pilots {
-                for phase in FeaturePresentationDemo.Phase.allCases {
+                // D154: the uninstall result is CleanMyMac's Applications
+                // manager, checked by `testUninstallManager…` below.
+                for phase in FeaturePresentationDemo.Phase.allCases where !(module == .uninstall && phase == .result) {
                     let host = CalibrationAppKitLayoutHost(root: try fixture(module: module, phase: phase),
                         size: CGSize(width: 1070, height: 735), dark: dark)
                     defer { host.close() }
@@ -81,40 +83,71 @@ final class FeatureLightfieldContractTests: XCTestCase {
         }
     }
 
-    func testResultLongListUsesFullViewportShowsTenRowsAndLastItemIsReachable() async throws {
+    /// D154 (was the D77 uninstall result: full viewport, ten rows, last
+    /// item reachable, pinned primary). The Applications manager keeps those
+    /// rules inside its panel: the list sits between the category title and
+    /// the footer, shows at least ten complete rows at the reference window,
+    /// scrolls to the last app, and the footer action does not move.
+    func testUninstallManagerListUsesThePanelShowsTenRowsAndLastItemIsReachable() async throws {
         for window in [CGSize(width: 1280, height: 763), CGSize(width: 677, height: 390)] {
             let size = CGSize(width: window.width - 210, height: window.height - 28)
-            let host = CalibrationAppKitLayoutHost(root: try fixture(module: .uninstall, phase: .result), size: size, dark: false)
+            let store = try productionStore()
+            store.installedApps = FeatureLightfieldProductionResult.installedApps
+            store.hasScannedInstalledApps = true
+            let root = AdaptivePageViewport(resetID: .uninstall) { AppUninstallerView(store: store) }
+                .environment(\.featureDisablesLayoutAnimations, true).environment(\.featureLightfieldModule, .uninstall)
+                .environment(\.featurePresentationIsFixture, true)
+                .transaction { $0.disablesAnimations = true }
+            let host = CalibrationAppKitLayoutHost(root: root, size: size, dark: false)
             defer { host.close() }
-            let ids: Set<String> = ["lightfield.content", "lightfield.primary", "lightfield.results.scrollViewport", "lightfield.results.fade", "fixture.viewport"]
+            let ids: Set<String> = ["careStudio.manager.applications", "careStudio.manager.primary",
+                                    "lightfield.results.scrollViewport", "lightfield.uninstall.row.0", "fixture.viewport"]
             let frames = try await host.frames(required: ids, size: size)
+            let panel = try XCTUnwrap(frames["careStudio.manager.applications"])
             let viewport = try XCTUnwrap(frames["lightfield.results.scrollViewport"])
-            let fade = try XCTUnwrap(frames["lightfield.results.fade"])
-            let content = try XCTUnwrap(frames["lightfield.content"])
-            let primary = try XCTUnwrap(frames["lightfield.primary"])
+            let primary = try XCTUnwrap(frames["careStudio.manager.primary"])
             XCTAssertGreaterThan(viewport.height, 0)
-            XCTAssertEqual(fade.height, min(24, viewport.height), accuracy: 0.5)
-            XCTAssertEqual(fade.maxY, viewport.maxY, accuracy: 0.5)
-            XCTAssertLessThanOrEqual(viewport.maxY, content.maxY + 0.5)
-            XCTAssertNil(frames["lightfield.results.scrollHint"])
-            XCTAssertEqual(viewport.maxY, content.maxY, accuracy: 0.5)
-            XCTAssertEqual(primary.minY - content.maxY, 16, accuracy: 0.5)
+            XCTAssertTrue(panel.insetBy(dx: -0.5, dy: -0.5).contains(viewport), "The list stays in the panel")
+            XCTAssertLessThanOrEqual(viewport.maxY, primary.minY + 0.5, "The list ends above the footer action")
+            XCTAssertTrue(CGRect(origin: .zero, size: size).insetBy(dx: -0.5, dy: -0.5).contains(primary))
             if window.height == 763 {
                 let rows = frames.filter { $0.key.hasPrefix("lightfield.uninstall.row.")
                     && viewport.insetBy(dx: -0.5, dy: -0.5).contains($0.value) }
-                XCTAssertGreaterThanOrEqual(rows.count, 10, "D77 replaces the old five-row snapped viewport")
+                XCTAssertGreaterThanOrEqual(rows.count, 10, "D77's ten complete rows at the reference window")
             }
             try host.scrollOptionsToBottom(matching: viewport)
-            let after = try await host.frames(required: ["lightfield.uninstall.row.35", "lightfield.primary",
+            let last = "lightfield.uninstall.row.\(FeatureLightfieldProductionResult.installedApps.count - 1)"
+            let after = try await host.frames(required: [last, "careStudio.manager.primary",
                 "lightfield.results.scrollViewport", "fixture.viewport"], size: size)
-            let last = try XCTUnwrap(after["lightfield.uninstall.row.35"])
-            // Full viewport and pinned controls do not move while scrolling.
+            let lastRow = try XCTUnwrap(after[last])
             XCTAssertEqual(try XCTUnwrap(after["lightfield.results.scrollViewport"]).height, viewport.height, accuracy: 0.5,
                 "The list end must not move while scrolling")
-            XCTAssertGreaterThan(last.maxY, viewport.minY - 0.5)
-            XCTAssertLessThanOrEqual(last.maxY, viewport.maxY + 0.5)
-            equal(try XCTUnwrap(after["lightfield.primary"]).origin, primary.origin, "Pinned after scroll")
+            XCTAssertGreaterThan(lastRow.maxY, viewport.minY - 0.5)
+            XCTAssertLessThanOrEqual(lastRow.maxY, viewport.maxY + 0.5)
+            equal(try XCTUnwrap(after["careStudio.manager.primary"]).origin, primary.origin, "Pinned after scroll")
         }
+    }
+
+    /// D154: the uninstall history stays one press away on the Applications
+    /// results (the overview's “卸载记录”) and in the manager's More menu.
+    func testUninstallResultsKeepTheUninstallHistoryEntry() async throws {
+        let store = try productionStore()
+        store.installedApps = FeatureLightfieldProductionResult.installedApps
+        store.hasScannedInstalledApps = true
+        ApplicationsManagerModel.of(store).showsOverview = true
+        let root = AdaptivePageViewport(resetID: .uninstall) { AppUninstallerView(store: store) }
+            .environment(\.featureDisablesLayoutAnimations, true).environment(\.featureLightfieldModule, .uninstall)
+            .environment(\.featurePresentationIsFixture, true)
+            .transaction { $0.disablesAnimations = true }
+        let size = CGSize(width: 1070, height: 735)
+        let host = CalibrationAppKitLayoutHost(root: root, size: size, dark: true)
+        defer { host.close() }
+        _ = try await host.frames(required: ["careStudio.results.applications", "fixture.viewport"], size: size)
+        let history = L10n.text("卸载记录", "Uninstall History")
+        try await host.waitForAccessibility(labels: [history], pressLabels: [history])
+        let manager = try text("Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift")
+        XCTAssertTrue(manager.contains("Button(L10n.text(\"卸载记录\", \"Uninstall History\")) { showsHistory = true }"))
+        XCTAssertTrue(manager.contains("ReversibleOperationsView(store: store, resumeUninstall: { store.prepareResidualUninstall($0) })"))
     }
 
     func testVisibleRuntimeStateSubtitleCurrentItemMetricsAndUnknownProgressAreAccessible() async throws {
@@ -306,13 +339,15 @@ final class FeatureLightfieldContractTests: XCTestCase {
         XCTAssertEqual([day.normal, day.warning, day.failure], [0x1D9B5C, 0xC77700, 0xD23A4A])
         XCTAssertEqual(FeatureLightfield.starCount, 90)
         XCTAssertEqual(FeatureLightfieldPalette.accents(.green), [0xFF7A2F, 0xC4441A])
-        XCTAssertEqual(FeatureLightfieldPalette.accents(.healthHub), [0x34C77B, 0x1E9E5A])
-        XCTAssertEqual(FeatureLightfieldPalette.accents(.uninstall), [0xA07BFF, 0x5B3FD9])
-        for (module, colors) in [(ReviewFilter.overview, [UInt32(0x4F8BFF), 0x2A55D6]),
-            (.devCaches, [0xFFB340, 0xC46A0C]), (.privacy, [0x2FBF71, 0x168A55]),
-            (.memory, [0x8B6CFF, 0x5B3FD9]), (.duplicates, [0x2CC9D6, 0x0E7C8C])] {
-            XCTAssertEqual(FeatureLightfieldPalette.accents(module), colors)
+        XCTAssertEqual(FeatureLightfieldPalette.accents(.overview), [0x4F8BFF, 0x2A55D6])
+        // D154: pages on a module gradient take the module's round-button
+        // colours (were the D67 table: health green, uninstall violet,
+        // developer amber, privacy green, memory violet, duplicates teal).
+        for (module, family) in [(ReviewFilter.healthHub, CareStudioFamily.myTools), (.uninstall, .applications),
+            (.devCaches, .cleanup), (.privacy, .protection), (.memory, .performance), (.duplicates, .clutter)] {
+            XCTAssertEqual(FeatureLightfieldPalette.accents(module), family.palette.action, module.rawValue)
         }
+        XCTAssertNil(FeatureLightfieldPalette.accents(.utilityHub))
         let component = HealthComponentEvaluation(factor: .diskReliability, availability: .available,
             score: 100, evaluatedAt: MiniWindowDemoData.referenceDate, modelVersion: "fixture")
         XCTAssertEqual(HealthFactorGrid.lightfieldStatus(factor: .diskReliability, component: component, smart: .failing), .warning)
@@ -352,8 +387,13 @@ final class FeatureLightfieldContractTests: XCTestCase {
         XCTAssertTrue(template.contains("phase == .result ? palette.glow * 0.6 : palette.glow"))
         let navigation = try text("Sources/StorageCleanerMac/Views/SidebarView.swift")
         XCTAssertTrue(navigation.contains("FeatureLightfieldArtwork(art:"))
-        XCTAssertTrue(navigation.contains(".frame(width: 20, height: 20)"))
-        let uninstaller = try text("Sources/StorageCleanerMac/Views/SystemUtilitiesView.swift")
+        // D154: CleanMyMac's sidebar marks are 26 pt (were 20 pt).
+        XCTAssertTrue(navigation.contains("static let glyphSide: CGFloat = 26"))
+        XCTAssertTrue(navigation.contains(".frame(width: Self.glyphSide, height: Self.glyphSide)"))
+        // D14x: the uninstall result is the CleanMyMac manager page (was
+        // SystemUtilitiesView.swift); the residual review sheet and the row
+        // menu's Copy Path / Show in Finder stay.
+        let uninstaller = try text("Sources/StorageCleanerMac/Views/ApplicationsManager/ApplicationsManagerView.swift")
         XCTAssertFalse(uninstaller.contains(".onChange(of: selectedApplicationID)"), "Selection never opens the preview")
         XCTAssertTrue(uninstaller.contains("UninstallPreviewSheet(store: store, app: app)"))
         XCTAssertTrue(uninstaller.contains("copyPath: { store.copyPath($0.path) }, reveal: { store.reveal($0.path) }"))
@@ -424,42 +464,46 @@ final class FeatureLightfieldContractTests: XCTestCase {
     // MARK: Round 6 — production result pages, selection and history entry
 
     func testProductionUninstallRowSelectionNeverOpensPreview() async throws {
+        // D14x (2.0.1, CleanMyMac uninstaller): pressing a row checks the app
+        // with everything found, and pressing it again clears it. It still
+        // never opens a preview or starts a removal; the primary action is
+        // available only with a selection. (Was: a single selection, and the
+        // primary action “卸载所选” opened the uninstall preview.)
         let store = try productionStore()
         store.installedApps = FeatureLightfieldProductionResult.installedApps
         store.hasScannedInstalledApps = true
+        // The manager reads bundles and Library folders on appear; the
+        // presentation-fixture flag keeps this layout host inert.
         let root = AdaptivePageViewport(resetID: .uninstall) { AppUninstallerView(store: store) }
             .environment(\.featureDisablesLayoutAnimations, true).environment(\.featureLightfieldModule, .uninstall)
+            .environment(\.featurePresentationIsFixture, true)
             .transaction { $0.disablesAnimations = true }
         let size = CGSize(width: 1070, height: 735)
         let host = CalibrationAppKitLayoutHost(root: root, size: size, dark: true)
         defer { host.close() }
-        let frames = try await host.frames(required: ["lightfield.primary", "lightfield.results.scrollViewport",
+        // D154: the rows are in CleanMyMac's Applications manager; its
+        // footer holds the one primary action.
+        let frames = try await host.frames(required: ["careStudio.manager.primary", "lightfield.results.scrollViewport",
             "lightfield.uninstall.row.0", "fixture.viewport"], size: size)
         let viewport = try XCTUnwrap(frames["lightfield.results.scrollViewport"])
-        let first = try XCTUnwrap(AppUninstallListPresentation.make(apps: store.installedApps.filter(\.canMoveToTrash),
-            query: "", filter: .all, sortMode: .recommendation).apps.first)
+        let model = ApplicationsManagerModel.of(store)
+        let first = try XCTUnwrap(model.visibleEntries.first)
         // D70's approved uninstall render uses decimal storage units for both
         // the visible row and its complete accessible label.
-        let row = first.name + " · " + first.path + " · " + ByteFormat.storageString(first.sizeBytes)
-        let primary = L10n.text("卸载所选", "Uninstall Selected")
+        let row = first.item.name + " · " + first.item.path + " · " + ByteFormat.storageString(first.totalBytes)
+        let primary = model.primaryActionTitle
         try await host.waitForAccessibility(labels: [row, primary], expectedValues: [row: L10n.text("未选择", "Not selected")],
             expectedEnabled: [primary: false], pressLabels: [row], hitTestViewport: viewport)
         XCTAssertTrue(try host.press(label: row))
         try await host.waitForAccessibility(labels: [row, primary], expectedValues: [row: L10n.text("已选择", "Selected")],
             expectedEnabled: [primary: true], hitTestViewport: viewport)
-        XCTAssertNil(store.pendingUninstallApp, "Selecting a row must not open the uninstall preview")
+        XCTAssertNil(store.pendingUninstallApp, "Selecting a row must not open a preview")
         XCTAssertFalse(store.isPreparingUninstall)
-        // The primary action opens the preview for the selected application.
-        XCTAssertTrue(try host.press(label: primary))
-        XCTAssertEqual(store.pendingUninstallApp?.id, first.id)
-        let deadline = Date().addingTimeInterval(15)
-        while store.isPreparingUninstall, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertFalse(store.isPreparingUninstall)
-        // Closing the preview keeps the selection, so the action stays usable.
-        store.cancelUninstall()
-        XCTAssertNil(store.pendingUninstallApp)
-        try await host.waitForAccessibility(labels: [row, primary], expectedValues: [row: L10n.text("已选择", "Selected")],
-            expectedEnabled: [primary: true], hitTestViewport: viewport)
+        XCTAssertEqual(model.phase, .browsing, "Selecting a row must not start a removal")
+        XCTAssertTrue(try host.press(label: row))
+        try await host.waitForAccessibility(labels: [row, primary], expectedValues: [row: L10n.text("未选择", "Not selected")],
+            expectedEnabled: [primary: false], hitTestViewport: viewport)
+        XCTAssertEqual(model.phase, .browsing)
     }
 
     func testLongUninstallListLaysOutOnlyVisibleRows() async throws {
@@ -471,16 +515,20 @@ final class FeatureLightfieldContractTests: XCTestCase {
                 relatedItems: [], status: .installed)
         }
         store.hasScannedInstalledApps = true
+        // D14x: the manager reads bundles and Library folders on appear; the
+        // presentation-fixture flag keeps this layout host inert.
         let root = AdaptivePageViewport(resetID: .uninstall) { AppUninstallerView(store: store) }
             .environment(\.featureDisablesLayoutAnimations, true).environment(\.featureLightfieldModule, .uninstall)
+            .environment(\.featurePresentationIsFixture, true)
             .transaction { $0.disablesAnimations = true }
         let size = CGSize(width: 1070, height: 735)
         let host = CalibrationAppKitLayoutHost(root: root, size: size, dark: true)
         defer { host.close() }
-        let frames = try await host.frames(required: ["lightfield.uninstall.row.0", "lightfield.listDocument",
+        // D154: the list is the Applications manager's lazy document.
+        let frames = try await host.frames(required: ["lightfield.uninstall.row.0", "careStudio.manager.document",
             "fixture.viewport"], size: size)
         // The document still has the full height (every row is one row tall)…
-        XCTAssertGreaterThanOrEqual(try XCTUnwrap(frames["lightfield.listDocument"]).height, 400 * FeatureLightfield.rowHeight)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(frames["careStudio.manager.document"]).height, 400 * FeatureLightfield.rowHeight)
         // …but rows far below the viewport are never instantiated or measured.
         let laidOut = frames.keys.filter { $0.hasPrefix("lightfield.uninstall.row.") }.count
         XCTAssertLessThan(laidOut, 60, "Only rows near the viewport are laid out; got \(laidOut)")
@@ -529,7 +577,9 @@ final class FeatureLightfieldContractTests: XCTestCase {
     }
 
     func testProductionResultPagesFillContentRemainClippedAndShowHistory() async throws {
-        for module in FeatureLightfield.pilots {
+        // D154: the uninstall result is the Applications manager
+        // (`testUninstallManagerListUsesThePanelShowsTenRowsAndLastItemIsReachable`).
+        for module in FeatureLightfield.pilots where module != .uninstall {
             for window in [CGSize(width: 1280, height: 763), CGSize(width: 1000, height: 700), CGSize(width: 677, height: 390)] {
                 let size = CGSize(width: window.width - 210, height: window.height - 28)
                 let root = try fixture(module: module, phase: .result).environment(\.featureOperationHistoryAction, {})
@@ -582,7 +632,16 @@ final class FeatureLightfieldContractTests: XCTestCase {
         XCTAssertEqual(counter.value, 1)
         let content = try text("Sources/StorageCleanerMac/Views/ContentView.swift")
         XCTAssertTrue(content.contains(".environment(\\.featureOperationHistoryAction, { isShowingOperationHistory = true })"))
-        XCTAssertTrue(content.contains(".toolbar(FeatureLightfield.owns(activePresentationFilter) ? .hidden : .visible, for: .windowToolbar)"))
+        // D94 replaces the hidden D67 toolbar: no page has toolbar items, and
+        // V1 pages show the entry in MainWindowHistoryBand.
+        XCTAssertFalse(content.contains(".toolbar(FeatureLightfield.owns(activePresentationFilter) ? .hidden : .visible, for: .windowToolbar)"))
+        XCTAssertFalse(content.contains("ToolbarItem("))
+        let presentation = try text("Sources/StorageCleanerMac/Views/ModulePresentation.swift")
+        // D154: pages on a module gradient have no band either; Operation
+        // History is on My Activity and in the template's status pills. The
+        // classic canvas (tests of these layouts) keeps the D94 rule.
+        XCTAssertTrue(presentation.contains("let studio = usesClassicPages ? nil : CareStudioModule(filter: route)"))
+        XCTAssertTrue(presentation.contains("let historyAction = showsIntegratedTitlebar || FeatureLightfield.owns(route)\n            || studio != nil ? nil : openOperationHistory"))
     }
 
     /// Round 6 P2 items that are presentation-only; the screenshots in
@@ -593,13 +652,15 @@ final class FeatureLightfieldContractTests: XCTestCase {
         XCTAssertFalse(content.contains("FeatureLightfield.owns(activePresentationFilter) && sidebarMode == .full"),
             "The full sidebar is 210 pt on every page")
         let sidebar = try text("Sources/StorageCleanerMac/Views/SidebarView.swift")
-        XCTAssertTrue(sidebar.contains("SidebarChrome(isRail: isRail, usesLightfield: FeatureLightfield.owns(selection))"))
+        // D154: the chrome also takes the module family for its gradient.
+        XCTAssertTrue(sidebar.contains("SidebarChrome(isRail: isRail, family: studioFamily,\n                      usesLightfield: FeatureLightfield.owns(navigationState.selectedFilter))"))
         XCTAssertTrue(sidebar.contains("if followsPureBlack { surfaces.sidebar }"))
         let cleanup = try text("Sources/StorageCleanerMac/Views/CleanupScanViews.swift")
         let start = try XCTUnwrap(cleanup.range(of: "private var lightfieldResults: some View"))
         let end = try XCTUnwrap(cleanup.range(of: "private static let topAnchorID", range: start.upperBound..<cleanup.endIndex))
         let pilot = String(cleanup[start.lowerBound..<end.lowerBound])
-        XCTAssertTrue(pilot.contains("只永久删除扫描时废纸篓里已有的 \\(entryCount) 项"))
+        // D178: the count is grouped (was "\\(entryCount) 项").
+        XCTAssertTrue(pilot.contains("只永久删除扫描时废纸篓里已有的 \\(ByteFormat.count(entryCount)) 项"))
         XCTAssertTrue(pilot.contains("Text(L10n.text(\"无法读取废纸篓\", \"Trash Cannot Be Read\"))"))
         XCTAssertTrue(pilot.contains("_ = CleanupService.openFullDiskAccessSettings()"))
         XCTAssertTrue(pilot.contains(".padding(.leading, FeatureLightfield.childRowIndent)"))

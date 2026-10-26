@@ -81,6 +81,9 @@ enum CleanupMigration {
         defaults: UserDefaults = .standard,
         userHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> [URL] {
+        if defaults === UserDefaults.standard {
+            return IgnoreListStore.shared.snapshot().paths(for: .other).map { URL(fileURLWithPath: $0) }
+        }
         let homePath = PathSafety.lexicalPath(userHomeURL.path)
         let rawPaths = (defaults.stringArray(forKey: excludedPathsKey) ?? [])
             + (defaults.stringArray(forKey: ScanExclusionService.defaultsKey) ?? [])

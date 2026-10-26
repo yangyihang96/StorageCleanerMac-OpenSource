@@ -53,9 +53,9 @@ struct ScanReportService {
         lines.append("| --- | --- |")
         lines.append("| \(L10n.text("磁盘", "Disk")) | \(tableText(result.system.diskName)) |")
         lines.append("| \(L10n.text("文件系统", "Filesystem")) | \(tableText(result.system.filesystem)) |")
-        lines.append("| \(L10n.text("总容量", "Capacity")) | \(ByteFormat.string(result.system.diskTotalBytes)) |")
-        lines.append("| \(L10n.text("已使用", "Used")) | \(ByteFormat.string(result.system.diskUsedBytes)) (\(ByteFormat.percent(result.system.diskUsedBytes, of: result.system.diskTotalBytes))) |")
-        lines.append("| \(L10n.text("可用", "Available")) | \(ByteFormat.string(result.system.diskFreeBytes)) (\(ByteFormat.percent(result.system.diskFreeBytes, of: result.system.diskTotalBytes))) |")
+        lines.append("| \(L10n.text("总容量", "Capacity")) | \(ByteFormat.storageString(result.system.diskTotalBytes)) |")
+        lines.append("| \(L10n.text("已使用", "Used")) | \(ByteFormat.storageString(result.system.diskUsedBytes)) (\(ByteFormat.percent(result.system.diskUsedBytes, of: result.system.diskTotalBytes))) |")
+        lines.append("| \(L10n.text("可用", "Available")) | \(ByteFormat.storageString(result.system.diskFreeBytes)) (\(ByteFormat.percent(result.system.diskFreeBytes, of: result.system.diskTotalBytes))) |")
         if !result.system.purgeable.isEmpty {
             lines.append("| \(L10n.text("系统可清除", "Purgeable")) | \(tableText(result.system.purgeable)) |")
         }
@@ -73,7 +73,7 @@ struct ScanReportService {
         lines.append("| \(L10n.text("结果时效", "Result Freshness")) | \(tableText(freshnessValue(for: freshness))) | \(tableText(freshnessSummary(for: freshness))) |")
         lines.append("| \(L10n.text("全盘权限覆盖率（未测量）", "Whole-disk access coverage (not measured)")) | — | \(tableText(coverageSummary(for: coverage))) |")
         lines.append("| \(L10n.text("扫描完成状态", "Scan Completion")) | \(result.scanWasLimited ? L10n.text("部分完成", "Partial") : L10n.text("完整完成", "Complete")) | \(result.scanWasLimited ? L10n.text("达到扫描预算或安全数量上限，部分位置未完成；建议重新扫描。", "A scan budget or safety cap was reached before every location completed; rescan is recommended.") : L10n.text("扫描在预算与安全上限内完成。", "The scan completed within its budget and safety caps.")) |")
-        lines.append("| \(L10n.text("权限缺口", "Access Gaps")) | \(coverage.deniedCount) | \(coverage.deniedCount == 0 ? L10n.text("没有发现未读取位置。", "No unreadable locations were detected.") : L10n.text("授权后重新扫描可提高排行和评分准确度。", "Grant access and rescan to improve ranking and score accuracy.")) |")
+        lines.append("| \(L10n.text("权限缺口", "Access Gaps")) | \(ByteFormat.count(coverage.deniedCount)) | \(coverage.deniedCount == 0 ? L10n.text("没有发现未读取位置。", "No unreadable locations were detected.") : L10n.text("授权后重新扫描可提高排行和评分准确度。", "Grant access and rescan to improve ranking and score accuracy.")) |")
         lines.append("")
         lines.append("| \(L10n.text("评分项", "Score Factor")) | \(L10n.text("扣分", "Deduction")) | \(L10n.text("状态", "Status")) | \(L10n.text("说明", "Detail")) |")
         lines.append("| --- | ---: | --- | --- |")
@@ -87,9 +87,9 @@ struct ScanReportService {
         lines.append("| \(L10n.text("分级", "Tier")) | \(L10n.text("数量", "Count")) | \(L10n.text("占用", "Size")) | \(L10n.text("说明", "Description")) |")
         lines.append("| --- | ---: | ---: | --- |")
         for tier in [StorageTier.green, .yellow, .red] {
-            lines.append("| \(tableText(tier.title)) | \(result.items(forTier: tier).count) | \(ByteFormat.string(result.bytes(for: tier))) | \(tableText(tier.detail)) |")
+            lines.append("| \(tableText(tier.title)) | \(result.items(forTier: tier).count) | \(ByteFormat.storageString(result.bytes(for: tier))) | \(tableText(tier.detail)) |")
         }
-        lines.append("| \(L10n.text("已移到废纸篓", "Moved to Trash")) | \(movedCount) | - | \(L10n.text("仅表示已移到废纸篓，清空前仍可恢复；空间释放以清空废纸篓为准。", "Only moved to Trash; recoverable until emptied. Space is freed after Trash is emptied.")) |")
+        lines.append("| \(L10n.text("已移到废纸篓", "Moved to Trash")) | \(ByteFormat.count(movedCount)) | - | \(L10n.text("仅表示已移到废纸篓，清空前仍可恢复；空间释放以清空废纸篓为准。", "Only moved to Trash; recoverable until emptied. Space is freed after Trash is emptied.")) |")
         lines.append("")
 
         lines.append("## \(L10n.text("建议", "Recommendations"))")
@@ -121,7 +121,7 @@ struct ScanReportService {
             lines.append("| \(L10n.text("项目", "Item")) | \(L10n.text("分级", "Tier")) | \(L10n.text("大小", "Size")) | \(L10n.text("建议", "Recommendation")) |")
             lines.append("| --- | --- | ---: | --- |")
             for item in topItems {
-                lines.append("| \(tableText(item.title)) | \(tableText(item.tier.title)) | \(ByteFormat.string(item.sizeBytes)) | \(tableText(item.recommendation)) |")
+                lines.append("| \(tableText(item.title)) | \(tableText(item.tier.title)) | \(ByteFormat.storageString(item.sizeBytes)) | \(tableText(item.recommendation)) |")
             }
         }
         lines.append("")
@@ -147,7 +147,7 @@ struct ScanReportService {
                 } else {
                     action = L10n.text("仅定位，人工复核", "Locate only; review manually")
                 }
-                lines.append("| \(tableText(item.title)) | \(tableText(item.tier.title)) | \(ByteFormat.string(item.sizeBytes)) | \(tableText(item.path)) | \(tableText(action)) |")
+                lines.append("| \(tableText(item.title)) | \(tableText(item.tier.title)) | \(ByteFormat.storageString(item.sizeBytes)) | \(tableText(item.path)) | \(tableText(action)) |")
             }
             if developerArtifactItems.count > 50 {
                 lines.append("")

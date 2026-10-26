@@ -32,6 +32,11 @@ enum AppMotion {
     static let standard = Animation.spring(response: 0.38, dampingFraction: 0.86)
     static let emphasized = Animation.spring(response: 0.55, dampingFraction: 0.82)
     static let data = Animation.easeInOut(duration: 0.7)
+    /// D154: CleanMyMac-style arrivals on the module pages — a landing
+    /// picture swinging in, a success mark popping, result tiles rising.
+    static let arrival = Animation.spring(response: 0.62, dampingFraction: 0.62)
+    static let successPop = Animation.spring(response: 0.5, dampingFraction: 0.55)
+    static let tileArrival = Animation.spring(response: 0.5, dampingFraction: 0.84)
     /// The only curve used under Reduce Motion.
     static let reducedFade = Animation.easeInOut(duration: 0.2)
     /// Outgoing pages leave quickly so two pages never compete (§3.2.1).
@@ -41,6 +46,10 @@ enum AppMotion {
     /// spring whose tail keeps moving the morphing card by fractions of a
     /// point for over a second after it looks settled.
     static let pageChange = Animation.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.5)
+    /// Report §4 item 17 (CleanMyMac's page change): the old page blurs as it
+    /// fades out and the new one comes in out of a blur that clears as it
+    /// fades in. Reduce Motion keeps only the fade.
+    static let pageBlurRadius: CGFloat = 8
 
     /// Staggered entrances only cover the first 12 items (§3.3).
     static let orbitRotationDuration: TimeInterval = 2.4
@@ -184,17 +193,21 @@ struct AppMotionPageModifier: ViewModifier {
         content
             .opacity(opacity)
             .offset(y: offset)
+            // Item 17: clear as it fades in (none once in).
+            .blur(radius: (1 - opacity) * AppMotion.pageBlurRadius)
     }
 }
 
 /// The outgoing page of a page change: transparent, not hit-testable and
-/// hidden from accessibility while it fades out.
+/// hidden from accessibility while it fades out, and blurred (item 17).
 struct AppMotionOutgoingPageModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isLeaving: Bool
 
     func body(content: Content) -> some View {
         content
             .opacity(isLeaving ? 0 : 1)
+            .blur(radius: isLeaving && !reduceMotion ? AppMotion.pageBlurRadius : 0)
             .allowsHitTesting(!isLeaving)
             .accessibilityHidden(isLeaving)
     }

@@ -457,8 +457,8 @@ struct SmartScoreBreakdown: Equatable, Sendable {
                 id: .diskPressure,
                 title: L10n.text("磁盘压力", "Disk Pressure"),
                 detail: L10n.text(
-                    "可用 \(ByteFormat.string(max(0, diskTotalBytes - diskUsedBytes)))（\(ByteFormat.percent(max(0, diskTotalBytes - diskUsedBytes), of: diskTotalBytes))）",
-                    "\(ByteFormat.string(max(0, diskTotalBytes - diskUsedBytes))) available (\(ByteFormat.percent(max(0, diskTotalBytes - diskUsedBytes), of: diskTotalBytes)))"
+                    "可用 \(ByteFormat.storageString(max(0, diskTotalBytes - diskUsedBytes)))（\(ByteFormat.percent(max(0, diskTotalBytes - diskUsedBytes), of: diskTotalBytes))）",
+                    "\(ByteFormat.storageString(max(0, diskTotalBytes - diskUsedBytes))) available (\(ByteFormat.percent(max(0, diskTotalBytes - diskUsedBytes), of: diskTotalBytes)))"
                 ),
                 systemImage: "chart.pie.fill",
                 penalty: diskPressurePenalty,
@@ -468,8 +468,8 @@ struct SmartScoreBreakdown: Equatable, Sendable {
                 id: .cleanupBacklog,
                 title: L10n.text("可清理积压", "Cleanup Backlog"),
                 detail: L10n.text(
-                    "\(actionableGreenCount) 项可安全清理 · \(ByteFormat.string(actionableGreenBytes))",
-                    "\(L10n.items(actionableGreenCount)) safe to clean · \(ByteFormat.string(actionableGreenBytes))"
+                    "\(ByteFormat.count(actionableGreenCount)) 项可安全清理 · \(ByteFormat.storageString(actionableGreenBytes))",
+                    "\(L10n.items(actionableGreenCount)) safe to clean · \(ByteFormat.storageString(actionableGreenBytes))"
                 ),
                 systemImage: "sparkles",
                 penalty: cleanupBacklogPenalty,
@@ -480,7 +480,7 @@ struct SmartScoreBreakdown: Equatable, Sendable {
                 title: L10n.text("权限缺口", "Access Gaps"),
                 detail: deniedCount == 0
                     ? L10n.text("扫描口径完整", "Full scan scope")
-                    : L10n.text("\(deniedCount) 个位置未读取", "\(deniedCount) locations unreadable"),
+                    : L10n.text("\(ByteFormat.count(deniedCount)) 个位置未读取", "\(ByteFormat.count(deniedCount)) locations unreadable"),
                 systemImage: deniedCount == 0 ? "checkmark.seal.fill" : "lock.fill",
                 penalty: permissionPenalty,
                 severity: permissionPenalty == 0 ? .good : severity(for: permissionPenalty, notice: 2, warning: 6, critical: 10)
@@ -648,14 +648,14 @@ enum ScanHistoryService {
     /// The tiers are the results page's (`CleanupScanTierTotals`); every
     /// listed item can be moved to Trash (D19), so all safe items are
     /// actionable. Rules the scan could not read for lack of permission are
-    /// the denied count; a partial outcome, a timed-out rule or truncated
-    /// results mark the scan as limited.
+    /// the denied count; whatever else really limited the scan (D179
+    /// `coverageLimits`, which includes a timed-out rule and truncated
+    /// results) marks it as limited. Rows held back on purpose and files gone
+    /// during the scan no longer do (was: any outcome other than complete).
     static func entry(from session: ScanSession, scanMode: ScanMode? = nil) -> ScanHistoryEntry {
         let totals = CleanupScanTierTotals(categories: session.categories)
         let deniedCount = session.permissions.filter { $0.status == .permissionDenied }.count
-        let scanWasLimited = session.outcome != .complete
-            || session.metrics.timedOutRuleCount > 0
-            || session.metrics.truncatedCandidateCount > 0
+        let scanWasLimited = session.coverageLimits.isLimitedBeyondPermissions
         let breakdown = scoreBreakdown(
             diskTotalBytes: session.system?.diskTotalBytes ?? 0,
             diskUsedBytes: session.system?.diskUsedBytes ?? 0,

@@ -130,18 +130,11 @@ struct FeatureLightfieldPalette: Equatable, Sendable {
         switch module {
         case .overview: [0x4F8BFF, 0x2A55D6]
         case .green: [0xFF7A2F, 0xC4441A]
-        case .devCaches: [0xFFB340, 0xC46A0C]
-        case .healthHub: [0x34C77B, 0x1E9E5A]
-        case .privacy: [0x2FBF71, 0x168A55]
-        case .memory: [0x8B6CFF, 0x5B3FD9]
-        case .uninstall: [0xA07BFF, 0x5B3FD9]
-        case .duplicates: [0x2CC9D6, 0x0E7C8C]
-        // Approved light-field mockups (approved-20261009 shared.js) for the
-        // B3–B7 modules; shared components draw them before the pages migrate.
-        case .startup, .energy, .performance: [0xFF5FA2, 0xAD1653]
-        case .updater: [0xA285FF, 0x5137C7]
-        case .largeFiles, .migration: [0x2CC9D6, 0x0E7C8C]
-        default: nil
+        case .utilityHub: nil
+        // D154: every other page sits on its CleanMyMac module's gradient, so
+        // its checks, links and primary action take that module's colours
+        // (its round button's) rather than the D67 mockup table.
+        default: CareStudioFamily(route: module).palette.action
         }
     }
     static func accent(_ module: ReviewFilter, secondary: Bool = false) -> Color {
@@ -271,6 +264,7 @@ struct FeatureLightfieldPage<Content: View>: View {
     @Environment(\.smartScanFlowNamespace) private var flowNamespace
     @Environment(\.featureLightfieldBackdropProvided) private var backdropProvided
     @Environment(\.featureOperationHistoryAction) private var openOperationHistory
+    @Environment(\.careStudioClassicResults) private var usesClassicLayout
     let module: ReviewFilter
     let phase: FeatureLightfieldPhase
     let title: String
@@ -292,7 +286,35 @@ struct FeatureLightfieldPage<Content: View>: View {
     @ViewBuilder let content: Content
     private var instant: Bool { reduceMotion || disablesAnimations }
     private var compactResult: Bool { phase == .result && FeatureLightfield.usesResultSpace(module) }
+
+    /// D154: a module's landing and running pages are CleanMyMac's
+    /// (`CareStudioTemplateLanding`/`Running`); results keep this layout on
+    /// the module gradient until each moves to its manager.
+    @ViewBuilder
     var body: some View {
+        if phase != .result, !usesClassicLayout, let studio = CareStudioModule(filter: module) {
+            if phase == .landing {
+                CareStudioTemplateLanding(
+                    studio: studio, title: studio.landingTitle(for: module, given: title),
+                    subtitle: subtitle.isEmpty ? studio.subtitle : subtitle,
+                    status: status, safety: safety, actionTitle: actionTitle,
+                    actionAccessibilityLabel: actionAccessibilityLabel, actionEnabled: actionEnabled,
+                    artwork: artwork, statusActionTitle: statusActionTitle,
+                    statusActionEnabled: statusActionEnabled, statusAction: statusAction,
+                    action: action) { content }
+                    .preference(key: FeatureLightfieldPhasePreferenceKey.self, value: phase)
+            } else {
+                CareStudioTemplateRunning(studio: studio, title: title, safety: safety,
+                                          actionTitle: actionTitle, actionEnabled: actionEnabled,
+                                          artwork: artwork, action: action) { content }
+                    .preference(key: FeatureLightfieldPhasePreferenceKey.self, value: phase)
+            }
+        } else {
+            lightfieldBody
+        }
+    }
+
+    private var lightfieldBody: some View {
         GeometryReader { proxy in
             let geometry = FeatureLightfieldGeometry(size: proxy.size, phase: phase, compactResult: compactResult)
             let hasSubtitleAccessory = !compactResult && subtitleAccessory != nil && geometry.content.width >= 740 && proxy.size.height >= 500
@@ -356,8 +378,8 @@ struct FeatureLightfieldPage<Content: View>: View {
                 // D67/prototype `.status .r`: the 1 pt divider sits 20 pt before
                 // the right-aligned safety line, not in the middle of the row.
                 HStack(spacing: compactResult ? 12 : 20) {
-                    // The window toolbar is hidden on D67 pages, so its
-                    // “操作记录” entry lives here as a text button (D64: no icon).
+                    // The window has no toolbar (D94), so “操作记录”
+                    // lives here as a text button (D64: no icon).
                     if let openOperationHistory {
                         Button(L10n.text("操作记录", "Operation History"), action: openOperationHistory)
                             .buttonStyle(FeatureLightfieldRowButtonStyle(minimumHitHeight: compactResult ? 44 : nil))
@@ -601,7 +623,12 @@ struct FeatureLightfieldButtonStyle: ButtonStyle {
 
 struct FeatureLightfieldHairline: View {
     @Environment(\.colorScheme) private var scheme
-    var body: some View { Rectangle().fill(FeatureLightfieldPalette.resolve(scheme).hairColor).frame(height: 1).accessibilityHidden(true) }
+    /// D154: on a module gradient the rule takes the studio's hairline.
+    @Environment(\.careStudioSurface) private var onStudio
+    var body: some View {
+        Rectangle().fill(onStudio ? CareStudioInk.hairline : FeatureLightfieldPalette.resolve(scheme).hairColor)
+            .frame(height: 1).accessibilityHidden(true)
+    }
 }
 
 /// Flat secondary actions share one chrome policy, just like the primary action.

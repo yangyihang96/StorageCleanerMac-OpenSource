@@ -89,14 +89,17 @@ struct DiskBenchmarkKernel: Sendable {
         let ranOnMainThread: Bool
     }
 
+    /// The running channel's own folder, the one the performance page already
+    /// passes (`MSeriesProtocol.temporaryRoot`): `StorageCleanerMac-Beta` in
+    /// the Beta, `StorageCleanerMac` in release (D106-R1). The launch-time
+    /// orphan sweep, the legacy runner and every v7 default resolve here, so a
+    /// Beta never lists, creates or deletes anything in the release folder.
     static var defaultRootDirectory: URL {
-        let applicationSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return applicationSupport
-            .appendingPathComponent("StorageCleanerMac", isDirectory: true)
+        defaultRootDirectory(fileManager: .default)
+    }
+
+    static func defaultRootDirectory(fileManager: FileManager) -> URL {
+        AppDataDirectories.applicationSupportRoot(fileManager: fileManager)
             .appendingPathComponent("BenchmarkTemporary", isDirectory: true)
     }
 

@@ -69,11 +69,15 @@ final class LargeFilesStore: ObservableObject {
         _ path: String,
         _ index: StorageMapAnalysisIndex?
     ) async throws -> StorageMapDirectorySnapshot
+    /// D104 G1: how much of a listed file deleting it frees at once.
+    typealias StorageSharingReader = @Sendable (_ path: String) -> FileStorageSharing.Reading
 
     private enum Key {
         static let searchText = "large-files.search-text"
         static let selectedFilter = "large-files.selected-filter"
         static let sortMode = "large-files.sort-mode"
+        static let storageMapStyle = "storage-map.view-style"
+        static let storageMapColorMode = "storage-map.color-mode"
         static let selectedStorageMapTarget = "storage-map.selected-target"
         static let largeFileThreshold = "large-files.threshold"
     }
@@ -86,8 +90,13 @@ final class LargeFilesStore: ObservableObject {
     private let listingScanOperation: ListingScanOperation
     private let storageAnalysisOperation: StorageAnalysisOperation
     private let directoryBrowseOperation: DirectoryBrowseOperation
+    private let storageSharing: StorageSharingReader
+    private let selectionMetadata: FileAnalysisSelectionReclaim.MetadataReader
 
     @Published private(set) var items: [StorageItem] = []
+    /// D104 G1: what each listed file frees once the Trash is emptied, by
+    /// item ID, read after the list is made. Folders are not read.
+    @Published private(set) var reclaimableEstimates: [String: CleanupReclaimableEstimate] = [:]
     /// D85：最近一次成功扫描的门槛与截断情况；取消或失败不替换。
     @Published private(set) var listingSummary: LargeFileListingSummary?
     @Published private(set) var phase: FeatureScanPhase = .idle
@@ -96,7 +105,12 @@ final class LargeFilesStore: ObservableObject {
     @Published private(set) var scanSeconds: TimeInterval?
     @Published private(set) var errorMessage: String?
     @Published private(set) var cancellationRequested = false
-    @Published private(set) var storageAnalysis: StorageMapAnalysisResult?
+    @Published private(set) var storageAnalysis: StorageMapAnalysisResult? {
+        didSet { storageMapDataVersion &+= 1; estimateSelectionReclaim() }
+    }
+    /// An edited index can retain its scan time and total volume size.
+    /// Advance on every replacement, including D46 removal and restoration.
+    @Published private(set) var storageMapDataVersion: UInt64 = 0
     @Published private(set) var storageAnalysisPhase: FeatureScanPhase = .idle
     @Published private(set) var storageAnalysisProgress: StorageMapScanProgress?
     @Published private(set) var storageAnalysisErrorMessage: String?
@@ -107,7 +121,11 @@ final class LargeFilesStore: ObservableObject {
     let storageMapTargets: [StorageMapScanTarget]
 
     // D46: checked items and their move to the Trash.
-    @Published private(set) var trashSelections: [FileAnalysisTrashSelection] = []
+    @Published private(set) var trashSelections: [FileAnalysisTrashSelection] = [] {
+        didSet { if oldValue != trashSelections { estimateSelectionReclaim() } }
+    }
+    @Published private(set) var selectionReclaim: CleanupSelectionReclaimable?
+    @Published private(set) var isEstimatingSelectionReclaim = false
     @Published private(set) var trashPolicy: FileAnalysisTrashPolicy?
     @Published private(set) var trashPhase: FileAnalysisTrashPhase = .idle
     @Published private(set) var trashReview: FileAnalysisTrashReview?
@@ -138,12 +156,21 @@ final class LargeFilesStore: ObservableObject {
     @Published var sortMode: LargeFileSortMode {
         didSet { defaults.set(sortMode.rawValue, forKey: Key.sortMode) }
     }
+    @Published var storageMapStyle: SpaceMapViewStyle {
+        didSet { defaults.set(storageMapStyle.rawValue, forKey: Key.storageMapStyle) }
+    }
+    @Published var storageMapColorMode: SpaceMapColorMode {
+        didSet { defaults.set(storageMapColorMode.rawValue, forKey: Key.storageMapColorMode) }
+    }
     /// D85：大文件门槛（50 MiB / 200 MiB / 1 GiB），默认 200 MiB。
     @Published var largeFileThreshold: LargeFileThreshold {
         didSet { defaults.set(largeFileThreshold.rawValue, forKey: Key.largeFileThreshold) }
     }
 
     private var scanTask: Task<Void, Never>?
+    private var selectionReclaimTask: Task<Void, Never>?
+    private var selectionReclaimKey: FileAnalysisSelectionReclaim.Key?
+    private var cachedSelectionReclaim: (key: FileAnalysisSelectionReclaim.Key, result: CleanupSelectionReclaimable)?
     private var scanGeneration: UUID?
     private var storageAnalysisTask: Task<Void, Never>?
     private var storageAnalysisGeneration: UUID?
@@ -171,7 +198,9 @@ final class LargeFilesStore: ObservableObject {
         storageMapTargets: [StorageMapScanTarget]? = nil,
         storageAnalysisOperation: StorageAnalysisOperation? = nil,
         directoryBrowseOperation: DirectoryBrowseOperation? = nil,
-        trashEnvironment: FileAnalysisTrashEnvironment = .live
+        trashEnvironment: FileAnalysisTrashEnvironment = .live,
+        storageSharing: StorageSharingReader? = nil,
+        selectionMetadata: @escaping FileAnalysisSelectionReclaim.MetadataReader = FileAnalysisSelectionReclaim.metadata(at:)
     ) {
         self.coordinator = coordinator
         self.trashEnvironment = trashEnvironment
@@ -189,6 +218,8 @@ final class LargeFilesStore: ObservableObject {
         usesDefaultScanOperation = scanOperation == nil && listingScanOperation == nil
         self.storageAnalysisOperation = storageAnalysisOperation ?? Self.defaultStorageAnalysisOperation
         self.directoryBrowseOperation = directoryBrowseOperation ?? Self.defaultDirectoryBrowseOperation
+        self.storageSharing = storageSharing ?? { FileStorageSharing.read(at: URL(fileURLWithPath: $0)) }
+        self.selectionMetadata = selectionMetadata
         let resolvedTargets = storageMapTargets ?? DiskScanner.storageMapScanTargets()
         self.storageMapTargets = resolvedTargets
         let storedTargetID = defaults.string(forKey: Key.selectedStorageMapTarget)
@@ -202,7 +233,36 @@ final class LargeFilesStore: ObservableObject {
         sortMode = LargeFileSortMode(
             rawValue: defaults.string(forKey: Key.sortMode) ?? ""
         ) ?? .size
+        storageMapStyle = SpaceMapViewStyle(rawValue: defaults.string(forKey: Key.storageMapStyle) ?? "") ?? .bubbles
+        storageMapColorMode = SpaceMapColorMode(rawValue: defaults.string(forKey: Key.storageMapColorMode) ?? "") ?? .type
         largeFileThreshold = LargeFileThreshold.stored(defaults.string(forKey: Key.largeFileThreshold))
+    }
+
+    deinit { selectionReclaimTask?.cancel() }
+
+    private func estimateSelectionReclaim() {
+        selectionReclaimTask?.cancel()
+        selectionReclaim = nil
+        let key = FileAnalysisSelectionReclaim.Key(selections: trashSelections, version: storageMapDataVersion)
+        selectionReclaimKey = key
+        guard !key.selections.isEmpty else { isEstimatingSelectionReclaim = false; return }
+        if let cachedSelectionReclaim, cachedSelectionReclaim.key == key {
+            selectionReclaim = cachedSelectionReclaim.result
+            isEstimatingSelectionReclaim = false
+            return
+        }
+        isEstimatingSelectionReclaim = true
+        let metadata = selectionMetadata
+        let sharing = storageSharing
+        selectionReclaimTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            guard !Task.isCancelled else { return }
+            let result = await FileAnalysisSelectionReclaim.calculateAsync(key.selections, metadata: metadata, sharing: sharing)
+            guard !Task.isCancelled, let self, self.selectionReclaimKey == key, let result else { return }
+            self.cachedSelectionReclaim = (key, result)
+            self.selectionReclaim = result
+            self.isEstimatingSelectionReclaim = false
+        }
     }
 
     var isScanning: Bool {
@@ -337,6 +397,7 @@ final class LargeFilesStore: ObservableObject {
         let usesDefaultScanOperation = usesDefaultScanOperation
         let coordinator = coordinator
         let activityStore = activityStore
+        let storageSharing = storageSharing
 
         scanTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -373,7 +434,8 @@ final class LargeFilesStore: ObservableObject {
                         try await operation(threshold, progressHandler)
                     }
                     try Task.checkCancellation()
-                    return result
+                    let estimates = try await Self.reclaimableEstimates(for: result.items, reading: storageSharing)
+                    return (result, estimates)
                 }
                 await activityStore.refresh()
                 guard scanGeneration == generation else { return }
@@ -381,8 +443,9 @@ final class LargeFilesStore: ObservableObject {
                     phase = .cancelled
                     return
                 }
-                items = scannedItems.items
-                listingSummary = scannedItems.summary
+                items = scannedItems.0.items
+                reclaimableEstimates = scannedItems.1
+                listingSummary = scannedItems.0.summary
                 migrationCompletions = [:]
                 lastScanAt = Date()
                 scanSeconds = Date().timeIntervalSince(started)
@@ -493,9 +556,23 @@ final class LargeFilesStore: ObservableObject {
         storageAnalysisTask?.cancel()
     }
 
+    /// D221: files the clutter manager's Large & Old Files moved to the
+    /// Trash leave this list too; the next scan lists what is there then.
+    /// D226: the File Analysis environment this store moves items with (a
+    /// test store's own home); My Clutter's Downloads reads and moves with it.
+    var fileAnalysisEnvironment: FileAnalysisTrashEnvironment { trashEnvironment }
+
+    func forgetMovedFiles(_ paths: Set<String>) {
+        guard !paths.isEmpty, items.contains(where: { paths.contains($0.path) }) else { return }
+        items.removeAll { paths.contains($0.path) }
+        let remaining = Set(items.map(\.id))
+        reclaimableEstimates = reclaimableEstimates.filter { remaining.contains($0.key) }
+    }
+
     func replaceItemsForTesting(_ items: [StorageItem], scannedAt: Date = Date()) {
         guard !isScanning else { return }
         self.items = items
+        reclaimableEstimates = [:]
         migrationCompletions = [:]
         lastScanAt = scannedAt
         phase = .finished
@@ -518,6 +595,13 @@ final class LargeFilesStore: ObservableObject {
         storageMapBrowsePhase = .idle
         resetTrash(for: result)
     }
+
+#if DEBUG
+    /// Exercises the same map edit as a completed D46 move, with an in-memory receipt.
+    func finishTrashForTesting(_ outcome: FileAnalysisTrashOutcome) {
+        finishTrash(outcome, generation: trashGeneration)
+    }
+#endif
 
     func openStorageMapDirectory(_ entry: StorageTreemapEntry, fromLevel level: Int? = nil) {
         guard entry.canDescend,
@@ -731,22 +815,48 @@ final class LargeFilesStore: ObservableObject {
         threshold: LargeFileThreshold,
         progressHandler: @escaping DiskScanProgressHandler
     ) async throws -> LargeFileScanOutcome {
-        try await Task.detached(priority: .utility) {
+        let ignoreList = IgnoreListStore.shared.snapshot()
+        return try await Task.detached(priority: .utility) {
             let result = try DiskScanner(
+                excludedPaths: [],
                 scanMode: .fallback,
                 progressHandler: progressHandler,
                 largeFileRoots: sourcePath.map { [$0] },
-                largeFileThreshold: threshold
+                largeFileThreshold: threshold,
+                ignoreList: ignoreList
             ).scan()
             return LargeFileScanOutcome(items: result.items(for: .largeFiles), summary: result.largeFileListing)
         }.value
+    }
+
+    /// D104 G1: one read-only `getattrlist` per listed file, off the main
+    /// thread; folders and volumes that report no sharing get no estimate.
+    /// Each row's note uses only its own estimate, so no volume is needed to
+    /// match clones between rows.
+    private static func reclaimableEstimates(
+        for items: [StorageItem],
+        reading: @escaping StorageSharingReader
+    ) async throws -> [String: CleanupReclaimableEstimate] {
+        let worker = Task.detached(priority: .utility) {
+            var estimates = [String: CleanupReclaimableEstimate]()
+            for item in items where !item.isDirectory {
+                try Task.checkCancellation()
+                estimates[item.id] = CleanupReclaimableEstimate.file(reading(item.path), allocatedBytes: item.sizeBytes)
+            }
+            return estimates
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
     }
 
     private static let defaultStorageAnalysisOperation: StorageAnalysisOperation = {
         target,
         progressHandler in
         let worker = Task.detached(priority: .utility) {
-            try DiskScanner(scanMode: .fallback).storageMapAnalysis(
+            try DiskScanner(excludedPaths: [], scanMode: .fallback).storageMapAnalysis(
                 target: target,
                 progressHandler: progressHandler
             )
@@ -761,7 +871,7 @@ final class LargeFilesStore: ObservableObject {
     private static let defaultDirectoryBrowseOperation: DirectoryBrowseOperation = { path, index in
         guard let index else { throw StorageMapAnalysisError.unavailable }
         let worker = Task.detached(priority: .userInitiated) {
-            try DiskScanner(scanMode: .fallback).storageMapSnapshot(
+            try DiskScanner(excludedPaths: [], scanMode: .fallback).storageMapSnapshot(
                 at: path,
                 using: index
             )
@@ -912,10 +1022,12 @@ extension LargeFilesStore {
         let index = analysis.index
         let volumeName = analysis.target.kind == .externalVolume ? analysis.target.title : nil
         let generation = trashGeneration
+        let storageSharing = storageSharing
         trashTask = Task { @MainActor [weak self] in
             let review = await Task.detached(priority: .userInitiated) {
                 FileAnalysisTrashService.review(selections, index: index, policy: policy,
-                                                environment: environment, externalVolumeName: volumeName)
+                                                environment: environment, externalVolumeName: volumeName,
+                                                storageSharing: storageSharing)
             }.value
             guard let self, self.trashGeneration == generation, self.trashPhase == .preparingReview else { return }
             self.trashReview = review
@@ -1096,7 +1208,7 @@ extension LargeFilesStore {
         return dropped.count == 1
             ? L10n.text("已取消勾选“\(first.title)”：\(first.block.shortTitle)。",
                         "Unchecked “\(first.title)”: \(first.block.shortTitle).")
-            : L10n.text("已取消勾选 \(dropped.count) 项，例如“\(first.title)”：\(first.block.shortTitle)。",
+            : L10n.text("已取消勾选 \(ByteFormat.count(dropped.count)) 项，例如“\(first.title)”：\(first.block.shortTitle)。",
                         "Unchecked \(L10n.items(dropped.count)), such as “\(first.title)”: \(first.block.shortTitle).")
     }
 

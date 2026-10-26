@@ -134,7 +134,18 @@ struct LargeFilesView: View {
                 if let source = rawItems.first(where: { ExternalMigrationItem.largeFile($0)?.id == item.id }) { store.requestTrash(source) }
             },
             listingNote: workspace.migrationKind == .file ? workspace.listingSummary?.note : nil,
-            lowerBoundIDs: lowerBoundMigrationIDs)
+            lowerBoundIDs: lowerBoundMigrationIDs,
+            reclaimable: workspace.migrationKind == .file ? migrationReclaimable : [:])
+    }
+
+    /// D104 G1：各文件清空废纸篓后预计释放多少，按迁移行 ID。
+    private var migrationReclaimable: [String: CleanupReclaimableEstimate] {
+        let estimates = workspace.reclaimableEstimates
+        guard !estimates.isEmpty else { return [:] }
+        return Dictionary(rawItems.compactMap { item in
+            guard let estimate = estimates[item.id], let id = ExternalMigrationItem.largeFile(item)?.id else { return nil }
+            return (id, estimate)
+        }, uniquingKeysWith: { first, _ in first })
     }
 
     /// D84：测量超时、大小只是本轮量到的下限的行。
@@ -386,7 +397,7 @@ struct LargeFilesScanLandingView: View {
             }
             if store.hasScannedInstalledApps {
                 let count = store.installedApps.compactMap(ExternalMigrationItem.application).count
-                return .completed(L10n.text("已找到 \(count) 个可搬移 App", "Found \(count) movable apps"))
+                return .completed(L10n.text("已找到 \(ByteFormat.count(count)) 个可搬移 App", "Found \(ByteFormat.count(count)) movable apps"))
             }
             return .neverScanned
         }
@@ -559,7 +570,7 @@ struct LargeFilesScanLandingView: View {
     /// D85：大文件门槛三档；默认 200 MiB，单位按二进制写明。
     private var largeFileThresholdControl: some View {
         HStack(spacing: 8) {
-            LightfieldOptionIconView(icon: .migrationVerification)
+            LightfieldOptionIconView(icon: .migrationItemType)
             Text(L10n.text("大文件门槛", "Large File Threshold")).font(.system(size: 13)).lineLimit(1)
             LightfieldTextSegments(titles: LargeFileThreshold.allCases.map(\.title),
                 selection: Binding(get: { LargeFileThreshold.allCases.firstIndex(of: workspace.largeFileThreshold) ?? 1 },
@@ -580,73 +591,81 @@ struct LargeFilesScanLandingView: View {
         .lightfieldComponentProbe("migration.threshold")
     }
 
+    // Titled rows like the threshold row. A borderless Menu flattens a custom
+    // label to its text and a chevron, so the icon, title, row height,
+    // hairline and free-space bar sit outside it and the menu shows the value.
     private var migrationSourceControl: some View {
-        Menu {
-            Button(L10n.text("用户可访问的文件夹", "User-accessible folders")) {
-                workspace.selectMigrationSource(nil)
+        HStack(spacing: 8) {
+            LightfieldOptionIconView(icon: .migrationSourceFolder)
+            Text(L10n.text("来源", "Source")).font(.system(size: 13)).lineLimit(1)
+            Menu {
+                Button(L10n.text("用户可访问的文件夹", "User-accessible folders")) {
+                    workspace.selectMigrationSource(nil)
+                }
+                Divider()
+                Button(L10n.text("选择文件夹…", "Choose Folder…")) { chooseMigrationSource() }
+            } label: {
+                Text(migrationSourceName).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
             }
-            Divider()
-            Button(L10n.text("选择文件夹…", "Choose Folder…")) { chooseMigrationSource() }
-        } label: {
-            HStack(spacing: 8) {
-                LightfieldOptionIconView(icon: .migrationSourceFolder)
-                Text(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
-                    .font(.system(size: 13))
-                    .lineLimit(1).truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.horizontal, 6)
-            .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
-            .contentShape(Rectangle())
-            .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+            .menuStyle(.borderlessButton).fixedSize()
+            .accessibilityLabel(L10n.text("来源", "Source"))
+            .accessibilityValue(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
+            Spacer(minLength: 0)
         }
-        .menuStyle(.borderlessButton)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityLabel(L10n.text("来源", "Source"))
-        .accessibilityValue(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
+        .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
         .help(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
+        .lightfieldComponentProbe("migration.source")
+    }
+
+    /// A chosen folder by its name; the full path is the row's help.
+    private var migrationSourceName: String {
+        workspace.migrationSourcePath.map { URL(fileURLWithPath: $0).lastPathComponent }
+            ?? L10n.text("用户可访问的文件夹", "User-accessible folders")
     }
 
     private var migrationDestinationControl: some View {
-        Menu {
-            if presentationExternalVolumes.isEmpty {
-                Text(L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
-            } else {
-                ForEach(presentationExternalVolumes) { volume in
-                    Button("\(volume.name) · \(ByteFormat.string(volume.availableBytes))") {
-                        workspace.migrationDestinationVolumeID = volume.id
+        HStack(spacing: 8) {
+            LightfieldOptionIconView(icon: .migrationDestinationDrive)
+            Text(L10n.text("目标位置", "Destination")).font(.system(size: 13)).lineLimit(1)
+            Menu {
+                if presentationExternalVolumes.isEmpty {
+                    Text(L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
+                } else {
+                    ForEach(presentationExternalVolumes) { volume in
+                        // D97: the same decimal unit as the row's own free space.
+                        Button("\(volume.name) · \(ByteFormat.storageString(volume.availableBytes))") {
+                            workspace.migrationDestinationVolumeID = volume.id
+                        }
                     }
                 }
+                Divider()
+                Button(L10n.text("刷新外接设备", "Refresh External Drives")) {
+                    Task { await refreshExternalVolumes() }
+                }
+            } label: {
+                Text(selectedVolume?.name ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
+                    .font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
             }
-            Divider()
-            Button(L10n.text("刷新外接设备", "Refresh External Drives")) {
-                Task { await refreshExternalVolumes() }
+            .menuStyle(.borderlessButton).fixedSize()
+            .disabled(isRefreshingVolumes)
+            .accessibilityLabel(L10n.text("目标位置", "Destination"))
+            .accessibilityValue(selectedVolume?.url.path ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
+            Spacer(minLength: 8)
+            if let volume = selectedVolume {
+                LightfieldDataBar(progress: volume.totalBytes > 0 ? Double(volume.availableBytes) / Double(volume.totalBytes) : nil,
+                    module: .migration, style: .share, accessibilityLabel: L10n.text("目标盘可用比例", "Destination Free Share"))
+                    .frame(width: 88)
             }
-        } label: {
-            HStack(spacing: 8) {
-                LightfieldOptionIconView(icon: .migrationDestinationDrive)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(selectedVolume?.name ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
-                        .font(.system(size: 16)).lineLimit(1).truncationMode(.middle)
-                    if let volume = selectedVolume {
-                        LightfieldDataBar(progress: volume.totalBytes > 0 ? Double(volume.availableBytes) / Double(volume.totalBytes) : nil,
-                            module: .migration, style: .share, accessibilityLabel: L10n.text("目标盘可用比例", "Destination Free Share"))
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                Text(selectedVolume.map { ByteFormat.storageString($0.availableBytes) } ?? "—")
-                    .font(.system(size: 13)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok
-            }
-            .padding(.horizontal, 6)
-            .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
-            .contentShape(Rectangle())
-            .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
+            Text(selectedVolume.map { ByteFormat.storageString($0.availableBytes) } ?? "—")
+                .font(.system(size: 13)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok
         }
-        .menuStyle(.borderlessButton)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .disabled(isRefreshingVolumes)
-        .accessibilityLabel(L10n.text("目标位置", "Destination"))
-        .accessibilityValue(selectedVolume?.url.path ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
+        .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
         .help(selectedVolume?.url.path ?? L10n.text("请连接外接硬盘", "Connect an external drive"))
+        .lightfieldComponentProbe("migration.destination")
     }
 
     private var selectedVolume: ExternalStorageVolume? {
@@ -718,7 +737,8 @@ struct LargeFilesScanLandingView: View {
             guard workspace.migrationKind != .application, let progress = workspace.progress else { return [] }
             return [
                 .init(title: L10n.text("已发现", "Items Found"), value: L10n.items(progress.discoveredItemCount)),
-                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.string(progress.discoveredBytes))
+                // D97: the migration results list sizes in the same decimal unit.
+                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.storageString(progress.discoveredBytes))
             ]
         }
         guard let progress = workspace.storageAnalysisProgress else { return [] }

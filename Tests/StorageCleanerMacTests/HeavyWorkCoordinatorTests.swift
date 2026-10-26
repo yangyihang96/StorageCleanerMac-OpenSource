@@ -13,6 +13,22 @@ final class HeavyWorkCoordinatorTests: XCTestCase {
         XCTAssertEqual(activeOwner, .mainScan)
     }
 
+    /// 10-24: the lease's refusals read as people's words wherever they are
+    /// shown (the Applications log read "…HeavyWorkCoordinator.Error错误0";
+    /// malware removal said to check permissions and the disk).
+    func testRefusalsReadAsPeoplesWords() {
+        let busy = HeavyWorkCoordinator.Error.busy(activeOwner: .appUpdates)
+        XCTAssertEqual(busy.localizedDescription, HeavyWorkActivityStore.conflictMessage(activeOwner: .appUpdates))
+        XCTAssertEqual(FileContentReadError.userMessage(for: busy), busy.localizedDescription,
+                       "another task, not a permission or disk problem")
+        let expired = HeavyWorkCoordinator.Error.invalidLease(expectedOwner: .cleanup)
+        for error in [busy, expired] {
+            XCTAssertFalse(error.localizedDescription.contains("HeavyWorkCoordinator"), error.localizedDescription)
+            XCTAssertEqual((error as NSError).domain, "StorageCleanerMac.HeavyWorkCoordinator.Error",
+                           "domain and code stay for Details")
+        }
+    }
+
     func testAcquireFailsFastWhenAnotherOwnerIsActive() async throws {
         let coordinator = HeavyWorkCoordinator()
         _ = try await coordinator.acquire(owner: .mainScan)

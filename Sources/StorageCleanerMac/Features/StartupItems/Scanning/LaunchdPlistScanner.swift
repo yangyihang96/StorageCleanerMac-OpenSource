@@ -105,7 +105,7 @@ struct LaunchdPlistScanner: StartupItemScanning {
             URLs = try fileManager.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-                options: [.skipsHiddenFiles]
+                options: []
             )
         } catch {
             throw LaunchdPlistScannerError.inaccessibleDirectory(directory.path, error.localizedDescription)
@@ -116,6 +116,10 @@ struct LaunchdPlistScanner: StartupItemScanning {
         for URL in URLs.sorted(by: { $0.path.localizedStandardCompare($1.path) == .orderedAscending }) {
             try Task.checkCancellation()
             guard URL.pathExtension.caseInsensitiveCompare("plist") == .orderedSame else { continue }
+            // D217: a folder named *.plist is not a launchd file. Keep
+            // symlinks as evidence for the existing security inspector.
+            let values = try? URL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values?.isRegularFile == true || values?.isSymbolicLink == true else { continue }
             candidates.append(candidate(at: URL, directory: directory))
         }
         return candidates

@@ -77,7 +77,7 @@ final class PhotoLibraryStore: ObservableObject {
             do {
                 guard authorization.canAddToAlbum else { throw PhotoLibraryError.permission }
                 let count = try await provider.addToReviewAlbum(identifiers: ids)
-                message = L10n.text("已将 \(count) 张照片加入『存储清理助手-待删除』。请在『照片』App 中查看并删除，删除后进入『最近删除』30 天可恢复。", "Added \(count) photos to ‘存储清理助手-待删除’. Review and delete them in Photos. Deleted photos can be recovered from Recently Deleted for 30 days.")
+                message = L10n.text("已将 \(ByteFormat.count(count)) 张照片加入『存储清理助手-待删除』。请在『照片』App 中查看并删除，删除后进入『最近删除』30 天可恢复。", "Added \(ByteFormat.count(count)) photos to ‘存储清理助手-待删除’. Review and delete them in Photos. Deleted photos can be recovered from Recently Deleted for 30 days.")
                 selectedIDs.removeAll()
             } catch { message = L10n.text("加入相册失败或未能核实。请在『照片』App 中检查；没有删除照片。", "Album addition failed or could not be verified. Check Photos; no photos were deleted.") }
             busy = false; task = nil

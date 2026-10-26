@@ -68,16 +68,32 @@ final class BetaDistributionTests: XCTestCase {
         ] {
             XCTAssertTrue(script.contains(required), "missing Beta contract: \(required)")
         }
-        XCTAssertTrue(updater.contains("startingUpdater: true"))
+        // Every normal launch starts Sparkle. Only a D106 acceptance session
+        // leaves it stopped, and release builds never enter one.
+        XCTAssertTrue(updater.contains("startingUpdater: !AcceptanceLaunch.isActive,"))
+        XCTAssertFalse(AcceptanceLaunch.isActive)
+        XCTAssertTrue(try source("Sources/StorageCleanerMac/Support/AcceptanceLaunch.swift").contains(
+            "static let isActive: Bool = {\n#if STORAGE_CLEANER_BETA\n        asksForAcceptance(ProcessInfo.processInfo.arguments)\n#else\n        false\n#endif\n    }()"
+        ))
         XCTAssertFalse(updater.contains("guard !StorageCleanerBuildIdentity.isBeta"))
         XCTAssertTrue(script.contains("StorageCleanerMacUpdates/main/appcast-beta.xml"))
+        // D152: the manual sliders still need verified ranges, each fan once
+        // (was "if telemetry.hasVerifiedRanges {").
         XCTAssertTrue(hardwareControl.contains(
-            "if telemetry.hasVerifiedRanges {"
+            "if FanManualSliderList.isAvailable(for: telemetry) {"
         ))
-        XCTAssertTrue(hardwareControl.contains(
-            "Button { presentation.showFanCurveEditor() } label: {"
+        XCTAssertTrue(try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/FanControlInlineControls.swift").contains(
+            "static func isAvailable(for telemetry: FanTelemetryState) -> Bool {\n        telemetry.hasVerifiedRanges\n"
         ))
-        XCTAssertTrue(hardwareControl.contains("Text(L10n.text(\"编辑曲线\", \"Edit Curve\"))"))
+        // D152 (F6): the palette has no curve editor page; the curve is
+        // edited in Settings and on the fan-curve page (were
+        // "Button { presentation.showFanCurveEditor() } label: {" and the
+        // 编辑曲线 / Edit Curve button in the palette).
+        XCTAssertFalse(hardwareControl.contains("presentation.showFanCurveEditor()"))
+        XCTAssertFalse(hardwareControl.contains("Text(L10n.text(\"编辑曲线\", \"Edit Curve\"))"))
+        let tertiaryDetail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarTertiaryDetail.swift")
+        XCTAssertTrue(tertiaryDetail.contains("case .fanCurve:\n            FanCurveEditor("))
+        XCTAssertTrue(try source("Sources/StorageCleanerMac/Views/Settings/SettingsSystem.swift").contains("FanCurveEditor("))
         XCTAssertFalse(script.contains("sudo "))
         XCTAssertFalse(script.contains("with administrator privileges"))
         XCTAssertTrue(screenshotCapture.contains("SCContentFilter(display: display, including: windows)"))

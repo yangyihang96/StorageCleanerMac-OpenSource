@@ -253,8 +253,9 @@ struct NetworkCompatibilitySpeedTestService: @unchecked Sendable {
     )
     static let maximumTotalLatencySampleCount = 64
     private static let maximumShutdownGraceSeconds: TimeInterval = 2
+    /// D178: the budget in decimal units, as Finder writes sizes (was "128 MiB").
     static let applicationPayloadBudgetDisclosure =
-        "128 MiB 是应用层正文预算；HTTP、TLS、TCP/IP 等协议开销与网络重传会产生额外流量。"
+        "134.2 MB 是应用层正文预算；HTTP、TLS、TCP/IP 等协议开销与网络重传会产生额外流量。"
     static let loadedLatencyMethodDisclosure =
         "负载延迟探针在下载收到正文且上传实际发送数据后执行；重叠为尽力测量，不代表全程持续满载。"
     static let defaultDownloadEndpoint = URL(string: "https://speed.cloudflare.com/__down")!

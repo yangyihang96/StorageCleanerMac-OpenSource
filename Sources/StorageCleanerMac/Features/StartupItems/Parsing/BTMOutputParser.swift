@@ -134,8 +134,10 @@ struct BTMOutputParser: Sendable {
         key.lowercased().filter(\.isLetter)
     }
 
+    /// D192③: `sfltool dumpbtm` writes "(null)" for an absent field; the 10-23
+    /// test beta showed it as a developer name.
     private func value(in fields: [String: String], keys: [String]) -> String? {
-        keys.lazy.compactMap { fields[$0] }.first(where: { !$0.isEmpty })
+        keys.lazy.compactMap { fields[$0] }.first(where: { !$0.isEmpty && $0 != "(null)" })
     }
 
     private func fileURL(from rawValue: String?) -> URL? {

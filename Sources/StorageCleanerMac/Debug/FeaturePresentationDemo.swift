@@ -145,7 +145,7 @@ struct FeaturePresentationDemoView: View {
         case .largeFiles: LargeFilesScanLandingView(store: store, workspace: store.largeFilesWorkspace)
         case .migration: LargeFilesScanLandingView(store: store, workspace: store.largeFilesWorkspace, mode: .migration)
         case .duplicates: DuplicateFilesView(store: store, presentationFilter: similarPhotos ? .similarImage : .all)
-        case .utilityHub: EmptyView()
+        case .utilityHub, .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles: EmptyView()
         }
     }
 
@@ -190,7 +190,7 @@ struct FeatureDemoRunningFixture: View {
                     : L10n.text("正在分析磁盘空间", "Analyzing Disk Space"),
                 fraction: module == .migration ? 0.42 : nil,
                 metrics: [.init(title: module == .migration ? L10n.text("已发现", "Items Found") : L10n.text("已读取", "Items Read"), value: "128"),
-                    .init(title: module == .migration ? L10n.text("候选大小", "Candidate Size") : L10n.text("已测量大小", "Measured Size"), value: ByteFormat.string(2_362_232_013))],
+                    .init(title: module == .migration ? L10n.text("候选大小", "Candidate Size") : L10n.text("已测量大小", "Measured Size"), value: ByteFormat.storageString(2_362_232_013))],
                 currentItem: path,
                 trustText: module == .migration
                     ? L10n.text("只读扫描 · 先复制并验证，另行确认后原件才会移到废纸篓", "Read-only scan · Copy and verify first; originals move to Trash only after a separate confirmation")
@@ -202,7 +202,7 @@ struct FeatureDemoRunningFixture: View {
                 title: L10n.text("正在确认文件内容", "Verifying File Contents"),
                 pageTitle: similar ? L10n.text("相似照片", "Similar Photos") : ReviewFilter.duplicates.sidebarTitle,
                 isSimilarPhotos: similar, canCancel: true, onCancel: onCancel, onPauseOrResume: {})
-        case .utilityHub: EmptyView()
+        case .utilityHub, .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles: EmptyView()
         }
     }
 

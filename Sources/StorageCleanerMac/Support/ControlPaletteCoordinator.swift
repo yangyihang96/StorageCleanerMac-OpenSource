@@ -22,16 +22,9 @@ enum ConnectionInspectorPresentationState: Equatable, Sendable {
     case pendingClose
 }
 
-enum FanControlPalettePage: Equatable, Sendable {
-    case controls
-    case curveEditor
-}
-
 @MainActor
 final class ControlPalettePresentationState: ObservableObject {
     @Published private(set) var kind = ControlPaletteKind.none
-    @Published private(set) var fanPage = FanControlPalettePage.controls
-    @Published private(set) var fanControlsExpanded: Bool?
     @Published private(set) var selectedFanIndex: Int?
     var interactionDidBegin: (() -> Void)?
 
@@ -50,35 +43,7 @@ final class ControlPalettePresentationState: ObservableObject {
             hasNaturalContentMeasurement = false
         }
         self.kind = kind
-        if kind != .fan {
-            fanPage = .controls
-        }
         presentationDidChange?()
-    }
-
-    func showFanControls() {
-        guard kind == .fan else { return }
-        guard fanPage != .controls else { return }
-        fanPage = .controls
-        measuredContentWidth = nil
-        measuredContentHeight = nil
-        hasNaturalContentMeasurement = false
-        presentationDidChange?()
-    }
-
-    func showFanCurveEditor() {
-        guard kind == .fan else { return }
-        guard fanPage != .curveEditor else { return }
-        fanPage = .curveEditor
-        measuredContentWidth = nil
-        measuredContentHeight = nil
-        hasNaturalContentMeasurement = false
-        presentationDidChange?()
-    }
-
-    func setFanControlsExpanded(_ expanded: Bool) {
-        guard kind == .fan, fanControlsExpanded != expanded else { return }
-        fanControlsExpanded = expanded
     }
 
     func reportNaturalContentSize(_ size: CGSize) {
@@ -98,15 +63,13 @@ final class ControlPalettePresentationState: ObservableObject {
         measuredContentWidth = size.width
         measuredContentHeight = size.height
 #if DEBUG || STORAGE_CLEANER_BETA
-        logControlPaletteEvent("content-size kind=\(kind) page=\(fanPage) width=\(size.width) height=\(size.height)")
+        logControlPaletteEvent("content-size kind=\(kind) width=\(size.width) height=\(size.height)")
 #endif
         presentationDidChange?()
     }
 
     fileprivate func dismiss() {
         kind = .none
-        fanPage = .controls
-        fanControlsExpanded = nil
         measuredContentWidth = nil
         measuredContentHeight = nil
         hasNaturalContentMeasurement = false
@@ -116,18 +79,22 @@ final class ControlPalettePresentationState: ObservableObject {
 enum ControlPaletteMetrics {
     static let gap: CGFloat = MiniWindowStyleTokens.cascadeGap
     static let connectionGap: CGFloat = MiniWindowStyleTokens.cascadeGap
-    static let fanSize = CGSize(width: 280, height: 228)
-    static let fanCurveSize = CGSize(width: 354, height: 410)
-    static let powerSize = CGSize(width: 280, height: 240)
+    /// D152: iStat's fan submenu is 200 wide (`[[BBRMenu alloc]
+    /// initWithFrame:(0, 0, 200, 0)]`, never `setWidth:`); the height is only
+    /// the first proposal, for two synchronized fans, until the content is
+    /// measured (was 280 × 228, and 354 × 410 for the curve editor page).
+    static let fanSize = CGSize(width: 200, height: 202)
+    /// D124: the energy-mode page is a plain level-three page, 220 wide as
+    /// the others (`GeekIStatDetailGeometry`; was 280). iStat's own menu is
+    /// its sections' width + 16 (150 at least); our charge-limit and Mac
+    /// mini notes need the plain-page width.
+    static let powerSize = CGSize(width: GeekIStatDetailGeometry.pageWidth, height: 240)
     static let networkConnectionSize = CGSize(width: 271, height: 435)
 
-    static func size(
-        kind: ControlPaletteKind,
-        fanPage: FanControlPalettePage
-    ) -> CGSize {
+    static func size(kind: ControlPaletteKind) -> CGSize {
         switch kind {
         case .fan:
-            fanPage == .curveEditor ? fanCurveSize : fanSize
+            fanSize
         case .power:
             powerSize
         case .networkConnection:
@@ -282,9 +249,9 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
         panel: ControlPalettePanel = ControlPalettePanel(),
         fixedVisibleFrame: NSRect? = nil,
         presentsPanelOnShow: Bool = true,
-        inspectorOpenDelay: Duration = HoverIntentPolicy.menuBar.initialOpenDelay,
-        inspectorCloseDelay: Duration = HoverIntentPolicy.menuBar.ordinaryCloseDelay,
-        hoverIntentController: HoverIntentController = HoverIntentController(),
+        inspectorOpenDelay: Duration = HoverIntentPolicy.controlPalette.initialOpenDelay,
+        inspectorCloseDelay: Duration = HoverIntentPolicy.controlPalette.ordinaryCloseDelay,
+        hoverIntentController: HoverIntentController = HoverIntentController(policy: .controlPalette),
         pointerLocationProvider: @escaping @MainActor () -> NSPoint = {
             NSEvent.mouseLocation
         },
@@ -331,9 +298,9 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
     convenience init(
         fixedVisibleFrame: NSRect? = nil,
         presentsPanelOnShow: Bool = true,
-        inspectorOpenDelay: Duration = HoverIntentPolicy.menuBar.initialOpenDelay,
-        inspectorCloseDelay: Duration = HoverIntentPolicy.menuBar.ordinaryCloseDelay,
-        hoverIntentController: HoverIntentController = HoverIntentController(),
+        inspectorOpenDelay: Duration = HoverIntentPolicy.controlPalette.initialOpenDelay,
+        inspectorCloseDelay: Duration = HoverIntentPolicy.controlPalette.ordinaryCloseDelay,
+        hoverIntentController: HoverIntentController = HoverIntentController(policy: .controlPalette),
         pointerLocationProvider: @escaping @MainActor () -> NSPoint = {
             NSEvent.mouseLocation
         }
@@ -777,10 +744,7 @@ final class ControlPaletteCoordinator: NSObject, NSWindowDelegate {
 #endif
             return
         }
-        let fallbackSize = ControlPaletteMetrics.size(
-            kind: state.kind,
-            fanPage: state.fanPage
-        )
+        let fallbackSize = ControlPaletteMetrics.size(kind: state.kind)
         let size = CGSize(
             width: state.measuredContentWidth ?? fallbackSize.width,
             height: state.measuredContentHeight ?? fallbackSize.height

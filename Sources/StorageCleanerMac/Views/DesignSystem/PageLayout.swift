@@ -212,11 +212,18 @@ enum SidebarPresentation: String, Equatable, Sendable {
 
 /// The window keeps the automatic mode and the user's manual choice. A
 /// manual choice holds until the window crosses the threshold again (§2.2).
+/// D176: from the first scan of this launch every page shows the icon rail,
+/// as CleanMyMac folds its sidebar once any module starts scanning and keeps
+/// it folded; the user's own toggle overrides that for the rest of the run.
+/// None of it is kept across launches (CleanMyMac opens with the full
+/// sidebar again).
 struct SidebarPresentationState: Equatable, Sendable {
     private(set) var automatic: SidebarPresentation = .full
     private(set) var userChoice: SidebarPresentation?
+    private(set) var foldedByScan = false
+    private(set) var userHasToggled = false
 
-    var effective: SidebarPresentation { userChoice ?? automatic }
+    var effective: SidebarPresentation { userChoice ?? (foldedByScan ? .rail : automatic) }
 
     mutating func update(windowWidth: CGFloat) {
         let next = SidebarPresentation.automatic(windowWidth: windowWidth, previous: automatic)
@@ -226,8 +233,17 @@ struct SidebarPresentationState: Equatable, Sendable {
         }
     }
 
+    /// D176: a scan or a run has started; folds the sidebar unless the user
+    /// has already chosen by hand in this run.
+    mutating func scanStarted() {
+        guard !userHasToggled else { return }
+        foldedByScan = true
+    }
+
     mutating func toggle() {
         userChoice = effective == .full ? .rail : .full
+        userHasToggled = true
+        foldedByScan = false
     }
 }
 

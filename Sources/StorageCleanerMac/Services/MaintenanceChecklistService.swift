@@ -44,7 +44,7 @@ struct MaintenanceChecklistService {
         lines.append("- \(L10n.text("扫描完成", "Scan completed")): \(displayDate(result.generatedAt))")
         lines.append("- \(L10n.text("存储评分", "Storage score")): \(score)/100")
         lines.append("- \(L10n.text("维护状态", "Maintenance status")): \(plan.statusTitle)")
-        lines.append("- \(L10n.text("安全收益", "Safe gain")): \(plan.opportunityBytes > 0 ? ByteFormat.string(plan.opportunityBytes) : L10n.text("无明显空间收益", "no obvious space gain"))")
+        lines.append("- \(L10n.text("安全收益", "Safe gain")): \(plan.opportunityBytes > 0 ? ByteFormat.storageString(plan.opportunityBytes) : L10n.text("无明显空间收益", "no obvious space gain"))")
         lines.append("")
 
         lines.append("## \(L10n.text("执行顺序", "Execution Order"))")
@@ -88,7 +88,7 @@ struct MaintenanceChecklistService {
         lines.append("- \(L10n.text("可安全清理项目也只会先移动到废纸篓，清空废纸篓前仍可恢复。", "Safe cleanup items are moved to Trash first and remain recoverable until Trash is emptied."))")
         lines.append("- \(L10n.text("需确认项、谨慎处理项、应用文件、云盘本地副本和重复文件都需要人工确认。", "Review items, careful items, app bundles, cloud-local copies, and duplicates need manual confirmation."))")
         if !result.deniedPaths.isEmpty {
-            lines.append("- \(L10n.text("本次扫描有 \(result.deniedPaths.count) 个权限缺口；授权后重新扫描，清单会更准确。", "This scan had \(result.deniedPaths.count) access gaps; grant access and rescan for a more accurate checklist."))")
+            lines.append("- \(L10n.text("本次扫描有 \(ByteFormat.count(result.deniedPaths.count)) 个权限缺口；授权后重新扫描，清单会更准确。", "This scan had \(ByteFormat.count(result.deniedPaths.count)) access gaps; grant access and rescan for a more accurate checklist."))")
         }
         lines.append("")
 
@@ -101,7 +101,7 @@ struct MaintenanceChecklistService {
             lines.append("| \(L10n.text("项目", "Item")) | \(L10n.text("分级", "Tier")) | \(L10n.text("大小", "Size")) | \(L10n.text("建议", "Recommendation")) |")
             lines.append("| --- | --- | ---: | --- |")
             for item in topItems {
-                lines.append("| \(tableText(item.title)) | \(tableText(item.tier.title)) | \(ByteFormat.string(item.sizeBytes)) | \(tableText(item.recommendation)) |")
+                lines.append("| \(tableText(item.title)) | \(tableText(item.tier.title)) | \(ByteFormat.storageString(item.sizeBytes)) | \(tableText(item.recommendation)) |")
             }
         }
 

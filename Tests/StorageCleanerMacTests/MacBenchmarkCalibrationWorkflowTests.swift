@@ -63,8 +63,10 @@ private extension MacBenchmarkCalibrationWorkflowTests {
     /// calibration instead of committing a reusable plaintext token.
     static let collectionRunGuardSHA256 =
         "9c1c97e53ffc0bddd8289f1f4718c6ef499b43a12a4efac22ef2f8afa1d9a9a9"
+    /// D106-R1 changed only which folder `DiskBenchmarkKernel` defaults to
+    /// (each channel's own); workloads, sizes, timing and scoring are unchanged.
     static let frozenWorkloadSourceSHA256 =
-        "b6f20c14c535e5d6ca025d1cc2370a924cd4f392018c7aead92ce1b8cc41510d"
+        "8ba060cdb60ca615e9d595833c226961ab16e626459ec4c41d43baf64deca58f"
     static let frozenWorkloadSourcePaths = [
         "Sources/StorageCleanerMac/Models/MacBenchmarkModels.swift",
         "Sources/StorageCleanerMac/Services/Benchmark/CPUBenchmarkKernel.swift",

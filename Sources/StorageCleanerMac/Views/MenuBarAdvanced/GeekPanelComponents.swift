@@ -36,47 +36,276 @@ struct GeekModuleLabel<Title: View>: View {
 }
 
 /// The module title row used by overview cards and by the secondary pages
-/// that open with one (CPU, Memory): the 12 pt panel-title font, the
-/// section-header color for both icon and title, and an optional trailing
-/// readout. Load or state colors belong to the readout, never to the heading.
+/// that open with one (CPU, Memory). D118 (iStat): the title alone, no
+/// symbol, in the 12 pt card-title font and the section-header color, on a
+/// 15 pt row; an optional trailing readout in the value color. Load or state
+/// colors belong to the readout, never to the heading.
 struct GeekModuleHeader<Trailing: View>: View {
     @Environment(\.panelMetricColors) private var metricColors
-    let systemImage: String
     let title: String
     let trailing: Trailing
 
     init(
-        systemImage: String,
         title: String,
         @ViewBuilder trailing: () -> Trailing
     ) {
-        self.systemImage = systemImage
         self.title = title
         self.trailing = trailing()
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: MiniWindowStyleTokens.inlineSpacing) {
-            GeekModuleLabel(systemImage: systemImage, tint: metricColors.sectionHeader) {
-                Text(title).foregroundStyle(metricColors.sectionHeader)
-            }
-            .font(AdvancedPanelTypography.header)
-            .lineLimit(1)
-            .accessibilityAddTraits(.isHeader)
+            Text(title)
+                .font(AdvancedPanelTypography.header)
+                .textCase(.uppercase)
+                .foregroundStyle(metricColors.sectionHeader)
+                .lineLimit(1)
+                .accessibilityAddTraits(.isHeader)
+                // D119: the title keeps its width on the narrower module
+                // pages; the readout gives way.
+                .layoutPriority(1)
             Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
             trailing
+                .frame(maxWidth: GeekIStatCardGeometry.titleTrailingMaximumWidth, alignment: .trailing)
         }
+        .frame(height: GeekIStatCardGeometry.titleHeight)
     }
 }
 
 extension GeekModuleHeader where Trailing == EmptyView {
-    init(systemImage: String, title: String) {
-        self.init(systemImage: systemImage, title: title) { EmptyView() }
+    init(title: String) {
+        self.init(title: title) { EmptyView() }
+    }
+}
+
+/// D118: iStat Menus 7.30 level-one card geometry, in points inside a card of
+/// the overview's card width (`BBRMenuItem` frames and the 2x capture).
+enum GeekIStatCardGeometry {
+    /// The card title is drawn at (8, 5) on a 15 pt row.
+    static let inset: CGFloat = 8
+    static let titleTop: CGFloat = 5
+    static let titleHeight: CGFloat = 15
+    /// The title's trailing readout is limited to W − 16 − 60 (`BBRMenuItem`).
+    static var titleTrailingMaximumWidth: CGFloat { cardWidth - 2 * inset - 60 }
+    /// The dot of a legend row is 3 pt from its label (dot at 8, label at 20).
+    static let legendDotSpacing: CGFloat = 3
+    /// The card width inside the overview's 8 pt shell inset.
+    static var cardWidth: CGFloat { MiniWindowStyleTokens.overviewSize.width - 2 * MiniWindowStyleTokens.contentInset }
+    /// The two halves of the content (between the 8 pt insets), e.g. the
+    /// centers of the memory rings and the network readouts.
+    static func halfCenter(_ index: Int, width: CGFloat = cardWidth) -> CGFloat {
+        inset + (width - 2 * inset) * (index == 0 ? 0.25 : 0.75)
+    }
+
+    // CPU (`cpu-cpu`): graph at x 8, width W − 14, from 25 to H − 24; the
+    // legend row 21 pt above the bottom, two columns 8 pt apart.
+    static let processorHeight: CGFloat = 120
+    static let processorGraphTop: CGFloat = 25
+    static let processorGraphTrailingInset: CGFloat = 6
+    static var processorGraphHeight: CGFloat { processorHeight - 49 }
+    static let legendBottomInset: CGFloat = 21
+    static let legendColumnSpacing: CGFloat = 8
+    static let legendDotSize: CGFloat = 9
+
+    // Memory (`memory-overview`): two 96 pt rings (radius 45, line 6)
+    // centered in the halves, center 56 pt from the top.
+    static let memoryHeight: CGFloat = 112
+    static let memoryRingSize: CGFloat = 96
+    static let memoryRingLineWidth: CGFloat = 6
+    static let memoryRingCenterY: CGFloat = 56
+    static let memoryValueFontSize: CGFloat = 28
+    static let ringLabelFontSize: CGFloat = 10
+
+    // Disk (`disks-physical`): a 26 pt ring (line 2) at (8, 8), two 15 pt
+    // rows at 5 and 22 starting 7 pt right of the ring, and the read and
+    // write lights (8 pt) at the trailing inset.
+    static let diskHeight: CGFloat = 42
+    static let diskRingSize: CGFloat = 26
+    static let diskRingLineWidth: CGFloat = 2
+    static let diskTextLeading: CGFloat = 41
+    static let diskSecondRowTop: CGFloat = 22
+    static let diskLightSize: CGFloat = 8
+    /// The rows stop 4 pt before the lights.
+    static var diskTextTrailingInset: CGFloat { inset + diskLightSize + 4 }
+    /// One light centered on each text row (centers 12.5 and 29.5).
+    static var diskLightSpacing: CGFloat { diskSecondRowTop - titleTop - diskLightSize }
+    static var diskLightTop: CGFloat { titleTop + (titleHeight - diskLightSize) / 2 }
+    static var diskLightColumnHeight: CGFloat { 2 * diskLightSize + diskLightSpacing }
+
+    // Network (`network-bandwidth`, compact): 18 pt readouts centered in the
+    // halves, their legend below, the mirrored graph from 47 to H − 10.
+    static let networkHeight: CGFloat = 100
+    static let networkValueTop: CGFloat = 6
+    static let networkLegendTop: CGFloat = 25
+    static let networkGraphTop: CGFloat = 47
+    static var networkGraphHeight: CGFloat { networkHeight - 57 }
+    /// A readout and its legend: from the value's top to the legend's bottom.
+    static var networkReadoutHeight: CGFloat { networkLegendTop + titleHeight - networkValueTop }
+    static let bigValueFontSize: CGFloat = 18
+
+    // Sensors (`sensors-overview`): three 72 pt rings (radius 35, line 2) in
+    // 87 pt cells at x 8, W/2 − 43.5 and W − 95, center 44 pt from the top.
+    static let sensorsHeight: CGFloat = 88
+    static let sensorRingSize: CGFloat = 72
+    static let sensorRingLineWidth: CGFloat = 2
+    static let sensorCellWidth: CGFloat = 87
+    static let sensorValueFontSize: CGFloat = 15
+    static let sensorValueOnlyFontSize: CGFloat = 19
+    static let sensorDetailFontSize: CGFloat = 11
+    static func sensorCellLeading(_ index: Int, width: CGFloat = cardWidth) -> CGFloat {
+        switch index {
+        case 0: inset
+        case 1: width / 2 - sensorCellWidth / 2
+        default: width - inset - sensorCellWidth
+        }
+    }
+
+    // Battery (`battery-combined`): the title row, then an 8 pt bar at 24.
+    static let batteryHeight: CGFloat = 40
+    static let batteryBarTop: CGFloat = 24
+    static let batteryBarHeight: CGFloat = 8
+
+    /// iStat's two text colors: labels at white 0.85, values at white.
+    static let labelOpacity: Double = 0.85
+    static let textFontSize: CGFloat = 12
+
+    /// D135: the theme's label color (`menuItemTextLabel`); without a theme
+    /// the former primary at 0.85.
+    static func labelColor(_ palette: PanelChromePalette?) -> Color {
+        palette?.secondaryText ?? Color.primary.opacity(labelOpacity)
+    }
+
+    /// D135: the theme's value color (`menuItemTextValue`); without a theme
+    /// the former primary.
+    static func valueColor(_ palette: PanelChromePalette?) -> Color {
+        palette?.text ?? Color.primary
+    }
+}
+
+/// D135: iStat's label and value text colors, read from the panel's theme.
+/// A value color of `.primary` (the callers' stand-in for the value color)
+/// becomes the theme's; any other color is a state readout and stays.
+struct GeekIStatTextColor: ViewModifier {
+    enum Role { case label, value }
+    @Environment(\.panelChromePalette) private var panelChromePalette
+    let role: Role
+    var color: Color = .primary
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(Self.resolve(role, color: color, palette: panelChromePalette))
+    }
+
+    static func resolve(_ role: Role, color: Color, palette: PanelChromePalette?) -> Color {
+        switch role {
+        case .label: GeekIStatCardGeometry.labelColor(palette)
+        case .value: color == .primary ? GeekIStatCardGeometry.valueColor(palette) : color
+        }
+    }
+}
+
+/// D118: a level-one card laid out like iStat's frames. There is no card
+/// padding; every layer is placed at its top offset inside the fixed height
+/// with `geekIStatLayer`.
+struct GeekIStatCard<Content: View>: View {
+    let height: CGFloat
+    let content: Content
+
+    init(height: CGFloat, @ViewBuilder content: () -> Content) {
+        self.height = height
+        self.content = content()
+    }
+
+    var body: some View {
+        GeekCombinedCard(height: height, contentInsets: EdgeInsets()) {
+            ZStack(alignment: .top) { content }
+                .frame(maxWidth: .infinity, minHeight: height, maxHeight: height, alignment: .top)
+        }
+    }
+}
+
+extension View {
+    /// Places a layer of a `GeekIStatCard`: `top` below the card's top edge,
+    /// `leading`/`trailing` from its sides, `height` tall when given.
+    func geekIStatLayer(
+        top: CGFloat,
+        height: CGFloat? = nil,
+        leading: CGFloat = GeekIStatCardGeometry.inset,
+        trailing: CGFloat = GeekIStatCardGeometry.inset,
+        alignment: Alignment = .center
+    ) -> some View {
+        frame(maxWidth: .infinity, alignment: alignment)
+            .frame(height: height, alignment: alignment)
+            .padding(.leading, leading)
+            .padding(.trailing, trailing)
+            .padding(.top, top)
+            .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    /// iStat's label text (`BBRMenuAttributes labelAttributes:`): 12 pt
+    /// regular with monospaced digits in the theme's label color (D135).
+    func geekIStatLabelText() -> some View {
+        font(.system(size: GeekIStatCardGeometry.textFontSize))
+            .modifier(GeekIStatTextColor(role: .label))
+            .monospacedDigit()
+            .lineLimit(1)
+    }
+
+    /// iStat's value text (`valueAttributes:`): the same 12 pt regular font
+    /// with monospaced digits in the value color; `color` replaces it for a
+    /// state readout such as the CPU temperature. D140: `lineLimit: nil`
+    /// wraps, as an IP section's address does.
+    func geekIStatValueText(
+        _ color: Color = .primary,
+        size: CGFloat = GeekIStatCardGeometry.textFontSize,
+        lineLimit: Int? = 1
+    ) -> some View {
+        font(.system(size: size))
+            .modifier(GeekIStatTextColor(role: .value, color: color))
+            .monospacedDigit()
+            .lineLimit(lineLimit)
+    }
+}
+
+/// One column of iStat's legend row: a 9 pt dot, the label, and the value
+/// right-aligned at the column's end.
+struct GeekIStatLegendColumn: View {
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: GeekIStatCardGeometry.legendDotSpacing) {
+            Circle()
+                .fill(color)
+                .frame(width: GeekIStatCardGeometry.legendDotSize, height: GeekIStatCardGeometry.legendDotSize)
+            Text(title).geekIStatLabelText()
+            Spacer(minLength: 4)
+            Text(value).geekIStatValueText()
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A legend label centered under a readout: the 9 pt dot and the label.
+struct GeekIStatCenteredLegend: View {
+    let title: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: GeekIStatCardGeometry.legendDotSpacing) {
+            Circle()
+                .fill(color)
+                .frame(width: GeekIStatCardGeometry.legendDotSize, height: GeekIStatCardGeometry.legendDotSize)
+            Text(title).geekIStatLabelText()
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
 /// One rule for every titled group inside a mini-window card (进程, 频率,
-/// 温度, 风扇, IP 地址 …): 11 pt semibold in the section-header color.
+/// 温度, 风扇, IP 地址 …). D119 (iStat): a section title is drawn like a
+/// card title, 12 pt regular, uppercase, in the section-header color.
 /// Load or pressure states color the data (rings, bars), never a heading.
 struct GeekSectionTitle: View {
     @Environment(\.panelMetricColors) private var metricColors
@@ -84,7 +313,8 @@ struct GeekSectionTitle: View {
 
     var body: some View {
         Text(title)
-            .font(AdvancedPanelTypography.captionStrong)
+            .font(AdvancedPanelTypography.header)
+            .textCase(.uppercase)
             .foregroundStyle(metricColors.sectionHeader)
             .lineLimit(1)
             .accessibilityAddTraits(.isHeader)
@@ -108,12 +338,16 @@ struct GeekProcessListColumn: Identifiable {
 /// 60 pt value slot, so the columns stay aligned, and a label one point wider
 /// (English "● Download") extends into the gap on its left. A single column
 /// is the row's last item and only needs its label's width, which leaves the
-/// rest of the row to the title (English "USING SIGNIFICANT ENERGY" beside
-/// "Power" on the 232 pt power page).
+/// rest of the row to the title. A table without value columns gives the
+/// title the whole row (D119, D172: English "USING SIGNIFICANT ENERGY" on the
+/// 240 pt power page, whose card has no "Power" column).
 struct GeekProcessListHeader<Accessory: View>: View {
     let title: String
     var status: String?
     var help: String?
+    /// The title's VoiceOver value where it is not the status (D139: the
+    /// memory page's group counts).
+    var titleAccessibilityValue: String?
     var columns: [GeekProcessListColumn]
     let accessory: Accessory
 
@@ -121,12 +355,14 @@ struct GeekProcessListHeader<Accessory: View>: View {
         title: String,
         status: String? = nil,
         help: String? = nil,
+        accessibilityValue: String? = nil,
         columns: [GeekProcessListColumn] = [],
         @ViewBuilder accessory: () -> Accessory
     ) {
         self.title = title
         self.status = status
         self.help = help
+        self.titleAccessibilityValue = accessibilityValue
         self.columns = columns
         self.accessory = accessory()
     }
@@ -136,14 +372,17 @@ struct GeekProcessListHeader<Accessory: View>: View {
             GeekSectionTitle(title: title)
                 .layoutPriority(1)
                 .help(help ?? "")
-                .accessibilityValue(status ?? "")
+                .accessibilityValue(titleAccessibilityValue ?? status ?? "")
                 .processHeaderLayoutProbe("process-header.title")
             Spacer(minLength: MiniWindowStyleTokens.rowSpacing)
             if let status {
-                Text(status)
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                // D119: the status shows complete or not at all (it stays in
+                // the title's help and VoiceOver value); beside two value
+                // columns on a 301 pt page there is no room for it.
+                ViewThatFits(in: .horizontal) {
+                    Text(status).geekIStatLabelText().fixedSize()
+                    Color.clear.frame(width: 0, height: 0)
+                }
             }
             accessory
             ForEach(columns) { column in
@@ -156,7 +395,8 @@ struct GeekProcessListHeader<Accessory: View>: View {
                     .accessibilityLabel(column.accessibilityLabel ?? column.title)
             }
         }
-        .frame(minHeight: GeekSecondaryTransferLayout.processRowHeight)
+        // D119: the 15 pt title row of iStat's process section.
+        .frame(minHeight: GeekIStatCardGeometry.titleHeight)
         .processHeaderLayoutProbe("process-header.row")
     }
 
@@ -171,8 +411,8 @@ struct GeekProcessListHeader<Accessory: View>: View {
                 .lineLimit(1)
                 .processHeaderLayoutProbe("process-header.column.\(column.id)")
         }
-        .font(AdvancedPanelTypography.caption)
-        .foregroundStyle(.secondary)
+        .font(.system(size: GeekIStatCardGeometry.textFontSize))
+        .modifier(GeekIStatTextColor(role: .label))
         .fixedSize()
     }
 }
@@ -235,20 +475,19 @@ enum GeekPanelLayout {
     static let contentPadding = MiniWindowStyleTokens.contentInset
     static let sectionSpacing = MiniWindowStyleTokens.cardSpacing
     static let detailSpacing = MiniWindowStyleTokens.cardSpacing
-    static let overviewProcessorCardHeight: CGFloat = 106
-    static let overviewMemoryCardHeight: CGFloat = 122
-    static let overviewDiskCardHeight: CGFloat = 78
-    static let overviewNetworkCardHeight: CGFloat = 81
-    static let overviewSensorsCardHeight: CGFloat = 108
-    static let overviewPowerCardHeight: CGFloat = 64
+    // D118: the iStat Menus 7.30 combined-menu cards (`GeekIStatCardGeometry`).
+    static let overviewProcessorCardHeight = GeekIStatCardGeometry.processorHeight
+    static let overviewMemoryCardHeight = GeekIStatCardGeometry.memoryHeight
+    static let overviewDiskCardHeight = GeekIStatCardGeometry.diskHeight
+    static let overviewNetworkCardHeight = GeekIStatCardGeometry.networkHeight
+    static let overviewSensorsCardHeight = GeekIStatCardGeometry.sensorsHeight
+    static let overviewPowerCardHeight = GeekIStatCardGeometry.batteryHeight
     static let moduleMinimumWidth: CGFloat = 220
     static let metricMinimumHeight: CGFloat = 60
     static let primaryChartHeight: CGFloat = 64
     static let overviewChartHeight: CGFloat = 48
-    // Use more of the existing CPU card for the fixed 0–100% plot. The shared
-    // presentation keeps the header and legend close, without widening cards.
-    static let overviewProcessorChartHeight: CGFloat = 60
-    static let overviewNetworkChartHeight: CGFloat = 40
+    static let overviewProcessorChartHeight = GeekIStatCardGeometry.processorGraphHeight
+    static let overviewNetworkChartHeight = GeekIStatCardGeometry.networkGraphHeight
 
     static func overviewSize(showsPowerModule: Bool) -> CGSize {
         overviewSize(modules: [.processorGraphics, .coreMetrics, .disk, .network, .sensors]
@@ -283,7 +522,14 @@ enum GeekVisualTokens {
     static let overviewMemoryGaugeSize: CGFloat = 88
     static let detailMemoryGaugeSize: CGFloat = 112
 
-    static func ringTrack(for colorScheme: ColorScheme, visualMode: MiniWindowVisualMode) -> Color {
+    /// D135: an iStat theme's tracks are its graph border color
+    /// (`+[BBRMenuAttributes graphBorderColor:]`).
+    static func ringTrack(
+        for colorScheme: ColorScheme,
+        visualMode: MiniWindowVisualMode,
+        palette: PanelChromePalette? = nil
+    ) -> Color {
+        if let graphBorder = palette?.graphBorder { return graphBorder }
         if colorScheme == .light { return MonitorPalette.lightRingTrack }
         return visualMode == .black ? MonitorPalette.blackRingTrack : MonitorPalette.graphiteRingTrack
     }
@@ -302,21 +548,22 @@ enum GeekVisualTokens {
             : AppAppearanceColors.panel
     }
 
+    /// D118 (iStat `BBRMenuItem drawRect:`): a hovered or open card is drawn
+    /// with a 1 pt accent line on the rect inset by 1 pt, at the card radius.
+    /// A resting card on graphite has no border, as on iStat's default theme;
+    /// the black night shell keeps a one-pixel border so its near-black cards
+    /// stay separated.
     static func cardBorder(
         for colorScheme: ColorScheme,
         visualMode: MiniWindowVisualMode,
         isActive: Bool = false,
         isSelected: Bool = false
     ) -> Color {
-        if isSelected {
-            return AppAppearanceColors.controlAccent.opacity(0.82)
+        if isActive || isSelected {
+            return AppAppearanceColors.controlAccent
         }
-        if isActive {
-            return AppAppearanceColors.controlAccent.opacity(colorScheme == .dark ? 0.82 : 0.65)
-        }
-        return colorScheme == .dark
-            ? Color.white.opacity(visualMode == .black ? 0.10 : 0.12)
-            : AppAppearanceColors.border
+        guard colorScheme == .dark else { return AppAppearanceColors.border }
+        return visualMode == .black ? Color.white.opacity(0.10) : .clear
     }
 
     static func cardBorderLineWidth(
@@ -324,7 +571,34 @@ enum GeekVisualTokens {
         isSelected: Bool = false,
         displayScale: CGFloat
     ) -> CGFloat {
-        MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
+        isActive || isSelected ? cardHighlightLineWidth : MiniWindowPixel.onePhysicalPixel(displayScale: displayScale)
+    }
+
+    static let cardHighlightLineWidth: CGFloat = 1
+    static let cardHighlightInset: CGFloat = 1
+
+    /// iStat rounds a highlighted row of at least 20 pt like a card and a
+    /// shorter row at 6 pt.
+    static func highlightRadius(rowHeight: CGFloat) -> CGFloat {
+        rowHeight >= 20 ? cardRadius : MiniWindowStyleTokens.controlCornerRadius
+    }
+}
+
+/// The card or row highlight: a line of `lineWidth` centered on the rect
+/// inset by `inset`, keeping `cornerRadius` on that rect. D135: iStat's
+/// `bezierPathWithRoundedRect:xRadius:yRadius:` corners are circular (the
+/// former continuous corners differed by under a point).
+struct GeekCardHighlight: View {
+    let color: Color
+    var cornerRadius: CGFloat = GeekVisualTokens.cardRadius
+    var lineWidth: CGFloat = GeekVisualTokens.cardHighlightLineWidth
+    var inset: CGFloat = GeekVisualTokens.cardHighlightInset
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .circular)
+            .stroke(color, lineWidth: lineWidth)
+            .padding(inset)
+            .allowsHitTesting(false)
     }
 }
 
@@ -440,20 +714,27 @@ struct GeekCombinedCard<Content: View>: View {
     @Environment(\.geekCombinedCardIsSelected) private var isSelected
 
     let height: CGFloat
+    let contentInsets: EdgeInsets
     let content: Content
 
     init(
         height: CGFloat,
+        contentInsets: EdgeInsets = EdgeInsets(
+            top: GeekVisualTokens.cardVerticalPadding,
+            leading: GeekVisualTokens.cardHorizontalPadding,
+            bottom: GeekVisualTokens.cardVerticalPadding,
+            trailing: GeekVisualTokens.cardHorizontalPadding
+        ),
         @ViewBuilder content: () -> Content
     ) {
         self.height = height
+        self.contentInsets = contentInsets
         self.content = content()
     }
 
     var body: some View {
         content
-            .padding(.horizontal, GeekVisualTokens.cardHorizontalPadding)
-            .padding(.vertical, GeekVisualTokens.cardVerticalPadding)
+            .padding(contentInsets)
             .frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)
             .background {
                 if !usesDivider {
@@ -471,7 +752,37 @@ struct GeekCombinedCard<Content: View>: View {
     }
 }
 
-private extension View {
+/// D135: one of a theme card's border strokes: `lineWidth` centered on the
+/// rect inset by `inset`, at the card radius with circular corners. The
+/// inset is applied to the path: a fractional padding would be rounded to
+/// the pixel grid by layout (0.25 pt at 2x drew a 1 pt top line and a
+/// half-covered bottom one).
+struct GeekCardStroke: View {
+    let color: Color
+    let lineWidth: CGFloat
+    let inset: CGFloat
+
+    var body: some View {
+        GeekInsetRoundedRect(inset: inset, cornerRadius: GeekVisualTokens.cardRadius)
+            .stroke(color, lineWidth: lineWidth)
+            .allowsHitTesting(false)
+    }
+}
+
+/// A rounded rect inset by `inset` that keeps its corner radius, as iStat
+/// strokes each inset rect at radius 8 (`RoundedRectangle.inset(by:)`
+/// would shrink the radius).
+struct GeekInsetRoundedRect: Shape {
+    var inset: CGFloat
+    var cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path(roundedRect: rect.insetBy(dx: inset, dy: inset), cornerRadius: cornerRadius, style: .circular)
+    }
+}
+
+// D124: internal for the text section cards (GeekIStatTextSection.swift).
+extension View {
     func geekCardSurface(
         colorScheme: ColorScheme,
         visualMode: MiniWindowVisualMode,
@@ -480,29 +791,45 @@ private extension View {
         isActive: Bool = false,
         isSelected: Bool = false
     ) -> some View {
+        // D135: an iStat theme's card (`-[BBRMenuItem drawRect:]`): its fill on
+        // a layer of radius 8 with circular corners, its own material on a
+        // transparent theme, a 1 pt border1 on the rect inset by 0.5 and a
+        // 0.5 pt border2 inset by 0.25, both at radius 8. A highlight adds
+        // the 1 pt accent line; the fill stays.
+        let themed = palette?.cardBorder1 != nil
         let shape = RoundedRectangle(
             cornerRadius: GeekVisualTokens.cardRadius,
-            style: .continuous
+            style: themed ? .circular : .continuous
         )
-        let fill = palette.map { isActive || isSelected ? $0.selection : $0.card }
+        let isHighlighted = isActive || isSelected
+        let fill = palette.map { isHighlighted ? $0.selection : $0.card }
             ?? GeekVisualTokens.cardFill(for: colorScheme, visualMode: visualMode)
-        return background(shape.fill(fill))
+        return background {
+                if let palette, palette.cardMaterial, let appearance = palette.menuMaterialAppearance {
+                    IStatMenuMaterialBackdrop(material: nil, appearanceName: appearance)
+                        .clipShape(shape)
+                }
+                shape.fill(fill)
+            }
             .overlay {
-                shape
-                    .strokeBorder(
-                        palette.map { isActive || isSelected ? $0.accent : $0.border } ?? GeekVisualTokens.cardBorder(
-                            for: colorScheme,
-                            visualMode: visualMode,
-                            isActive: isActive,
-                            isSelected: isSelected
-                        ),
-                        lineWidth: GeekVisualTokens.cardBorderLineWidth(
-                            isActive: isActive,
-                            isSelected: isSelected,
-                            displayScale: displayScale
+                if let palette, let border1 = palette.cardBorder1 {
+                    GeekCardStroke(color: border1, lineWidth: 1, inset: 0.5)
+                    GeekCardStroke(color: palette.cardBorder2 ?? border1, lineWidth: 0.5, inset: 0.25)
+                    if isHighlighted {
+                        GeekCardHighlight(color: palette.accent)
+                    }
+                } else if isHighlighted {
+                    GeekCardHighlight(color: palette?.accent ?? GeekVisualTokens.cardBorder(
+                        for: colorScheme, visualMode: visualMode, isActive: isActive, isSelected: isSelected
+                    ))
+                } else {
+                    shape
+                        .strokeBorder(
+                            palette?.border ?? GeekVisualTokens.cardBorder(for: colorScheme, visualMode: visualMode),
+                            lineWidth: GeekVisualTokens.cardBorderLineWidth(isActive: false, displayScale: displayScale)
                         )
-                    )
-                    .allowsHitTesting(false)
+                        .allowsHitTesting(false)
+                }
             }
     }
 }
@@ -619,6 +946,7 @@ struct GeekCombinedRingLabel: View {
 /// A missing percentage keeps a neutral track and never invents a fan limit.
 struct GeekCombinedRing: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.panelChromePalette) private var panelChromePalette
     @Environment(\.miniWindowVisualMode) private var visualMode
     let title: String
     let value: String
@@ -638,12 +966,15 @@ struct GeekCombinedRing: View {
     var isStatusOnly = false
     /// Full name for VoiceOver when `title` is a ring-sized abbreviation.
     var accessibilityTitle: String? = nil
+    /// D118: iStat's ring label (10 pt) and frequency line (11 pt Thin).
+    var fixedLabelFontSize: CGFloat? = nil
+    var detailFontWeight: Font.Weight = .regular
 
     var body: some View {
         ZStack {
             Circle()
                 .inset(by: lineWidth / 2)
-                .stroke(isStatusOnly ? tint : GeekVisualTokens.ringTrack(for: colorScheme, visualMode: visualMode),
+                .stroke(isStatusOnly ? tint : GeekVisualTokens.ringTrack(for: colorScheme, visualMode: visualMode, palette: panelChromePalette),
                         lineWidth: lineWidth)
 
             if !normalizedSegmentSpans.isEmpty {
@@ -689,7 +1020,7 @@ struct GeekCombinedRing: View {
 
                 if detailFontSize > 0, let detail, !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: fixedDetailFontSize ?? detailFontSize, weight: .regular))
+                        .font(.system(size: fixedDetailFontSize ?? detailFontSize, weight: detailFontWeight))
                         .foregroundStyle(.primary.opacity(0.77))
                         .monospacedDigit()
                         .multilineTextAlignment(.center)
@@ -784,6 +1115,7 @@ struct GeekCombinedRing: View {
     }
 
     var labelFontSize: CGFloat {
+        if let fixedLabelFontSize { return fixedLabelFontSize }
         if size >= 90 { return 11 }
         if size >= 68 { return 10 }
         if size >= 52 { return 9 }
@@ -1027,6 +1359,7 @@ struct GeekModuleAnchorRegistration: ViewModifier {
 
 struct GeekOverviewModuleButton<Content: View>: View {
     @Environment(\.geekPanelHoverCoordinator) private var hoverCoordinator
+    @Environment(\.geekKeyboardHighlight) private var keyboardHighlight
 
     let destination: PanelSection
     let isSelected: Bool
@@ -1060,7 +1393,7 @@ struct GeekOverviewModuleButton<Content: View>: View {
             action(destination)
         } label: {
             content
-                .environment(\.geekCombinedCardIsActive, isHovering)
+                .environment(\.geekCombinedCardIsActive, isHovering || keyboardHighlight == .card(destination))
                 .environment(\.geekCombinedCardIsSelected, isSelected)
                 .modifier(GeekModuleAnchorRegistration(destination: destination, handle: anchorHandle))
         }
@@ -1112,6 +1445,7 @@ struct GeekOverviewModuleButton<Content: View>: View {
 
 struct GeekOverviewHoverRegion<Content: View>: View {
     @Environment(\.geekPanelHoverCoordinator) private var hoverCoordinator
+    @Environment(\.geekKeyboardHighlight) private var keyboardHighlight
 
     let destination: PanelSection
     let isSelected: Bool
@@ -1136,7 +1470,7 @@ struct GeekOverviewHoverRegion<Content: View>: View {
 
     var body: some View {
         content
-            .environment(\.geekCombinedCardIsActive, isHovering)
+            .environment(\.geekCombinedCardIsActive, isHovering || keyboardHighlight == .card(destination))
             .modifier(GeekModuleAnchorRegistration(destination: destination, handle: anchorHandle))
             .onContinuousHover { phase in
                 switch phase {

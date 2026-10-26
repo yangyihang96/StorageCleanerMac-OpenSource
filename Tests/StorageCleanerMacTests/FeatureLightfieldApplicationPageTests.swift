@@ -18,7 +18,9 @@ final class FeatureLightfieldApplicationPageTests: XCTestCase {
         var references: [String: [String: CGRect]] = [:]
         for dark in [true, false] {
             for module in [ReviewFilter.uninstall, .updater] {
-                for phase in FeatureLightfieldPhase.allCases {
+                // D154: the uninstall result is CleanMyMac's Applications manager
+                // (`FeatureLightfieldContractTests.testUninstallManager…`).
+                for phase in FeatureLightfieldPhase.allCases where !(module == .uninstall && phase == .result) {
                     let host = CalibrationAppKitLayoutHost(root: page(module: module, phase: phase, store: store),
                         size: .init(width: 1070, height: 735), dark: dark)
                     defer { host.close() }

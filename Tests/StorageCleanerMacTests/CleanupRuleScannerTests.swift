@@ -40,8 +40,9 @@ final class CleanupRuleScannerTests: XCTestCase {
             }
         }
 
-        let selectedRuleIDs = ruleIDsByScope[.caches, default: []]
-            .union(ruleIDsByScope[.downloadResidue, default: []])
+        // D192＋旧值：原来取 caches + downloadResidue；现在按产品的四组选择。
+        let selectedRuleIDs = ruleIDsByScope[.systemJunk, default: []]
+            .union(ruleIDsByScope[.trashBins, default: []])
         let request = CleanupScanRequest(includedRuleIDs: selectedRuleIDs)
         let scopedRules = CleanupScanOperations.scopedRuleSet(
             allRules,
@@ -60,6 +61,67 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertEqual(CleanupScanRequest().developerInactivityThresholdDays, 30)
         XCTAssertEqual(CleanupScanRequest(developerInactivityThresholdDays: 5).developerInactivityThresholdDays, 30)
         XCTAssertEqual(CleanupScanRequest(developerInactivityThresholdDays: 500).developerInactivityThresholdDays, 364)
+    }
+
+    /// D104 G5: a scan of newly readable locations runs as part of the
+    /// session it completes, so its rows belong to that session.
+    func testARequestNamingASessionScansAsPartOfIt() async throws {
+        let home = try makeFixtureHome()
+        try write(bytes: 4_096, to: home.appendingPathComponent("Library/Caches/com.example.app/cache.bin"))
+        let scanner = try ReadOnlyCleanupScanner(fileSystem: FixtureReadOnlyFileSystem(), ruleSet: makeRuleSet())
+        let sessionID = ScanSessionID()
+
+        let rescan = try await scanner.scan(
+            request: CleanupScanRequest(userHomeURL: home, sessionID: sessionID)
+        ) { _ in }
+        let fresh = try await scanner.scan(request: CleanupScanRequest(userHomeURL: home)) { _ in }
+
+        XCTAssertEqual(rescan.id, sessionID)
+        XCTAssertFalse(rescan.candidates.isEmpty)
+        XCTAssertTrue(rescan.candidates.allSatisfy { $0.sessionID == sessionID })
+        XCTAssertNotEqual(fresh.id, sessionID)
+        XCTAssertEqual(
+            Set(fresh.candidates.map(\.id)),
+            Set(rescan.candidates.map(\.id)),
+            "row identifiers do not depend on the session"
+        )
+        XCTAssertNil(CleanupScanRequest().sessionID)
+    }
+
+    /// D104 G5 with the real scanner: a rule whose root was denied still has
+    /// a group and a denied report, so once the root is readable, scanning
+    /// only that rule as part of the session adds its rows to the same
+    /// results and leaves the rows already listed as they were.
+    func testANewlyReadableRuleScannedAsPartOfTheSessionJoinsItsResults() async throws {
+        let home = try makeFixtureHome()
+        try write(bytes: 4_096, to: home.appendingPathComponent("Library/Caches/com.example.app/cache.bin"))
+        try write(bytes: 8_192, to: home.appendingPathComponent("Library/Logs/com.example.app/app.log"))
+        let ruleSet = makeRuleSet(rules: [makeRule(), makeRule(id: "system.logs", root: "Library/Logs")])
+        let first = try await ReadOnlyCleanupScanner(
+            fileSystem: PermissionDeniedReadOnlyFileSystem(deniedPath: home.appendingPathComponent("Library/Logs").path),
+            ruleSet: ruleSet
+        ).scan(request: CleanupScanRequest(userHomeURL: home)) { _ in }
+        let denied = try XCTUnwrap(first.permissions.first { $0.ruleID == "system.logs" })
+        XCTAssertEqual(denied.status, .permissionDenied)
+        XCTAssertEqual(first.outcome, .partial)
+        XCTAssertEqual(first.categories.flatMap(\.subcategories).first { $0.id == "system.logs" }?.candidates.count, 0,
+                       "a denied rule keeps an empty group")
+        let ruleIDs = first.deniedRuleIDs(at: [denied.path])
+        XCTAssertEqual(ruleIDs, ["system.logs"])
+
+        let rescan = try await ReadOnlyCleanupScanner(fileSystem: FixtureReadOnlyFileSystem(), ruleSet: ruleSet)
+            .scan(request: CleanupScanRequest(userHomeURL: home, includedRuleIDs: ruleIDs, sessionID: first.id)) { _ in }
+        let merged = try XCTUnwrap(first.mergingRescan(rescan, ofRules: ruleIDs))
+
+        XCTAssertEqual(merged.id, first.id)
+        XCTAssertEqual(merged.outcome, .complete)
+        XCTAssertTrue(merged.permissions.allSatisfy { $0.status == .readable })
+        XCTAssertFalse(merged.issues.contains { $0.kind == .permissionDenied })
+        XCTAssertEqual(merged.candidates.filter { $0.ruleID == "system.cache" }.map(\.id), first.candidates.map(\.id))
+        XCTAssertEqual(merged.candidates.filter { $0.ruleID == "system.cache" }.map(\.estimatedSizeBytes),
+                       first.candidates.map(\.estimatedSizeBytes))
+        XCTAssertFalse(merged.candidates.filter { $0.ruleID == "system.logs" }.isEmpty)
+        XCTAssertTrue(merged.candidates.allSatisfy { $0.sessionID == first.id })
     }
 
     func testDeveloperAgePolicyUsesStrictGreenYellowAndRedBoundaries() throws {
@@ -326,11 +388,16 @@ final class CleanupRuleScannerTests: XCTestCase {
             "developer.npm-content-cache",
             "developer.homebrew-cache",
             "developer.uv-cache",
+            "developer.bun-install-cache",
             "developer.xcode-derived-data",
+            // D145: developer caches CleanMyMac 5.7.2 lists and we did not.
+            "developer.xcode-ios-device-support",
+            "developer.gradle-cache",
+            "developer.cargo-registry-cache",
             "system.user-caches",
             "system.user-logs",
-            "downloads.installers",
-            "downloads.large-items",
+            // D227＋旧值：the list had "downloads.installers" and "downloads.large-items".
+            "user-data.istat-menus-setapp-history",
             "applications.duplicate-installed-apps",
         ]
         XCTAssertEqual(
@@ -354,13 +421,22 @@ final class CleanupRuleScannerTests: XCTestCase {
         ] {
             XCTAssertNil(ruleByID[removedRuleID], "D19/D24/D25 removed \(removedRuleID)")
         }
+        // D227: installers live under Applications → Installers, the rest of
+        // Downloads under My Clutter.
+        for removedRuleID in ["downloads.installers", "downloads.large-items"] {
+            XCTAssertNil(ruleByID[removedRuleID], "D227 removed \(removedRuleID)")
+        }
+        XCTAssertFalse(rules.contains { $0.categoryID == "downloads" }, "D227: Files to Review has no Downloads category")
 
         // D19: nothing is listed read-only any more.
         XCTAssertTrue(rules.allSatisfy { $0.action.isExecutable && $0.allowsManualSelection })
         XCTAssertFalse(rules.contains { $0.action == .revealOnly })
         XCTAssertEqual(
             rules.filter { $0.risk == .safe }.count,
-            7
+            // Safe JSON rules: npx, npm, Homebrew, uv, Bun, Xcode derived
+            // data, user caches, user logs, and since D145 Xcode device
+            // support, Gradle and Cargo.
+            11
                 + artifactDefinitions.count
                 + CleanupCoverageCatalog.regenerableCacheDefinitions.count
                 + CleanupCoverageCatalog.logDefinitions.count
@@ -368,15 +444,20 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertEqual(
             Set(rules.filter { $0.risk == .reviewOnly }.map(\.id)),
             [
-                "downloads.installers",
-                "downloads.large-items",
+                // D227＋旧值：the set began with "downloads.installers" and "downloads.large-items".
                 "system-cache.cloudkit",
                 "mail.downloaded-attachments",
+                // D183＋旧值：邮件规则之前只有 mail.downloaded-attachments。
+                "mail.library-attachment-folders",
+                "user-data.istat-menus-setapp-history",
+                // D-FP6: broken preferences, read one by one.
+                "system.broken-preferences",
             ]
         )
+        // D192＋旧值：protected 原为 duplicate-installed-apps、user-trash、volume-trashes。
         XCTAssertEqual(
             Set(rules.filter { $0.risk == .protected }.map(\.id)),
-            ["applications.duplicate-installed-apps", "trash.user-trash"]
+            ["applications.duplicate-installed-apps", "trash.user-trash", "trash.volume-trashes", "trash.icloud-drive"]
         )
 
         let automaticRules = rules.filter { $0.action == .moveToTrash }
@@ -394,9 +475,10 @@ final class CleanupRuleScannerTests: XCTestCase {
             rules.filter { $0.action == .moveToTrashAfterProtectedReview }.map(\.id),
             ["applications.duplicate-installed-apps"]
         )
+        // D192＋旧值：emptyTrash 原为 ["trash.user-trash", "trash.volume-trashes"]。
         XCTAssertEqual(
             rules.filter { $0.action == .emptyTrash }.map(\.id),
-            ["trash.user-trash"]
+            ["trash.user-trash", "trash.volume-trashes", "trash.icloud-drive"]
         )
 
         let duplicateApplications = try XCTUnwrap(
@@ -436,6 +518,7 @@ final class CleanupRuleScannerTests: XCTestCase {
         for ruleID in [
             "developer.homebrew-cache",
             "developer.uv-cache",
+            "developer.bun-install-cache",
             "developer.xcode-derived-data",
         ] {
             let rule = try XCTUnwrap(ruleByID[ruleID])
@@ -579,16 +662,12 @@ final class CleanupRuleScannerTests: XCTestCase {
         XCTAssertEqual(trash.recommendation, .notRecommended)
         XCTAssertEqual(trash.defaultSelection, .unselected)
 
-        let downloads = try XCTUnwrap(ruleByID["downloads.large-items"])
-        XCTAssertEqual(downloads.root.path, "Downloads")
-        XCTAssertEqual(downloads.action, .moveToTrashAfterReview)
-        XCTAssertEqual(downloads.recommendation, .notRecommended)
-
-        let installers = try XCTUnwrap(ruleByID["downloads.installers"])
-        XCTAssertEqual(installers.include.extensions, ["dmg", "pkg", "xip"])
-        XCTAssertEqual(installers.recommendation, .optional)
-        XCTAssertEqual(installers.defaultSelection, .unselected)
-        XCTAssertEqual(installers.action, .moveToTrashAfterReview)
+        // D227＋旧值：was downloads.large-items rooted at Downloads, moveToTrashAfterReview,
+        // notRecommended; and downloads.installers with dmg/pkg/xip, optional, unselected,
+        // moveToTrashAfterReview. Both rules are retired.
+        XCTAssertNil(ruleByID["downloads.large-items"])
+        XCTAssertNil(ruleByID["downloads.installers"])
+        XCTAssertFalse(rules.contains { $0.root.path == "Downloads" }, "D227: no junk rule reads Downloads")
 
         XCTAssertTrue(rules.allSatisfy {
             [
@@ -719,7 +798,9 @@ final class CleanupRuleScannerTests: XCTestCase {
         )
         let bundled = try CleanupRuleSetLoader.loadBundled()
         let rules = CleanupScanOperations.scopedRuleSet(bundled, includedCategoryIDs: ["mail"])
-        XCTAssertEqual(rules.rules.map(\.id), ["mail.downloaded-attachments"])
+        // D183＋旧值：["mail.downloaded-attachments"]. The small library
+        // fixture below stays below D183's 1 MB threshold, preserving D24 coverage.
+        XCTAssertEqual(rules.rules.map(\.id), ["mail.downloaded-attachments", "mail.library-attachment-folders"])
 
         let session = try await scan(home: home, ruleSet: rules)
         let candidate = try XCTUnwrap(session.candidates.first)

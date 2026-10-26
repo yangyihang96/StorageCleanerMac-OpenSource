@@ -411,7 +411,7 @@ final class CleanupSafetyTests: XCTestCase {
         XCTAssertFalse(PathSafety.isLexicallyInsideHome(privateTemporaryArtifact.path))
     }
 
-    func testTrashSummaryCountsDirectTrashItemsAndNestedBytes() throws {
+    func testFrozenTrashCountsDirectTrashItemsAndNestedBytes() throws {
         let homeURL = try makeTrashHome()
         defer { TestFileSystem.remove(homeURL) }
 
@@ -424,13 +424,13 @@ final class CleanupSafetyTests: XCTestCase {
         try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
         try Data(repeating: 2, count: 4096).write(to: folderURL.appendingPathComponent("nested.bin"))
 
-        let summary = try CleanupService.trashSummary(at: trashURL)
+        let summary = try XCTUnwrap(CleanupService.freezeTrash(at: trashURL)).summary
 
         XCTAssertEqual(summary.itemCount, 2)
-        XCTAssertGreaterThan(summary.totalBytes, 0)
+        XCTAssertGreaterThanOrEqual(summary.totalBytes, 2048 + 4096)
     }
 
-    func testEmptyUserTrashRemovesOnlyTrashContents() throws {
+    func testEmptyingFrozenTrashRemovesOnlyTrashContents() async throws {
         let homeURL = try makeTrashHome()
         defer { TestFileSystem.remove(homeURL) }
 
@@ -442,18 +442,19 @@ final class CleanupSafetyTests: XCTestCase {
         try Data("keep".utf8).write(to: outsideURL)
         try Data("delete".utf8).write(to: trashFileURL)
 
-        let summary = try CleanupService.emptyUserTrash(at: trashURL)
+        let frozen = try XCTUnwrap(CleanupService.freezeTrash(at: trashURL))
+        let result = await CleanupService.emptyFrozenTrash(frozen, deleter: FoundationCleanupPermanentDeleter())
 
-        XCTAssertEqual(summary.itemCount, 1)
+        XCTAssertEqual(result.deletedCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: trashFileURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: outsideURL.path))
     }
 
-    func testEmptyUserTrashRejectsNonTrashLocation() throws {
+    func testFreezingTrashRejectsNonTrashLocation() throws {
         let homeURL = try makeTrashHome()
         defer { TestFileSystem.remove(homeURL) }
 
-        XCTAssertThrowsError(try CleanupService.emptyUserTrash(at: homeURL)) { error in
+        XCTAssertThrowsError(try CleanupService.freezeTrash(at: homeURL)) { error in
             guard case CleanupServiceError.invalidTrashLocation = error else {
                 return XCTFail("Expected invalidTrashLocation, got \(error)")
             }

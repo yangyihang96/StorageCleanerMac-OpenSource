@@ -91,7 +91,9 @@ enum FanControlPaletteAvailability {
 }
 
 struct FanControlEntryRow: View {
-    nonisolated static let height: CGFloat = 24
+    /// D119: a row of iStat's fan group, 15 pt on the 17 pt pitch; its hit
+    /// area covers the pitch (D73 kept a 24 pt row).
+    nonisolated static let height: CGFloat = 15
     nonisolated static let headerHeight: CGFloat = 20
     let presentation: FanControlEntryPresentation
     let isHeader: Bool
@@ -117,21 +119,21 @@ struct FanControlEntryRow: View {
                 } else {
                     HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
                         Text(L10n.text("风扇控制", "Fan Control"))
+                            .geekIStatLabelText()
                         Spacer(minLength: 4)
-                        Text(presentation.status).foregroundStyle(.secondary)
+                        Text(presentation.status)
+                            .geekIStatValueText(.secondary)
                         GeekDisclosureIcon(systemImage: "chevron.forward")
                     }
-                    .font(AdvancedPanelTypography.caption)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, minHeight: Self.height)
+                    .frame(maxWidth: .infinity, minHeight: Self.height, maxHeight: Self.height)
+                    .contentShape(Rectangle().inset(by: -GeekIStatSectionGeometry.rowGap / 2))
                 }
             }
             .accessibilityIdentifier("fan-control-entry")
             .accessibilityValue(presentation.status)
         } else {
             Text(presentation.status)
-                .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .geekIStatLabelText()
                 .frame(maxWidth: .infinity, minHeight: Self.height, alignment: .leading)
         }
     }

@@ -208,6 +208,64 @@ final class CleanupTrashDeletionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: locked.path))
     }
 
+    /// Same boundary as B-R2 in the menu command: the deleter reports success
+    /// but only takes away access to the Trash, so the entry cannot be read
+    /// back. That is not evidence it is gone, so it is not counted deleted.
+    func testAFailedReadbackAfterDeletionIsNotCountedAsDeleted() async throws {
+        let fixture = try makeFixture()
+        let trash = fixture.home.appendingPathComponent(".Trash")
+        let entry = trash.appendingPathComponent("old.bin")
+        try write(bytes: 8_192, to: entry)
+        let rules = CleanupRuleSet(
+            schemaVersion: 2,
+            rulesVersion: "trash.fixture",
+            rules: [CleanupCoverageCatalog.userTrashRule]
+        )
+        let session = try await ReadOnlyCleanupScanner(
+            fileSystem: TrashDeletionFixtureFileSystem(),
+            ruleSet: rules,
+            applicationsURL: fixture.root.appendingPathComponent("Applications")
+        ).scan(request: CleanupScanRequest(userHomeURL: fixture.home)) { _ in }
+        let trashCandidate = try XCTUnwrap(session.candidates.first)
+        var selection = CleanupSelection()
+        selection.setCandidate(trashCandidate.id, selected: true, in: session)
+        let plan = try CleanPlanBuilder.makePlan(
+            session: session,
+            selection: selection,
+            activeRules: rules,
+            disposition: .trash
+        )
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: trash.path)
+        }
+
+        let report = await SafeCleanupExecutor(
+            metadataReader: TrashDeletionFixtureFileSystem(),
+            deleter: ReadbackDeniedTrashDeleter(),
+            coordinator: HeavyWorkCoordinator()
+        ).execute(
+            plan: plan,
+            context: CleanupExecutionContext(
+                featureConfiguration: .productDefault,
+                activeSessionID: session.id,
+                activeRules: rules,
+                userHomeURL: fixture.home,
+                excludedURLs: [],
+                approvedPlanItemIDs: Set(plan.items.map(\.id))
+            )
+        ) { _ in }
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: trash.path)
+
+        XCTAssertEqual(plan.permanentDeletionItems.count, 1)
+        guard case let .failed(failure) = report.items.first?.outcome else {
+            return XCTFail("\(String(describing: report.items.first?.outcome))")
+        }
+        XCTAssertEqual(failure, CleanFailure(code: .deletionOutcomeUnknown, detailCode: "deletion-readback-failed"))
+        XCTAssertEqual(report.summary.deletedItemCount, 0)
+        XCTAssertEqual(OperationResultPresentation(report: report).state, .needsVerification)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entry.path), "The fake deleter leaves the entry in place")
+    }
+
     // MARK: - Fixtures
 
     private func deletion(trash: URL, entry: URL) throws -> CleanupTrashEntryDeletion {
@@ -302,5 +360,13 @@ private final class TrashSwappingDeleter: CleanupPermanentDeleting, @unchecked S
         }
         try fileManager.createSymbolicLink(at: trash, withDestinationURL: elsewhere)
         lock.withLock { swapped = true }
+    }
+}
+
+/// Reports success but deletes nothing: it only takes away access to the
+/// fixture's Trash, so reading the entry back fails with EACCES.
+private struct ReadbackDeniedTrashDeleter: CleanupPermanentDeleting {
+    func removeTrashEntry(_ deletion: CleanupTrashEntryDeletion) async throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: deletion.trashURL.path)
     }
 }

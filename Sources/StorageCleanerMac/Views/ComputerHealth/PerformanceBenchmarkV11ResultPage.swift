@@ -254,7 +254,7 @@ struct PerformanceBenchmarkV11ResultPage: View {
             }
             Text(L10n.text("保持率", "Retention") + " · " + ((measured?.retention).map { MSeriesV11PagePresentation.number($0 * 100) + "%" } ?? MSeriesV11PagePresentation.unread))
                 .font(.system(size: 13, weight: .semibold))
-            Text(L10n.text("末 30 秒 / 首 10 秒中位数", "Last 30 s / first 10 s median") + " · \(windows.count) " + L10n.text("个五秒窗口", "five second windows"))
+            Text(L10n.text("末 30 秒 / 首 10 秒中位数", "Last 30 s / first 10 s median") + " · \(ByteFormat.count(windows.count)) " + L10n.text("个五秒窗口", "five second windows"))
                 .font(.system(size: 12)).foregroundStyle(palette.fg2)
         }.frame(maxWidth: .infinity, alignment: .leading).lightfieldComponentProbe("performance.sustained")
     }

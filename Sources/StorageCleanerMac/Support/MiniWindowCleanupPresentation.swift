@@ -108,7 +108,8 @@ struct MiniWindowCleanupPresentation {
 
     // These nonnumeric placeholders preserve the state's explanation in
     // GeekMetricCell. "--" would replace that explanation with "Unavailable".
-    var bytesText: String { safeBytes.map(ByteFormat.string) ?? "…" }
+    /// D128: disk space in iStat's format (was KiB-based ByteFormat).
+    var bytesText: String { safeBytes.map { IStatNumberFormat.space($0) } ?? "…" }
     var countText: String {
         if isUpdating { return L10n.text("更新中…", "Updating…") }
         if source == .preparing { return L10n.text("正在整理", "Preparing Details") }
@@ -146,9 +147,9 @@ struct MiniWindowCleanupPresentation {
                 return L10n.text("扫描已取消。重新扫描后再确认清理。", "Scan cancelled. Rescan before confirming cleanup.")
             }
             if let count = details?.defaultCount, count > 0 {
-                return L10n.text("默认可清理 \(count) 项。在主窗口确认。",
+                return L10n.text("默认可清理 \(ByteFormat.count(count)) 项。在主窗口确认。",
                                  count == 1 ? "1 default cleanup item. Confirm in the main window."
-                                     : "\(count) default cleanup items. Confirm in the main window.")
+                                     : "\(ByteFormat.count(count)) default cleanup items. Confirm in the main window.")
             }
             return safeCount == 0
                 ? L10n.text("本次扫描没有绿色清理项。", "This scan found no green cleanup items.")

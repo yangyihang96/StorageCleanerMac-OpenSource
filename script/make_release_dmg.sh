@@ -437,6 +437,13 @@ verify_app_metadata() {
     echo "$app_path: missing Sparkle license" >&2
     return 1
   fi
+  local policy_file
+  for policy_file in InternetAccessPolicy.plist en.lproj/InternetAccessPolicy.strings zh-Hans.lproj/InternetAccessPolicy.strings; do
+    if ! cmp -s "$ROOT_DIR/Resources/$policy_file" "$app_path/Contents/Resources/$policy_file"; then
+      echo "$app_path: missing or changed $policy_file" >&2
+      return 1
+    fi
+  done
   if ! otool -L "$app_path/Contents/MacOS/$APP_NAME" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle'; then
     echo "$app_path: executable is not linked to embedded Sparkle.framework" >&2
     return 1
@@ -645,6 +652,9 @@ plutil -lint "$APP_LAUNCH_DAEMONS/$FILE_HELPER_PLIST" >/dev/null
 copy_resource_file "$SPARKLE_LICENSE" "$APP_RESOURCES/Sparkle-LICENSE.txt"
 copy_resource_file "$NOTICE_PATH" "$APP_RESOURCES/$NOTICE_NAME"
 copy_resource_file "$ROOT_DIR/Resources/CleanupRules.v2.json" "$APP_RESOURCES/CleanupRules.v2.json"
+# D116: Little Snitch reads this policy (and the .lproj translations copied
+# below) to explain each connection; it is covered by the bundle signature.
+copy_resource_file "$ROOT_DIR/Resources/InternetAccessPolicy.plist" "$APP_RESOURCES/InternetAccessPolicy.plist"
 source "$ROOT_DIR/script/benchmark_resources.sh"
 copy_benchmark_resources
 copy_resource_file \

@@ -44,7 +44,9 @@ enum FanControlHelperStatus: Equatable, Sendable {
 
 @MainActor
 final class FanControlCoordinator: ObservableObject {
-    static let shared = FanControlCoordinator()
+    static let shared = AcceptanceLaunch.isActive
+        ? makeAcceptanceInstance()
+        : FanControlCoordinator(operationHistory: .shared)
     static let helperLabel = StorageCleanerBuildIdentity.helperLabel
     static let helperPlistName = "\(helperLabel).plist"
     private(set) var isDataOnlyFixture = false
@@ -99,6 +101,14 @@ final class FanControlCoordinator: ObservableObject {
             for: coordinator.curveStore.draftProfile.sensor, in: snapshot
         )
         coordinator.curveRuntimeState = profile.curveRuntimeState
+        // D152: the palette's toggles and sliders show the coordinator's mode
+        // and values; the fixture holds the profile's.
+        if let mode = profile.observedMode {
+            coordinator.selectedMode = mode
+        }
+        if let percentage = profile.manualPercentage {
+            coordinator.manualFraction = min(1, max(0, percentage / 100))
+        }
         // This is explicitly simulated readback, never a control request or a
         // claim about the host Mac. No LIVE verification-expiry task is started.
         coordinator.observedMode = profile.observedMode
@@ -106,6 +116,39 @@ final class FanControlCoordinator: ObservableObject {
         return coordinator
     }
 #endif
+
+    /// D106: the acceptance launch never talks to the privileged helper: no
+    /// connection, no request, no registration and nothing to restore when
+    /// the app quits, so quitting it writes nothing to the SMC or to power
+    /// settings. Live sensor readings still arrive; fan and power controls
+    /// show the helper as unavailable, and real helper states stay untested
+    /// in that session.
+    static func makeAcceptanceInstance(
+        defaults: UserDefaults = .standard,
+        requestSender: @escaping @MainActor (FanControlHelperRequest) async throws -> FanControlHelperReply = { _ in
+            throw CancellationError()
+        }
+    ) -> FanControlCoordinator {
+        let coordinator = FanControlCoordinator(
+            defaults: defaults,
+            helperStatusOverride: .unavailable,
+            requestSender: requestSender,
+            legacyArtifactsPresentProvider: { false },
+            legacyArtifactsCurrentProvider: { false },
+            legacyArtifactsSafeForRemovalProvider: { false },
+            serviceStatusProvider: { .notRegistered },
+            serviceRegistrar: { throw CancellationError() },
+            serviceUnregistrar: { throw CancellationError() },
+            approvalSettingsOpener: {}
+        )
+        coordinator.isDataOnlyFixture = true
+        coordinator.fixtureHelperState = .unavailable
+        coordinator.lastMessage = L10n.text(
+            "验收模式：未连接辅助程序，硬件控制不可用。",
+            "Acceptance mode: the helper is not connected and hardware control is unavailable."
+        )
+        return coordinator
+    }
 
     @Published private(set) var helperStatus: FanControlHelperStatus
     @Published private(set) var bundledHelperSigningIsTrusted: Bool?
@@ -117,8 +160,19 @@ final class FanControlCoordinator: ObservableObject {
     @Published private(set) var lastMessage: String?
     @Published private(set) var observedMode: GeekFanControlMode?
     @Published private(set) var requestedMode: GeekFanControlMode?
-    @Published private(set) var synchronizesManualFans = true
-    @Published private(set) var manualFractionByFan: [Int: Double] = [:]
+    /// D152: iStat's Sync and its per-fan slider values, kept across
+    /// launches like the shared value (`manualFraction`).
+    @Published private(set) var synchronizesManualFans: Bool {
+        didSet {
+            defaults.set(synchronizesManualFans, forKey: FanControlPreferences.manualSyncKey)
+        }
+    }
+    @Published private(set) var manualFractionByFan: [Int: Double] {
+        didSet {
+            defaults.set(Self.encodedManualFractions(manualFractionByFan),
+                         forKey: FanControlPreferences.manualFractionByFanKey)
+        }
+    }
     @Published private(set) var confirmedManualFractionByFan: [Int: Double] = [:]
     @Published private(set) var curveRuntimeState = FanCurveRuntimeState.inactive
     @Published private(set) var availableCurveSensors: [FanCurveSensor] = []
@@ -244,6 +298,17 @@ final class FanControlCoordinator: ObservableObject {
         (@MainActor (FanControlHelperRequest) async throws -> FanControlHelperReply)?
     private let helperRequestTimeout: TimeInterval
     private let fanWriteRequestTimeout: TimeInterval
+    /// D102 L4: only the app's shared coordinator records by default; a test
+    /// records only into a history it passes.
+    private let operationHistory: HardwareOperationHistory?
+    /// D105: the helper's own returns saved to the record in this run. The
+    /// record itself keeps each ID once, across runs. Review D105-R1: an ID
+    /// is added only once its save succeeded; while the save is on its way
+    /// it is in `savingAutomaticRestoreIDs` instead, so a reply reporting it
+    /// again does not save it twice, and a save that failed is tried again
+    /// the next time the helper reports the return.
+    private var recordedAutomaticRestoreIDs = Set<UUID>()
+    private var savingAutomaticRestoreIDs = Set<UUID>()
     private static let logger = Logger(
         subsystem: StorageCleanerBuildIdentity.appBundleIdentifier,
         category: "HardwareControl"
@@ -349,7 +414,8 @@ final class FanControlCoordinator: ObservableObject {
         serviceStatusProvider: (() -> SMAppService.Status)? = nil,
         serviceRegistrar: (() throws -> Void)? = nil,
         serviceUnregistrar: (() async throws -> Void)? = nil,
-        approvalSettingsOpener: @escaping () -> Void = { SMAppService.openSystemSettingsLoginItems() }
+        approvalSettingsOpener: @escaping () -> Void = { SMAppService.openSystemSettingsLoginItems() },
+        operationHistory: HardwareOperationHistory? = nil
     ) {
         self.defaults = defaults
         self.legacyArtifactsPresentProvider = legacyArtifactsPresentProvider
@@ -369,6 +435,7 @@ final class FanControlCoordinator: ObservableObject {
         self.helperRequestTimeout = helperRequestTimeout
         self.fanWriteRequestTimeout = fanWriteRequestTimeout
         self.curveStore = curveStore ?? FanCurveStore(defaults: defaults)
+        self.operationHistory = operationHistory
         service = SMAppService.daemon(plistName: Self.helperPlistName)
         helperStatus = helperStatusOverride ?? Self.resolvedStatus(service.status)
         bundledHelperSigningIsTrusted = nil
@@ -380,6 +447,11 @@ final class FanControlCoordinator: ObservableObject {
             defaults,
             key: FanControlPreferences.manualFractionKey,
             fallback: FanControlPreferences.defaultManualFraction
+        )
+        synchronizesManualFans = defaults.object(forKey: FanControlPreferences.manualSyncKey) == nil
+            || defaults.bool(forKey: FanControlPreferences.manualSyncKey)
+        manualFractionByFan = Self.decodedManualFractions(
+            defaults.data(forKey: FanControlPreferences.manualFractionByFanKey)
         )
         let legacyCurveLowTemperature = Self.storedDouble(
             defaults,
@@ -1179,16 +1251,8 @@ final class FanControlCoordinator: ObservableObject {
             return
         }
 
-        if mode == .manual {
-            let entryFractions = Self.manualEntryFractions(
-                fanReadings: latestSnapshot?.fanReadings
-            )
-            if !entryFractions.isEmpty {
-                manualFractionByFan = entryFractions
-                manualFraction = entryFractions.values.reduce(0, +)
-                    / Double(entryFractions.count)
-            }
-        }
+        // D152: manual applies the stored slider values, as iStat writes them
+        // with the mode (was the fans' current speeds).
 
         refreshRegistrationStatus()
         if helperStatus != .enabled {
@@ -1388,32 +1452,24 @@ final class FanControlCoordinator: ObservableObject {
         process(snapshot: snapshot, bypassesMinimumUpdateInterval: false)
     }
 
+    /// D152: iStat's Sync tick row only switches between the shared slider
+    /// and the per-fan ones, whose values stay as stored (a fan without its
+    /// own value takes the shared one), and writes at once in manual mode
+    /// (was: averaging or resetting the values to the current speeds, then
+    /// the debounce). A data-only fixture changes nothing here, as with the
+    /// sliders and every other action.
     func setManualFansSynchronized(_ synchronized: Bool) {
-        guard synchronizesManualFans != synchronized else { return }
-        if synchronized {
-            let fractions = latestSnapshot?.fanReadings?.compactMap { reading in
-                manualFractionByFan[reading.index]
-                    ?? Self.manualEntryFraction(reading)
-            } ?? []
-            if !fractions.isEmpty {
-                manualFraction = fractions.reduce(0, +) / Double(fractions.count)
-            }
-        } else {
-            let readings = latestSnapshot?.fanReadings ?? []
-            manualFractionByFan = Dictionary(
-                uniqueKeysWithValues: readings.map { reading in
-                    (
-                        reading.index,
-                        Self.manualEntryFraction(reading) ?? manualFraction
-                    )
-                }
-            )
-        }
+        guard !isDataOnlyFixture, synchronizesManualFans != synchronized else { return }
         synchronizesManualFans = synchronized
         guard selectedMode == .manual else { return }
+        manualCommitTask?.cancel()
+        manualCommitTask = nil
         manualCommitPending = true
-        scheduleManualCommit()
+        commitPendingManualUpdate()
     }
+
+    /// A slider value is stored but not yet written.
+    var hasPendingManualCommit: Bool { manualCommitPending }
 
     func manualPercentage(for fanID: Int?) -> Double {
         guard let fanID, !synchronizesManualFans else {
@@ -1423,6 +1479,7 @@ final class FanControlCoordinator: ObservableObject {
     }
 
     func updateManualPercentage(_ percentage: Double, fanID: Int? = nil) {
+        guard !isDataOnlyFixture else { return }
         setManualPercentage(percentage, fanID: fanID)
         guard selectedMode == .manual else { return }
         manualCommitPending = true
@@ -1430,6 +1487,7 @@ final class FanControlCoordinator: ObservableObject {
     }
 
     func commitManualPercentage(_ percentage: Double, fanID: Int? = nil) {
+        guard !isDataOnlyFixture else { return }
         manualCommitTask?.cancel()
         manualCommitTask = nil
         setManualPercentage(percentage, fanID: fanID)
@@ -1533,7 +1591,8 @@ final class FanControlCoordinator: ObservableObject {
             fanSet: selectedFanSet,
             manualFraction: manualFraction,
             manualFractionByFan: manualFractionByFan,
-            synchronizesManualFans: synchronizesManualFans,
+            // D152: a single fan always takes the shared slider, as iStat.
+            synchronizesManualFans: synchronizesManualFans || (snapshot.fanReadings?.count ?? 0) < 2,
             curveLowTemperature: curveLowTemperature,
             curveHighTemperature: curveHighTemperature,
             thermalState: snapshot.thermalState,
@@ -2060,8 +2119,11 @@ final class FanControlCoordinator: ObservableObject {
         // Signing preflight completes before admission. Connection creation in
         // transport cannot yield between this gate and assigning the connection.
         var generation = connectionGeneration
+        var sent = false, replied = false
         do {
-            let reply = try await performSend(request, generation: &generation)
+            let reply = try await performSend(request, generation: &generation, sent: &sent)
+            replied = true
+            recordHardwareOperation(request, reply: reply)
             guard generation == connectionGeneration else {
                 throw FanControlConnectionError.connectionChanged
             }
@@ -2074,8 +2136,14 @@ final class FanControlCoordinator: ObservableObject {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            // D102 L4: a request that left the app without a usable reply is
+            // unconfirmed; one stopped in the app before it was sent changed nothing.
+            if sent, !replied { recordHardwareOperation(request, reply: nil) }
             if case FanControlConnectionError.untrustedBundledHelper = error {
                 // Local signing failures never induce repeated XPC attempts.
+                throw error
+            }
+            if case FanControlConnectionError.helperRequirementUnavailable = error {
                 throw error
             }
             // A decoded v2/v3 response is an authenticated protocol mismatch,
@@ -2092,12 +2160,49 @@ final class FanControlCoordinator: ObservableObject {
         }
     }
 
-    private func performSend(_ request: FanControlHelperRequest,
-                             generation: inout UInt64) async throws -> FanControlHelperReply {
+    /// D102 L4: a write, or an automatic restore a reply reports, goes to the
+    /// bounded local record. Reads and lease renewals do not, and the request
+    /// never waits for the record to be saved. D105 (review C-R2): the returns
+    /// to system control the helper made on its own, which it reports when
+    /// the app connects (a ping) and on a reply that did not succeed, are
+    /// recorded once each, with the result the helper reported.
+    private func recordHardwareOperation(_ request: FanControlHelperRequest, reply: FanControlHelperReply?) {
+        saveHardwareRecord(HardwareOperationRecord.make(for: request, reply: reply, at: now()))
+        guard operationHistory != nil else { return }
+        for restore in (reply?.automaticRestores ?? []).suffix(FanControlAutomaticRestoreLog.retainedLimit)
+        where !recordedAutomaticRestoreIDs.contains(restore.id)
+            && savingAutomaticRestoreIDs.insert(restore.id).inserted {
+            saveHardwareRecord(HardwareOperationRecord(automaticRestore: restore)) { [weak self] saved in
+                self?.savingAutomaticRestoreIDs.remove(restore.id)
+                if saved { self?.recordedAutomaticRestoreIDs.insert(restore.id) }
+            }
+        }
+    }
+
+    /// Saves in the background; `finished` learns whether the save succeeded.
+    private func saveHardwareRecord(_ record: HardwareOperationRecord?,
+                                    finished: @escaping @MainActor (Bool) -> Void = { _ in }) {
+        guard let operationHistory, let record else { return }
+        Task {
+            do {
+                try await operationHistory.record(record)
+                finished(true)
+            } catch {
+                Self.logger.error("The hardware operation record was not saved.")
+                finished(false)
+            }
+        }
+    }
+
+    /// `sent` is set once the request is handed over, so only a request that
+    /// left the app can be recorded as unconfirmed (D102 L4).
+    private func performSend(_ request: FanControlHelperRequest, generation: inout UInt64,
+                             sent: inout Bool) async throws -> FanControlHelperReply {
         let response: FanControlHelperReply
         var requestConnectionGeneration: UInt64?
         PerformanceTelemetry.signposter.emitEvent("XPCRequest")
         if let requestSender {
+            sent = true
             response = try await withCheckedThrowingContinuation { continuation in
                 let completion = FanControlReplyCompletion(continuation)
                 armTimeout(for: request, completion: completion)
@@ -2114,7 +2219,7 @@ final class FanControlCoordinator: ObservableObject {
                 throw FanControlConnectionError.untrustedBundledHelper
             }
             let requestData = try request.encodedForTransport()
-            let connection = helperConnection()
+            let connection = try helperConnection()
             generation = connectionGeneration
             requestConnectionGeneration = connectionGeneration
             response = try await withCheckedThrowingContinuation { continuation in
@@ -2127,6 +2232,7 @@ final class FanControlCoordinator: ObservableObject {
                     completion.resume(throwing: FanControlConnectionError.invalidRemoteObject)
                     return
                 }
+                sent = true
                 helper.execute(requestData) { @Sendable replyData in
                     do {
                         completion.resume(returning: try FanControlHelperReply.decodeFromTransport(replyData))
@@ -2143,14 +2249,22 @@ final class FanControlCoordinator: ObservableObject {
         PerformanceTelemetry.signposter.emitEvent("XPCReply")
         let validated = try response.validated(for: request)
         if validated.errorCode == .fanCrashRecoveryFailed {
-            latchStartupRecoveryFailure()
+            // D105: a helper that reports its own returns reports this one too.
+            latchStartupRecoveryFailure(recordingIt: validated.automaticRestores == nil)
             return validated.replacingMessage(Self.startupRecoveryFailureMessage)
         }
         if request.operation == .ping, validated.success { startupRecoveryFailureLatched = false }
         return validated
     }
 
-    private func latchStartupRecoveryFailure() {
+    private func latchStartupRecoveryFailure(recordingIt: Bool) {
+        // D102 L4: the helper could not return the fans to system control when
+        // it started. Recorded once, when the app first learns of it.
+        if recordingIt, !startupRecoveryFailureLatched {
+            saveHardwareRecord(HardwareOperationRecord(
+                recordedAt: now(), operation: .systemFanControl, outcome: .failed,
+                errorCode: FanControlHelperErrorCode.fanCrashRecoveryFailed.rawValue))
+        }
         startupRecoveryFailureLatched = true
         cancelAutomaticReconnect()
         helperConnectionNeedsAttention = false
@@ -2186,13 +2300,20 @@ final class FanControlCoordinator: ObservableObject {
         }
     }
 
-    private func helperConnection() -> NSXPCConnection {
+    private func helperConnection() throws -> NSXPCConnection {
         if let connection { return connection }
 
+        // D102 L7: the system checks every message against the helper's
+        // identifier, this app's leaf certificate and Team ID. Without that
+        // requirement (an unsigned or ad hoc build) there is no connection.
+        guard let requirement = FanControlPeerRequirement.currentSigner(peerIdentifier: Self.helperLabel) else {
+            throw FanControlConnectionError.helperRequirementUnavailable
+        }
         let newConnection = NSXPCConnection(
             machServiceName: Self.helperLabel,
             options: .privileged
         )
+        newConnection.setCodeSigningRequirement(requirement)
         newConnection.remoteObjectInterface = NSXPCInterface(
             with: FanControlHelperProtocol.self
         )
@@ -2235,6 +2356,18 @@ final class FanControlCoordinator: ObservableObject {
                 return L10n.text("辅助程序需要更新，正在重新连接…", "The helper needs an update; reconnecting…")
             default: break
             }
+        }
+        // D102 L7: this build's own signature gave no requirement, so nothing
+        // was sent and nothing is retried.
+        if case FanControlConnectionError.helperRequirementUnavailable = error {
+            return L10n.text("未连接辅助程序，不会自动重试。", "Not connected to the helper; it will not retry automatically.")
+        }
+        // D102 L7: the system ended the connection because the helper is not
+        // signed with this app's certificate and Team ID.
+        let failure = error as NSError
+        if failure.domain == NSCocoaErrorDomain, failure.code == NSXPCConnectionCodeSigningRequirementFailure {
+            return L10n.text("辅助程序的签名与本应用不一致，已拒绝连接。",
+                             "The helper is not signed like this app, so the connection was refused.")
         }
         return L10n.text("辅助程序连接中断，正在重新连接…", "The helper connection was interrupted; reconnecting…")
     }
@@ -2356,33 +2489,18 @@ final class FanControlCoordinator: ObservableObject {
         min(1, max(0, value.isFinite ? value : 0))
     }
 
-    private static func manualEntryFractions(
-        fanReadings: [SystemFanReading]?
-    ) -> [Int: Double] {
-        guard let fanReadings,
-              !fanReadings.isEmpty,
-              Set(fanReadings.map(\.index)).count == fanReadings.count else {
-            return [:]
-        }
-        return fanReadings.reduce(into: [Int: Double]()) { result, reading in
-            if let fraction = manualEntryFraction(reading) {
-                result[reading.index] = fraction
-            }
-        }
+    /// D152: the per-fan slider values as JSON keyed by fan index.
+    private static func encodedManualFractions(_ fractions: [Int: Double]) -> Data? {
+        let object = Dictionary(uniqueKeysWithValues: fractions.map { (String($0.key), normalizedFraction($0.value)) })
+        return try? JSONEncoder().encode(object)
     }
 
-    private static func manualEntryFraction(
-        _ reading: SystemFanReading
-    ) -> Double? {
-        guard let minimumRPM = reading.minimumRPM,
-              let maximumRPM = reading.maximumRPM,
-              minimumRPM >= 0,
-              maximumRPM > minimumRPM,
-              reading.actualRPM >= 0 else { return nil }
-        return normalizedFraction(
-            Double(reading.actualRPM - minimumRPM)
-                / Double(maximumRPM - minimumRPM)
-        )
+    private static func decodedManualFractions(_ data: Data?) -> [Int: Double] {
+        guard let data, let object = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }
+        return object.reduce(into: [Int: Double]()) { result, entry in
+            guard let index = Int(entry.key), index >= 0, entry.value.isFinite else { return }
+            result[index] = normalizedFraction(entry.value)
+        }
     }
 
     private static func manualFractions(
@@ -2515,7 +2633,7 @@ final class FanControlCoordinator: ObservableObject {
     }
 }
 
-private enum FanControlConnectionError: LocalizedError {
+enum FanControlConnectionError: LocalizedError {
     case invalidRemoteObject
     case connectionChanged
     case reconnectDeferred
@@ -2523,6 +2641,8 @@ private enum FanControlConnectionError: LocalizedError {
     case helperRejected(String)
     case timedOut
     case untrustedBundledHelper
+    /// D102 L7: this app's own signature gave no requirement for the helper.
+    case helperRequirementUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -2546,6 +2666,11 @@ private enum FanControlConnectionError: LocalizedError {
             L10n.text(
                 "App 与高级硬件控制 Helper 的签名身份不一致，已拒绝连接。",
                 "The app and advanced hardware-control helper signing identities do not match; the connection was rejected."
+            )
+        case .helperRequirementUnavailable:
+            L10n.text(
+                "无法读取本应用的签名证书，未连接风扇控制辅助程序。",
+                "This app's signing certificate could not be read, so it did not connect to the fan-control helper."
             )
         }
     }

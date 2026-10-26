@@ -1,6 +1,18 @@
 import SwiftUI
 
+/// D119: iStat's bandwidth section in the module menu (150): the readouts
+/// at 6 with their legend at 25, the mirrored graph from 47 (H − 74 tall,
+/// x 8 and W − 14 wide), the peak row at H − 21 (was a padded stack with a
+/// 72 pt plot).
+enum GeekNetworkBandwidthLayout {
+    static let cardHeight: CGFloat = 150
+    static var chartHeight: CGFloat { cardHeight - 74 }
+    static var peakTop: CGFloat { cardHeight - 21 }
+}
+
 extension MenuBarAdvancedStatusView {
+    /// D119: iStat's network menu (301 pt): the bandwidth, the interfaces
+    /// (our VPN first), the public and the local addresses, the processes.
     var geekNetworkPage: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
             liveCard(.network) { geekNetworkTrend }
@@ -23,7 +35,7 @@ extension MenuBarAdvancedStatusView {
         GeekHoverDetailTarget(
             accessibilityLabel: L10n.text("网络活动历史三级详情", "Network Activity History Deep Detail"),
             chartRangeMetric: .network,
-            popoverSize: GeekHoverDetailMetrics.compactHistorySize
+            popoverSize: GeekNetworkHistoryHoverDetail.popoverSize
         ) {
             geekNetworkTrendCard
         } detail: {
@@ -38,64 +50,61 @@ extension MenuBarAdvancedStatusView {
     }
 
     private var geekNetworkTrendCard: some View {
-        GeekCombinedCard(height: 150) {
-            VStack(spacing: 3) {
-                HStack(spacing: 12) {
-                    GeekSecondaryTransferValue(
-                        title: L10n.text("上传", "Upload"),
-                        value: networkUpText,
-                        tint: resolvedUploadTint
-                    )
-                    GeekSecondaryTransferValue(
-                        title: L10n.text("下载", "Download"),
-                        value: networkDownText,
-                        tint: resolvedDownloadTint
-                    )
-                }
-
-                GeekPrecisionNetworkChart(
-                    points: networkChartHistory,
-                    accessibilityLabel: L10n.text(
-                        "最近 \(networkChartRange.title) 的网络上传与下载趋势",
-                        "Network upload and download trends over the last \(networkChartRange.title)"
-                    ),
-                    duration: networkChartRange.duration,
-                    showsLegend: false,
-                    showsTimelineLabels: false,
-                    horizontalInset: 0
+        GeekIStatCard(height: GeekNetworkBandwidthLayout.cardHeight) {
+            HStack(spacing: 0) {
+                GeekSecondaryTransferValue(
+                    title: L10n.text("上传", "Upload"),
+                    value: networkUpText,
+                    tint: resolvedUploadTint
                 )
-                .frame(height: 72)
+                GeekSecondaryTransferValue(
+                    title: L10n.text("下载", "Download"),
+                    value: networkDownText,
+                    tint: resolvedDownloadTint
+                )
+            }
+            .geekIStatLayer(top: GeekIStatCardGeometry.networkValueTop,
+                            height: GeekIStatCardGeometry.networkReadoutHeight)
 
-                HStack(spacing: MiniWindowStyleTokens.columnSpacing) {
-                    GeekNetworkPeakAndTotalValue(
-                        direction: "↑",
-                        peak: rateText(geekNetworkUpPeak),
-                        total: ByteFormat.string(sessionUploadedBytes),
-                        color: resolvedUploadTint,
-                        accessibilityLabel: L10n.text(
-                            "上传峰值 \(rateText(geekNetworkUpPeak))，会话累计 \(ByteFormat.string(sessionUploadedBytes))",
-                            "Upload peak \(rateText(geekNetworkUpPeak)), session total \(ByteFormat.string(sessionUploadedBytes))"
-                        )
-                    )
-                    GeekNetworkPeakAndTotalValue(
-                        direction: "↓",
-                        peak: rateText(geekNetworkDownPeak),
-                        total: ByteFormat.string(sessionDownloadedBytes),
-                        color: resolvedDownloadTint,
-                        accessibilityLabel: L10n.text(
-                            "下载峰值 \(rateText(geekNetworkDownPeak))，会话累计 \(ByteFormat.string(sessionDownloadedBytes))",
-                            "Download peak \(rateText(geekNetworkDownPeak)), session total \(ByteFormat.string(sessionDownloadedBytes))"
-                        )
-                    )
-                }
+            GeekPrecisionNetworkChart(
+                points: networkChartHistory,
+                accessibilityLabel: L10n.text(
+                    "最近 \(networkChartRange.title) 的网络上传与下载趋势",
+                    "Network upload and download trends over the last \(networkChartRange.title)"
+                ),
+                duration: networkChartRange.duration,
+                showsLegend: false,
+                showsTimelineLabels: false,
+                horizontalInset: 0,
+                verticalInset: 0,
+                mirroredHalfInset: 0,
+                // D131: iStat's menu graph, one bar per sample.
+                bucketing: .samples
+            )
+            .geekIStatLayer(top: GeekIStatCardGeometry.networkGraphTop,
+                            height: GeekNetworkBandwidthLayout.chartHeight,
+                            trailing: GeekIStatCardGeometry.processorGraphTrailingInset)
+            // iStat's peak row, upload at the leading inset and download at
+            // the trailing one. D146: the peaks of the bars the graph draws
+            // (were the window's peaks with arrows and what our session had
+            // moved).
+            // A layer spans the card, so the row keeps the card's offsets.
+            .overlayPreferenceValue(GeekMirroredChartPeaksKey.self) { peaks in
+                GeekNetworkPeakRow(peaks: peaks)
+                    .geekIStatLayer(top: GeekNetworkBandwidthLayout.peakTop, height: GeekIStatCardGeometry.titleHeight)
             }
         }
     }
 
+    /// D140: iStat's public IP section (`BBRNetworkMenuIPSectionPublic`,
+    /// `-[NetworkMenu updatePublicAddresses]`): the public IPv4 and IPv6
+    /// addresses as last looked up, the country's flag, the refresh icon while
+    /// hovered (was the IPv4 address in the title row and IPv6 below it).
     private var geekNetworkPublicAddress: some View {
-        GeekPublicNetworkAddressCard(
+        GeekPublicNetworkAddressSection(
             snapshot: publicNetworkAddressSnapshot,
-            isLoading: !store.isMenuBarRefreshPaused && isRefreshingPublicNetworkAddress
+            isLoading: !store.isMenuBarRefreshPaused && isRefreshingPublicNetworkAddress,
+            refresh: requestPublicNetworkAddressRefresh
         )
         .accessibilityHint(L10n.text(
             "极客概览显示网络模块时预取公网地址，成功结果缓存 15 分钟。",
@@ -103,16 +112,38 @@ extension MenuBarAdvancedStatusView {
         ))
     }
 
+    /// D140: iStat's IP section (`-[NetworkMenu privateAddresses]`): every
+    /// listed address of the connection and the VPNs (was the first IPv4 and
+    /// the first IPv6 address, titled "本地 IP 地址").
     private var geekNetworkLocalAddresses: some View {
-        GeekNetworkAddressCard(
-            title: L10n.text("本地 IP 地址", "IP Addresses"),
-            ipv4Address: geekPhysicalIPv4Address,
-            ipv6Address: geekPhysicalIPv6Address,
-            ipv4CountryCode: nil,
-            ipv6CountryCode: nil,
-            isLoading: !store.isMenuBarRefreshPaused && networkTopologySnapshot == nil && networkInterfaceSnapshot == nil,
-            unavailableText: "—"
+        let isReading = !store.isMenuBarRefreshPaused && networkTopologySnapshot == nil && networkInterfaceSnapshot == nil
+        return GeekIStatIPSection(
+            title: GeekIStatInterfaceModel.addressesTitle,
+            addresses: geekNetworkListedAddresses,
+            status: isReading ? L10n.text("正在读取…", "Reading…") : L10n.text("没有 IP 地址", "No IP Addresses")
         )
+    }
+
+    /// iStat's list: the addresses of each connected interface it lists
+    /// (`NetworkAddressListing`), the connection's then the VPNs', every IPv4
+    /// address before the IPv6 ones. A snapshot without the list keeps the
+    /// connection's first IPv4 and IPv6 addresses.
+    var geekNetworkListedAddresses: [String] {
+        NetworkAddressListing.menuAddresses(
+            connection: geekConnectionSnapshot.ipConfiguration.listedAddresses
+                ?? [geekPhysicalIPv4Address, geekPhysicalIPv6Address].compactMap { $0 },
+            tunnels: [networkTopologySnapshot?.activeVPNTunnel].compactMap { $0 }
+                + (networkTopologySnapshot?.additionalVPNTunnels ?? [])
+        )
+    }
+
+    /// D140: the public section's refresh icon (`onRefresh`): looks the
+    /// public addresses up again; nothing in the demo.
+    func requestPublicNetworkAddressRefresh() {
+#if DEBUG || STORAGE_CLEANER_BETA
+        if MiniWindowDemoData.isEnabled { return }
+#endif
+        auxiliaryState.requestPublicNetworkAddressRefresh()
     }
 
     private var geekPhysicalNetwork: some View {
@@ -121,7 +152,7 @@ extension MenuBarAdvancedStatusView {
                 "连接方式，\(geekPhysicalNetworkTitle)，\(geekPhysicalNetworkDetail)，显示详情",
                 "Connection, \(geekPhysicalNetworkTitle), \(geekPhysicalNetworkDetail), show details"
             ),
-            popoverSize: GeekNetworkTertiaryView.referenceSize
+            popoverSize: GeekNetworkTertiaryView.preferredSize(for: geekConnectionSnapshot)
         ) {
             GeekNetworkTopologyRow(
                 title: geekPhysicalNetworkTitle,
@@ -143,19 +174,19 @@ extension MenuBarAdvancedStatusView {
         .accessibilityIdentifier("network.connection.inspector")
     }
 
+    /// D119: iStat's process section with the upload and download columns;
+    /// it keeps the height of its row capacity (was one row per process).
     private var geekNetworkProcessCard: some View {
-        GeekCombinedCard(height: geekNetworkProcessCardHeight) {
-            VStack(spacing: GeekSecondaryTransferLayout.processSpacing) {
-                GeekNetworkProcessHeader(status: geekNetworkProcessSampleTimeText)
-                geekNetworkProcessRows
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityElement(children: .combine)
+        GeekIStatProcessSection(rowCapacity: geekNetworkProcessCapacity) {
+            GeekNetworkProcessHeader(status: geekNetworkProcessSampleTimeText)
+        } rows: {
+            geekNetworkProcessRows
         }
+        .accessibilityElement(children: .combine)
     }
 
-    private var geekNetworkProcessCardHeight: CGFloat {
-        GeekSecondaryTransferLayout.processCardHeight(rowCount: displayedNetworkProcesses.count)
+    private var geekNetworkProcessCapacity: Int {
+        showsExtendedGeekDetails ? 4 : 2
     }
 
     @ViewBuilder
@@ -173,18 +204,18 @@ extension MenuBarAdvancedStatusView {
                         .accessibilityHidden(true)
                 }
                 Text(geekNetworkProcessStatusText)
+                    .lineLimit(1)
             }
-            .font(AdvancedPanelTypography.body)
+            .font(.system(size: GeekIStatCardGeometry.textFontSize))
             .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: GeekIStatSectionGeometry.rowHeight, alignment: .leading)
             .accessibilityLabel(geekNetworkProcessStatusAccessibilityText)
         }
     }
 
     private var displayedNetworkProcesses: [NativeNetworkProcessTransfer] {
         guard let snapshot = networkProcessSnapshot else { return [] }
-        let limit = showsExtendedGeekDetails ? 4 : 2
-        return Array(snapshot.processes.prefix(limit))
+        return Array(snapshot.processes.prefix(geekNetworkProcessCapacity))
     }
 
     /// BOARD N16-2: the shown processes' sample time, as on the CPU page. A
@@ -326,171 +357,121 @@ private struct GeekNetworkProcessHeader: View {
                                       accessibilityLabel: L10n.text("下载速率", "Download rate")),
             ]
         )
-        .frame(height: GeekSecondaryTransferLayout.processRowHeight)
     }
 }
 
+/// D119: a row of iStat's process section with the upload and download
+/// columns, aligned on the header's column labels.
 struct GeekNetworkProcessRow: View {
     let process: NativeNetworkProcessTransfer
 
     var body: some View {
-        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-            GeekSecondaryProcessIcon(path: process.iconPath, fallback: AppSymbols.Monitor.network)
+        GeekIStatProcessRow(iconPath: process.iconPath, fallbackSymbol: AppSymbols.Monitor.network,
+                            name: process.name) {
+            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+                GeekSecondaryTransferReadout(
+                    value: IStatNumberFormat.bandwidth(process.uploadBytesPerSecond, style: .process),
+                    numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
+                    unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
+                    minimumScale: GeekSecondaryTransferLayout.processMinimumScale
+                )
+                .frame(width: GeekSecondaryTransferLayout.processValueColumnWidth, alignment: .trailing)
 
-            Text(process.name)
-                .font(AdvancedPanelTypography.body)
-                .lineLimit(1)
-
-            Spacer(minLength: 3)
-
-            GeekSecondaryTransferReadout(
-                value: GeekSecondaryTransferLayout.processByteString(process.uploadBytesPerSecond),
-                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
-                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
-                minimumScale: GeekSecondaryTransferLayout.processMinimumScale
-            )
-            .frame(width: GeekSecondaryTransferLayout.processValueColumnWidth, alignment: .trailing)
-
-            GeekSecondaryTransferReadout(
-                value: GeekSecondaryTransferLayout.processByteString(process.downloadBytesPerSecond),
-                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
-                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
-                minimumScale: GeekSecondaryTransferLayout.processMinimumScale
-            )
-            .frame(width: GeekSecondaryTransferLayout.processValueColumnWidth, alignment: .trailing)
+                GeekSecondaryTransferReadout(
+                    value: IStatNumberFormat.bandwidth(process.downloadBytesPerSecond, style: .process),
+                    numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
+                    unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
+                    minimumScale: GeekSecondaryTransferLayout.processMinimumScale
+                )
+                .frame(width: GeekSecondaryTransferLayout.processValueColumnWidth, alignment: .trailing)
+            }
         }
-        .font(AdvancedPanelTypography.body)
-        .monospacedDigit()
-        .frame(height: GeekSecondaryTransferLayout.processRowHeight)
         .help(L10n.text(
-            "\(process.name)：上传 \(ByteFormat.string(process.uploadBytesPerSecond))/s，下载 \(ByteFormat.string(process.downloadBytesPerSecond))/s",
-            "\(process.name): upload \(ByteFormat.string(process.uploadBytesPerSecond))/s, download \(ByteFormat.string(process.downloadBytesPerSecond))/s"
+            "\(process.name)：上传 \(uploadText)，下载 \(downloadText)",
+            "\(process.name): upload \(uploadText), download \(downloadText)"
         ))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(process.name)
         .accessibilityValue(L10n.text(
-            "上传 \(ByteFormat.string(process.uploadBytesPerSecond)) 每秒，下载 \(ByteFormat.string(process.downloadBytesPerSecond)) 每秒",
-            "Upload \(ByteFormat.string(process.uploadBytesPerSecond)) per second, download \(ByteFormat.string(process.downloadBytesPerSecond)) per second"
+            "上传 \(uploadText)，下载 \(downloadText)",
+            "Upload \(uploadText), download \(downloadText)"
         ))
     }
-}
 
-private struct GeekNetworkPeakAndTotalValue: View {
-    let direction: String
-    let peak: String
-    let total: String
-    let color: Color
-    let accessibilityLabel: String
+    /// D128: help and VoiceOver spell the rates out in iStat's row format
+    /// ("12 KB/s"); the row itself shows its short "12 K".
+    private var uploadText: String {
+        IStatNumberFormat.bandwidth(process.uploadBytesPerSecond)
+    }
 
-    var body: some View {
-        HStack(spacing: 3) {
-            Text(direction)
-                .foregroundStyle(color)
-            GeekSecondaryTransferReadout(value: peak,
-                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
-                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
-                minimumScale: GeekSecondaryTransferLayout.processMinimumScale)
-            Text("·")
-                .foregroundStyle(.tertiary)
-            GeekSecondaryTransferReadout(value: total,
-                numberFontSize: GeekSecondaryTransferLayout.processNumberFontSize,
-                unitFontSize: GeekSecondaryTransferLayout.processUnitFontSize,
-                minimumScale: GeekSecondaryTransferLayout.processMinimumScale)
-        }
-        .font(AdvancedPanelTypography.body)
-        .monospacedDigit()
-        .lineLimit(1)
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel)
+    private var downloadText: String {
+        IStatNumberFormat.bandwidth(process.downloadBytesPerSecond)
     }
 }
 
-/// Missing preferences use the shared default; an explicitly saved false
-/// remains switched off rather than being presented as a failed request.
-private struct GeekPublicNetworkAddressCard: View {
-    @AppStorage(PublicNetworkConsent.addressKey) private var isLookupAllowed = PublicNetworkConsent.defaultAllowsAddress
-    let snapshot: PublicNetworkAddressSnapshot?
-    let isLoading: Bool
+/// D146: iStat's bandwidth peak row, "Label: value" with 'Network.Upload'
+/// and 'Network.Download' (was an arrow in the direction's color, the peak
+/// and what our session had moved). The peaks are in iStat's bandwidth
+/// format; "--" until the graph has a frame.
+struct GeekNetworkPeakRow: View {
+    let uploadPeak: String
+    let downloadPeak: String
 
     var body: some View {
-        GeekNetworkAddressCard(
-            title: L10n.text("公共 IP 地址", "Public IP Addresses"),
-            ipv4Address: snapshot?.ipv4Address,
-            ipv6Address: snapshot?.ipv6Address,
-            ipv4CountryCode: snapshot?.ipv4CountryCode,
-            ipv6CountryCode: snapshot?.ipv6CountryCode,
-            isLoading: isLookupAllowed && isLoading,
-            unavailableText: isLookupAllowed
-                ? L10n.text("暂不可用", "Unavailable")
-                : L10n.text("未开启 · 设置 › 权限", "Off · Settings › Access")
+        GeekIStatPeakRow(
+            leading: GeekIStatPeakValue(title: L10n.text("上传", "Upload"), value: uploadPeak,
+                accessibilityLabel: L10n.text("上传峰值", "Upload peak")),
+            trailing: GeekIStatPeakValue(title: L10n.text("下载", "Download"), value: downloadPeak,
+                accessibilityLabel: L10n.text("下载峰值", "Download peak"))
         )
     }
 }
 
-private struct GeekNetworkAddressCard: View {
-    let title: String
-    let ipv4Address: String?
-    let ipv6Address: String?
-    let ipv4CountryCode: String?
-    let ipv6CountryCode: String?
+extension GeekNetworkPeakRow {
+    init(peaks: GeekMirroredChartPeaks?) {
+        self.init(uploadPeak: peaks?.upward.map { IStatNumberFormat.bandwidth($0) } ?? "--",
+                  downloadPeak: peaks?.downward.map { IStatNumberFormat.bandwidth($0) } ?? "--")
+    }
+}
+
+/// D140: iStat's public IP section: the addresses it has (IPv4, then
+/// IPv6), the flag of the IPv4 address's country (else the IPv6 one's), and
+/// the refresh icon. Missing preferences use the shared default. With the
+/// lookup switched off (Settings › Access) the section is not there, as
+/// iStat's with its public addresses off (was "未开启 · 设置 › 权限" in the
+/// section).
+struct GeekPublicNetworkAddressSection: View {
+    @AppStorage(PublicNetworkConsent.addressKey) private var isLookupAllowed = PublicNetworkConsent.defaultAllowsAddress
+    let snapshot: PublicNetworkAddressSnapshot?
     let isLoading: Bool
-    let unavailableText: String
-
-    private var showsIPv6: Bool {
-        isLoading || !(ipv6Address?.isEmpty ?? true)
-    }
+    let refresh: () -> Void
 
     var body: some View {
-        GeekCombinedCard(height: showsIPv6 ? 59 : 41) {
-            VStack(alignment: .leading, spacing: 0) {
-                GeekSectionTitle(title: title)
-
-                GeekNetworkAddressLine(
-                    version: "IPv4",
-                    value: addressText(ipv4Address, countryCode: ipv4CountryCode)
-                )
-                if showsIPv6 {
-                    GeekNetworkAddressLine(
-                        version: "IPv6",
-                        value: addressText(ipv6Address, countryCode: ipv6CountryCode)
-                    )
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
+        if isLookupAllowed {
+            GeekIStatIPSection(
+                title: L10n.text("公共 IP 地址", "Public IP Addresses"),
+                addresses: Self.addresses(snapshot),
+                flag: Self.flag(snapshot),
+                refresh: refresh,
+                status: isLoading ? L10n.text("正在读取…", "Reading…") : L10n.text("暂不可用", "Unavailable")
+            )
         }
     }
 
-    private func addressText(_ address: String?, countryCode: String?) -> String {
-        if let address, !address.isEmpty {
-            guard let flag = PublicNetworkAddressService.flagEmoji(
-                forCountryCode: countryCode
-            ) else {
-                return address
-            }
-            return "\(flag)  \(address)"
+    static func addresses(_ snapshot: PublicNetworkAddressSnapshot?) -> [String] {
+        [snapshot?.ipv4Address, snapshot?.ipv6Address].compactMap { address in
+            guard let address, !address.isEmpty else { return nil }
+            return address
         }
-        return isLoading ? L10n.text("正在读取…", "Reading…") : unavailableText
+    }
+
+    static func flag(_ snapshot: PublicNetworkAddressSnapshot?) -> String? {
+        PublicNetworkAddressService.flagEmoji(forCountryCode: snapshot?.ipv4CountryCode ?? snapshot?.ipv6CountryCode)
     }
 }
 
-private struct GeekNetworkAddressLine: View {
-    let version: String
-    let value: String
-
-    var body: some View {
-        Text(value)
-            .font(AdvancedPanelTypography.body)
-            .monospacedDigit()
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .help(value)
-            .accessibilityLabel("\(version), \(value)")
-    }
-}
-
+/// D119: an interface in iStat's 25 pt row: the glyph and the name on the
+/// left, the state on the right (was a 39 pt card).
 private struct GeekNetworkTopologyRow: View {
     let title: String
     let detail: String
@@ -500,27 +481,25 @@ private struct GeekNetworkTopologyRow: View {
     var showsDisclosure = false
 
     var body: some View {
-        GeekCombinedCard(height: 39) {
-            HStack(spacing: 6) {
+        GeekIStatCard(height: GeekIStatSectionGeometry.singleRowHeight) {
+            HStack(spacing: GeekIStatCardGeometry.legendDotSpacing) {
                 GeekModuleIcon(systemImage: symbol, tint: tint)
 
                 Text(title)
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .lineLimit(1)
+                    .geekIStatLabelText()
+                    .layoutPriority(1)
 
-                Spacer(minLength: 4)
+                Spacer(minLength: MiniWindowStyleTokens.inlineSpacing)
 
                 Text(detail)
-                    .font(AdvancedPanelTypography.body)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .geekIStatValueText()
                     .truncationMode(.middle)
 
                 if showsDisclosure {
                     GeekDisclosureIcon()
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .geekIStatLayer(top: GeekIStatCardGeometry.titleTop, height: GeekIStatCardGeometry.titleHeight)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
@@ -555,8 +534,20 @@ private struct GeekVPNDisclosure: View {
     }
 }
 
+/// D125: a VPN's page is iStat's interface submenu. iStat lists a VPN as an
+/// interface, its row drawn with a lock, and opens the same submenu for it
+/// (`-[NetworkMenu updateInterfaceSubmenu]`): the interface section with
+/// the tunnel's BSD name, its addresses, and IPv4 / IPv6 with the router
+/// and every scoped DNS server (was a status card, a details card with
+/// three DNS rows and "N more", and a management card; the status stays in
+/// the row and the page's accessibility label). iStat ends with its
+/// disconnect button (type 2) for a connection it can switch. Ours is the
+/// management action of the tunnel's capability in that item: the macOS
+/// disconnect request, which asks first, or opening the VPN's app or System
+/// Settings as a standard button. The action's description is its help;
+/// its result shows as a note below it.
 struct GeekVPNHoverDetail: View {
-    private static let maximumVisibleDNSRows = 3
+    @Environment(\.miniWindowPageProvidesInset) private var pageProvidesInset
 
     let tunnel: VPNTunnelSnapshot
     let refresh: () -> Void
@@ -589,31 +580,61 @@ struct GeekVPNHoverDetail: View {
         capabilityResolver.preflight(for: tunnel)
     }
 
+    /// The page's first size: its sections and, when the tunnel may offer an
+    /// action, the 31 pt button, 7 apart inside the 8 pt insets. The column
+    /// then measures the page, so a result's note makes it taller. D137: as
+    /// wide as its widest section or button + 20, iStat's interface submenu
+    /// (was `GeekHoverDetailMetrics.vpnWidth`, 220 for every tunnel); the
+    /// button counts the widest action title, since the size reads the
+    /// tunnel only.
     static func preferredSize(for tunnel: VPNTunnelSnapshot) -> CGSize {
-        let detailRows = tunnelDetailRowCount(for: tunnel)
-        let tunnelCardHeight = max(56, CGFloat(detailRows + 1) * 15 + 12)
-        let managementCardHeight = managementCardHeight(for: tunnel)
-        let contentHeight = 46 + tunnelCardHeight + managementCardHeight
-        let spacing = GeekPanelLayout.detailSpacing * 2
-        let padding = GeekPanelLayout.contentPadding * 2
+        let model = GeekIStatInterfaceModel(tunnel: tunnel)
+        let reservesButton = reservesActionButton(for: tunnel)
+        let width = model.pageWidth(buttonTitles: reservesButton ? actionTitles : [])
+        var cards = model.sectionHeights(pageWidth: width)
+        if reservesButton {
+            cards.append(GeekIStatInterfaceGeometry.buttonHeight)
+        }
         return CGSize(
-            width: GeekHoverDetailMetrics.vpnWidth,
-            height: contentHeight + spacing + padding
+            width: width,
+            height: GeekIStatDetailGeometry.pageHeight(cards: cards)
         )
     }
 
     var body: some View {
         VStack(spacing: GeekPanelLayout.detailSpacing) {
-            statusCard
-            tunnelCard
-            managementCard
+            GeekIStatInterfaceSections(model: GeekIStatInterfaceModel(tunnel: tunnel)) {
+                EmptyView()
+            }
+
+            if let action = Self.actionPresentation(for: preflight) {
+                GeekIStatButtonItem(
+                    title: action.title,
+                    kind: action.isDestructive ? .destructive : .standard,
+                    isBusy: isPerformingAction,
+                    action: requestAction
+                )
+                .disabled(isPerformingAction || !preflight.canExecute)
+                .help(managementDescription)
+#if DEBUG
+                .layoutProbe("vpn.action")
+#endif
+            }
+
+            if let actionMessage {
+                GeekIStatNoteCard(text: actionMessage)
+#if DEBUG
+                    .layoutProbe("vpn.note")
+#endif
+            }
         }
-        .padding(GeekPanelLayout.contentPadding)
-        .frame(
-            width: preferredSize.width,
-            height: preferredSize.height,
-            alignment: .top
-        )
+        .padding(pageProvidesInset ? 0 : GeekPanelLayout.contentPadding)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.text(
+            "VPN，\(tunnel.displayName)，\(vpnStatusText(tunnel.status))",
+            "VPN, \(tunnel.displayName), \(vpnStatusText(tunnel.status))"
+        ))
         .confirmationDialog(
             L10n.text("断开 VPN？", "Disconnect VPN?"),
             isPresented: $isConfirmingDisconnect,
@@ -631,158 +652,14 @@ struct GeekVPNHoverDetail: View {
         }
     }
 
-    private var statusCard: some View {
-        GeekCombinedCard(height: 46) {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(tunnel.displayName)
-                        .font(AdvancedPanelTypography.captionStrong)
-                        .lineLimit(1)
-                    Text(vpnStatusText(tunnel.status))
-                        .font(AdvancedPanelTypography.body)
-                        .foregroundStyle(vpnStatusTint(tunnel.status))
-                }
-
-                Spacer(minLength: 4)
-
-                Text(tunnel.protocolKind.displayName)
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    private var tunnelCard: some View {
-        GeekCombinedCard(height: tunnelCardHeight) {
-            VStack(spacing: 1) {
-                GeekNetworkTertiaryHeader(title: L10n.text("VPN 详情", "VPN Details"))
-                GeekNetworkCompactRow(title: L10n.text("协议", "Protocol"), value: tunnel.protocolKind.displayName)
-                GeekNetworkCompactRow(title: "BSD", value: tunnel.bsdName)
-                if let tunnelIPv4 {
-                    GeekNetworkCompactRow(
-                        title: L10n.text("隧道 IPv4", "Tunnel IPv4"),
-                        value: tunnelIPv4
-                    )
-                }
-                if let tunnelIPv6 {
-                    GeekNetworkCompactRow(
-                        title: L10n.text("隧道 IPv6", "Tunnel IPv6"),
-                        value: tunnelIPv6
-                    )
-                }
-                ForEach(Array(displayedScopedDNSServers.enumerated()), id: \.offset) { index, server in
-                    GeekNetworkCompactRow(title: index == 0 ? "DNS" : "", value: server)
-                }
-                if additionalScopedDNSCount > 0 {
-                    GeekNetworkCompactRow(
-                        title: "DNS",
-                        value: L10n.text(
-                            "另有 \(additionalScopedDNSCount) 条 DNS",
-                            "\(additionalScopedDNSCount) more DNS servers"
-                        )
-                    )
-                }
-                if let remote = tunnel.gatewayOrRemoteAddress?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !remote.isEmpty {
-                    GeekNetworkCompactRow(title: L10n.text("远端", "Remote"), value: remote)
-                }
-            }
-        }
-    }
-
-    private var preferredSize: CGSize {
-        Self.preferredSize(for: tunnel)
-    }
-
-    private var tunnelCardHeight: CGFloat {
-        max(56, CGFloat(tunnelDetailRowCount + 1) * 15 + 12)
-    }
-
-    private var tunnelDetailRowCount: Int {
-        Self.tunnelDetailRowCount(for: tunnel)
-    }
-
-    private var tunnelIPv4: String? {
-        Self.meaningfulValues(tunnel.tunnelIPv4).first
-    }
-
-    private var tunnelIPv6: String? {
-        Self.meaningfulValues(tunnel.tunnelIPv6).first
-    }
-
-    private var displayedScopedDNSServers: [String] {
-        Array(Self.meaningfulValues(tunnel.scopedDNSServers).prefix(Self.maximumVisibleDNSRows))
-    }
-
-    private var additionalScopedDNSCount: Int {
-        max(0, Self.meaningfulValues(tunnel.scopedDNSServers).count - displayedScopedDNSServers.count)
-    }
-
-    private static func tunnelDetailRowCount(for tunnel: VPNTunnelSnapshot) -> Int {
-        let dnsServers = meaningfulValues(tunnel.scopedDNSServers)
-        let addressRows = meaningfulValues(tunnel.tunnelIPv4).isEmpty ? 0 : 1
-        let ipv6Rows = meaningfulValues(tunnel.tunnelIPv6).isEmpty ? 0 : 1
-        let shownDNSRows = min(dnsServers.count, maximumVisibleDNSRows)
-        let remainingDNSRow = dnsServers.count > maximumVisibleDNSRows ? 1 : 0
-        let remoteRow = tunnel.gatewayOrRemoteAddress?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? 1 : 0
-        return 2 + addressRows + ipv6Rows + shownDNSRows + remainingDNSRow + remoteRow
-    }
-
-    private static func meaningfulValues(_ values: [String]) -> [String] {
-        values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
-    /// U1 085: room for two lines of description and the 30 pt action button
-    /// when the tunnel may offer an action. Reads the tunnel only, so sizing
-    /// the row's popover never runs the SystemConfiguration preflight.
-    static func managementCardHeight(for tunnel: VPNTunnelSnapshot) -> CGFloat {
-        reservesActionButton(for: tunnel) ? 76 : 64
-    }
-
     /// Every capability with an action needs a service identity or a provider
-    /// app (`VPNControlCapabilityResolver`); a tunnel with neither is read-only.
+    /// app (`VPNControlCapabilityResolver`); a tunnel with neither is
+    /// read-only. Reads the tunnel only, so sizing the row's page never runs
+    /// the SystemConfiguration preflight.
     static func reservesActionButton(for tunnel: VPNTunnelSnapshot) -> Bool {
         guard tunnel.status != .invalid else { return false }
         let serviceID = tunnel.serviceID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !serviceID.isEmpty || tunnel.providerApplicationURL != nil
-    }
-
-    private var managementCard: some View {
-        GeekCombinedCard(height: Self.managementCardHeight(for: tunnel)) {
-            VStack(alignment: .leading, spacing: 6) {
-                // After a request its result replaces the description, so the
-                // card keeps its height.
-                Text(actionMessage ?? managementDescription)
-                    .font(AdvancedPanelTypography.body)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-#if DEBUG
-                    .layoutProbe("vpn.management.description")
-#endif
-
-                if let action = Self.actionPresentation(for: preflight) {
-                    GeekVPNManagementActionButton(
-                        title: action.title,
-                        isDestructive: action.isDestructive,
-                        isBusy: isPerformingAction,
-                        action: requestAction
-                    )
-                    .disabled(isPerformingAction || !preflight.canExecute)
-#if DEBUG
-                    .layoutProbe("vpn.management.action")
-#endif
-                }
-            }
-            // Review P2-5: centred vertically, so a one-line description leaves
-            // the same space above the text as below the button.
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        }
-#if DEBUG
-        .layoutProbe("vpn.management.card")
-#endif
     }
 
     /// The management action, if any. Only the macOS disconnect request is
@@ -791,15 +668,20 @@ struct GeekVPNHoverDetail: View {
         guard preflight.canExecute else { return nil }
         switch preflight.capability {
         case .systemConfigurationConnection:
-            return GeekVPNManagementAction(title: L10n.text("断开连接", "Disconnect"), isDestructive: true)
+            return GeekVPNManagementAction(title: disconnectTitle, isDestructive: true)
         case .openProviderApplication:
-            return GeekVPNManagementAction(title: L10n.text("打开 VPN 应用", "Open VPN App"), isDestructive: false)
+            return GeekVPNManagementAction(title: openApplicationTitle, isDestructive: false)
         case .openSystemSettingsOnly:
-            return GeekVPNManagementAction(title: L10n.text("打开系统设置", "Open System Settings"), isDestructive: false)
+            return GeekVPNManagementAction(title: openSystemSettingsTitle, isDestructive: false)
         case .ownedNEVPNConnection, .readOnly, .unsupported:
             return nil
         }
     }
+
+    static var disconnectTitle: String { L10n.text("断开连接", "Disconnect") }
+    static var openApplicationTitle: String { L10n.text("打开 VPN 应用", "Open VPN App") }
+    static var openSystemSettingsTitle: String { L10n.text("打开系统设置", "Open System Settings") }
+    static var actionTitles: [String] { [disconnectTitle, openApplicationTitle, openSystemSettingsTitle] }
 
     private var managementDescription: String {
         if let failure = preflight.failure {
@@ -887,53 +769,6 @@ struct GeekVPNManagementAction: Equatable {
     let isDestructive: Bool
 }
 
-/// U1 085 (concept 085): the VPN detail's management action is a full-width,
-/// 30 pt tall button instead of a small bordered text button. The macOS
-/// disconnect request uses the destructive red outline; it still asks for
-/// confirmation first (`GeekVPNHoverDetail.requestAction`).
-struct GeekVPNManagementActionButton: View {
-    static let height: CGFloat = 30
-
-    let title: String
-    let isDestructive: Bool
-    let isBusy: Bool
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(role: isDestructive ? .destructive : nil, action: action) {
-            HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
-                if isBusy {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .accessibilityLabel(L10n.text("正在请求 VPN 操作", "Requesting VPN action"))
-                }
-                Text(title)
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .lineLimit(1)
-            }
-            .foregroundStyle(tint)
-            .frame(maxWidth: .infinity, minHeight: Self.height)
-            .background(
-                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
-                    .fill(tint.opacity(isHovered ? 0.16 : 0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous)
-                    .strokeBorder(tint.opacity(0.85), lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: MiniWindowStyleTokens.controlCornerRadius, style: .continuous))
-        }
-        .buttonStyle(ResponsivePlainButtonStyle())
-        .onHover { isHovered = $0 }
-        .accessibilityLabel(Text(title))
-    }
-
-    private var tint: Color {
-        isDestructive ? AppDesignTokens.Palette.destructive : AppDesignTokens.Palette.information
-    }
-}
-
 private func vpnStatusText(_ status: VPNStatus) -> String {
     switch status {
     case .connecting:
@@ -964,9 +799,16 @@ private func vpnStatusTint(_ status: VPNStatus) -> Color {
     }
 }
 
+/// D125: the physical connection's page is iStat's interface submenu
+/// (`-[NetworkMenu updateInterfaceSubmenu]`, `GeekIStatInterfaceSections`):
+/// the interface, a wired link's media options, Wi-Fi with its power
+/// switch, the addresses, IPv4 and IPv6, each section only with something
+/// to show (was five fixed cards with "—" and "Not Configured" rows in the
+/// 255 × 419 `referenceSize`). The column measures the page, so it follows
+/// its rows. iStat's "Renew DHCP Lease" button is not copied: it changes
+/// the system's network configuration.
 struct GeekNetworkTertiaryView: View {
     @Environment(\.miniWindowPageProvidesInset) private var pageProvidesInset
-    static let referenceSize = CGSize(width: 255, height: 419)
 
     let snapshot: NativeNetworkInterfaceSnapshot?
     let topology: NetworkTopologySnapshot?
@@ -988,24 +830,29 @@ struct GeekNetworkTertiaryView: View {
         _wiFiPowerControl = ObservedObject(wrappedValue: .shared)
     }
 
+    /// The page's first size for `connection`: its sections 7 apart inside
+    /// the 8 pt insets. D137: as wide as its widest section + 20, iStat's
+    /// interface submenu (was 255 for every connection).
+    static func preferredSize(for connection: NetworkConnectionSnapshot) -> CGSize {
+        let model = GeekIStatInterfaceModel(connection: connection)
+        return CGSize(
+            width: model.pageWidth(),
+            height: GeekIStatDetailGeometry.pageHeight(cards: model.sectionHeights)
+        )
+    }
+
     var body: some View {
-        Group {
-            VStack(spacing: GeekPanelLayout.detailSpacing) {
-                interfaceCard
-                if connection.wifi != nil,
-                   connection.connectionKind == .wifi
-                    || connection.connectionKind == .disconnected {
-                    wiFiCard
-                } else if connection.ethernet != nil {
-                    ethernetCard
-                }
-                ipAddressCard
-                ipv4Card
-                ipv6Card
+        let model = GeekIStatInterfaceModel(connection: connection)
+        VStack(spacing: GeekPanelLayout.detailSpacing) {
+            GeekIStatInterfaceSections(
+                model: model,
+                revealsHardwareAddress: $revealsHardwareAddress
+            ) {
+                wiFiHeaderStatus
             }
-            .padding(pageProvidesInset ? 0 : contentPadding)
         }
-        .frame(width: pageProvidesInset ? nil : Self.referenceSize.width, alignment: .top)
+        .padding(pageProvidesInset ? 0 : contentPadding)
+        .frame(width: pageProvidesInset ? nil : model.pageWidth(), alignment: .top)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .contain)
         .onAppear {
@@ -1019,216 +866,29 @@ struct GeekNetworkTertiaryView: View {
         }
     }
 
-    private var interfaceCard: some View {
-        GeekCombinedCard(height: connection.isVPNActive ? 91 : 76) {
-            VStack(spacing: 1) {
-                GeekNetworkTertiaryHeader(title: L10n.text("网络接口", "Interface"))
-                GeekNetworkCompactRow(title: L10n.text("类型", "Type"), value: connectionTypeText)
-                GeekNetworkCompactRow(title: L10n.text("BSD 名称", "BSD Name"), value: connection.activeInterface?.bsdName ?? "—")
-                hardwareAddressRow
-                if connection.isVPNActive {
-                    GeekNetworkCompactRow(title: "VPN", value: L10n.text("已连接", "Connected"))
-                }
-            }
-        }
-    }
-
-    private var hardwareAddressRow: some View {
-        ViewThatFits(in: .horizontal) {
-            hardwareAddressLine
-            VStack(alignment: .leading, spacing: 0) {
-                Text(L10n.text("MAC 地址", "MAC Address"))
-                    .foregroundStyle(.secondary)
-                hardwareAddressValue
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-        }
-        .font(AdvancedPanelTypography.body)
-    }
-
-    private var hardwareAddressLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
-            Text(L10n.text("MAC 地址", "MAC Address"))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: 6)
-            hardwareAddressValue
-        }
-    }
-
-    private var hardwareAddressValue: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(displayedHardwareAddress)
-                .foregroundStyle(.primary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            if connection.activeInterface?.hardwareAddress != nil {
-                Button(revealsHardwareAddress
-                    ? L10n.text("隐藏", "Hide")
-                    : L10n.text("显示", "Show")) {
-                    revealsHardwareAddress.toggle()
-                }
-                .buttonStyle(ResponsivePlainButtonStyle())
-                .font(AdvancedPanelTypography.captionStrong)
-                .fixedSize()
-                .accessibilityLabel(revealsHardwareAddress
-                    ? L10n.text("隐藏 MAC 地址", "Hide MAC address")
-                    : L10n.text("显示 MAC 地址", "Show MAC address"))
-            }
-        }
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
-    private var wiFiCard: some View {
-        GeekCombinedCard(height: 146) {
-            VStack(spacing: 1) {
-                ViewThatFits(in: .horizontal) {
-                    wiFiHeader
-                    VStack(alignment: .leading, spacing: 0) {
-                        GeekNetworkTertiaryHeader(title: "Wi-Fi")
-                        wiFiHeaderStatus
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-                }
-                GeekNetworkCompactRow(title: L10n.text("网络名称", "Network Name"), value: wiFiNetworkName)
-                GeekNetworkCompactRow(title: L10n.text("模式", "Mode"), value: connection.wifi?.phyMode ?? "—")
-                GeekNetworkCompactRow(title: L10n.text("频段", "Band"), value: wiFiBandText)
-                GeekNetworkCompactRow(
-                    title: L10n.text("传输速率", "Transmit Rate"),
-                    value: connection.wifi?.transmitRateMbps.map { String(format: "%.0f Mbps", $0) } ?? "—"
-                )
-                GeekNetworkCompactRow(
-                    title: "RSSI",
-                    value: connection.wifi?.rssiDBm.map { "\($0) dBm" } ?? "—"
-                )
-                GeekNetworkCompactRow(
-                    title: L10n.text("噪声", "Noise"),
-                    value: connection.wifi?.noiseDBm.map { "\($0) dBm" } ?? "—"
-                )
-                GeekNetworkCompactRow(
-                    title: L10n.text("信噪比", "SNR"),
-                    value: connection.wifi?.snrDB.map { "\($0) dB" } ?? "—"
-                )
-                GeekNetworkCompactRow(title: L10n.text("频道", "Channel"), value: channelText)
-            }
-        }
-    }
-
-    private var wiFiHeader: some View {
-        HStack(spacing: 8) {
-            GeekNetworkTertiaryHeader(title: "Wi-Fi")
-            Spacer(minLength: 8)
-            wiFiHeaderStatus
-        }
-    }
-
+    /// The Wi-Fi section's switch (iStat's `BBRMenuToggle`, 26 × 14 at 8
+    /// from the right). Ours asks before turning Wi-Fi off, spins while a
+    /// change applies and puts a warning before the switch after a change
+    /// failed; the state is the help.
     private var wiFiHeaderStatus: some View {
-        HStack(spacing: 8) {
-            Text(wiFiPowerStatusText)
-                .font(AdvancedPanelTypography.captionStrong)
-                .foregroundStyle(wiFiPowerStatusTint)
-                .lineLimit(1)
-                .help(wiFiPowerHelpText)
+        HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
+            if wiFiPowerControl.lastError != nil, !wiFiPowerControl.isApplying {
+                Image(systemName: AppSymbols.Status.warning)
+                    .font(AdvancedPanelTypography.symbol)
+                    .foregroundStyle(AppDesignTokens.Palette.warning)
+                    .accessibilityLabel(wiFiPowerStatusText)
+            }
             GeekWiFiPowerControl(
                 powerState: displayedWiFiPowerState,
                 coordinator: wiFiPowerControl
             )
-            .fixedSize()
         }
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
-    private var ethernetCard: some View {
-        GeekCombinedCard(height: 91) {
-            VStack(spacing: 1) {
-                GeekNetworkTertiaryHeader(title: L10n.text("有线网络", "Ethernet"))
-                GeekNetworkCompactRow(
-                    title: L10n.text("状态", "Status"),
-                    value: connection.ethernet?.linkActive == true
-                        ? L10n.text("已连接", "Connected")
-                        : L10n.text("未连接", "Disconnected")
-                )
-                GeekNetworkCompactRow(
-                    title: L10n.text("链路速率", "Link Speed"),
-                    value: ethernetLinkSpeedText
-                )
-                GeekNetworkCompactRow(
-                    title: L10n.text("双工模式", "Duplex"),
-                    value: connection.ethernet?.duplex ?? "—"
-                )
-                GeekNetworkCompactRow(
-                    title: "MTU",
-                    value: connection.ethernet?.mtu.map { $0.formatted() } ?? "—"
-                )
-                GeekNetworkCompactRow(
-                    title: L10n.text("介质类型", "Media Type"),
-                    value: connection.ethernet?.mediaSubtype ?? "—"
-                )
-            }
-        }
-    }
-
-    private var ipAddressCard: some View {
-        GeekCombinedCard(height: addressCardHeight) {
-            VStack(alignment: .leading, spacing: 1) {
-                GeekNetworkTertiaryHeader(title: L10n.text("本地 IP 地址", "IP Addresses"))
-                ForEach(Array(addressRows.enumerated()), id: \.offset) { _, row in
-                    GeekNetworkInspectorAddressRow(title: row.0, value: row.1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var ipv4Card: some View {
-        GeekCombinedCard(height: configurationCardHeight(ipv4Rows)) {
-            VStack(alignment: .leading, spacing: 1) {
-                GeekNetworkTertiaryHeader(title: "IPv4")
-                ForEach(Array(ipv4Rows.enumerated()), id: \.offset) { _, row in
-                    GeekNetworkInspectorAddressRow(title: row.0, value: row.1)
-                }
-            }
-        }
-    }
-
-    private var ipv6Card: some View {
-        GeekCombinedCard(height: configurationCardHeight(ipv6Rows)) {
-            VStack(alignment: .leading, spacing: 1) {
-                GeekNetworkTertiaryHeader(title: "IPv6")
-                ForEach(Array(ipv6Rows.enumerated()), id: \.offset) { _, row in
-                    GeekNetworkInspectorAddressRow(title: row.0, value: row.1)
-                }
-            }
-        }
+        .fixedSize()
+        .help(wiFiPowerHelpText)
     }
 
     private var connection: NetworkConnectionSnapshot {
         NetworkConnectionSnapshot.resolve(native: snapshot, topology: topology)
-    }
-
-    private var connectionTypeText: String {
-        switch connection.connectionKind {
-        case .wifi:
-            "Wi-Fi"
-        case .ethernet:
-            L10n.text("有线网络", "Ethernet")
-        case .other:
-            connection.activeInterface?.displayName ?? L10n.text("其他网络", "Other Network")
-        case .disconnected:
-            connection.wifi == nil ? L10n.text("未连接", "Disconnected") : "Wi-Fi"
-        }
-    }
-
-    private var displayedHardwareAddress: String {
-        guard let address = connection.activeInterface?.hardwareAddress?.uppercased() else {
-            return "—"
-        }
-        guard !revealsHardwareAddress else { return address }
-        let components = address.split(separator: ":").map(String.init)
-        guard components.count >= 2 else { return "••:••:••:••:••:••" }
-        return "••:••:••:••:\(components.suffix(2).joined(separator: ":"))"
     }
 
     private var displayedWiFiPowerState: WiFiPowerState {
@@ -1249,18 +909,6 @@ struct GeekNetworkTertiaryView: View {
         }
     }
 
-    private var wiFiPowerStatusTint: Color {
-        if wiFiPowerControl.lastError != nil { return AppDesignTokens.Palette.warning }
-        return switch displayedWiFiPowerState {
-        case .onConnected:
-            AppDesignTokens.Palette.success
-        case .changingToOn, .changingToOff:
-            AppDesignTokens.Palette.warning
-        case .onDisconnected, .off, .unavailable:
-            .secondary
-        }
-    }
-
     private var wiFiPowerHelpText: String {
         guard let error = wiFiPowerControl.lastError else { return wiFiPowerStatusText }
         switch error {
@@ -1272,145 +920,175 @@ struct GeekNetworkTertiaryView: View {
             return L10n.text("macOS 未允许更改 Wi-Fi；当前状态未伪造为成功。", "macOS did not allow the Wi-Fi change.")
         }
     }
-
-    private var wiFiNetworkName: String {
-        if let ssid = connection.wifi?.ssid, !ssid.isEmpty { return ssid }
-        return displayedWiFiPowerState == .onConnected
-            ? L10n.text("不可用", "Unavailable")
-            : "—"
-    }
-
-    private var wiFiBandText: String {
-        connection.wifi?.bandGHz.map { "\($0) GHz" } ?? "—"
-    }
-
-    private var channelText: String {
-        guard let channel = connection.wifi?.channelNumber else { return "—" }
-        guard let width = connection.wifi?.channelWidthMHz else { return "\(channel)" }
-        return "\(channel) (\(width) MHz)"
-    }
-
-    private var ethernetLinkSpeedText: String {
-        guard let speed = connection.ethernet?.linkSpeedMbps, speed > 0 else { return "—" }
-        if speed >= 1_000 {
-            return speed.isMultiple(of: 1_000)
-                ? "\(speed / 1_000) Gbps"
-                : String(format: "%.1f Gbps", Double(speed) / 1_000)
-        }
-        return "\(speed) Mbps"
-    }
-
-    private var addressRows: [(String, String)] {
-        let ipv4 = connection.ipConfiguration.ipv4Addresses.enumerated().map {
-            ($0.offset == 0 ? "IPv4" : "", $0.element)
-        }
-        let ipv6 = connection.ipConfiguration.ipv6Addresses.enumerated().map {
-            ($0.offset == 0 ? "IPv6" : "", $0.element)
-        }
-        let rows = ipv4 + ipv6
-        return rows.isEmpty
-            ? [(L10n.text("状态", "Status"), L10n.text("未配置", "Not Configured"))]
-            : rows
-    }
-
-    private var ipv4Rows: [(String, String)] {
-        var rows = connection.ipConfiguration.subnetMasks.enumerated().map {
-            ($0.offset == 0 ? L10n.text("子网掩码", "Subnet Mask") : "", $0.element)
-        }
-        if let router = connection.ipConfiguration.ipv4Router {
-            rows.append((L10n.text("路由器", "Router"), router))
-        }
-        rows += connection.ipConfiguration.dnsServers
-            .filter { !$0.contains(":") }
-            .enumerated()
-            .map { ($0.offset == 0 ? "DNS" : "", $0.element) }
-        return rows.isEmpty
-            ? [(L10n.text("状态", "Status"), L10n.text("未配置", "Not Configured"))]
-            : rows
-    }
-
-    private var ipv6Rows: [(String, String)] {
-        var rows: [(String, String)] = []
-        if let router = connection.ipConfiguration.ipv6Router {
-            rows.append((L10n.text("路由器", "Router"), router))
-        }
-        rows += connection.ipConfiguration.dnsServers
-            .filter { $0.contains(":") }
-            .enumerated()
-            .map { ($0.offset == 0 ? "DNS" : "", $0.element) }
-        return rows.isEmpty
-            ? [(L10n.text("状态", "Status"), L10n.text("未配置", "Not Configured"))]
-            : rows
-    }
-
-    private var addressCardHeight: CGFloat {
-        max(44, 24 + CGFloat(addressRows.count) * 17)
-    }
-
-    private func configurationCardHeight(_ rows: [(String, String)]) -> CGFloat {
-        max(44, 24 + CGFloat(rows.count) * 17)
-    }
 }
 
-private struct GeekNetworkTertiaryHeader: View {
-    let title: String
-
-    var body: some View {
-        GeekSectionTitle(title: title)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct GeekNetworkInspectorAddressRow: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if !title.isEmpty {
-                Text(title)
-                    .font(AdvancedPanelTypography.captionStrong)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+extension GeekIStatInterfaceModel {
+    /// The physical connection: the active interface's BSD name and MAC
+    /// address, a wired link's speed and the media options, the Wi-Fi section
+    /// while Wi-Fi is the connection or nothing is connected, the addresses,
+    /// and IPv4 / IPv6 with every subnet mask, router and DNS server. D134:
+    /// as in iStat, the speed and the media options only while connected,
+    /// the speed for a link other than Wi-Fi with an `IOLinkSpeed`.
+    init(connection: NetworkConnectionSnapshot) {
+        bsdName = Self.meaningful(connection.activeInterface?.bsdName)
+        hardwareAddress = Self.meaningful(connection.activeInterface?.hardwareAddress)?.uppercased()
+        if connection.isConnected {
+            linkSpeed = connection.ethernet?.linkSpeedMbps.map {
+                Self.linkSpeedText(Self.displayedLinkSpeed($0, mediaSubType: connection.mediaSubType))
             }
-            Spacer(minLength: title.isEmpty ? 0 : 4)
-            Text(value)
-                .font(AdvancedPanelTypography.body.monospaced())
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-                .help(value)
+            mediaOptions = Self.mediaOptions(connection.mediaOptions)
         }
-        .frame(maxWidth: .infinity, minHeight: 17, alignment: .leading)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title.isEmpty ? value : "\(title), \(value)")
+        if let wifi = connection.wifi,
+           connection.connectionKind == .wifi || connection.connectionKind == .disconnected {
+            wiFiRows = Self.wiFiRows(wifi)
+        }
+        // D140: the addresses iStat lists (`NetworkAddressListing`); a
+        // snapshot without the list keeps every IPv4 and IPv6 address.
+        addresses = connection.ipConfiguration.listedAddresses
+            ?? Self.meaningful(connection.ipConfiguration.ipv4Addresses)
+            + Self.meaningful(connection.ipConfiguration.ipv6Addresses)
+        ipv4Rows = Self.meaningful(connection.ipConfiguration.subnetMasks).map {
+            Row(title: Self.subnetMaskTitle, value: $0)
+        }
+        if let router = Self.meaningful(connection.ipConfiguration.ipv4Router) {
+            ipv4Rows.append(Row(title: Self.routerTitle, value: router))
+        }
+        let dnsServers = Self.meaningful(connection.ipConfiguration.dnsServers)
+        ipv4Rows += dnsServers.filter { !$0.contains(":") }.map { Row(title: "DNS", value: $0) }
+        if let router = Self.meaningful(connection.ipConfiguration.ipv6Router) {
+            ipv6Rows.append(Row(title: Self.routerTitle, value: router))
+        }
+        ipv6Rows += dnsServers.filter { $0.contains(":") }.map { Row(title: "DNS", value: $0) }
+    }
+
+    /// A VPN: the tunnel's BSD name and addresses; its router (the service's
+    /// `Router`) and its scoped DNS servers in the IPv4 or IPv6 section of
+    /// their family. Every DNS server is a row, as in iStat. D140: the
+    /// addresses iStat lists, so a point-to-point tunnel's own addresses
+    /// (`utun`, `ppp`) are not there and neither is the section; a snapshot
+    /// without the list keeps `tunnel.tunnelIPv4` and `tunnel.tunnelIPv6`.
+    init(tunnel: VPNTunnelSnapshot) {
+        bsdName = Self.meaningful(tunnel.bsdName)
+        addresses = tunnel.listedAddresses
+            ?? Self.meaningful(tunnel.tunnelIPv4) + Self.meaningful(tunnel.tunnelIPv6)
+        if let router = Self.meaningful(tunnel.gatewayOrRemoteAddress) {
+            let row = Row(title: Self.routerTitle, value: router)
+            if router.contains(":") { ipv6Rows.append(row) } else { ipv4Rows.append(row) }
+        }
+        let dnsServers = Self.meaningful(tunnel.scopedDNSServers)
+        ipv4Rows += dnsServers.filter { !$0.contains(":") }.map { Row(title: "DNS", value: $0) }
+        ipv6Rows += dnsServers.filter { $0.contains(":") }.map { Row(title: "DNS", value: $0) }
+    }
+
+    // iStat's labels (`BBRMenuKit.strings`, zh-CN and en), looked up one by
+    // one.
+    static var interfaceTitle: String { L10n.text("接口", "Interface") }
+    static var bsdNameTitle: String { L10n.text("BSD名称", "BSD") }
+    static var hardwareAddressTitle: String { L10n.text("MAC地址", "MAC Address") }
+    static var linkSpeedTitle: String { L10n.text("链接速度", "Link Speed") }
+    static var mediaOptionsTitle: String { L10n.text("介质选项", "Media Options") }
+    static var addressesTitle: String { L10n.text("IP 地址", "IP Addresses") }
+    static var subnetMaskTitle: String { L10n.text("子网掩码", "Subnet Mask") }
+    static var routerTitle: String { L10n.text("路由器", "Router") }
+
+    /// iStat's link speed: below 1000 in Mb/s ("%li", so 0 is "0 Mb/s"), 1
+    /// and 10 Gb/s whole, any other speed in Gb/s with one decimal of the
+    /// single-precision quotient (`floatValue / 1000`, "%.1f"). D134: a zero
+    /// speed is a row as in iStat (before: no row).
+    static func linkSpeedText(_ megabits: Int) -> String {
+        switch megabits {
+        case ..<1_000: return "\(megabits) Mb/s"
+        case 1_000: return "1 Gb/s"
+        case 10_000: return "10 Gb/s"
+        default: return String(format: "%.1f Gb/s", Double(Float(megabits) / 1_000))
+        }
+    }
+
+    /// D134: iStat's speed for the row: a zero `IOLinkSpeed` takes the
+    /// number before "baseT" when the media subtype ends with it
+    /// ("1000baseT" is 1000; `integerValue`, so "10GbaseT" is 10); any other
+    /// speed is kept.
+    static func displayedLinkSpeed(_ megabits: Int, mediaSubType: String?) -> Int {
+        guard megabits == 0, let mediaSubType, mediaSubType.hasSuffix("baseT") else { return megabits }
+        return (mediaSubType.replacingOccurrences(of: "baseT", with: "") as NSString).integerValue
+    }
+
+    /// D134: the media options in the system's order, iStat's labels for full
+    /// duplex, half duplex and flow control, any other option as the system
+    /// names it (before: a duplex text matched by substrings, never read).
+    static func mediaOptions(_ options: [String]) -> [String] {
+        options.map { option in
+            switch option {
+            case "full-duplex": L10n.text("全双工", "Full Duplex")
+            case "half-duplex": L10n.text("半双工", "Half Duplex")
+            case "flow-control": L10n.text("流控制", "Flow Control")
+            default: option
+            }
+        }
+    }
+
+    /// The Wi-Fi rows in iStat's order, formats and conditions: the network
+    /// and BSSID when known; the transmit rate when not 0; RSSI and noise
+    /// each when not 0; the mode, SNR and channel only with both readings
+    /// (associated). The mode carries its band ("802.11ax (5GHz)", "N/A"
+    /// without a mode), SNR is RSSI − noise, the channel its width as iStat
+    /// writes it ("149 (80 Mhz)").
+    static func wiFiRows(_ wifi: WiFiConnectionDetails) -> [Row] {
+        var rows: [Row] = []
+        let rssi = wifi.rssiDBm ?? 0
+        let noise = wifi.noiseDBm ?? 0
+        let isAssociated = rssi != 0 && noise != 0
+        if let ssid = meaningful(wifi.ssid) {
+            rows.append(Row(title: L10n.text("网络", "Network"), value: ssid))
+        }
+        if let bssid = meaningful(wifi.bssid) {
+            rows.append(Row(title: "BSSID", value: bssid))
+        }
+        if isAssociated {
+            let mode = meaningful(wifi.phyMode) ?? "N/A"
+            let band = wifi.bandGHz.flatMap(bandText)
+            rows.append(Row(title: L10n.text("模式", "Mode"), value: band.map { "\(mode) (\($0))" } ?? mode))
+        }
+        if let rate = wifi.transmitRateMbps, rate.isFinite, rate != 0 {
+            rows.append(Row(title: L10n.text("传输速率", "Transmit Rate"), value: String(format: "%.0f", rate) + " Mbps"))
+        }
+        if rssi != 0 {
+            rows.append(Row(title: "RSSI", value: "\(rssi) dBm"))
+        }
+        if noise != 0 {
+            rows.append(Row(title: L10n.text("噪音", "Noise"), value: "\(noise) dBm"))
+        }
+        if isAssociated {
+            rows.append(Row(title: "SNR", value: "\(rssi - noise) dB"))
+            if let channel = wifi.channelNumber {
+                let width = wifi.channelWidthMHz.flatMap { [20, 40, 80, 160].contains($0) ? " (\($0) Mhz)" : nil } ?? ""
+                rows.append(Row(title: L10n.text("频段", "Channel"), value: "\(channel)\(width)"))
+            }
+        }
+        return rows
+    }
+
+    static func bandText(_ gigahertz: Int) -> String? {
+        switch gigahertz {
+        case 2: "2.4GHz"
+        case 5: "5GHz"
+        case 6: "6GHz"
+        default: nil
+        }
+    }
+
+    private static func meaningful(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+
+    private static func meaningful(_ values: [String]) -> [String] {
+        values.compactMap { meaningful($0) }
     }
 }
 
-private struct GeekNetworkCompactRow: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            Text(value)
-                .foregroundStyle(.primary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .font(AdvancedPanelTypography.body)
-        .help(value)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title), \(value)")
-    }
-}
-
+/// D125: the Wi-Fi section's switch is the text section's (was the native
+/// mini switch); turning Wi-Fi off still asks first.
 private struct GeekWiFiPowerControl: View {
     let powerState: WiFiPowerState
     @ObservedObject var coordinator: WiFiPowerControlCoordinator
@@ -1420,10 +1098,8 @@ private struct GeekWiFiPowerControl: View {
         Group {
             if let isPoweredOn = displayedPower {
                 ZStack {
-                    Toggle("", isOn: powerBinding(isPoweredOn: isPoweredOn))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
+                    Toggle(isOn: powerBinding(isPoweredOn: isPoweredOn)) { EmptyView() }
+                        .toggleStyle(GeekIStatSwitchToggleStyle())
                         .disabled(powerState == .unavailable)
                         .accessibilityLabel(isPoweredOn
                             ? L10n.text("Wi-Fi 当前已开启", "Wi-Fi is currently on")

@@ -1,4 +1,5 @@
 import Foundation
+import FileOperationShared
 import XCTest
 @testable import StorageCleanerMac
 
@@ -21,6 +22,7 @@ extension ScanStore {
         loadScanReadinessSummary: @escaping @Sendable () -> ScanReadinessSummary = {
             ScanReadinessService.summary()
         },
+        readableDirectories: @escaping @Sendable ([String]) -> Set<String> = { _ in [] },
         historyLoader: (any ScanStoreHistoryLoading)? = nil,
         scanHistoryDefaults: UserDefaults? = nil,
         metricHistoryStore: MetricHistoryStore? = nil,
@@ -48,6 +50,7 @@ extension ScanStore {
         websiteUpdateWorkflow: WebsiteUpdateWorkflow? = nil,
         cleanupFeatureConfiguration: CleanupFeatureConfiguration = .productDefault,
         cleanupScanOperation: @escaping CleanupScanOperation = CleanupScanOperations.live,
+        systemCacheService: any SystemCacheServicing = UnavailableTestSystemCacheService(),
         smartScanHealthOperation: @escaping SmartScanHealthOperation = { nil },
         cleanupRuleSetLoader: @escaping @Sendable () throws -> CleanupRuleSet = {
             try CleanupRuleSetLoader.loadBundled()
@@ -96,6 +99,7 @@ extension ScanStore {
             scanReadinessTimeout: scanReadinessTimeout,
             restoreSavedAccessOperation: restoreSavedAccessOperation,
             loadScanReadinessSummary: loadScanReadinessSummary,
+            readableDirectories: readableDirectories,
             historyLoader: historyLoader ?? TestScanStoreHistoryLoader(suiteName: fixture.suiteName),
             scanHistoryDefaults: scanHistoryDefaults ?? defaults,
             metricHistoryStore: metricHistoryStore,
@@ -130,6 +134,7 @@ extension ScanStore {
                 }),
             cleanupFeatureConfiguration: cleanupFeatureConfiguration,
             cleanupScanOperation: cleanupScanOperation,
+            systemCacheService: systemCacheService,
             smartScanHealthOperation: smartScanHealthOperation,
             cleanupRuleSetLoader: cleanupRuleSetLoader,
             cleanupPreferences: cleanupPreferences ?? defaults,
@@ -152,6 +157,7 @@ extension ScanStore {
         // cleanupExecutionTask can move files before upgrading weak self.
         // Keep the store until cancellation and bounded joining have finished.
         testCase.addTeardownBlock { @MainActor [store] in
+            await store.cancelSystemCacheInventory()
             let pending = await store.waitForOperationReportTasksForTesting(cancelPending: true)
             if !pending.isEmpty {
                 cleanupState.preservePreferences()
@@ -159,6 +165,14 @@ extension ScanStore {
             }
         }
         return store
+    }
+}
+
+@MainActor
+struct UnavailableTestSystemCacheService: SystemCacheServicing {
+    func inventory() async -> SystemCacheInventoryReply? { nil }
+    func clear(_ directories: [SystemCacheDirectoryIdentity]) async throws -> SystemCacheClearReply {
+        throw SystemCacheServiceError.unavailable
     }
 }
 

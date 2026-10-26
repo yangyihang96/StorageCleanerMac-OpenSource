@@ -35,7 +35,7 @@ final class AppUpdaterPolicyTests: XCTestCase {
         let optionalHooks = Set((0..<Int(count)).compactMap { methods[$0].name }.map(NSStringFromSelector))
 
         // Hooks that would affect which update is found, offered or installed
-        // (Sparkle 2.9.4 names). They must exist, so the check below is real.
+        // (Sparkle 2.10.0 names). They must exist, so the check below is real.
         let selectionHooks: Set<String> = [
             "bestValidUpdateInAppcast:forUpdater:",
             "allowedChannelsForUpdater:",

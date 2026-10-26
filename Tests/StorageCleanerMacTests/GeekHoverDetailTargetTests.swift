@@ -6,26 +6,76 @@ final class GeekHoverDetailTargetTests: XCTestCase {
     func testHoverTimingKeepsAStableBridgeIntoTheAttachedThirdColumn() {
         XCTAssertEqual(HoverIntentPolicy.menuBar.initialOpenDelay, .zero)
         XCTAssertEqual(HoverIntentPolicy.menuBar.switchDelay, .zero)
-        XCTAssertEqual(HoverIntentPolicy.menuBar.ordinaryCloseDelay, .milliseconds(260))
+        // D123 (2026-10-19): a submenu the pointer leaves without entering
+        // closes at once, as in iStat Menus 7.30 (was 260 ms); the control
+        // palettes keep 260 ms.
+        XCTAssertEqual(HoverIntentPolicy.menuBar.ordinaryCloseDelay, .zero)
+        XCTAssertEqual(HoverIntentPolicy.controlPalette.ordinaryCloseDelay, .milliseconds(260))
         XCTAssertEqual(HoverIntentPolicy.menuBar.corridorGraceDuration, .milliseconds(320))
+        // D123 (2026-10-19): the hold has no time limit. iStat Menus 7.30's
+        // 1 s check holds again at once while the pointer still heads for the
+        // child (was `corridorMaximumHold`, 1 s, D117).
+        XCTAssertFalse(
+            Mirror(reflecting: HoverIntentPolicy.menuBar).children.contains { $0.label == "corridorMaximumHold" }
+        )
+        // D123 (2026-10-19): a one-point step toward the child's side starts
+        // the hold, and it lasts while every step keeps going that way;
+        // stopping does not end it, any other step does (was a 50 ms progress
+        // check, `corridorRecheckInterval`).
+        XCTAssertEqual(HoverIntentPolicy.menuBar.headingStep, 1)
     }
 
     @MainActor
     func testReferenceTertiaryDetailGeometryIsKeptExplicit() {
         XCTAssertEqual(GeekHoverDetailMetrics.historySize, CGSize(width: MiniWindowStyleTokens.historyWidth, height: 216))
         XCTAssertEqual(GeekHoverDetailMetrics.cpuHistorySize, GeekHoverDetailMetrics.historySize)
-        XCTAssertEqual(GeekHoverDetailMetrics.memoryHistorySize, GeekHoverDetailMetrics.historySize)
-        XCTAssertEqual(GeekHoverDetailMetrics.diskIOSize, GeekHoverDetailMetrics.historySize)
-        XCTAssertEqual(GeekSensorPowerHoverDetailMetrics.batteryHistorySize, GeekHoverDetailMetrics.historySize)
+        // D121 (2026-10-18): a history page is the graph card and its rows
+        // below it: memory pressure one row, disk I/O two (both were the
+        // bare 216 pt history size).
+        XCTAssertEqual(GeekHoverDetailMetrics.memoryHistorySize, GeekIStatHistoryGeometry.pageSize(rowCount: 1))
+        XCTAssertEqual(GeekHoverDetailMetrics.diskIOSize, GeekIStatHistoryGeometry.pageSize(rowCount: 2))
+        // D132 (2026-10-19): iStat's battery history submenu is 319 wide with
+        // a 180 pt graph; was `GeekHoverDetailMetrics.historySize` (391 × 216).
+        XCTAssertEqual(GeekSensorPowerHoverDetailMetrics.batteryHistorySize, CGSize(width: 319, height: 196))
         XCTAssertGreaterThan(GeekMemoryCompositionHistoryDetail.preferredSize.height, GeekHoverDetailMetrics.historySize.height)
         for size in [GeekHoverDetailMetrics.cpuHistorySize, GeekHoverDetailMetrics.memoryHistorySize, GeekHoverDetailMetrics.cpuUsageSize] {
             XCTAssertEqual(GeekPanelPresentationMetrics.normalizedTertiarySize(size), size)
         }
         XCTAssertEqual(GeekHoverDetailMetrics.compactHistorySize, CGSize(width: MiniWindowStyleTokens.compactHistoryWidth, height: 216))
-        XCTAssertEqual(GeekHoverDetailMetrics.volumeSize, CGSize(width: 220, height: 339))
-        XCTAssertEqual(GeekHoverDetailMetrics.vpnWidth, 220)
-        XCTAssertEqual(GeekHoverDetailMetrics.uptimeSize, CGSize(width: 220, height: 106))
-        XCTAssertEqual(GeekNetworkTertiaryView.referenceSize, CGSize(width: 255, height: 419))
+        // D122 (2026-10-18): the volume page is the 200 pt space card and its
+        // reading rows, sized by them (was the fixed `volumeSize`, 220 × 339);
+        // a network volume before its capacity is read is its two rows.
+        XCTAssertEqual(GeekDiskVolumeHoverDetail.popoverSize(rowCount: 4), CGSize(width: 220, height: 299))
+        XCTAssertEqual(GeekDiskVolumeHoverDetail.popoverSize(rowCount: 2), CGSize(width: 220, height: 265))
+        XCTAssertEqual(GeekDiskVolumeHoverDetail.networkWithoutCapacitySize, CGSize(width: 220, height: 58))
+        // D137 (2026-10-19): the VPN page is its widest section + 20, 220 at
+        // the least (was the fixed `GeekHoverDetailMetrics.vpnWidth`, 220).
+        XCTAssertEqual(GeekIStatContentWidth.page(sections: [GeekIStatContentWidth.sectionMinimum]), 220)
+        // D122 (2026-10-18): one card of three title-and-value groups, iStat's
+        // uptime menu (was 106 for two rows). D137 (2026-10-19): its section +
+        // 20, from 150 (was `GeekHoverDetailMetrics.uptimeSize`, 220 × 130).
+        XCTAssertEqual(GeekProcessorUptimeHoverDetail(poweredOnAt: "—", awake: "—", asleep: "—").popoverSize,
+                       CGSize(width: 170, height: 130))
+        // D122 (2026-10-18): the usage page is a history page with its rows
+        // below the graph card (were 270 and 293).
+        XCTAssertEqual(GeekHoverDetailMetrics.cpuUsageSize, GeekIStatHistoryGeometry.pageSize(rowCount: 3))
+        XCTAssertEqual(GeekHoverDetailMetrics.cpuLoadSize, GeekIStatHistoryGeometry.pageSize(rowCount: 4))
+        // D125 (2026-10-19): the connection page is iStat's interface submenu,
+        // sized by its sections (was the fixed `referenceSize`, 255 × 419).
+        // D137 (2026-10-19): its width too, the widest section + 20 (was
+        // `GeekNetworkTertiaryView.pageWidth`, 255).
+        #if DEBUG || STORAGE_CLEANER_BETA
+        // The demo Wi-Fi connection: interface 61, Wi-Fi 163, addresses 57,
+        // IPv4 78, IPv6 61.
+        let demoConnection = NetworkConnectionSnapshot.resolve(
+            native: MiniWindowDemoData.networkInterfaceSnapshot,
+            topology: nil
+        )
+        XCTAssertEqual(
+            GeekNetworkTertiaryView.preferredSize(for: demoConnection),
+            CGSize(width: GeekIStatInterfaceModel(connection: demoConnection).pageWidth(), height: 464)
+        )
+        #endif
     }
 
     func testHoverTargetRequestsTheRootHostedThirdColumnWithoutCreatingWindowInfrastructure() throws {
@@ -70,13 +120,22 @@ final class GeekHoverDetailTargetTests: XCTestCase {
 
         XCTAssertTrue(target.contains("@Environment(\\.geekPanelHoverEnvelopeActive)"))
         XCTAssertTrue(target.contains(".onChange(of: isPanelHoverEnvelopeActive)"))
-        XCTAssertTrue(target.contains("&& !isPanelHoverEnvelopeActive"))
+        // D123 (2026-10-19): leaving a row for a gap in the module column
+        // closes its page inside the envelope too, as a change of target does
+        // in iStat Menus 7.30 (was `&& !isPanelHoverEnvelopeActive`).
+        let dismissal = try r2SourceDeclaration("private func scheduleDismissal(", in: target)
+        XCTAssertTrue(dismissal.contains("&& hoverCoordinator.allowsTertiaryGapClose"))
+        XCTAssertFalse(dismissal.contains("!isPanelHoverEnvelopeActive"))
         XCTAssertTrue(tertiary.contains("!panelCoordinator.isPointerWithinHoverEnvelope"))
         XCTAssertTrue(tertiary.contains("panelCoordinator.dismissUnpinnedHierarchy()"))
         XCTAssertTrue(advanced.contains("panelCoordinator.scheduleHoverDismissal("))
         XCTAssertTrue(advanced.contains("scheduleTertiaryDetailDismissal(detail)"))
         XCTAssertTrue(advanced.contains("geekPanelHoverActivityState.reset()"))
-        XCTAssertTrue(advanced.contains("panelCoordinator.dismissUnpinnedHierarchy()"))
+        // D123 (2026-10-19): a row's page closes alone; the module column
+        // follows its own rules (was `dismissUnpinnedHierarchy()`).
+        let inlineEvent = try r2SourceDeclaration("private func handleInlineTertiaryEvent(", in: advanced)
+        XCTAssertTrue(inlineEvent.contains("panelCoordinator.dismissHistory()"))
+        XCTAssertFalse(inlineEvent.contains("dismissUnpinnedHierarchy"))
     }
 
     func testSnapshotCaptureBlocksPointerHoverAtBothTertiaryEntryPoints() throws {
@@ -226,15 +285,16 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertTrue(disk.contains("GeekDiskThroughputHoverDetail"))
 
         XCTAssertFalse(detail.contains("L10n.text(\"历史趋势\", \"History Trend\")"))
-        // Batch 2b review: the GPU memory reading keeps one name, 显存 /
-        // GPU Memory (GeekGPUVocabulary), on the CPU page ring and here.
+        // Batch 2b review: the GPU memory reading keeps one name
+        // (GeekGPUVocabulary) on the CPU page ring and here; D138: iStat's
+        // 内存 / Memory (was 显存 / GPU Memory).
         XCTAssertTrue(detail.contains("title: GeekGPUVocabulary.memory"))
         XCTAssertFalse(detail.contains("频率 / FPS"))
         XCTAssertFalse(detail.contains("value: \"-- / --\""))
         XCTAssertFalse(detail.contains("Text(pressureExplanation)"))
     }
 
-    func testDiskWriteChartUsesItsOwnScaleInsteadOfReadPeak() {
+    func testDiskWriteChartUsesItsOwnScaleInsteadOfReadPeak() throws {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let points = (0..<3).map { index in
             NativeDiskIOPoint(
@@ -253,15 +313,22 @@ final class GeekHoverDetailTargetTests: XCTestCase {
             scale: 2
         )
 
-        XCTAssertGreaterThan(GeekDiskIOChartMode.write.maximum(for: frame), 0)
-        XCTAssertLessThan(
-            GeekDiskIOChartMode.write.maximum(for: frame),
-            GeekDiskIOChartMode.read.maximum(for: frame)
-        )
-        XCTAssertEqual(
-            GeekDiskIOChartMode.combined.maximum(for: frame),
-            GeekDiskIOChartMode.read.maximum(for: frame)
-        )
+        XCTAssertEqual(frame.writeMaximum, GeekBarChartScale.throughputFloor)
+        // D120 (2026-10-18): the visible peak itself; D117's tier was 12 500.
+        XCTAssertEqual(frame.readMaximum, 10_000)
+        // D117: the combined chart's write half also uses the write scale
+        // instead of sharing the read peak.
+        let charts = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/MenuBarGeekCharts.swift")
+        let diskChart = try XCTUnwrap(charts.components(separatedBy: "struct GeekDiskIOChart: View {").last)
+        // D121 (2026-10-18): a history recomputes the scale without easing
+        // (`easesScale: false`); either way each half keeps its own target.
+        // Were `maximum: writeAxisScale.displayedMaximum(fallback: writeTarget)`.
+        // D130/D131 (2026-10-19): `eases` also needs the projection (were
+        // `maximum: easesScale ? …`).
+        XCTAssertTrue(diskChart.contains(
+            "maximum: eases ? writeAxisScale.displayedMaximum(fallback: writeTarget) : writeTarget"))
+        XCTAssertTrue(diskChart.contains(
+            "maximum: eases ? readAxisScale.displayedMaximum(fallback: readTarget) : readTarget"))
     }
 
     func testSwapDetailKeepsMeasuredZeroUnknownAndHistoricalPeakDistinct() {
@@ -300,7 +367,9 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertTrue(swapTarget.contains("chartRangeMetric: .memory"))
         XCTAssertTrue(swapTarget.contains("points: memoryHistory"))
         XCTAssertTrue(swapTarget.contains("duration: geekMetricRange(.memory).duration"))
-        XCTAssertTrue(swapDetail.contains("channel: .swapUsedBytes"))
+        // D133: iStat's swap history draws the swap files' used share (was
+        // `channel: .swapUsedBytes`).
+        XCTAssertTrue(swapDetail.contains("channel: .swapUsedPercent"))
         XCTAssertTrue(swapDetail.contains("showsRangePicker: true"))
         XCTAssertFalse(swapDetail.contains("GeekHoverLargeValue"))
     }
@@ -310,12 +379,17 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift")
 
         XCTAssertEqual(network.components(separatedBy: "GeekHoverDetailTarget(").count - 1, 3)
-        XCTAssertTrue(network.contains("GeekHoverDetailMetrics.compactHistorySize"))
+        // D121 (2026-10-18): the page's own size, the card and its two rows
+        // (was `GeekHoverDetailMetrics.compactHistorySize`).
+        XCTAssertTrue(network.contains("GeekNetworkHistoryHoverDetail.popoverSize"))
         XCTAssertTrue(network.contains("GeekNetworkHistoryHoverDetail("))
+        // D140 (2026-10-19): the IP section's reading state (was `isLoading:`
+        // of the address card).
         XCTAssertTrue(network.contains(
-            "isLoading: !store.isMenuBarRefreshPaused && networkTopologySnapshot == nil && networkInterfaceSnapshot == nil"
+            "let isReading = !store.isMenuBarRefreshPaused && networkTopologySnapshot == nil && networkInterfaceSnapshot == nil"
         ))
-        XCTAssertTrue(network.contains("popoverSize: GeekNetworkTertiaryView.referenceSize"))
+        // D125 (2026-10-19): the page's size from its sections.
+        XCTAssertTrue(network.contains("popoverSize: GeekNetworkTertiaryView.preferredSize(for: geekConnectionSnapshot)"))
         XCTAssertTrue(network.contains("GeekNetworkTertiaryView("))
         XCTAssertTrue(network.contains("snapshot: networkInterfaceSnapshot"))
         XCTAssertTrue(network.contains("topology: networkTopologySnapshot"))
@@ -324,7 +398,14 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         XCTAssertFalse(network.contains("ControlPaletteHoverAnchor("))
         XCTAssertTrue(network.contains("GeekVPNDisclosure"))
         XCTAssertTrue(network.contains("GeekVPNHoverDetail.preferredSize(for: tunnel)"))
-        XCTAssertTrue(network.contains("GeekHoverDetailMetrics.vpnWidth"))
+        // D137 (2026-10-19): the VPN page's width from its sections and button
+        // (was `width: GeekHoverDetailMetrics.vpnWidth`). D140: the sections
+        // measured at that width, where an address wraps (was `width:
+        // model.pageWidth(buttonTitles: reservesButton ? actionTitles : [])`
+        // in the size).
+        XCTAssertTrue(network.contains("let width = model.pageWidth(buttonTitles: reservesButton ? actionTitles : [])"))
+        XCTAssertTrue(network.contains("var cards = model.sectionHeights(pageWidth: width)"))
+        XCTAssertFalse(network.contains("width: GeekHoverDetailMetrics.vpnWidth"))
         XCTAssertTrue(network.contains("sourceOffset: 158"))
         XCTAssertFalse(network.contains("GeekNetworkInterfaceDisclosure"))
         XCTAssertTrue(detail.contains("struct GeekNetworkHistoryHoverDetail"))
@@ -359,8 +440,12 @@ final class GeekHoverDetailTargetTests: XCTestCase {
                 .components(separatedBy: "private var batteryRows").first
         )
         XCTAssertFalse(batteryBody.contains("maxHeight: .infinity"))
-        XCTAssertTrue(network.contains("popoverSize: GeekHoverDetailMetrics.compactHistorySize"))
-        XCTAssertTrue(power.contains("popoverSize: GeekSensorPowerHoverDetailMetrics.batterySize"))
+        // D121 (2026-10-18): was `popoverSize: GeekHoverDetailMetrics.compactHistorySize`.
+        XCTAssertTrue(network.contains("popoverSize: GeekNetworkHistoryHoverDetail.popoverSize"))
+        // D137 (2026-10-19): the battery page's size carries its content width
+        // (was `popoverSize: GeekSensorPowerHoverDetailMetrics.batterySize`).
+        XCTAssertTrue(power.contains("popoverSize: geekBatteryElectricalDetail.popoverSize"))
+        XCTAssertTrue(sensorPower.contains("GeekSensorPowerHoverDetailMetrics.batterySize(\n            sectionRowCounts: sectionRowCounts,"))
     }
 
     func testEveryHoverDetailUsesItsMeasuredOwningRowTop() throws {
@@ -468,13 +553,25 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift")
 
         for source in [processor, detail] {
-            XCTAssertFalse(source.contains("平均负载"))
+            // D138: iStat's LOAD row is 平均负载量 ('CPU.Load'); no other
+            // raw load-average text (was `XCTAssertFalse(source.contains("平均负载"))`).
+            XCTAssertEqual(source.components(separatedBy: "平均负载").count,
+                           source.components(separatedBy: "L10n.text(\"平均负载量\", \"LOAD\")").count)
             XCTAssertFalse(source.contains("Load Average"))
         }
-        XCTAssertTrue(processor.contains("CPU 占用"))
+        XCTAssertTrue(processor.contains("L10n.text(\"平均负载量\", \"LOAD\")"))
+        // D119: iStat's LOAD row replaces the "CPU 占用" row on the page; the
+        // readable usage is that row's third level (was
+        // `processor.contains("CPU 占用")`).
+        XCTAssertTrue(processor.contains("GeekProcessorUsageHoverDetail("))
+        // D122 (2026-10-18): the usage page is a history page with the range
+        // picker (was `GeekHoverDetailCanvas(title: L10n.text("CPU 占用",
+        // "CPU Usage"))` around the usage ring).
+        XCTAssertTrue(detail.contains("GeekHoverDetailCanvas(title: L10n.text(\"CPU 占用\", \"CPU Usage\"), showsRangePicker: true)"))
         // D39: the total reads the current reading (history's last point, or
-        // the live one while the history is not prepared).
-        XCTAssertTrue(processor.contains("percentText(cpuCurrentReading?.cpuTotal)"))
+        // the live one while the history is not prepared); was shown on the
+        // page as `percentText(cpuCurrentReading?.cpuTotal)`.
+        XCTAssertTrue(processor.contains("total: cpuCurrentReading?.cpuTotal"))
         XCTAssertTrue(processor.contains("percentText(geekCurrentCPUUserPercent)"))
         XCTAssertTrue(processor.contains("percentText(geekCurrentCPUSystemPercent)"))
         XCTAssertFalse(processor.contains("percentText(cpuBreakdown?."))
@@ -491,7 +588,9 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         // Decision D2 (2026-10-04): "内存清理" is "退出所选应用" and no longer
         // falls back to the suggested apps (was: "内存清理" / "Clean Memory" and
         // store.ensureMemorySelectionForQuit()).
-        XCTAssertTrue(memory.contains("GeekMemoryQuitSelectedButton(store: store, tint: memoryTint)"))
+        // D139: in the form the header picks (was
+        // `GeekMemoryQuitSelectedButton(store: store, tint: memoryTint)`).
+        XCTAssertTrue(memory.contains("GeekMemoryQuitSelectedButton(store: store, tint: memoryTint, presentation: quitHint)"))
         XCTAssertTrue(memory.contains("@ObservedObject var store: ScanStore"))
         XCTAssertTrue(memory.contains("L10n.text(\"选择内存进程\", \"Select Memory Processes\")"))
         XCTAssertTrue(memory.contains("store.toggleMemoryAppUsageSelection(process)"))
@@ -611,6 +710,15 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         let memory = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekMemoryView.swift")
         XCTAssertTrue(memory.contains("geekMemoryTopProcesses.count)/\\(geekMemoryAllProcesses.count)"))
         XCTAssertTrue(memory.contains("进程组 · 前"))
+        // D139: the scope is the title's help and VoiceOver value; the title
+        // is iStat's PROCESSES (was the title itself).
+        let scope = try XCTUnwrap(memory.components(separatedBy: "private var memoryProcessScopeText: String {").last?
+            .components(separatedBy: "private var memoryProcessTitleHelp").first)
+        XCTAssertTrue(scope.contains("进程组 · 前\\(geekMemoryTopProcesses.count)/\\(geekMemoryAllProcesses.count)项"))
+        XCTAssertTrue(memory.contains("private var memoryProcessTitleText: String {\n        L10n.text(\"进程\", \"PROCESSES\")\n    }"))
+        XCTAssertTrue(memory.contains("memoryProcessScopeText + L10n.text(\"。按应用"))
+        XCTAssertTrue(memory.contains("accessibilityValue: memoryProcessScopeText"))
+        XCTAssertTrue(memory.contains(".accessibilityValue(memoryProcessScopeText)"))
         let actions = try XCTUnwrap(memory.components(separatedBy: "private var memoryProcessActions: some View {").last?
             .components(separatedBy: "private var geekMemoryPagesCard").first)
         XCTAssertTrue(actions.contains("Button(L10n.text(\"查看全部\", \"View all\"))"))
@@ -633,15 +741,26 @@ final class GeekHoverDetailTargetTests: XCTestCase {
         let detail = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekHoverDetailTarget.swift")
 
         XCTAssertTrue(memory.contains("store.menuBarPreparedMemoryApps"))
-        XCTAssertTrue(memory.contains("Text(L10n.text(\"交换内存\", \"Swap Memory\"))"))
+        // D138: iStat's 'Memory.Swap' (was "交换内存", "Swap Memory").
+        XCTAssertTrue(memory.contains("Text(L10n.text(\"已使用的交换\", \"Swap\"))"))
         XCTAssertTrue(memory.contains("内存不够用时，macOS 暂时存放到磁盘上的数据"))
-        XCTAssertTrue(memory.contains("value: geekSwapPercentText"))
+        // D119: iStat's swap bar replaces the 30 pt ring; the percentage is
+        // the bar's share and VoiceOver's value (was `value: geekSwapPercentText`).
+        XCTAssertTrue(memory.contains("GeekMemorySwapBar(progress: geekSwapProgress"))
+        XCTAssertTrue(memory.contains("geekSwapPercentText]"))
         XCTAssertTrue(memory.contains("return used == 0 ? 0 : nil"))
         XCTAssertTrue(memory.contains("\\(usedText) · 未使用"))
         XCTAssertTrue(detail.contains("按需分配"))
         XCTAssertFalse(memory.contains("Capsule()"))
-        XCTAssertTrue(disk.contains("title: L10n.text(\"读取峰值\", \"Read Peak\")"))
-        XCTAssertTrue(disk.contains("title: L10n.text(\"写入峰值\", \"Write Peak\")"))
+        // D146 (2026-10-19): iStat's 'Disks.Read' and 'Disks.Write' label the
+        // peaks; the full names stay VoiceOver's (were
+        // `title: L10n.text("读取峰值", "Read Peak")`, "写入峰值", "Write Peak").
+        XCTAssertTrue(disk.contains("GeekIStatPeakValue(title: L10n.text(\"读\", \"Read\"), value: readPeak,"))
+        XCTAssertTrue(disk.contains("GeekIStatPeakValue(title: L10n.text(\"写\", \"Write\"), value: writePeak,"))
+        XCTAssertTrue(disk.contains("accessibilityLabel: L10n.text(\"读取峰值\", \"Read peak\")"))
+        XCTAssertTrue(disk.contains("accessibilityLabel: L10n.text(\"写入峰值\", \"Write peak\")"))
+        XCTAssertFalse(disk.contains("title: L10n.text(\"读取峰值\", \"Read Peak\")"))
+        XCTAssertFalse(disk.contains("title: L10n.text(\"写入峰值\", \"Write Peak\")"))
         XCTAssertTrue(disk.contains("\"健康度 \\(remainingLifePercent)%"))
         XCTAssertFalse(disk.contains("\"健康度 \\(remainingLifePercent)% ·"))
         XCTAssertTrue(disk.contains("var geekPrimaryDiskHealthText: String?"))

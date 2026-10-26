@@ -26,6 +26,8 @@ struct FileMigrationLightfieldView: View {
     var listingNote: String? = nil
     /// D84：测量超时、大小只是本轮量到的下限的项目。
     var lowerBoundIDs: Set<String> = []
+    /// D104 G1：清空废纸篓后各文件预计释放多少（按行 ID；文件夹不读取）。
+    var reclaimable: [String: CleanupReclaimableEstimate] = [:]
     @State private var selectedIDs: Set<String> = []
     @State private var grouping = 0
     @State private var collapsed: Set<String> = []
@@ -162,15 +164,25 @@ struct FileMigrationLightfieldView: View {
             .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
     }
     /// D84：大文件清单按本地占用测量；超时的项目只是本轮量到的下限。
+    /// D104 G1：与克隆共享或被本地快照占用的部分清空废纸篓后也不释放。
     private func sizeHelp(_ entry: LightfieldMigrationEntry) -> String {
         let basis: StorageCapacityBasis = lowerBoundIDs.contains(entry.id) ? .measuredLowerBound : .allocated
-        return L10n.text("口径：", "Basis: ") + basis.title
+        let note = CleanupCandidateRowHint.reclaimable(reclaimable[entry.id], ofSize: entry.item.sizeBytes)
+        return L10n.text("口径：", "Basis: ") + basis.title + (note.map { "\n" + $0.text } ?? "")
+    }
+    /// D104 G1：清空废纸篓后明显释放不了列出的大小时，大小下方写出预计释放量。
+    private func freedCaption(_ entry: LightfieldMigrationEntry) -> String? {
+        guard let estimate = reclaimable[entry.id], estimate.reason != nil else { return nil }
+        let size = entry.item.sizeBytes
+        let freed = estimate.reclaimableBytes(ofAllocated: size)
+        guard CleanupReclaimableEstimate.isNoticeable(size - freed, of: size) else { return nil }
+        return L10n.text("可释放 \(ByteFormat.storageString(freed))", "Frees \(ByteFormat.storageString(freed))")
     }
     private func collapseKey(_ id: String) -> String { "\(grouping):" + id }
     private func groupHeader(_ group: LightfieldMigrationGroup, eligibleIDs: Set<String>) -> some View {
         let ids = Set(group.entries.map(\.id)).intersection(eligibleIDs)
         return LightfieldFileGroupHeader(title: group.title,
-            metadata: L10n.text("\(group.entries.count) 个 · ", "\(group.entries.count) items · ") + ByteFormat.storageString(group.bytes),
+            metadata: L10n.text("\(ByteFormat.count(group.entries.count)) 个 · ", "\(ByteFormat.count(group.entries.count)) items · ") + ByteFormat.storageString(group.bytes),
             icon: group.icon, module: .migration,
             selection: LightfieldSelectionCheck.state(ids: ids, selected: selectedIDs), selectionEnabled: !ids.isEmpty && busyID == nil,
             onSelect: { toggleGroup(ids) }, expanded: Binding(get: { !collapsed.contains(collapseKey(group.id)) }, set: {
@@ -208,8 +220,14 @@ struct FileMigrationLightfieldView: View {
             Text(entry.modifiedAt.map { $0.formatted(date: .numeric, time: .omitted) } ?? L10n.text("未知", "Unknown"))
                 .font(.system(size: 13)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Text(ByteFormat.storageString(entry.item.sizeBytes)).font(.system(size: 15)).monospacedDigit()
-                .lineLimit(1).minimumScaleFactor(0.5).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing) // lightfield-scale-ok
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(ByteFormat.storageString(entry.item.sizeBytes)).font(.system(size: 15)).monospacedDigit()
+                    .lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok
+                if let freed = freedCaption(entry) {
+                    Text(freed).font(.system(size: 12)).monospacedDigit().lineLimit(1).truncationMode(.tail)
+                        .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                 .help(sizeHelp(entry))
             Menu {
                 Button(L10n.text("在访达中显示", "Show in Finder")) { onReveal(entry.item) }

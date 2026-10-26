@@ -11,6 +11,10 @@ struct ReversibleOperationsView: View {
     @State private var departedReceiptPaths: [CleanPlanID: Set<String>] = [:]
     /// N18: a restore result left from before this page opened is not shown.
     @State private var recoveryBaseline = OperationRecordPresentation.RecoveryBaseline.notCaptured
+    /// D102 L4: fan, power mode and Mac mini mode writes, newest first.
+    var hardwareHistory: HardwareOperationHistory = .shared
+    @State private var hardwareRecords: [HardwareOperationRecord] = []
+    @State private var hardwareHistoryUnreadable = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
@@ -18,7 +22,10 @@ struct ReversibleOperationsView: View {
                 Text(L10n.text("操作记录", "Operation History"))
                     .font(AppDesignTokens.Typography.sectionTitle)
                 Spacer()
-                Button(L10n.text("刷新", "Refresh")) { store.refreshOperationReports(reconcile: true) }
+                Button(L10n.text("刷新", "Refresh")) {
+                    store.refreshOperationReports(reconcile: true)
+                    Task { await loadHardwareRecords() }
+                }
                 Button(L10n.text("关闭", "Close")) { dismiss() }.keyboardShortcut(.cancelAction)
             }
             Text(L10n.text("清空废纸篓后才释放空间；恢复前核验身份，同名冲突不覆盖。",
@@ -98,7 +105,7 @@ struct ReversibleOperationsView: View {
                                 let offersRestore = OperationRecordPresentation.offersRestore(rulesVersion: summary.rulesVersion)
                                 if offersRestore {
                                     Text(L10n.text("原操作移走：", "Originally moved: ")
-                                         + ByteFormat.string(summary.summary.movedToRecoverableLocationBytes))
+                                         + ByteFormat.storageString(summary.summary.movedToRecoverableLocationBytes))
                                         .font(AppDesignTokens.Typography.metadata)
                                 }
                                 if let report = store.operationReportDetail, report.planID == summary.planID {
@@ -127,7 +134,7 @@ struct ReversibleOperationsView: View {
                                     Text(L10n.text("恢复记录", "Restore attempt"))
                                     Text(attempt.completedAt, style: .time)
                                     Spacer()
-                                    Text(L10n.text("已恢复 \(attempt.restoredCount) 项", "\(attempt.restoredCount) restored"))
+                                    Text(L10n.text("已恢复 \(ByteFormat.count(attempt.restoredCount)) 项", "\(ByteFormat.count(attempt.restoredCount)) restored"))
                                 }.font(AppDesignTokens.Typography.metadata)
                                 if attempt.persistenceFailure != nil {
                                     Text(L10n.text("恢复日志未完全写入，需要核实。", "Restore log is incomplete; verification is required."))
@@ -153,6 +160,7 @@ struct ReversibleOperationsView: View {
                         Button(L10n.text("加载更多", "Load more")) { store.refreshOperationReports(loadMore: true) }
                             .disabled(store.isLoadingOperationReports)
                     }
+                    hardwareOperations
                 }
             }
         }
@@ -165,6 +173,7 @@ struct ReversibleOperationsView: View {
             }
         }
         .task { store.refreshOperationReports(reconcile: true) }
+        .task { await loadHardwareRecords() }
         .task(id: store.operationReportDetail?.planID) {
             guard let report = store.operationReportDetail else { return }
             let departed = await Task.detached(priority: .utility) {
@@ -183,6 +192,56 @@ struct ReversibleOperationsView: View {
         } message: {
             Text(L10n.text("仅恢复身份核实的回执。原位置已存在文件时跳过，不覆盖。",
                            "Only verified receipts can be restored. Existing destinations are skipped, never overwritten."))
+        }
+    }
+
+    /// D102 L4: the hardware operation record, kept apart from the receipts.
+    private var hardwareOperations: some View {
+        VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
+            Text(L10n.text("硬件操作", "Hardware Operations"))
+                .font(AppDesignTokens.Typography.compactLabelEmphasis)
+            Text(L10n.text("风扇、电源模式和 Mac mini 模式的写入，以及辅助程序自动交回系统控制的情况；只记在本机，不能撤销。",
+                           "Fan, power mode and Mac mini mode writes, and the helper returning control to the system; kept on this Mac only and cannot be undone."))
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+            if hardwareHistoryUnreadable {
+                Label(L10n.text("硬件操作记录无法读取", "The hardware operation record could not be read"),
+                      systemImage: "exclamationmark.triangle")
+                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(AppDesignTokens.Palette.warning)
+            } else if hardwareRecords.isEmpty {
+                Text(L10n.text("暂无硬件操作记录", "No hardware operations"))
+                    .font(AppDesignTokens.Typography.metadata)
+            }
+            ForEach(hardwareRecords) { record in
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(HardwareOperationPresentation.title(record))
+                        if let detail = HardwareOperationPresentation.detail(record) {
+                            Text(detail).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 12)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(HardwareOperationPresentation.outcome(record))
+                        HStack(spacing: 4) {
+                            Text(record.recordedAt, style: .date)
+                            Text(record.recordedAt, style: .time)
+                        }.foregroundStyle(.secondary)
+                    }
+                }.font(AppDesignTokens.Typography.metadata)
+            }
+        }
+        .padding(AppDesignTokens.Layout.compactPadding)
+        .glassPanel(cornerRadius: AppDesignTokens.Layout.rowRadius,
+                    tint: AppDesignTokens.Palette.information, prominence: .quiet)
+    }
+
+    private func loadHardwareRecords() async {
+        do {
+            hardwareRecords = try await hardwareHistory.load()
+            hardwareHistoryUnreadable = false
+        } catch {
+            hardwareRecords = []
+            hardwareHistoryUnreadable = true
         }
     }
 

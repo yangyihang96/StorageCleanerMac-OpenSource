@@ -248,6 +248,31 @@ enum EnergyImpactService {
                             measuredSampleSeconds: elapsed, sampledAt: current.sampledAt)
     }
 
+    /// D171 (iStat `-[ItemManager startItemsForKey:]` lists its first read at
+    /// once): the apps of a baseline frame before any interval is measured.
+    /// Every rate is 0 as in iStat, whose CPU is Δ(user+system)/Δt and so 0
+    /// on the first read (the frame's ps %CPU is not shown instead). The
+    /// snapshot has no interval (`sampleSeconds` 0). Rows without counters
+    /// are left out, as every delta leaves them out.
+    static func menuBarFirstReadSnapshot(
+        of frame: MenuBarCounterFrame,
+        metadataCache: ProcessSamplingCache = .shared
+    ) -> EnergyImpactSnapshot? {
+        let rows = frame.rows.compactMap { row -> EnergyProcessRow? in
+            guard frame.counters[row.pid] != nil else { return nil }
+            return EnergyProcessRow(pid: row.pid, parentPID: row.parentPID, residentBytes: row.residentBytes,
+                                    elapsedSeconds: row.elapsedSeconds, cpuTimeSeconds: row.cpuTimeSeconds,
+                                    cpuPercent: 0, path: row.path)
+        }
+        guard !rows.isEmpty else { return nil }
+        return makeSnapshot(startedAt: frame.sampledAt,
+                            applicationProcesses: applicationProcesses(from: rows, resourceSamples: frame.counters,
+                                                                       metadataCache: metadataCache),
+                            firstResourceSamples: frame.counters,
+                            latestResourceSamples: frame.counters,
+                            measuredSampleSeconds: 0, sampledAt: frame.sampledAt)
+    }
+
     private static func makeSnapshot(
         startedAt: Date,
         applicationProcesses: [PreparedEnergyProcess],

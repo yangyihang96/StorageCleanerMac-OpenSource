@@ -6,6 +6,7 @@ extension MSeriesV11PagePresentation {
         let measurementCompleted: Bool
         let savedLocally: Bool
         let saveFailed: Bool
+        let historyFull: Bool
         let failure: BenchmarkV7Failure?
         let elapsedSeconds: Double?
 
@@ -20,6 +21,7 @@ extension MSeriesV11PagePresentation {
             // Retain fallback support for an older in-memory persistenceFailed
             // result; new runs keep the stop failure and local save state apart.
             saveFailed = localState == .failed || result.failure == .persistenceFailed
+            historyFull = localState == .failed && saveState?.historyFull == true
             savedLocally = !saveFailed && result.recordID != nil && history.contains {
                 $0.recordID == result.recordID && $0.session.id == result.session.id
                     && $0.failure == result.failure
@@ -31,7 +33,14 @@ extension MSeriesV11PagePresentation {
             return savedLocally ? L10n.text("结果保存在本机", "Saved locally") : L10n.text("保存未确认", "Save not confirmed")
         }
         var saveFailureText: String? {
-            saveFailed ? L10n.text("测量结果未能安全保存；仅当前应用会话可查看。", "Measurements were not safely saved; available only in the current app session.") : nil
+            guard saveFailed else { return nil }
+            if historyFull {
+                let limit = BenchmarkV7HistoryRepository.maximumRecordCount
+                return L10n.text(
+                    "本机跑分历史已满（最多 \(ByteFormat.count(limit)) 条），本次结果未保存，仅当前应用会话可查看。删除不需要的旧记录后，新的结果才能保存。",
+                    "Local benchmark history is full (\(ByteFormat.count(limit)) records). This result was not saved and is available only in this app session. Delete records you no longer need to save new results.")
+            }
+            return L10n.text("测量结果未能安全保存；仅当前应用会话可查看。", "Measurements were not safely saved; available only in the current app session.")
         }
         var terminationText: String? {
             guard let failure, failure != .persistenceFailed else { return nil }
@@ -66,7 +75,7 @@ extension MSeriesV11PagePresentation {
             let measurement = measurementCompleted ? L10n.text("测量完成", "Measurements complete") : L10n.text("部分测量", "Partial measurements")
             let termination = failure == .cancelled ? L10n.text(" · 已取消", " · Cancelled") : failure != nil && failure != .persistenceFailed ? L10n.text(" · 已中止", " · Stopped") : ""
             let storage = saveFailed ? L10n.text(" · 保存失败", " · Save failed") : ""
-            return "\(measuredCoreCount)/18 " + measurement + termination + storage + " · " + duration(elapsedSeconds)
+            return "\(ByteFormat.count(measuredCoreCount))/18 " + measurement + termination + storage + " · " + duration(elapsedSeconds)
         }
     }
 

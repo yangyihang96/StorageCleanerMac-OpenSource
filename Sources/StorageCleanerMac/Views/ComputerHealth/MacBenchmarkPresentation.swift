@@ -135,8 +135,8 @@ enum MacBenchmarkPresentation {
         let chip = normalizedChipName(environment.chipName)
         let memory = physicalMemoryText(environment.physicalMemoryBytes)
         return L10n.text(
-            "\(chip) · \(environment.activeProcessorCount) 核 · \(memory)",
-            "\(chip) · \(environment.activeProcessorCount) cores · \(memory)"
+            "\(chip) · \(ByteFormat.count(environment.activeProcessorCount)) 核 · \(memory)",
+            "\(chip) · \(ByteFormat.count(environment.activeProcessorCount)) cores · \(memory)"
         )
     }
 

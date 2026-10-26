@@ -8,7 +8,8 @@ final class StartupItemsPresentationTests: XCTestCase {
 
     func testDefaultCategoriesUseUserFacingConcepts() {
         XCTAssertEqual(StartupItemsCategory.loginItems.title, L10n.text("登录时打开", "Open at Login"))
-        XCTAssertEqual(StartupItemsCategory.background.title, L10n.text("后台运行", "Background"))
+        // D217＋旧值：后台运行 / Background。
+        XCTAssertEqual(StartupItemsCategory.background.title, L10n.text("后台项目", "Background Items"))
         XCTAssertEqual(StartupItemsCategory.updatesAndSync.title, L10n.text("更新与同步", "Updates & Sync"))
         XCTAssertEqual(StartupItemsCategory.attention.title, L10n.text("需要关注", "Needs Attention"))
     }
@@ -155,6 +156,12 @@ final class StartupItemsPresentationTests: XCTestCase {
         let ordinaryFilters = StartupItemsListFilter.allCases.filter { $0 != .appleSystem }
 
         for filter in ordinaryFilters {
+            if filter == .background {
+                // D217＋旧值：后台筛选也为空。三处目录中的 plist 现在按位置列出，不按 Apple 归属排除。
+                XCTAssertEqual(StartupItemsPresentation.make(items: protectedItems, query: "", filter: filter)
+                    .visibleItems.map(\.id), ["background:user"])
+                continue
+            }
             XCTAssertTrue(
                 StartupItemsPresentation.make(items: protectedItems, query: "", filter: filter)
                     .visibleItems.isEmpty,
@@ -372,7 +379,8 @@ final class StartupItemsPresentationTests: XCTestCase {
         let all = StartupItemsPresentation.make(items: items, query: "", filter: .all)
 
         XCTAssertEqual(all.summary.openAtLogin, 1)
-        XCTAssertEqual(all.summary.background, 3)
+        // D217＋旧值：3（曾包含系统登记的 Running Helper）；现在只数两个 plist。
+        XCTAssertEqual(all.summary.background, 2)
         XCTAssertEqual(all.summary.manageable, 0)
         XCTAssertEqual(all.summary.unidentified, 5)
         XCTAssertEqual(all.summary.orphaned, 1)
@@ -386,7 +394,8 @@ final class StartupItemsPresentationTests: XCTestCase {
         )
         XCTAssertEqual(
             StartupItemsPresentation.make(items: items, query: "", filter: .background).visibleItems.map(\.id),
-            ["disabled", "running", "daemon"]
+            // D217＋旧值：[disabled, running, daemon]（按应用合并）。
+            ["background:disabled", "background:daemon"]
         )
     }
 
@@ -969,9 +978,10 @@ final class StartupItemsPresentationTests: XCTestCase {
         )
         unknown.components[0].state.process = .unknown
         unknown.state.process = .unknown
+        // D206＋旧值：L10n.text("运行状态待确认", "Runtime state pending")
         XCTAssertEqual(
             unknown.runningSummaryText,
-            L10n.text("运行状态待确认", "Runtime state pending")
+            L10n.text("后台组件状态待确认", "Background component state pending")
         )
 
         unknown.components[0].state.process = .stopped
@@ -1040,7 +1050,8 @@ final class StartupItemsPresentationTests: XCTestCase {
 
         XCTAssertEqual(all.count(for: .all), 4)
         XCTAssertEqual(all.count(for: .loginItems), 1)
-        XCTAssertEqual(all.count(for: .background), 3)
+        // D217＋旧值：3；Combined 的两个 plist 现在各算一项。
+        XCTAssertEqual(all.count(for: .background), 4)
         XCTAssertEqual(all.count(for: .updatesAndSync), 0)
         XCTAssertEqual(all.count(for: .attention), 0)
         XCTAssertEqual(
@@ -1048,12 +1059,14 @@ final class StartupItemsPresentationTests: XCTestCase {
                 + all.count(for: .background)
                 + all.count(for: .updatesAndSync)
                 + all.count(for: .attention),
-            all.count(for: .all)
+            // D217＋旧值：all.count(for: .all)；后台按文件数比应用分组多一项。
+            all.count(for: .all) + 1
         )
         XCTAssertEqual(
             Set(consolePresentation(items: [login, agent, daemon, combined], category: .background)
                 .visibleItems.map(\.id)),
-            ["agent", "daemon", "combined"]
+            // D217＋旧值：[agent, daemon, combined]。
+            ["background:agent", "background:daemon", "background:combined", "background:combined-daemon"]
         )
     }
 
@@ -1091,7 +1104,8 @@ final class StartupItemsPresentationTests: XCTestCase {
         XCTAssertEqual(all.count(for: .attention), 1)
         XCTAssertEqual(
             consolePresentation(items: [background], category: .background).visibleItems.map(\.id),
-            ["background-needs-attention"]
+            // D217＋旧值：[background-needs-attention]（应用分组行标识）。
+            ["background:background-needs-attention"]
         )
     }
 

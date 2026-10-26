@@ -40,14 +40,31 @@ enum HoverPresentationState: Equatable, Sendable {
 struct HoverIntentPolicy: Equatable, Sendable {
     var initialOpenDelay: Duration = .zero
     var switchDelay: Duration = .zero
-    var ordinaryCloseDelay: Duration = .milliseconds(260)
+    /// D123: a submenu closes as soon as the pointer leaves its menu without
+    /// entering it, as in iStat Menus 7.30 (was 260 ms). The control palettes
+    /// keep 260 ms (`controlPalette`).
+    var ordinaryCloseDelay: Duration = .zero
+    /// The control palettes' close delay inside the corridor to the palette
+    /// (`recommendedCloseDelay`).
     var corridorGraceDuration: Duration = .milliseconds(320)
+    /// D123: the horizontal step toward the open child's side, per pointer
+    /// event, that holds a switch or a close (iStat Menus 7.30 `updateMouse:`,
+    /// ΔX ≥ 1). The hold lasts while every step keeps going that way; any
+    /// other step ends it. It replaces the trajectory test, the 320 ms grace,
+    /// the 50 ms progress checks and the 1 s cap: iStat's 1 s check holds
+    /// again at once while the pointer still heads for the child, so the
+    /// hold has no time limit.
+    var headingStep: CGFloat = 1
     var reverseDirectionCloseDelay: Duration = .milliseconds(90)
     var pointerHistoryDuration: TimeInterval = 0.16
     var maximumPointerSamples = 6
     var corridorPadding: CGFloat = 8
 
     static let menuBar = Self()
+    /// The control palettes and their hover inspectors are ours, not iStat's.
+    /// A gap separates a palette from its anchor row, so they keep the 260 ms
+    /// close and the corridor to the palette.
+    static let controlPalette = Self(ordinaryCloseDelay: .milliseconds(260))
 }
 
 struct SmallWindowAnchorSnapshot: Equatable, Sendable {
@@ -402,9 +419,29 @@ final class HoverIntentController {
     private var generation: UInt = 0
     private var pendingTask: Task<Void, Never>?
     private var pointerSamples: [PointerSample] = []
+    /// The pointer's latest movement, from the reading before it however long
+    /// ago that was: iStat Menus 7.30 compares each event with the previous
+    /// one, while `pointerSamples` drops readings older than
+    /// `pointerHistoryDuration` (D123).
+    private var lastPointerStep: CGVector?
     private var activeAnchorID: SmallWindowAnchorID?
     private var activePanelRole: SmallWindowPanelRole?
+    /// The menus from the overview to the deepest child, parents first.
     private var windowGroupFrames: [NSRect] = []
+    /// A presented control palette: part of the close-delay corridors, not a
+    /// child menu for the hold.
+    private var paletteFrame: NSRect?
+    /// A switch or close held while the pointer heads for the open child
+    /// (D123). `recordPointer` releases it on the first step that does not.
+    private var diagonalHold: DiagonalHold?
+
+    private struct DiagonalHold {
+        let request: Request
+        /// −1 when the open child is on the left of the pointer's menu, +1
+        /// when it is on the right.
+        let side: CGFloat
+        let complete: @MainActor () -> Void
+    }
 
     init(policy: HoverIntentPolicy = .menuBar) {
         self.policy = policy
@@ -431,6 +468,12 @@ final class HoverIntentController {
         invalidatePendingRequest(preservingPresentation: true)
     }
 
+    /// Whether a switch or close is being held for a pointer heading to the
+    /// open child.
+    var isHoldingForOpenChild: Bool {
+        diagonalHold != nil
+    }
+
     @discardableResult
     func scheduleOpen(
         anchorID: SmallWindowAnchorID,
@@ -450,23 +493,10 @@ final class HoverIntentController {
         } else {
             PerformanceTelemetry.signposter.emitEvent("HoverOpenScheduled")
         }
-        let isCrossingTowardOpenChild = isSwitch && isMovingTowardOpenChild()
-        let resolvedDelay = delay
-            ?? (isCrossingTowardOpenChild
-                ? policy.corridorGraceDuration
-                : isSwitch ? policy.switchDelay : policy.initialOpenDelay)
-        pendingTask = Task { @MainActor [weak self] in
-            do {
-                // Retain one cancellable main-actor turn without routing an
-                // immediate reveal through the sleep scheduler.
-                if resolvedDelay > .zero {
-                    try await Task.sleep(for: resolvedDelay)
-                }
-            } catch {
-                return
-            }
+        let complete: @MainActor () -> Void = { [weak self] in
             guard let self, isCurrent(request) else { return }
             pendingTask = nil
+            diagonalHold = nil
             guard condition() else {
                 restoreOpenState()
                 return
@@ -481,6 +511,13 @@ final class HoverIntentController {
             }
             action()
         }
+        // iStat Menus 7.30 opens at once and switches at once, except while
+        // the pointer heads for the open child (D123).
+        if delay == nil, isSwitch, let side = headingSideOfOpenChild() {
+            hold(request, side: side, complete: complete)
+        } else {
+            run(request, after: delay ?? (isSwitch ? policy.switchDelay : policy.initialOpenDelay), complete)
+        }
         return request
     }
 
@@ -493,15 +530,10 @@ final class HoverIntentController {
         let request = beginRequest()
         state = .pendingClose
         PerformanceTelemetry.signposter.emitEvent("HoverCloseScheduled")
-        let resolvedDelay = delay ?? recommendedCloseDelay()
-        pendingTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(for: resolvedDelay)
-            } catch {
-                return
-            }
+        let complete: @MainActor () -> Void = { [weak self] in
             guard let self, isCurrent(request) else { return }
             pendingTask = nil
+            diagonalHold = nil
             guard condition() else {
                 restoreOpenState()
                 return
@@ -510,7 +542,57 @@ final class HoverIntentController {
             PerformanceTelemetry.signposter.emitEvent("HoverClosed")
             action()
         }
+        // D123: a close is a change of target too; iStat holds it while the
+        // pointer heads for the open child and otherwise closes at once.
+        // An explicit delay (the control palettes) keeps its own timing.
+        if delay == nil, let side = headingSideOfOpenChild() {
+            hold(request, side: side, complete: complete)
+        } else {
+            run(request, after: delay ?? policy.ordinaryCloseDelay, complete)
+        }
         return request
+    }
+
+    /// Runs `complete` after `delay`. A zero delay still waits one
+    /// cancellable main-actor turn, so a hover callback never reenters the
+    /// view update that reported it.
+    private func run(
+        _ request: Request,
+        after delay: Duration,
+        _ complete: @escaping @MainActor () -> Void
+    ) {
+        pendingTask = Task { @MainActor in
+            if delay > .zero {
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    return
+                }
+            }
+            complete()
+        }
+    }
+
+    /// Holds `complete` while the pointer heads for the open child. The
+    /// first pointer step that does not keep heading there releases it
+    /// (`recordPointer`); a pointer that stops keeps it (iStat Menus 7.30,
+    /// D123).
+    private func hold(
+        _ request: Request,
+        side: CGFloat,
+        complete: @escaping @MainActor () -> Void
+    ) {
+        diagonalHold = DiagonalHold(request: request, side: side, complete: complete)
+        PerformanceTelemetry.signposter.emitEvent("DiagonalHoldBegan")
+    }
+
+    private func releaseDiagonalHold(_ request: Request) {
+        guard let hold = diagonalHold, hold.request == request, isCurrent(request) else { return }
+        diagonalHold = nil
+        PerformanceTelemetry.signposter.emitEvent("DiagonalHoldReleased")
+        // The release arrives in the middle of pointer handling, so the
+        // switch or close runs on the next turn, as `run` does for any change.
+        run(request, after: .zero, hold.complete)
     }
 
     func markOpen(anchorID: SmallWindowAnchorID, panelRole: SmallWindowPanelRole) {
@@ -540,47 +622,63 @@ final class HoverIntentController {
         at timestamp: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) {
         guard point.x.isFinite, point.y.isFinite, timestamp.isFinite else { return }
+        let previous = pointerSamples.last?.point
+        // A reading at the same place (a refresh after a layout change) is
+        // not a pointer movement.
+        guard point != previous else { return }
+        lastPointerStep = previous.map { CGVector(dx: point.x - $0.x, dy: point.y - $0.y) }
         pointerSamples.append(PointerSample(point: point, timestamp: timestamp))
         let cutoff = timestamp - policy.pointerHistoryDuration
         pointerSamples.removeAll { $0.timestamp < cutoff }
         if pointerSamples.count > policy.maximumPointerSamples {
             pointerSamples.removeFirst(pointerSamples.count - policy.maximumPointerSamples)
         }
-    }
-
-    func updateWindowGroupFrames(_ frames: [NSRect]) {
-        windowGroupFrames = frames.filter(\.isUsableWindowAnchor)
-    }
-
-    private func isMovingTowardOpenChild() -> Bool {
-        guard let source = windowGroupFrames.first,
-              let first = pointerSamples.first,
-              let last = pointerSamples.last,
-              first.timestamp < last.timestamp,
-              source.contains(last.point) else { return false }
-        let dx = last.point.x - first.point.x
-        let dy = last.point.y - first.point.y
-        guard abs(dx) >= 2 else { return false }
-
-        return windowGroupFrames.dropFirst().contains { destination in
-            guard pointerDirection(toward: destination) == .toward else { return false }
-            let entryX: CGFloat
-            if destination.maxX <= source.minX, dx < 0 {
-                entryX = destination.maxX
-            } else if destination.minX >= source.maxX, dx > 0 {
-                entryX = destination.minX
-            } else {
-                return false
-            }
-            // Being closer to the child's center is not enough: vertical row
-            // changes and slight horizontal drift also satisfy that test.
-            // Protect only a trajectory that actually enters its near edge.
-            let travel = (entryX - last.point.x) / dx
-            let entryY = last.point.y + dy * travel
-            return travel >= 0 && entryY.isFinite
-                && entryY >= destination.minY - policy.corridorPadding
-                && entryY <= destination.maxY + policy.corridorPadding
+        // D123 (iStat Menus 7.30 `updateMouse:`): the hold lasts while every
+        // step keeps going toward the open child's side by `headingStep`; a
+        // sideways, shorter or backward step ends it at once.
+        if let hold = diagonalHold, let step = lastPointerStep,
+           step.dx * hold.side < policy.headingStep {
+            releaseDiagonalHold(hold.request)
         }
+    }
+
+    func updateWindowGroupFrames(_ frames: [NSRect], palette: NSRect? = nil) {
+        windowGroupFrames = frames.filter(\.isUsableWindowAnchor)
+        paletteFrame = palette.flatMap { $0.isUsableWindowAnchor ? $0 : nil }
+    }
+
+    /// The menus from the overview to the deepest child, parents first.
+    var menuFrames: [NSRect] {
+        windowGroupFrames
+    }
+
+    /// D123 (iStat Menus 7.30 `updateMouse:`): the side of the open child of
+    /// the menu the pointer is in, −1 left or +1 right, when the pointer's
+    /// latest horizontal step goes that way by `headingStep`; otherwise nil.
+    /// Children come after their parent in `windowGroupFrames`, so this
+    /// covers the overview toward the module column and the module column
+    /// toward the history column alike. Only a step toward the child's side
+    /// counts, whether or not its line would reach the child (the D117
+    /// trajectory test is gone).
+    private func headingSideOfOpenChild() -> CGFloat? {
+        guard activeAnchorID != nil,
+              let step = lastPointerStep,
+              let last = pointerSamples.last,
+              let sourceIndex = windowGroupFrames.firstIndex(where: { $0.contains(last.point) }),
+              windowGroupFrames.indices.contains(sourceIndex + 1)
+        else { return nil }
+        let source = windowGroupFrames[sourceIndex]
+        let child = windowGroupFrames[sourceIndex + 1]
+        let side: CGFloat
+        if child.minX >= source.maxX - 0.5 {
+            side = 1
+        } else if child.maxX <= source.minX + 0.5 {
+            side = -1
+        } else {
+            // A child stacked above or below its menu has no side.
+            return nil
+        }
+        return step.dx * side >= policy.headingStep ? side : nil
     }
 
     func pointerDirection(toward destination: NSRect) -> PointerDirection {
@@ -614,19 +712,20 @@ final class HoverIntentController {
         guard let pointer = pointerSamples.last?.point else {
             return ordinaryDelay ?? policy.ordinaryCloseDelay
         }
-        let corridors = zip(windowGroupFrames, windowGroupFrames.dropFirst()).map {
+        let frames = windowGroupFrames + (paletteFrame.map { [$0] } ?? [])
+        let corridors = zip(frames, frames.dropFirst()).map {
             HoverCorridor(
                 source: $0.0,
                 destination: $0.1,
                 padding: policy.corridorPadding
             )
         }
-        if windowGroupFrames.contains(where: { $0.contains(pointer) })
+        if frames.contains(where: { $0.contains(pointer) })
             || corridors.contains(where: { $0.contains(pointer) }) {
             PerformanceTelemetry.signposter.emitEvent("CorridorEntered")
             return policy.corridorGraceDuration
         }
-        let nearest = windowGroupFrames.min {
+        let nearest = frames.min {
             $0.distanceSquared(to: pointer) < $1.distanceSquared(to: pointer)
         }
         if let nearest, pointerDirection(toward: nearest) == .away {
@@ -638,6 +737,7 @@ final class HoverIntentController {
     private func invalidatePendingRequest(preservingPresentation: Bool) {
         pendingTask?.cancel()
         pendingTask = nil
+        diagonalHold = nil
         generation &+= 1
         if preservingPresentation {
             restoreOpenState()

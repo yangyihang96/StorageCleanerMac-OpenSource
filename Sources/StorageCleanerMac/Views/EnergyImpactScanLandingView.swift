@@ -217,8 +217,8 @@ struct EnergyImpactScanPipelineView: View {
             return L10n.text("六个测量步骤", "Six measurement steps")
         }
         return L10n.text(
-            "步骤 \(index + 1)/\(steps.count) · \(phase.shortTitle)",
-            "Step \(index + 1) of \(steps.count) · \(phase.shortTitle)"
+            "步骤 \(index + 1)/\(ByteFormat.count(steps.count)) · \(phase.shortTitle)",
+            "Step \(index + 1) of \(ByteFormat.count(steps.count)) · \(phase.shortTitle)"
         )
     }
 

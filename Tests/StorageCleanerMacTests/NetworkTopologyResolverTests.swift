@@ -12,6 +12,11 @@ final class NetworkTopologyResolverTests: XCTestCase {
                 .intersection(snapshot.tunnelAddresses.map(\.id))
                 .isEmpty
         )
+        // D140: the adapter reads each interface's list (only whether it was
+        // read; no address is compared or printed).
+        if let transport = snapshot.physicalTransport {
+            XCTAssertNotNil(transport.listedAddresses)
+        }
     }
 
     func testNoVPNKeepsPhysicalTransportAndLocalAddressSeparate() {
@@ -490,6 +495,81 @@ final class NetworkTopologyResolverTests: XCTestCase {
         XCTAssertTrue(connection.isConnected)
         XCTAssertEqual(connection.wifi?.powerState, .onConnected)
         XCTAssertEqual(connection.wifi?.ssid, "Studio Wi-Fi")
+    }
+
+    /// D140: each interface's list (the addresses iStat lists,
+    /// `NetworkAddressListing`) reaches the physical transport, the VPN and
+    /// the connection; a list not read stays nil and the pages keep every
+    /// address; while the topology has no list yet, the native reading's
+    /// counts where it is the interface.
+    func testListedAddressesFollowTheirInterfaces() throws {
+        let snapshot = resolve(
+            primaryServiceID: "surfshark-service",
+            primaryInterfaceName: "ipsec0",
+            wiFiInterfaceName: "en0",
+            services: [
+                physicalService(serviceID: "wifi-service", name: "Wi-Fi", bsdName: "en0"),
+                vpnService(runtimeBSDName: "ipsec0")
+            ],
+            interfaces: [
+                .init(bsdName: "en0", isUp: true, ipv4Addresses: ["192.0.2.35"],
+                      ipv6Addresses: ["2001:db8::35", "2001:db8::36"],
+                      listedAddresses: ["192.0.2.35", "2001:db8::35"]),
+                .init(bsdName: "ipsec0", isUp: true, isPointToPoint: true, ipv4Addresses: ["198.51.100.2"],
+                      listedAddresses: [])
+            ]
+        )
+        XCTAssertEqual(snapshot.physicalTransport?.listedAddresses, ["192.0.2.35", "2001:db8::35"])
+        let vpn = try XCTUnwrap(snapshot.activeVPNTunnel)
+        XCTAssertEqual(vpn.listedAddresses, [])
+        XCTAssertEqual(vpn.tunnelIPv4, ["198.51.100.2"], "the tunnel's addresses stay for the rest")
+        let connection = NetworkConnectionSnapshot.resolve(native: nil, topology: snapshot)
+        XCTAssertEqual(connection.ipConfiguration.listedAddresses, ["192.0.2.35", "2001:db8::35"])
+        XCTAssertEqual(connection.ipConfiguration.ipv6Addresses.count, 2)
+        XCTAssertEqual(GeekIStatInterfaceModel(connection: connection).addresses, ["192.0.2.35", "2001:db8::35"])
+        XCTAssertEqual(GeekIStatInterfaceModel(tunnel: vpn).addresses, [])
+        // An unattributed tunnel keeps its interface's list too.
+        let unattributed = resolve(
+            primaryInterfaceName: "utun4",
+            interfaces: [.init(bsdName: "utun4", isUp: true, isPointToPoint: true, ipv4Addresses: ["198.51.100.4"],
+                               listedAddresses: [])]
+        )
+        XCTAssertNil(unattributed.activeVPNTunnel?.serviceID)
+        XCTAssertEqual(unattributed.activeVPNTunnel?.listedAddresses, [])
+
+        let unread = resolve(
+            primaryServiceID: "wifi-service",
+            primaryInterfaceName: "en0",
+            wiFiInterfaceName: "en0",
+            services: [physicalService(serviceID: "wifi-service", name: "Wi-Fi", bsdName: "en0")],
+            interfaces: [.init(bsdName: "en0", isUp: true, ipv4Addresses: ["192.0.2.35"],
+                               ipv6Addresses: ["2001:db8::35"])]
+        )
+        XCTAssertNil(unread.physicalTransport?.listedAddresses)
+        let unreadConnection = NetworkConnectionSnapshot.resolve(native: nil, topology: unread)
+        XCTAssertNil(unreadConnection.ipConfiguration.listedAddresses)
+        XCTAssertEqual(GeekIStatInterfaceModel(connection: unreadConnection).addresses,
+                       ["192.0.2.35", "2001:db8::35"])
+
+        var native = nativeSnapshot(interfaceName: "en0", wiFiInterfaceName: "en0", isWiFiPoweredOn: true,
+                                    ssid: "Test WiFi")
+        native.listedAddresses = ["192.0.2.35"]
+        let pending = resolve(
+            primaryServiceID: "wifi-service",
+            primaryInterfaceName: "en0",
+            wiFiInterfaceName: "en0",
+            services: [physicalService(serviceID: "wifi-service", name: "Wi-Fi", bsdName: "en0")],
+            interfaces: [.init(bsdName: "en0", isUp: true, listedAddresses: [])]
+        )
+        XCTAssertEqual(NetworkConnectionSnapshot.resolve(native: native, topology: pending)
+            .ipConfiguration.listedAddresses, ["192.0.2.35"])
+        // The topology's list, once it has one, comes before the native one.
+        XCTAssertEqual(NetworkConnectionSnapshot.resolve(native: native, topology: snapshot)
+            .ipConfiguration.listedAddresses, ["192.0.2.35", "2001:db8::35"])
+        var otherNative = nativeSnapshot(interfaceName: "en7", wiFiInterfaceName: "en0", isWiFiPoweredOn: true)
+        otherNative.listedAddresses = ["198.51.100.9"]
+        XCTAssertEqual(NetworkConnectionSnapshot.resolve(native: otherNative, topology: pending)
+            .ipConfiguration.listedAddresses, [], "another interface's reading is not the transport's")
     }
 
     private func resolve(

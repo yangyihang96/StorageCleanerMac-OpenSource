@@ -37,15 +37,15 @@ struct PhotoLibraryLightfieldView: View {
                 Button(L10n.text("刷新授权状态", "Refresh Access Status")) { Task { await model.refreshAuthorization() } }.disabled(model.busy)
                 Button(L10n.text("扫描图库", "Scan Library"), action: model.scan).disabled(!model.authorization.canRead || model.busy)
                 if model.scanning {
-                    Text(L10n.text("已处理 \(model.processed) 张", "Processed \(model.processed) photos"))
+                    Text(L10n.text("已处理 \(ByteFormat.count(model.processed)) 张", "Processed \(ByteFormat.count(model.processed)) photos"))
                     Button(L10n.text("取消扫描", "Cancel Scan"), action: model.cancel)
                 }
             }.buttonStyle(FeatureLightfieldRowButtonStyle())
             if let result = model.result {
-                Text(L10n.text("已处理 \(result.processed) 张 · \(result.groups.count) 组 · 本地缩略图不可用 \(result.missingThumbnails) 张", "Processed \(result.processed) photos · \(result.groups.count) groups · \(result.missingThumbnails) local thumbnails unavailable"))
+                Text(L10n.text("已处理 \(ByteFormat.count(result.processed)) 张 · \(ByteFormat.count(result.groups.count)) 组 · 本地缩略图不可用 \(ByteFormat.count(result.missingThumbnails)) 张", "Processed \(ByteFormat.count(result.processed)) photos · \(ByteFormat.count(result.groups.count)) groups · \(ByteFormat.count(result.missingThumbnails)) local thumbnails unavailable"))
                     .font(.system(size: 13))
                 if result.truncated {
-                    Text(L10n.text("只处理前 \(result.processed) 张；图库中还有更多照片。", "Only the first \(result.processed) photos were processed; the library contains more photos."))
+                    Text(L10n.text("只处理前 \(ByteFormat.count(result.processed)) 张；图库中还有更多照片。", "Only the first \(ByteFormat.count(result.processed)) photos were processed; the library contains more photos."))
                 }
                 if result.comparisonLimited {
                     Text(L10n.text("已达到相似比对预算，结果不完整。", "Similarity comparison budget reached; results are incomplete."))
@@ -71,7 +71,7 @@ struct PhotoLibraryLightfieldView: View {
             }
             if let message = model.message { Text(message).font(.system(size: 13)).textSelection(.enabled) }
             HStack(spacing: 16) {
-                Button(L10n.text("加入待删除相册（\(model.selectedIDs.count) 张）", "Add to Review Album (\(model.selectedIDs.count) photos)")) { confirmingAlbum = true }
+                Button(L10n.text("加入待删除相册（\(ByteFormat.count(model.selectedIDs.count)) 张）", "Add to Review Album (\(ByteFormat.count(model.selectedIDs.count)) photos)")) { confirmingAlbum = true }
                     .disabled(model.busy || model.selectedIDs.isEmpty || !model.authorization.canAddToAlbum)
                 Button(L10n.text("打开照片 App", "Open Photos")) {
                     if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Photos") {
@@ -95,7 +95,7 @@ struct PhotoLibraryLightfieldView: View {
                 Button(L10n.text("取消", "Cancel"), role: .cancel) {}
                 Button(L10n.text("加入相册", "Add to Album"), action: model.addSelectedToAlbum)
             } message: {
-                Text(L10n.text("将选中的 \(model.selectedIDs.count) 张照片加入『存储清理助手-待删除』，不删除照片。需要完整读写授权以创建或复用相册并加入照片；已有唯一同名相册时可能复用您的相册。请在『照片』App 中查看并删除；删除后进入『最近删除』30 天可恢复。", "Add \(model.selectedIDs.count) selected photos to ‘存储清理助手-待删除’ without deleting them. Full read/write access is required to create or reuse the album and add photos. An existing uniquely named album may be yours and will be reused. Review and delete in Photos; recover from Recently Deleted for 30 days."))
+                Text(L10n.text("将选中的 \(ByteFormat.count(model.selectedIDs.count)) 张照片加入『存储清理助手-待删除』，不删除照片。需要完整读写授权以创建或复用相册并加入照片；已有唯一同名相册时可能复用您的相册。请在『照片』App 中查看并删除；删除后进入『最近删除』30 天可恢复。", "Add \(ByteFormat.count(model.selectedIDs.count)) selected photos to ‘存储清理助手-待删除’ without deleting them. Full read/write access is required to create or reuse the album and add photos. An existing uniquely named album may be yours and will be reused. Review and delete in Photos; recover from Recently Deleted for 30 days."))
             }
     }
 }

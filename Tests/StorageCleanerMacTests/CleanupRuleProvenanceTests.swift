@@ -17,7 +17,8 @@ final class CleanupRuleProvenanceTests: XCTestCase {
 
     func testEveryOriginalMatchingAndSelectionFieldMatchesIntegrationSnapshot() throws {
         let baseline = try CleanupRuleTestFixtures.baseline()
-        XCTAssertEqual(baseline.legacyRules.count, 73)
+        // D227＋旧值：was 73; downloads.installers and downloads.large-items retired with their snapshots.
+        XCTAssertEqual(baseline.legacyRules.count, 71)
         let current = try CleanupRuleSetLoader.loadBundled()
         for original in baseline.legacyRules {
             let actual = try XCTUnwrap(current.rules.first { $0.id == original.id })
@@ -86,6 +87,7 @@ final class CleanupRuleProvenanceTests: XCTestCase {
             "categoryTitleKey": "changed", "titleKey": "changed",
             "root": ["kind": "homeRelative", "path": ".changed"], "candidateScope": "root",
             "maximumDepth": 1, "minimumAgeDays": 1, "minimumBytes": 1,
+            "maximumCandidates": 400,
             "include": ["entryKinds": ["directory"], "extensions": ["tmp"],
                         "nameMatcher": ["mode": "exact", "values": ["other"]]],
             "exclude": ["relativePrefixes": ["personal"], "extensions": ["doc"], "namePrefixes": ["keep"]],
@@ -296,12 +298,14 @@ final class CleanupRuleProvenanceTests: XCTestCase {
         XCTAssertEqual(preflight.failure?.code, .planIntegrityFailed)
         let report = await executor.execute(plan: plan, context: context) { _ in }
         XCTAssertEqual(report.outcome, .failed)
-        XCTAssertEqual(report.summary.failedItemCount, plan.items.count)
-        if case let .failed(failure)? = report.items.first?.outcome {
-            XCTAssertEqual(failure.code, .planIntegrityFailed)
-        } else {
-            XCTFail("Changed effective rules must fail before processing the plan")
-        }
+        // D214＋旧值：was `XCTAssertEqual(report.summary.failedItemCount, plan.items.count)`
+        // and the first item `.failed` with `.planIntegrityFailed`. The plan is still
+        // refused before processing; its items are not run and the report keeps why.
+        XCTAssertEqual(report.summary.failedItemCount, 0)
+        XCTAssertEqual(report.summary.notProcessedItemCount, plan.items.count)
+        XCTAssertEqual(report.items.first?.outcome, .notProcessed)
+        XCTAssertEqual(report.startRefusal?.code, .planIntegrityFailed,
+                       "Changed effective rules must refuse the plan before processing it")
         XCTAssertEqual(report.rulesProvenance, plan.rulesProvenance)
         XCTAssertEqual(report.items.first?.ruleRevision, candidate.ruleRevision)
         let encoded = try JSONEncoder().encode(report)

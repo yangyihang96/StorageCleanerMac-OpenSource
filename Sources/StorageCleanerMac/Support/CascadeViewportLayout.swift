@@ -24,8 +24,10 @@ enum CascadeViewportLayout {
         // Align INWARD. Rounding a 99.75pt viewport to a 100pt window overflows.
         let inset = min(margin, max(0, (min(visible.width, visible.height) - 1 / scale) / 2))
         let raw = visible.insetBy(dx: inset, dy: inset)
+        // D123: up to the menu bar, which iStat's menus reach (was the inset
+        // below it as well).
         let x0 = ceil(raw.minX * scale) / scale, y0 = ceil(raw.minY * scale) / scale
-        let x1 = floor(raw.maxX * scale) / scale, y1 = floor(raw.maxY * scale) / scale
+        let x1 = floor(raw.maxX * scale) / scale, y1 = floor(visible.maxY * scale) / scale
         guard x1 > x0, y1 > y0 else { return nil }
         let bounds = CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
         func up(_ value: CGFloat) -> CGFloat { ceil(value * scale) / scale }
@@ -61,6 +63,27 @@ enum CascadeViewportLayout {
                 }
             }
             return true
+        }
+        // D123 (iStat Menus 7.30 `-[BBRMenu updateFrame]`): the level-one
+        // panel stays where it is. The first child goes on its right unless it
+        // would leave the screen there, then on its left, and a deeper child
+        // keeps its parent's side; each child is flush with its parent, its
+        // top at its owning row's (`offsets`). Only a page this would cut off
+        // takes one of the arrangements below (iStat lets it run off screen).
+        if let first = sizes.first {
+            let primary = CGRect(origin: CGPoint(x: position(parent.minX, low: bounds.minX, high: bounds.maxX - p.width),
+                                                 y: y(p.height)), size: p)
+            let left = primary.maxX + gap + first.width > bounds.maxX
+            var cursor = left ? primary.minX : primary.maxX
+            let frames = sizes.enumerated().map { index, size -> CGRect in
+                let x = left ? cursor - gap - size.width : cursor + gap
+                let frame = CGRect(origin: CGPoint(x: x, y: y(size.height, offset: offset(index))), size: size)
+                cursor = left ? frame.minX : frame.maxX
+                return frame
+            }
+            if validFrames([primary] + frames) {
+                return Result(parent: primary, children: frames, expandsLeft: left, arrangement: .columns)
+            }
         }
         let totalWidth = p.width + sizes.reduce(0) { $0 + $1.width } + gap * CGFloat(sizes.count)
         if totalWidth <= bounds.width, ([p] + sizes).allSatisfy({ $0.height <= bounds.height }) {

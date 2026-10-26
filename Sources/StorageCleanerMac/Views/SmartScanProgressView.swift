@@ -106,9 +106,9 @@ struct SmartScanProgressDashboard: View {
             fraction: progress.progressKind == .determinate ? Double(progress.fractionCompleted) : nil,
             metrics: [
                 .init(title: L10n.text("已发现", "Items Found"), value: String(progress.discoveredItemCount)),
-                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.string(progress.discoveredBytes)),
+                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.storageString(progress.discoveredBytes)),
                 .init(title: L10n.text("已完成分类", "Categories Complete"),
-                      value: "\(progress.completedGroupCount) / \(progress.totalGroupCount)")
+                      value: "\(ByteFormat.count(progress.completedGroupCount)) / \(ByteFormat.count(progress.totalGroupCount))")
             ],
             currentItem: locationText
         ) {
@@ -144,7 +144,22 @@ struct SmartScanScanningPage: View {
     var isCancelling = false
     var onCancel: (() -> Void)?
 
+    /// Tests of the D62② shared running template set `careStudioClassicResults`.
+    @Environment(\.careStudioClassicResults) private var usesClassicPage
+
+    /// D141: the CleanMyMac running page (picture working, "Looking for
+    /// junk…", the path being read, Stop ringed by progress) with the result
+    /// groups listed as they finish (Tencent Lemon / PureMac). The D62②
+    /// template stays as the classic view.
     var body: some View {
+        if usesClassicPage {
+            classicPage
+        } else {
+            studioPage
+        }
+    }
+
+    private var classicPage: some View {
         FeatureRunningTemplate(
             module: module,
             title: isCancelling ? L10n.text("正在停止扫描", "Stopping Scan")
@@ -154,9 +169,9 @@ struct SmartScanScanningPage: View {
             fraction: progress.progressKind == .determinate ? Double(progress.fractionCompleted) : nil,
             metrics: [
                 .init(title: L10n.text("已发现", "Items Found"), value: String(progress.discoveredItemCount)),
-                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.string(progress.discoveredBytes)),
+                .init(title: L10n.text("候选大小", "Candidate Size"), value: ByteFormat.storageString(progress.discoveredBytes)),
                 .init(title: L10n.text("已完成分类", "Categories Complete"),
-                      value: "\(progress.completedGroupCount) / \(progress.totalGroupCount)")
+                      value: "\(ByteFormat.count(progress.completedGroupCount)) / \(ByteFormat.count(progress.totalGroupCount))")
             ],
             currentItem: progress.currentPath ?? progress.currentGroupTitle,
             canCancel: canCancel && !isCancelling,
@@ -166,6 +181,30 @@ struct SmartScanScanningPage: View {
                 ScanProgressStageList(progress: progress, isFinalizing: isFinalizing)
             }
         } actions: { EmptyView() }
+    }
+
+    private var studioPage: some View {
+        let studio = CareStudioModule(filter: module) ?? .smartScan
+        return CareStudioRunningPage(
+            module: studio,
+            title: isCancelling ? L10n.text("正在停止扫描…", "Stopping the scan…")
+                : isFinalizing ? L10n.text("正在汇总结果…", "Preparing results…")
+                : studio.scanningTitle,
+            detail: isFinalizing
+                ? L10n.text("扫描结束，正在整理可审阅的结果。", "The scan finished; organizing reviewable results.")
+                : (progress.currentPath ?? progress.currentGroupTitle),
+            categories: CareStudioScanCategories.make(progress),
+            headlineValue: progress.discoveredItemCount > 0
+                ? L10n.text("已发现 \(ByteFormat.storageString(progress.discoveredBytes)) · \(ByteFormat.count(progress.discoveredItemCount)) 项",
+                            "\(ByteFormat.storageString(progress.discoveredBytes)) found · \(ByteFormat.count(progress.discoveredItemCount)) items")
+                : nil,
+            progress: progress.progressKind == .determinate
+                ? .fraction(Double(progress.fractionCompleted)) : .indeterminate,
+            actionTitle: isCancelling ? L10n.text("正在停止", "Stopping") : L10n.text("停止", "Stop"),
+            canStop: canCancel && !isCancelling,
+            footnote: L10n.text("只读扫描 · 不会删除任何文件", "Read-only scan · Nothing is removed"),
+            stopConfirmation: .scan,
+            onStop: { onCancel?() })
     }
 
 }
@@ -271,8 +310,8 @@ private struct ModuleScanProgressHero: View {
                         .monospaced()
                 } else {
                     Text(L10n.text(
-                        "已发现 \(L10n.items(progress.discoveredItemCount)) · \(ByteFormat.string(progress.discoveredBytes))",
-                        "\(L10n.items(progress.discoveredItemCount)) · \(ByteFormat.string(progress.discoveredBytes)) found"
+                        "已发现 \(L10n.items(progress.discoveredItemCount)) · \(ByteFormat.storageString(progress.discoveredBytes))",
+                        "\(L10n.items(progress.discoveredItemCount)) · \(ByteFormat.storageString(progress.discoveredBytes)) found"
                     ))
                     .font(AppDesignTokens.Typography.metadata)
                     .foregroundStyle(.secondary)
@@ -320,7 +359,7 @@ struct SmartScanResultRing: View {
                     .font(AppDesignTokens.Typography.secondary)
                     .foregroundStyle(.secondary)
 
-                Text(ByteFormat.string(candidateBytes))
+                Text(ByteFormat.storageString(candidateBytes))
                     .font(AppDesignTokens.Typography.heroTitle)
                     .monospacedDigit()
 
@@ -334,8 +373,8 @@ struct SmartScanResultRing: View {
         .accessibilityLabel(L10n.text("扫描结果", "Scan result"))
         .accessibilityValue(
             L10n.text(
-                "发现 \(ByteFormat.string(candidateBytes))，建议选择 \(ByteFormat.string(recommendedBytes))",
-                "\(ByteFormat.string(candidateBytes)) found, \(ByteFormat.string(recommendedBytes)) recommended"
+                "发现 \(ByteFormat.storageString(candidateBytes))，建议选择 \(ByteFormat.storageString(recommendedBytes))",
+                "\(ByteFormat.storageString(candidateBytes)) found, \(ByteFormat.storageString(recommendedBytes)) recommended"
             )
         )
     }
@@ -397,8 +436,8 @@ private struct ModuleScanProgressRing: View {
         .accessibilityLabel(L10n.text("扫描进度", "Scan progress"))
         .accessibilityValue(
             L10n.text(
-                "已完成 \(progress.completedGroupCount) 类，共 \(progress.totalGroupCount) 类；发现 \(ByteFormat.string(progress.discoveredBytes))，\(L10n.items(progress.discoveredItemCount))",
-                "\(progress.completedGroupCount) of \(progress.totalGroupCount) categories complete; \(ByteFormat.string(progress.discoveredBytes)), \(L10n.items(progress.discoveredItemCount)) found"
+                "已完成 \(ByteFormat.count(progress.completedGroupCount)) 类，共 \(ByteFormat.count(progress.totalGroupCount)) 类；发现 \(ByteFormat.storageString(progress.discoveredBytes))，\(L10n.items(progress.discoveredItemCount))",
+                "\(ByteFormat.count(progress.completedGroupCount)) of \(ByteFormat.count(progress.totalGroupCount)) categories complete; \(ByteFormat.storageString(progress.discoveredBytes)), \(L10n.items(progress.discoveredItemCount)) found"
             )
         )
     }
@@ -485,8 +524,8 @@ private struct ScanProgressGroupRow: View {
         case .clean: L10n.text("干净", "Clean")
         case .found:
             L10n.text(
-                "\(group.itemCount) 项 · \(ByteFormat.string(group.bytes))",
-                "\(group.itemCount) · \(ByteFormat.string(group.bytes))"
+                "\(ByteFormat.count(group.itemCount)) 项 · \(ByteFormat.storageString(group.bytes))",
+                "\(ByteFormat.count(group.itemCount)) · \(ByteFormat.storageString(group.bytes))"
             )
         case .skipped: L10n.text("已跳过", "Skipped")
         case .failed: L10n.text("读取失败", "Failed")

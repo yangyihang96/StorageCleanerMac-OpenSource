@@ -35,8 +35,10 @@ final class GeekPowerViewTests: XCTestCase {
             try r2ProductionSource(at: projectRoot.appendingPathComponent($0))
         }
 
+        // D119 (2026-10-18): the row is iStat's process row, which takes the
+        // fallback symbol as `fallbackSymbol:` (was `fallback:`).
         XCTAssertTrue(sources.allSatisfy {
-            $0.contains("fallback: AppSymbols.Monitor.power")
+            $0.contains("fallbackSymbol: AppSymbols.Monitor.power")
                 && !$0.contains("bolt.app")
         })
         XCTAssertNotNil(NSImage(
@@ -47,44 +49,64 @@ final class GeekPowerViewTests: XCTestCase {
 
     func testSecondarySurfaceMatchesReferenceCardGeometry() {
         XCTAssertEqual(GeekPowerLayout.gaugeHeight, 112)
-        XCTAssertEqual(GeekPowerLayout.historyHeight, 79)
+        // D119 (2026-10-18): iStat's battery menu: the 80 pt charge chart
+        // (was 79, a 67 pt chart), the 25 pt energy-mode row and a process
+        // section of 25 + 17n for up to three apps (was 39, 59 or 79).
+        XCTAssertEqual(GeekPowerLayout.historyHeight, 80)
+        // D132 (2026-10-19): iStat's battery graph draws its bars from 8 and
+        // its rail to 72 (`drawRect:`), so the chart is 80 − 8 − 8; was 66,
+        // the bars from 6.
+        XCTAssertEqual(GeekPowerLayout.historyChartHeight, 64)
         XCTAssertEqual(GeekPowerLayout.modeHeight, 25)
-        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight, 79)
-        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 0), 39)
-        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 1), 39)
+        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight, 76)
+        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 0), 42)
+        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 1), 42)
         XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 2), 59)
-        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 3), 79)
-        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 5), 79)
-        XCTAssertEqual(GeekPowerLayout.secondaryCardHeights.count, 6)
-        // D57: the power card lists five rows (computer, power input,
-        // battery, display backlight, chip total), 46 pt more than three.
-        XCTAssertEqual(GeekPowerLayout.powerHeight, GeekSensorReadoutLayout.cardHeight(rowCount: 5))
-        XCTAssertEqual(GeekPowerLayout.desktopPowerHeight, GeekSensorReadoutLayout.cardHeight(rowCount: 3))
-        XCTAssertEqual(GeekPowerLayout.secondaryContentHeight, 538)
+        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 3), 76)
+        XCTAssertEqual(GeekPowerLayout.significantEnergyHeight(for: 5), 76)
+        // D119: the battery-electrical and power cards (D57: five power rows
+        // on a laptop, three on a desktop) are groups of the sensors page, so
+        // the page keeps four sections (was six); the adapter card of a Mac
+        // without a battery is a titled group of three rows.
+        XCTAssertEqual(GeekPowerLayout.secondaryCardHeights.count, 4)
+        XCTAssertEqual(GeekPowerLayout.adapterHeight, GeekSensorReadoutLayout.cardHeight(rowCount: 3))
+        // D118 (2026-10-18): iStat's 7 pt card gap (was 6); the level-one
+        // battery card is iStat's 40 pt (was 64).
+        XCTAssertEqual(MiniWindowStyleTokens.cardSpacing, 7)
+        XCTAssertEqual(GeekPowerLayout.secondaryContentHeight, 314)
         XCTAssertEqual(GeekPanelLayout.detailSpacing, MiniWindowStyleTokens.cardSpacing)
-        XCTAssertEqual(GeekPanelLayout.overviewPowerCardHeight, 64)
+        XCTAssertEqual(GeekPanelLayout.overviewPowerCardHeight, 40)
         XCTAssertEqual(GeekPowerLayout.displayedEnergyAppCount, 3)
-        XCTAssertEqual(GeekPowerLayout.detailPreviewDuration, GeekChartRange.oneHour.duration)
-        XCTAssertEqual(GeekPanelPresentationMetrics.powerDetailWidth, 264)
-        XCTAssertEqual(GeekPowerLayout.historyTertiaryOffset, 126)
-        XCTAssertEqual(GeekPowerLayout.energyModeTertiaryOffset, 436)
+        // D132 (2026-10-19): the charge chart is iStat's battery menu graph,
+        // 69 buckets of 15 minutes; was `detailPreviewDuration`, one hour.
+        XCTAssertEqual(GeekPowerLayout.menuGraphDuration, 69 * 900)
+        // D119 (2026-10-18): iStat's battery menu is 240 pt wide (was 264).
+        XCTAssertEqual(GeekPanelPresentationMetrics.powerDetailWidth, 240)
+        XCTAssertEqual(GeekPowerLayout.historyTertiaryOffset, 127)
+        // D119: the energy mode follows the chart (was 440 below the
+        // electrical and power cards, 211 below the desktop power card).
+        XCTAssertEqual(GeekPowerLayout.energyModeTertiaryOffset, 214)
         XCTAssertEqual(
             GeekPowerLayout.energyModeSourceOffset(hasInternalBattery: true),
-            436
+            214
         )
         XCTAssertEqual(
             GeekPowerLayout.energyModeSourceOffset(hasInternalBattery: false),
-            209
+            90
         )
 
         let requiredHeight = GeekPowerLayout.secondaryContentHeight
-            + GeekPanelLayout.detailSpacing
-            + 33
             + GeekPanelLayout.contentPadding * 2
-        XCTAssertEqual(requiredHeight, 593)
+        XCTAssertEqual(requiredHeight, 330)
         XCTAssertLessThanOrEqual(
             requiredHeight,
             GeekPanelPresentationMetrics.detailSize(for: .power).height
+        )
+        // D119: the detailed density shows the battery card and the chart.
+        XCTAssertEqual(
+            GeekPanelPresentationMetrics.detailSize(for: .power, density: .complex).height,
+            GeekPanelLayout.contentPadding * 2 + GeekPowerLayout.gaugeHeight
+                + GeekPanelLayout.detailSpacing + GeekPowerLayout.historyHeight
         )
     }
 
@@ -122,7 +144,11 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertTrue(source.contains("正在扫描应用…"))
         XCTAssertTrue(source.contains("当前没有显著能耗应用"))
         XCTAssertTrue(source.contains("geekHasEnergyImpactSnapshot"))
-        XCTAssertTrue(source.contains(".frame(height: 19)"))
+        // D119 (2026-10-18): the scanning and empty states are 15 pt rows of
+        // the process section (were 19 pt rows).
+        XCTAssertFalse(source.contains(".frame(height: 19)"))
+        XCTAssertTrue(source.contains("minHeight: GeekIStatSectionGeometry.rowHeight"))
+        XCTAssertTrue(source.contains("GeekIStatProcessCard("))
         XCTAssertTrue(source.contains("Text(powerText)"))
         XCTAssertTrue(source.contains("app.currentEvidence.source == .unknown ? \"—\" : app.currentPowerWattsText"))
         XCTAssertTrue(source.contains("app.currentEvidence.detail"))
@@ -146,8 +172,12 @@ final class GeekPowerViewTests: XCTestCase {
             from: "private var geekPowerGaugeCard",
             to: "private var geekPowerHistoryCard"
         )
-        XCTAssertTrue(gauges.contains("HStack(spacing: 12)"))
-        XCTAssertTrue(gauges.contains("size: 96"))
+        // D119 (2026-10-18): the memory card's iStat rings, each centered in
+        // its half (were 96 pt rings 12 pt apart).
+        XCTAssertTrue(gauges.contains("HStack(spacing: 0)"))
+        XCTAssertTrue(gauges.contains("size: GeekIStatCardGeometry.memoryRingSize"))
+        XCTAssertEqual(GeekIStatCardGeometry.memoryRingSize, 96)
+        XCTAssertTrue(gauges.contains("strokeWidth: GeekIStatCardGeometry.memoryRingLineWidth"))
         XCTAssertTrue(gauges.contains("chargePercent: batterySnapshot?.chargePercent"))
         XCTAssertTrue(gauges.contains("healthPercent: geekBatteryHealthPercent"))
         XCTAssertTrue(gauges.contains("statusText: batteryStatusTitle"))
@@ -164,12 +194,22 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertFalse(history.contains("GeekPowerBatteryLevelBar"))
         XCTAssertTrue(history.contains("GeekPowerHistoryChart("))
         XCTAssertTrue(history.contains("metric: .charge"))
-        XCTAssertTrue(history.contains("duration: GeekPowerLayout.detailPreviewDuration"))
+        // D132 (2026-10-19): iStat's battery menu graph; was
+        // `duration: GeekPowerLayout.detailPreviewDuration` (the last hour).
+        XCTAssertTrue(history.contains("duration: GeekPowerLayout.menuGraphDuration"))
+        XCTAssertTrue(history.contains("batteryGraph: .menu"))
         XCTAssertTrue(history.contains("points: batteryPowerHistory"))
         XCTAssertTrue(history.contains("chargingTint: panelMetricColors.batteryDraining"))
         XCTAssertTrue(history.contains("sourceOffset: GeekPowerLayout.historyTertiaryOffset"))
         XCTAssertTrue(history.contains("usesCardActiveBorder: true"))
-        XCTAssertTrue(history.contains(".frame(height: 67)"))
+        // D119 (2026-10-18): iStat's 80 pt chart card (was a 67 pt chart).
+        // D132: the chart takes the card's width (iStat places its bars from
+        // the card's right edge); was the layer inside the 8 pt insets,
+        // `.geekIStatLayer(top: GeekIStatSectionGeometry.chargeChartTop, height: GeekPowerLayout.historyChartHeight)`.
+        XCTAssertTrue(history.contains(
+            ".geekIStatLayer(top: GeekIStatSectionGeometry.chargeChartTop, height: GeekPowerLayout.historyChartHeight,\n"
+                + "                                leading: 0, trailing: 0)"
+        ))
     }
 
     func testEnergyCardKeepsCachedRowsAndOnlyUsesScanningForInitialLoad() {
@@ -235,7 +275,10 @@ final class GeekPowerViewTests: XCTestCase {
         let kernel = try r2ProductionSource(at: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekPowerPreparationKernel.swift"))
-        XCTAssertTrue(kernel.contains("end.addingTimeInterval(-duration)"))
+        // D132 (2026-10-19): iStat's battery graphs select their whole bucket
+        // span; the projection keeps `duration` (was
+        // `end.addingTimeInterval(-duration)`).
+        XCTAssertTrue(kernel.contains("end.addingTimeInterval(-(batteryGraph?.span(for: duration) ?? duration))"))
         XCTAssertTrue(rawHistory.contains("return auxiliaryState.powerHistory"))
         XCTAssertTrue(hover.contains("inlineContentStore.update(hostedDetail, force: true)"))
         XCTAssertFalse(hover.contains("NSPanel("))
@@ -256,8 +299,14 @@ final class GeekPowerViewTests: XCTestCase {
             to: "var geekChartHistory"
         )
 
-        XCTAssertTrue(summary.contains("GeekCombinedRing("))
-        XCTAssertTrue(summary.contains("size: 35"))
+        // D118 (2026-10-18): the app-power and adapter cards take the battery
+        // card's iStat layout, the power in the title row (were a 35 pt ring,
+        // `GeekCombinedRing(` with `size: 35`).
+        XCTAssertTrue(summary.contains("GeekModuleHeader(title: L10n.text(\"App 功耗\", \"APP POWER\"))"))
+        XCTAssertEqual(
+            summary.components(separatedBy: "GeekIStatCard(height: GeekPanelLayout.overviewPowerCardHeight)").count - 1,
+            2
+        )
         XCTAssertTrue(summary.contains("geekOverviewBatteryStatusText"))
         XCTAssertTrue(summary.contains("geekOverviewPowerSourceAndModeTitle"))
         XCTAssertTrue(summary.contains("geekCurrentPowerMode.map(batteryPowerModeText)"))
@@ -278,7 +327,10 @@ final class GeekPowerViewTests: XCTestCase {
             "height: GeekPanelLayout.overviewPowerCardHeight"
         ))
         XCTAssertTrue(batteryCard.contains("GeometryReader { proxy in"))
-        XCTAssertTrue(batteryCard.contains(".frame(height: 7)"))
+        // D118: iStat's 8 pt bar at y 24 (was `.frame(height: 7)`).
+        XCTAssertTrue(batteryCard.contains("GeekIStatBar(progress: charge"))
+        XCTAssertTrue(batteryCard.contains("height: IStat.batteryBarHeight"))
+        XCTAssertEqual(GeekIStatCardGeometry.batteryBarHeight, 8)
         XCTAssertFalse(batteryCard.contains("GeekCombinedRing("))
         XCTAssertFalse(batteryCard.contains("GeekPowerHistoryChart("))
 
@@ -315,7 +367,10 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertEqual(fullSize.width, MiniWindowStyleTokens.overviewSize.width)
         // CPU's reference-calibrated card is 12 pt taller; the hardware-
         // absence contract below must still remove exactly one card and gap.
-        XCTAssertEqual(fullSize.height, 605) // fix1 B1: the entry belongs inside the unchanged sensor-card footprint.
+        // D118 (2026-10-18): iStat's combined menu, 8 + 120 + 112 + 42 + 100
+        // + 88 + 40 + 5 × 7 + 8 (was 605, fix1 B1). The fan entry still sits
+        // inside the sensor card's footprint.
+        XCTAssertEqual(fullSize.height, 553)
         XCTAssertEqual(batterylessSize.width, fullSize.width)
         XCTAssertEqual(
             batterylessSize.height,
@@ -403,7 +458,9 @@ final class GeekPowerViewTests: XCTestCase {
         XCTAssertTrue(detail.contains("Input Current"))
         XCTAssertTrue(detail.contains("Battery Power · Last \\(geekChartRangeTitle)"))
         XCTAssertFalse(detail.contains("Latest On-Demand Energy Measurement"))
-        XCTAssertTrue(powerPage.contains("else {\n                geekPowerAdapterCard"))
+        let page = try sourceSegment(powerPage, from: "var geekPowerPage: some View", to: "var batteryRuntimeEstimate")
+        XCTAssertTrue(page.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            .contains("} else { geekPowerAdapterCard }"))
         XCTAssertTrue(powerPage.contains("Negotiated Power"))
         XCTAssertTrue(powerPage.contains("Negotiated Voltage"))
         XCTAssertTrue(powerPage.contains("Negotiated Current"))

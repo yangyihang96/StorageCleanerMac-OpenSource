@@ -171,13 +171,15 @@ final class MiniWindowLiveReadingRetentionTests: XCTestCase {
         monitor.update(SystemMonitorSnapshot(
             generatedAt: now.addingTimeInterval(-2), metrics: [],
             networkThroughput: NetworkMonitorThroughput(downBytesPerSecond: 900, upBytesPerSecond: 30)))
-        XCTAssertEqual(page.view.networkDownText, "900 B/s")
+        // D128 (2026-10-19): iStat's large bandwidth values start at KB/s
+        // (was "900 B/s" and "30 B/s").
+        XCTAssertEqual(page.view.networkDownText, "1 KB/s")
 
         // The next sample has no rates (taken right after the previous one,
         // or across an interface change): the card keeps the last reading.
         monitor.update(SystemMonitorSnapshot(generatedAt: now, metrics: [], networkThroughput: nil))
-        XCTAssertEqual(page.view.networkDownText, "900 B/s")
-        XCTAssertEqual(page.view.networkUpText, "30 B/s")
+        XCTAssertEqual(page.view.networkDownText, "1 KB/s")
+        XCTAssertEqual(page.view.networkUpText, "0 KB/s")
 
         // A reading that is long gone is not kept. Review P2-7: its age is
         // counted to now (the view's clock), so the old reading is a minute

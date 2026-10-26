@@ -63,8 +63,9 @@ enum ProviderBackedUpdateExecutorError: LocalizedError, Sendable, Equatable {
                 "Available disk space could not be confirmed at: \(path)"
             )
         case let .insufficientDiskSpace(requiredBytes, availableBytes, path):
-            let required = ByteCountFormatter.string(fromByteCount: requiredBytes, countStyle: .file)
-            let available = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
+            // D228 (D178): through ByteFormat, so a full disk reads "0 字节", not "Zero KB".
+            let required = ByteFormat.storageString(requiredBytes)
+            let available = ByteFormat.storageString(availableBytes)
             return L10n.text(
                 "磁盘空间不足（需要至少 \(required)，可用 \(available)）：\(path)",
                 "Not enough disk space (at least \(required) required, \(available) available): \(path)"

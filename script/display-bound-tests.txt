@@ -1,0 +1,82 @@
+# XCTest classes that can put a window or system UI on screen (DECISIONS
+# D106). Checked by script/display_bound_tests.py, which script/verify.sh
+# runs (exit 17): every class the scanner detects must be listed here once,
+# and every listed class must still be detected and exist in
+# Tests/StorageCleanerMacTests, so the list cannot drift.
+# verify.sh has no display to confine windows to: it skips the in-process and
+# out-of-process classes and prints them as NOT RUN.
+# script/run_display_bound_tests.sh runs the in-process classes with
+# STORAGE_CLEANER_TEST_DISPLAY set, so the test bundle's display gate places
+# every window on that one named non-main display before it is shown.
+# Format: Class | kind | reason
+#   in-process      skipped by verify.sh, run by run_display_bound_tests.sh
+#   out-of-process  skipped by verify.sh and never run by the display runner:
+#                   it launches another app, whose windows the gate cannot place
+#   exempt          detected, but runs in verify.sh because it shows nothing;
+#                   the reason must say why
+# Exempt entries for the display gate's own tests are added with those tests.
+DisplayConfinementGateTests | exempt | routes every entry point through the gate with the original call replaced by a recorder; its windows are borderless, deferred and never shown, and its URLs and apps are fixtures that are refused or recorded, never opened
+AppDelegateBenchmarkTerminationTests | in-process | creates AppDelegate, whose termination path can show an alert (the reply is injected)
+AppInstallationConflictServiceTests | in-process | AppInstallationConflictController can reveal app copies in Finder (the reveal is injected)
+AppOpenPanelCoordinatorTests | in-process | presents NSOpenPanel through AppOpenPanelCoordinator, with and without a parent NSWindow
+AppUpdateAuthorizationRepairTests | in-process | AppUpdateBatchAuthorization can show the administrator password prompt (prompt and channel are fakes)
+ApplicationUpdateRelaunchTests | in-process | relaunch(_:) reopens an updated app (the open call is injected)
+BenchmarkMonitorLayoutTests | in-process | hosts the benchmark monitor in an NSWindow and measures its layout
+BrowserPrivacyDisclosureTests | in-process | lays out browser-privacy pages in CalibrationAppKitLayoutHost, an NSWindow host
+BrowserPrivacyLightfieldNativeTests | in-process | lays out browser-privacy pages in CalibrationAppKitLayoutHost, an NSWindow host
+BrowserPrivacyPerformanceTests | in-process | orders a 1070x650 NSWindow front and lays out pages in CalibrationAppKitLayoutHost
+CareStudioNavigationTests | in-process | orders a 1280x763 NSWindow front with the main window and switches pages and widths to check the sidebar is full before the first scan and the icon rail on every page after it (D176; was: folded page by page on result pages)
+CareStudioWindowReviewTests | in-process | orders a 1070x735 NSWindow front to capture the studio managers for review; writes PNGs only when STORAGE_CLEANER_CARESTUDIO_EVIDENCE is set
+CombinedStatusIconSettingsWindowTests | in-process | hosts the combined status icon settings in an NSWindow and captures it (D153)
+CompactGaugeRenderingTests | in-process | renders compact gauges in NSWindows and reads their pixels
+ComputerHealthSecurityIntegrationTests | in-process | lays out the health security page in CalibrationAppKitLayoutHost, an NSWindow host
+ConceptLandingNativeLayoutRegressionTests | in-process | declares CalibrationAppKitLayoutHost (NSWindow, ordered front) and lays out landing pages in it
+ControlPaletteTests | in-process | presents control palettes from ControlPaletteCoordinator over NSPanel parents
+DesignSystemV2ReviewTests | in-process | lays out design-system pages in V0LayoutHost and CalibrationAppKitLayoutHost windows
+DesignSystemV2Tests | in-process | declares V0LayoutHost (an NSWindow host) and orders NSWindows front
+ExternalUninstallRequestTests | in-process | ExternalUninstallRequestCenter activates the app and its uninstall review window
+FanControlModeCardTests | in-process | hosts fan-control cards in NSWindows and builds a ControlPaletteCoordinator
+FeatureLightfieldApplicationP2Tests | in-process | lays out application pages in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldApplicationPageTests | in-process | lays out application pages in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldComponentTests | in-process | lays out Lightfield components in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldContractTests | in-process | lays out Lightfield pages in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldFileMetadataTests | in-process | lays out file-metadata pages in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldFilesContractTests | in-process | lays out file pages in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldFilesPerformanceTests | in-process | lays out file pages in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldLandingAdapterTests | in-process | lays out landing pages in CalibrationAppKitLayoutHost, an NSWindow host
+FeatureLightfieldPerformanceTests | in-process | CalibrationAppKitLayoutHost and MainWindowSnapshotPipeline windows
+FeatureLightfieldResultSpaceTests | in-process | CalibrationAppKitLayoutHost and MainWindowSnapshotPipeline windows
+FeatureTemplateContractTests | in-process | lays out feature templates in CalibrationAppKitLayoutHost and orders an NSWindow front
+GeekOverviewLabelLayoutTests | in-process | hosts the geek overview in an NSWindow and measures label layout
+GeekVPNManagementActionTests | in-process | hosts the VPN management card in an NSWindow
+HealthCapabilityLayoutTests | in-process | hosts health capability cards in an NSWindow and measures their layout
+HelperPowerMetricsMergeTests | in-process | declared in FeatureLightfieldContractTests.swift, which lays out pages in CalibrationAppKitLayoutHost
+LightfieldMergeContractTests | in-process | declared in FeatureLightfieldContractTests.swift, which lays out pages in CalibrationAppKitLayoutHost
+MSeriesV11NativeLayoutTests | in-process | lays out M-series pages in CalibrationAppKitLayoutHost, an NSWindow host
+MainWindowControlsTests | in-process | orders a 1280x763 NSWindow front and checks the main window controls
+MenuBarPanelSessionTests | in-process | shows the menu-bar panel with MenuBarPanelSession.show(anchor:screen:) on a real screen
+MenuBarPublishLoopTests | in-process | hosts the menu-bar panel content in a borderless NSWindow
+MiniWindowAnchorGeometryTests | in-process | orders the mini-window panel front (orderFrontRegardless) and checks its anchor geometry
+MiniWindowCascadeSettleTests | in-process | shows the mini window with MenuBarPanelSession.show(anchor:) on the visible frame
+MiniWindowCleanupPresentationTests | in-process | orders mini-window NSWindows front for the cleanup presentation
+MiniWindowLevelOneAnchorTests | in-process | MenuBarPanelSession plus a borderless NSWindow ordered front (orderFrontRegardless)
+MiniWindowRowLayoutTests | in-process | hosts mini-window rows in an NSWindow and measures their layout
+MiniWindowSinglePageTests | in-process | hosts the mini window in a borderless NSWindow
+MiniWindowUpdatingStateTests | in-process | hosts the mini window's updating state in a borderless NSWindow
+PhotoLibraryTests | in-process | PhotoLibraryStore.authorize and PhotoKitLibraryProvider can show the Photos permission prompt (the provider is a fake)
+RealMacUIAccessibilitySmokeTests | out-of-process | launches the built app with NSWorkspace.openApplication (opt-in STORAGE_CLEANER_RUN_UI_TESTS=1); that app's windows are outside the test bundle's gate
+ResidentStartupScheduleTests | in-process | declared in StartupPerformanceTests.swift, which creates AppDelegate
+RuntimeUIRound201Tests | in-process | hosts 2.0.1 runtime UI in a 900x450 NSWindow
+SafeCleanupLayoutTests | in-process | orders cleanup-page windows front and measures their layout
+SettingsLightfieldGeometryTests | in-process | lays out settings pages in CalibrationAppKitLayoutHost, an NSWindow host
+SettingsMiniWindowPreviewTests | in-process | lays out the settings mini-window preview in CalibrationAppKitLayoutHost
+SmartScanScopeTests | in-process | lays out smart-scan scope pages in CalibrationAppKitLayoutHost, an NSWindow host
+SpaceMapTreemapWindowTests | in-process | hosts the Space Lens page with the blocks map in an NSWindow and drives it with synthetic events; writes PNGs only when STORAGE_CLEANER_SPACEMAP_EVIDENCE is set
+SpaceLensSidebarWindowTests | in-process | hosts the Space Lens sidebar in an NSWindow for bilingual geometry and filter, purpose, worth and reclaim interactions; exports PNGs only when STORAGE_CLEANER_SPACEMAP_EVIDENCE is set
+StartupApplicationUpdateSchedulerTests | in-process | declared in StartupPerformanceTests.swift, which creates AppDelegate
+StartupItemsDashboardContractTests | in-process | renders the startup-items dashboard with MainWindowSnapshotPipeline
+StorageAnalysisScopeLayoutTests | in-process | hosts storage-analysis scope pages in an NSWindow and measures their layout
+ToolboxWindowReviewTests | in-process | orders 1070x735, 1024x734 and 780x540 NSWindows front with the new tool panels (extensions, maintenance, chat files) to check that rows and the main button stay inside; writes PNGs only when STORAGE_CLEANER_TOOLBOX_EVIDENCE is set
+WindowCloseGuardTests | in-process | creates NSWindows to check the close guard
+WindowGlassConfigurationTests | in-process | creates the main window glass in an NSWindow at MainWindowSnapshotPipeline sizes
+MainWindowSidebarColumnTests | in-process | shows a NavigationSplitView with MainWindowChromeConfigurator in a titled NSWindow and hides its sidebar column (D175)

@@ -6,6 +6,7 @@ enum SettingsCategory: String, CaseIterable, Hashable, Identifiable {
     case general
     case miniWindow
     case scanAndSafety
+    case ignoreList
     case accessAndSetup
     case systemControl
     case updates
@@ -22,7 +23,7 @@ enum SettingsCategory: String, CaseIterable, Hashable, Identifiable {
         case .miniWindow: AppDesignTokens.Layout.pagePadding
         case .accessAndSetup: AppDesignTokens.Spacing.small + AppDesignTokens.Layout.sectionPadding
         // The grouped macOS Form rows in the review capture start 30 pt in.
-        case .general, .scanAndSafety, .systemControl, .updates, .about: 30
+        case .general, .scanAndSafety, .ignoreList, .systemControl, .updates, .about: 30
         }
     }
 
@@ -31,6 +32,7 @@ enum SettingsCategory: String, CaseIterable, Hashable, Identifiable {
         case .miniWindow: L10n.text("小窗", "Mini Window")
         case .general:
             L10n.text("通用", "General")
+        case .ignoreList: L10n.text("忽略列表", "Ignore List")
         case .scanAndSafety:
             L10n.text("扫描与安全", "Scan & Safety")
         case .accessAndSetup:
@@ -49,6 +51,7 @@ enum SettingsCategory: String, CaseIterable, Hashable, Identifiable {
         case .miniWindow: "rectangle.split.2x1"
         case .general:
             "gearshape"
+        case .ignoreList: "line.3.horizontal.decrease.circle"
         case .scanAndSafety:
             "checkmark.shield"
         case .accessAndSetup:
@@ -67,6 +70,7 @@ enum SettingsCategory: String, CaseIterable, Hashable, Identifiable {
         case .miniWindow: AppAppearanceColors.accent
         case .general:
             AppDesignTokens.Palette.information
+        case .ignoreList: AppDesignTokens.Palette.information
         case .scanAndSafety:
             AppDesignTokens.Palette.success
         case .accessAndSetup:
@@ -93,9 +97,6 @@ struct SettingsView: View {
     @State var supportSnapshot: RedactedSupportSnapshot?
     @State var showsSupportExport = false
     @State var miniWindowDraft = GeekDashboardDraft(GeekDashboardConfigurationStore.shared.configuration)
-    @FocusState var sidebarHasFocus: Bool
-    @State var hoveredCategory: SettingsCategory?
-    @State var sidebarVisibility = NavigationSplitViewVisibility.all
     @State var pendingCategory: SettingsCategory?
     @State var configurationNotice: String?
 
@@ -103,14 +104,16 @@ struct SettingsView: View {
     @AppStorage(L10n.languageDefaultsKey) var languageRawValue = AppLanguage.system.rawValue
     @AppStorage(L10n.appearanceDefaultsKey) var appearanceRawValue = AppAppearance.system.rawValue
     @AppStorage(AppCanvasTheme.defaultsKey) var canvasThemeRawValue = AppCanvasTheme.defaultTheme.rawValue
-    @AppStorage(PanelAppearancePreferences.colorThemeKey) var panelColorThemeRawValue = PanelColorTheme.graphite.rawValue
-    @AppStorage(PanelAppearancePreferences.miniWindowAppearanceKey) var miniWindowAppearanceRawValue = ""
-    @AppStorage(PanelAppearancePreferences.backgroundColorKey) var panelBackgroundColor = ""
-    @AppStorage(PanelAppearancePreferences.chartColorKey) var panelChartColor = ""
+    // D135: iStat's theme pair replaces the mini-window appearance, chart
+    // color and dropdown surface preferences (their keys stay unread).
+    @AppStorage(IStatMenuThemePreferences.darkThemeKey) var menuThemeDarkID = IStatMenuTheme.defaultID
+    @AppStorage(IStatMenuThemePreferences.lightThemeKey) var menuThemeLightID = IStatMenuTheme.defaultID
+    @AppStorage(IStatMenuThemePreferences.vibrancyKey) var menuThemeVibrancy = true
     @AppStorage(PanelPalettePreferences.statusThemeKey) var panelStatusPresetRaw = ""
-    @AppStorage(PanelPalettePreferences.surfaceThemeKey) var panelSurfacePresetRaw = ""
     @AppStorage(PanelPalettePreferences.statusCustomDayKey) var statusCustomDayHex = ""
     @AppStorage(PanelPalettePreferences.statusCustomNightKey) var statusCustomNightHex = ""
+    // D136: the volumes hidden from the mini window's disk page.
+    @AppStorage(MiniWindowHiddenItems.disksKey) var hiddenDiskKeysRaw = ""
     @AppStorage(MaintenanceReminderService.defaultsKey) var maintenanceCadenceRawValue = MaintenanceReminderService.defaultCadence.rawValue
     @State var pendingCloseWindow: NSWindow?
     @AppStorage("settings.selected-category.v1") var selectedCategory = SettingsCategory.general
@@ -118,6 +121,10 @@ struct SettingsView: View {
     @AppStorage(PublicNetworkConsent.countryKey) var allowsCountryLookup = false
     @State var scanHistorySummary = ScanHistorySummary(entries: [])
     @State var excludedPaths: [String] = []
+    @StateObject var ignoreListModel = SettingsIgnoreListModel(store: .shared)
+    @State var ignoreSelection = Set<String>()
+    @State var ignoreApplicationSelection = Set<String>()
+    @State var showsIgnoreApplicationPicker = false
     @State var exclusionNotice: SettingsNotice?
     @ObservedObject var helperSettingsNavigation = SystemHelperSettingsNavigation.shared
     @State var permissionNotice: SettingsNotice?
@@ -168,11 +175,23 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        GeometryReader { viewport in
-            HStack(spacing: 0) {
-                settingsSidebar.frame(width: viewport.size.width < 820 ? 180 : FeatureLightfield.sidebarWidth)
-                settingsPane(for: selectedCategory)
+        // D154 batch 3I: CleanMyMac's tabs across the top replace the D3/D53
+        // sidebar (the user's decision, 2026-10-21); one backdrop fills the
+        // title bar, the tabs and the pane.
+        VStack(spacing: 0) {
+            settingsTabBar
+            FeatureLightfieldHairline()
+            settingsPane(for: selectedCategory)
+        }
+        .background {
+            GeometryReader { proxy in
+                let topInset = proxy.safeAreaInsets.top
+                let canvas = CGSize(width: proxy.size.width, height: max(1, proxy.size.height - topInset))
+                FeatureLightfieldBackdrop(module: .overview, phase: .landing,
+                    geometry: FeatureLightfieldGeometry(size: canvas, phase: .landing),
+                    canvasTopInset: topInset)
             }
+            .ignoresSafeArea(.container, edges: .top)
         }
         .frame(
             minWidth: 560,
@@ -257,67 +276,14 @@ struct SettingsView: View {
         }
     }
 
-    private var settingsSidebar: some View {
-        let palette = FeatureLightfieldPalette.resolve(colorScheme)
-        return VStack(alignment: .leading, spacing: 0) {
-            Text(L10n.text("设置", "Settings"))
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(palette.fg2)
-                .padding(.horizontal, 18).padding(.top, 24).padding(.bottom, 8)
-            ScrollView {
-                VStack(spacing: 2) {
-                    ForEach(SettingsCategory.allCases) { category in
-                        let isSelected = selectedCategory == category
-                        Button {
-                            settingsSelection.wrappedValue = category
-                            sidebarHasFocus = true
-                        } label: {
-                            HStack(spacing: 10) {
-                                FeatureLightfieldArtwork(art: GeneratedArt.module(for: category.artworkModule), variant: .header)
-                                    .frame(width: 20, height: 20)
-                                Text(category.title).font(.system(size: 15)).lineLimit(2)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Spacer(minLength: 0)
-                            }.foregroundStyle(palette.fg)
-                                .padding(.horizontal, 10).padding(.vertical, 8)
-                                .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .background {
-                                    if isSelected {
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(FeatureLightfieldPalette.accent(.overview).opacity(colorScheme == .dark ? 0.20 : 0.16))
-                                    }
-                                }
-                        }.buttonStyle(FeatureLightfieldRowButtonStyle())
-                            .accessibilityValue(isSelected ? L10n.text("已选择", "Selected") : "")
-                            .accessibilityAddTraits(isSelected ? .isSelected : [])
-                    }
-                }.padding(.horizontal, 10)
-            }
-            .focusable().focused($sidebarHasFocus).focusEffectDisabled()
-            .onKeyPress(keys: [.upArrow, .downArrow]) { press in
-                guard let current = SettingsCategory.allCases.firstIndex(of: selectedCategory) else { return .ignored }
-                let next = press.key == .upArrow ? max(0, current - 1) : min(SettingsCategory.allCases.count - 1, current + 1)
-                settingsSelection.wrappedValue = SettingsCategory.allCases[next]
-                return .handled
-            }
-            .onMoveCommand { direction in
-                guard let current = SettingsCategory.allCases.firstIndex(of: selectedCategory) else { return }
-                let next: Int
-                switch direction {
-                case .up: next = max(0, current - 1)
-                case .down: next = min(SettingsCategory.allCases.count - 1, current + 1)
-                default: return
-                }
-                settingsSelection.wrappedValue = SettingsCategory.allCases[next]
-            }
-            FeatureLightfieldHairline().padding(.horizontal, 10)
-            Text(SidebarVersionLabel.text).font(.system(size: 13)).foregroundStyle(palette.fg2)
-                .monospacedDigit().padding(18).help(runtimeInfo.versionDisplay)
-        }.background(FeatureLightfieldPalette.color(palette.sidebar))
+    private var settingsTabBar: some View {
+        SettingsTabBar(selected: selectedCategory) { category in
+            settingsSelection.wrappedValue = category
+        }
     }
 
     private func settingsPane(for category: SettingsCategory) -> some View {
-        SettingsLightfieldPane(category: category) {
+        SettingsLightfieldPane(category: category, drawsBackdrop: false) {
             settingsForm(for: category)
                 .controlSize(.regular)
                 .buttonStyle(FeatureLightfieldRowButtonStyle())
@@ -328,6 +294,8 @@ struct SettingsView: View {
     private func settingsForm(for category: SettingsCategory) -> some View {
         if category == .general {
             generalSettings
+        } else if category == .ignoreList {
+            ignoreListSettings
         } else if category == .miniWindow {
             miniWindowSettings
         } else if category == .accessAndSetup {
@@ -361,10 +329,12 @@ struct SettingsView: View {
     @ViewBuilder
     private func settingsSections(for category: SettingsCategory) -> some View {
         switch category {
+        case .ignoreList: ignoreListSettings
         case .miniWindow: EmptyView()
         case .general:
             interfaceSection
             panelAppearanceSection
+            CombinedStatusIconSettingsSection()
             launchBehaviorSection
         case .scanAndSafety:
             if let scanStore {
@@ -374,6 +344,7 @@ struct SettingsView: View {
                 } header: { Text(L10n.text("可恢复操作", "Recoverable Operations")) }
             }
             maintenanceReminderSection
+            AppLifecycleReminderSettingsSection()
             exclusionSection
         case .accessAndSetup:
             permissionSetupSection
@@ -390,6 +361,7 @@ struct SettingsView: View {
 
     private func refresh(category: SettingsCategory) {
         switch category {
+        case .ignoreList: ignoreListModel.refresh()
         case .miniWindow: break
         case .general:
             refreshLaunchAtLoginStatus()
@@ -551,19 +523,60 @@ struct ExclusionPathRow: View {
     }
 }
 
-private struct SettingsWindowConfigurator: NSViewRepresentable {
+struct SettingsWindowConfigurator: NSViewRepresentable {
     let title: String
 
+    /// SwiftUI's Settings window style has no `.resizable` and no
+    /// `.miniaturizable`, and SwiftUI takes them away again whenever the
+    /// content's size limits update, even with
+    /// `.windowResizability(.contentMinSize)`; that also kept the zoom button
+    /// off. The panes lay out for any size from the minimum set in
+    /// `configure`, so the window gets resizing back (D96), and like the main
+    /// window it keeps all three window buttons (D97).
+    @MainActor
+    final class Coordinator {
+        private static let standardControls: NSWindow.StyleMask = [.resizable, .miniaturizable]
+        private weak var window: NSWindow?
+        private var observation: NSKeyValueObservation?
+
+        func keepStandardControls(_ window: NSWindow) {
+            Self.restoreStandardControls(window)
+            guard self.window !== window else { return }
+            self.window = window
+            observation = window.observe(\.styleMask, options: [.new]) { [weak self] _, _ in
+                Task { @MainActor in
+                    guard let window = self?.window else { return }
+                    Self.restoreStandardControls(window)
+                }
+            }
+        }
+
+        private static func restoreStandardControls(_ window: NSWindow) {
+            guard !window.styleMask.isSuperset(of: standardControls) else { return }
+            window.styleMask.formUnion(standardControls)
+            window.standardWindowButton(.miniaturizeButton)?.isEnabled = true
+            window.standardWindowButton(.zoomButton)?.isEnabled = true
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeNSView(context: Context) -> NSView {
-        PassthroughWindowConfigurationView { window in
+        let coordinator = context.coordinator
+        return PassthroughWindowConfigurationView { window in
             configure(window)
+            coordinator.keepStandardControls(window)
         }
     }
 
     func updateNSView(_ view: NSView, context: Context) {
         guard let view = view as? PassthroughWindowConfigurationView else { return }
+        let coordinator = context.coordinator
         view.updateConfiguration { window in
             configure(window)
+            coordinator.keepStandardControls(window)
         }
     }
 
@@ -580,7 +593,7 @@ private struct SettingsWindowConfigurator: NSViewRepresentable {
         window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.standardWindowButton(.miniaturizeButton)?.isEnabled = false
+        window.standardWindowButton(.miniaturizeButton)?.isEnabled = true
         window.standardWindowButton(.zoomButton)?.isEnabled = true
 
         let minimumSize = NSSize(width: 560, height: 390)

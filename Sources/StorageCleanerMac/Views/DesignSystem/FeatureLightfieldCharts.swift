@@ -415,6 +415,15 @@ struct LightfieldChartItem: Identifiable {
     let icon: LightfieldOptionIcon
     var color: Color? = nil
     var detail = ""
+    /// D154 batch 3N: the item's real icon in its bubble, in place of `icon`.
+    var picture: LightfieldChartPicture? = nil
+}
+
+/// D154 batch 3N: what a Space Lens bubble shows, as its list row does — an
+/// app's own icon, else Finder's icon for the folder or the kind of file.
+struct LightfieldChartPicture: Equatable {
+    let path: String
+    let isDirectory: Bool
 }
 
 struct LightfieldBubbleChart: View {
@@ -490,9 +499,16 @@ private struct LightfieldBubble: View {
         let dark = scheme == .dark
         // Approved glass bubble (files r3/r4 CSS): type-colour linear body,
         // lower-right colour pool, upper-left highlight and a tinted 1 pt rim.
-        let iconSide: CGFloat = diameter < 42 ? 14 : diameter >= 138 ? 32 : 24
+        // D154 batch 3S: a bubble this size always shows its name, set in its
+        // own font and cut at the end when it runs past the bubble (was hidden
+        // whenever an estimate of 15 pt a character ran past 70% of it, which
+        // dropped "node_modules" from the largest bubble).
         let labelled = diameter >= LightfieldBubbleLayout.labelThreshold
-            && CGFloat(item.label.count) * 15 <= diameter * 0.7
+        // D193③: with its name and size, a bubble under about 100 pt shrinks
+        // the glyph as it does a picture, so the two lines keep their room.
+        let glyphSide: CGFloat = diameter < 42 ? 14 : diameter >= 138 ? 32 : 24
+        let iconSide = labelled
+            ? min(glyphSide, LightfieldBubbleLayout.pictureSide(diameter: diameter, labelled: true)) : glyphSide
         let label = item.formattedValue.isEmpty ? item.label : item.label + " · " + item.formattedValue
         Button { onDrillDown(item.id) } label: {
             ZStack {
@@ -505,11 +521,18 @@ private struct LightfieldBubble: View {
                 Circle().strokeBorder(color.opacity(dark ? 0.72 : 0.6), lineWidth: 1)
                 Circle().strokeBorder(Color.white.opacity(dark ? 0.28 : 0.45), lineWidth: 1)
                 VStack(spacing: 4) {
-                    // 32 pt icons load the 84 px export (review P2-7).
-                    LightfieldOptionIconView(icon: item.icon, pointSize: iconSide)
+                    if let picture = item.picture {
+                        LightfieldBubblePicture(picture: picture,
+                            side: LightfieldBubbleLayout.pictureSide(diameter: diameter, labelled: labelled))
+                            .lightfieldComponentProbe("lightfield.bubble.picture." + item.id)
+                    } else {
+                        // 32 pt icons load the 84 px export (review P2-7).
+                        LightfieldOptionIconView(icon: item.icon, pointSize: iconSide)
+                    }
                     if labelled {
                         Text(item.label).font(.system(size: 15, weight: .medium)).foregroundStyle(palette.fg)
-                            .lineLimit(1)
+                            .lineLimit(1).truncationMode(.tail)
+                            .lightfieldComponentProbe("lightfield.bubble.label." + item.id)
                         Text(item.formattedValue).font(.system(size: 13)).monospacedDigit().foregroundStyle(palette.fg2)
                             .lineLimit(1).minimumScaleFactor(0.8) // lightfield-scale-ok: disk-value
                     }
@@ -534,6 +557,24 @@ private struct LightfieldBubble: View {
         // Too small to target: the merged "other" bubble carries the tail.
         .accessibilityHidden(diameter < LightfieldBubbleLayout.minimumAccessibleDiameter)
         .lightfieldComponentProbe("lightfield.bubble." + item.id)
+    }
+}
+
+/// The list row's icon at the bubble's size: an app's own icon (cached),
+/// else Finder's icon for its kind, read once per kind.
+private struct LightfieldBubblePicture: View {
+    let picture: LightfieldChartPicture
+    let side: CGFloat
+
+    var body: some View {
+        CachedAppIconView(path: picture.path.hasSuffix(".app") ? picture.path : "", size: side) {
+            Image(nsImage: SpaceLensKindIcon.image(isDirectory: picture.isDirectory, path: picture.path))
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: side, height: side)
+        }
+        .accessibilityHidden(true)
     }
 }
 

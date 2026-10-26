@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import FileOperationShared
 
 @MainActor
 struct ApplicationUpdateGracefulQuitRequester {
@@ -834,6 +835,9 @@ struct AppNavigationRoute: Equatable {
 @MainActor
 final class AppNavigationState: ObservableObject {
     @Published private(set) var route = AppNavigationRoute(filter: .overview, utilityTool: .memory)
+    /// D202: the Smart Care part whose result the page on screen shows for
+    /// Smart Care's Review; any other choice of page ends it.
+    @Published private(set) var smartCareReview: SmartCareModule?
 
     var selectedFilter: ReviewFilter {
         route.filter
@@ -841,6 +845,18 @@ final class AppNavigationState: ObservableObject {
 
     var selectedUtilityFilter: ReviewFilter {
         route.utilityTool
+    }
+
+    /// D202: called right after Smart Care's Review opened its page.
+    func beginSmartCareReview(_ part: SmartCareModule) {
+        smartCareReview = part
+    }
+
+    /// D202: ends a Review. Another page ends it (`update`); the sidebar's
+    /// rows end it even for the page on screen. Without one it publishes
+    /// nothing.
+    func endSmartCareReview() {
+        if smartCareReview != nil { smartCareReview = nil }
     }
 
     @discardableResult
@@ -867,6 +883,10 @@ final class AppNavigationState: ObservableObject {
     private func update(filter: ReviewFilter, utilityTool: ReviewFilter) -> Bool {
         let nextRoute = AppNavigationRoute(filter: filter, utilityTool: utilityTool)
         guard nextRoute != route else { return false }
+        // D202: another page ends a Review. Choosing the page on screen again
+        // does not: `ContentView` echoes `showFilter`'s `requestedFilter` a
+        // moment later (r42: that echo ended every Review at once).
+        endSmartCareReview()
         route = nextRoute
         return true
     }
@@ -893,6 +913,11 @@ final class ScanStore: ObservableObject {
     @Published private(set) var mainScanProgress: DiskScanProgress?
     @Published private(set) var cleanupScanSession: ScanSession? {
         didSet {
+            if cleanupScanSession == nil {
+                systemCacheInventoryTask?.cancel()
+                systemCacheInventory = nil
+                pendingSystemCacheClear = nil
+            }
             // Retain only scalar totals for menu summaries. Candidate walks
             // happen once per result mutation, never during panel opening.
             currentCleanupHistoryEntry = cleanupScanSession.flatMap { session in
@@ -917,6 +942,17 @@ final class ScanStore: ObservableObject {
     @Published private(set) var selectedSmartScanScopes = SmartScanScope.defaultSelection
     @Published private(set) var smartScanHealthSnapshot: ComputerHealthSnapshot?
     @Published private(set) var selectedSafeCleanupScopes = SafeCleanupScanScope.defaultSelection
+    /// D202: the Smart Care parts whose result in the shared stores came from
+    /// Smart Care's own scan (kept across launches, as the duplicates result is).
+    @Published private(set) var smartCareResultParts: Set<SmartCareModule> = []
+    /// D202: the part Smart Care is scanning; its calls into the modules'
+    /// entry points are Smart Care's own.
+    @Published private(set) var smartCareScanningPart: SmartCareModule?
+    /// D202: Smart Care's coordinator hears when a module's own scan replaced
+    /// one of its parts.
+    var onModuleScanReplacedSmartCarePart: (@MainActor (SmartCareModule) -> Void)?
+    /// D202: set while Smart Care starts its junk scan.
+    private var startsSmartCareJunkScan = false
     @Published private(set) var cleanupSelection = CleanupSelection()
     @Published private(set) var cleanupDryRunSummary: CleanupDryRunSummary?
     @Published private(set) var isCancellingMainScan = false
@@ -962,6 +998,12 @@ final class ScanStore: ObservableObject {
     @Published private(set) var isRestoringV2Cleanup = false
     @Published var errorMessage: String?
     @Published var actionMessage: String?
+    @Published private(set) var systemCacheInventory: SystemCacheInventoryReply?
+    @Published private(set) var pendingSystemCacheClear: SystemCacheClearPlan?
+    @Published private(set) var isClearingSystemCaches = false
+    @Published private(set) var systemCacheResultMessage: String?
+    private let systemCacheService: any SystemCacheServicing
+    private var systemCacheInventoryTask: Task<Void, Never>?
     @Published private(set) var monitoringHistoryWarning: String?
     private var actionMessageDismissalTask: Task<Void, Never>?
     let navigationState = AppNavigationState()
@@ -971,7 +1013,8 @@ final class ScanStore: ObservableObject {
     @Published var memoryShowsAllProcesses = true
     @Published var pendingTrashItem: StorageItem?
     @Published var pendingBulkTrashItems: [StorageItem] = []
-    @Published var pendingEmptyTrashSummary: TrashSummary?
+    /// D101 L5: the Trash frozen for the open confirmation.
+    @Published var pendingEmptyTrash: FrozenTrash?
     @Published var isCheckingTrashSummary = false
     @Published private(set) var isMovingItemsToTrash = false
     @Published private(set) var cleanupOperationSnapshot: CleanupOperationSnapshot?
@@ -998,6 +1041,8 @@ final class ScanStore: ObservableObject {
     @Published var memorySnapshot: MemorySnapshot?
     @Published var isLoadingMemory = false
     @Published var isOptimizingMemory = false
+    /// True while "释放内存" pushes (D144), as opposed to quitting apps.
+    @Published private(set) var isReclaimingMemory = false
     @Published var memoryOptimizationResult: MemoryOptimizationResult?
     @Published var selectedMemoryProcessIDs: Set<Int32> = []
     @Published var pendingMemoryProcess: MemoryProcess?
@@ -1018,7 +1063,8 @@ final class ScanStore: ObservableObject {
     /// sample time, while the next measurement is taken.
     @Published private(set) var menuBarPreparedProcesses: MenuBarPreparedProcesses?
     /// A process page is waiting for its first measurement and has none to
-    /// show yet ("正在采样…", not "未测量").
+    /// show yet ("正在采样…", not "未测量"). D171: on the CPU and disk pages
+    /// only while the first read runs; it is listed at once, rates 0.
     @Published private(set) var isMenuBarProcessSamplePending = false
     /// Review P2-8: the first measurement did not come within
     /// `menuBarProcessSampleTimeout`; the page says "未测量" and why.
@@ -1039,6 +1085,8 @@ final class ScanStore: ObservableObject {
     private var menuBarResidentPrimaryGeneration = 0
     private var menuBarResidentFirstAttemptAt: Date?
     private var menuBarResidentProcessStartedAt: Date?
+    /// D127: a page change asks the next read to start from a new baseline.
+    private var menuBarResidentProcessBaselineReset = false
     private var menuBarResidentMemoryStartedAt: Date?
     private var menuBarResidentHelperTask: Task<Void, Never>?
 
@@ -1049,55 +1097,63 @@ final class ScanStore: ObservableObject {
     }
 
     /// Called by the sole resident clock; starting a finite worker never blocks
-    /// that clock on ps/nettop/XPC. UI demand does not reset a stored baseline.
+    /// that clock on ps/nettop/XPC.
+    /// D127 (iStat `-[ItemManager startItemsForKey:]` / `stopItemsForKey:`):
+    /// process lists are read only while a module page that shows one is open
+    /// — at once, again after 0.5 s, then on each tick — and not prestored
+    /// while the panel is closed (was every 10 s open / 15 s closed, D74).
     func refreshMenuBarResidentSamples(now: Date = Date()) {
         guard let cadence = menuBarResidentContext?.plan?.cadence,
               !cadence.suspended, !isMenuBarRefreshPaused else { return }
 #if DEBUG || STORAGE_CLEANER_BETA
         guard !MiniWindowDemoData.isEnabled else { return }
 #endif
-        if menuBarPreparedProcesses == nil,
+        let readsProcessFrame = [.processor, .disk, .power].contains(menuBarProcessDemand)
+        let processSpacing = MenuBarPerformancePolicy.processSpacing(cadence.processes, tick: cadence.cheap)
+        if readsProcessFrame, menuBarPreparedProcesses == nil,
            let first = menuBarResidentFirstAttemptAt, now.timeIntervalSince(first) >= menuBarProcessSampleTimeout {
             setMenuBarProcessSampleState(pending: false, unavailable: true)
         }
         menuBarAuxiliaryMonitorState.refreshResidentSamples()
-        if menuBarVisibleProcessTask == nil,
-           menuBarResidentProcessStartedAt.map({ now.timeIntervalSince($0) >= cadence.processes }) != false {
+        if readsProcessFrame, menuBarVisibleProcessTask == nil,
+           MenuBarPerformancePolicy.isDue(since: menuBarResidentProcessStartedAt, now: now, interval: processSpacing) {
             menuBarResidentProcessStartedAt = now
             if menuBarResidentFirstAttemptAt == nil { menuBarResidentFirstAttemptAt = now }
             let generation = menuBarVisibleProcessGeneration
             let sampler = menuBarContinuousProcessSampler
             let needsFirstDelta = menuBarPreparedProcesses == nil
+            let listsFirstRead = needsFirstDelta && MenuBarProcessSamplingDemand.listsFirstRead(menuBarProcessDemand)
+            // D127: the baseline is dropped inside the read, so no earlier
+            // frame can pair with the first read of a newly opened page.
+            let resetsBaseline = menuBarResidentProcessBaselineReset
+            menuBarResidentProcessBaselineReset = false
             menuBarVisibleProcessTask = Task { @MainActor [weak self] in
-                let worker = Task.detached(priority: .utility) {
-                    var snapshot = await sampler.sample()
-                    if snapshot == nil, needsFirstDelta, !Task.isCancelled {
-                        try? await Task.sleep(for: .seconds(MenuBarPerformancePolicy.firstProcessSampleInterval))
-                        if !Task.isCancelled { snapshot = await sampler.sample() }
-                    }
-                    return snapshot.flatMap { snapshot in
-                        MenuBarPreparedProcesses.fitsCache(snapshot) ? MenuBarPreparedProcesses(snapshot: snapshot) : nil
+                var prepared = await Self.readMenuBarProcesses(sampler, resettingBaseline: resetsBaseline,
+                                                               listingFirstRead: listsFirstRead)
+                if needsFirstDelta, prepared?.isFirstRead ?? true, !Task.isCancelled {
+                    // D171: the first read is shown while the first delta is
+                    // taken 0.5 s later; this task keeps the single flight.
+                    if let prepared { self?.adoptFirstMenuBarProcessRead(prepared, generation: generation) }
+                    try? await Task.sleep(for: .seconds(MenuBarPerformancePolicy.firstProcessSampleInterval))
+                    if !Task.isCancelled {
+                        prepared = await Self.readMenuBarProcesses(sampler, resettingBaseline: false,
+                                                                   listingFirstRead: listsFirstRead)
                     }
                 }
-                let prepared = await withTaskCancellationHandler { await worker.value }
-                    onCancel: { worker.cancel() }
                 guard let self else { return }
-                defer { menuBarVisibleProcessTask = nil }
+                menuBarVisibleProcessTask = nil
                 guard !Task.isCancelled, generation == menuBarVisibleProcessGeneration,
-                      menuBarResidentContext?.plan?.cadence.suspended == false else { return }
-                if let prepared {
-                    menuBarPreparedProcesses = prepared
-                    setMenuBarProcessSampleState(pending: false, unavailable: false)
-                    if menuBarProcessDemand == .power {
-                        systemEnergyAccumulator.recordAttributed(prepared.snapshot,
-                            powerSource: menuBarAuxiliaryMonitorState.batterySnapshot?.powerSource ?? .unknown,
-                            continuous: true)
-                    }
+                      menuBarResidentContext?.plan?.cadence.suspended == false else {
+                    // D127: another page superseded this read. Its first read
+                    // waited for this physical read to exit; start it now.
+                    if generation != menuBarVisibleProcessGeneration { refreshMenuBarResidentSamples() }
+                    return
                 }
+                if let prepared { adoptMenuBarProcesses(prepared) }
             }
         }
-        if menuBarMemoryProcessTask == nil,
-           menuBarResidentMemoryStartedAt.map({ now.timeIntervalSince($0) >= cadence.processes }) != false {
+        if menuBarProcessDemand == .memory, menuBarMemoryProcessTask == nil,
+           MenuBarPerformancePolicy.isDue(since: menuBarResidentMemoryStartedAt, now: now, interval: processSpacing) {
             menuBarResidentMemoryStartedAt = now
             refreshMenuBarMemoryProcesses(now: now)
         }
@@ -1126,6 +1182,8 @@ final class ScanStore: ObservableObject {
         menuBarAuxiliaryMonitorState.suspendResidentSamples()
         menuBarResidentProcessStartedAt = nil
         menuBarResidentMemoryStartedAt = nil
+        // D127: the next read also drops the baseline itself, in order.
+        menuBarResidentProcessBaselineReset = true
         let sampler = menuBarContinuousProcessSampler
         Task { await sampler.reset() }
     }
@@ -1157,6 +1215,7 @@ final class ScanStore: ObservableObject {
     }
     @Published var isMenuBarRefreshPaused = false
     @Published var installedApps: [InstalledAppItem] = []
+    let applicationsScanCoordinator = ApplicationsScanCoordinator()
     @Published var isLoadingInstalledApps = false
     @Published var hasScannedInstalledApps = false
     @Published var installedAppsScanCoverage: AppUninstallScanCoverage?
@@ -1227,6 +1286,10 @@ final class ScanStore: ObservableObject {
     @Published var didCompleteInitialPermissionCheck: Bool
     @Published var isShowingAccessRepairGuide = false
     @Published var isShowingInitialFolderAccessPrompt = false
+    /// D100 G5: roots the current scan could not read that are readable now.
+    @Published private(set) var accessReturnNotice: ScanAccessReturnNotice?
+    private var accessReturnTracker = ScanAccessReturnTracker()
+    private var accessReturnCheckTask: Task<Void, Never>?
 
     private var menuBarNetworkSample: NetworkMonitorSample?
     private var menuBarMemoryStatusSnapshot: MemorySnapshot?
@@ -1272,9 +1335,16 @@ final class ScanStore: ObservableObject {
     private let scanReadinessTimeout: Duration
     private let restoreSavedAccessOperation: @Sendable () -> Void
     private let loadScanReadinessSummary: @Sendable () -> ScanReadinessSummary
+    private let readableDirectories: @Sendable ([String]) -> Set<String>
     private let historyLoader: any ScanStoreHistoryLoading
     /// Where the scan history is written and read (tests isolate it).
     private let appPreferences: UserDefaults
+    /// D207: the ignore list the scans read and the managers add to — the
+    /// app's own file; none in tests unless a test gives one.
+    var ignoreListStore: IgnoreListStore?
+    /// D207 (CleanMyMac's Add to Ignore List): the note after a manager adds
+    /// rows, with Put Back.
+    lazy var ignoreFeedback = IgnoreListFeedback { [weak self] in self?.ignoreListStore }
     private let samplingGaps: MenuBarSamplingGaps
     private let scanHistoryDefaults: UserDefaults
     private let memoryCoordinator: MemoryCoordinator
@@ -1297,6 +1367,8 @@ final class ScanStore: ObservableObject {
     private let cleanupRecoveryService: CleanupRecoveryService
     private let interruptedOperationReconciler: @Sendable () -> Set<CleanupReportJournal.ReconcileIssue>
     private let operationJournal: CleanupReportJournal
+    /// D154: My Activity totals the same journal Operation History lists.
+    var activityJournal: CleanupReportJournal { operationJournal }
     /// The Trash that recorded restores read from (injected by fixtures).
     private let operationTrashURL: URL
     /// How uninstalls move files and request authorization (injected by fixtures).
@@ -1412,6 +1484,9 @@ final class ScanStore: ObservableObject {
         loadScanReadinessSummary: @escaping @Sendable () -> ScanReadinessSummary = {
             ScanReadinessService.summary()
         },
+        readableDirectories: @escaping @Sendable ([String]) -> Set<String> = {
+            ScanReadinessService.readableDirectories($0)
+        },
         historyLoader: any ScanStoreHistoryLoading = UserDefaultsScanStoreHistoryLoader(),
         scanHistoryDefaults: UserDefaults = .standard,
         metricHistoryStore: MetricHistoryStore? = nil,
@@ -1439,6 +1514,7 @@ final class ScanStore: ObservableObject {
         websiteUpdateWorkflow: WebsiteUpdateWorkflow? = nil,
         cleanupFeatureConfiguration: CleanupFeatureConfiguration = .productDefault,
         cleanupScanOperation: @escaping CleanupScanOperation = CleanupScanOperations.live,
+        systemCacheService: (any SystemCacheServicing)? = nil,
         smartScanHealthOperation: @escaping SmartScanHealthOperation = {
             try await DefaultComputerHealthProbe().probe()
         },
@@ -1460,14 +1536,23 @@ final class ScanStore: ObservableObject {
         uninstallMoves: UninstallMoveEnvironment = .live
     ) {
         self.appPreferences = preferences
+        self.ignoreListStore = preferences === UserDefaults.standard ? IgnoreListStore.shared : nil
         self.samplingGaps = samplingGaps
         self.cleanupPreferences = cleanupPreferences
 #if DEBUG
         // Inert presentation captures do not read or overwrite saved checkbox state.
-        if FeaturePresentationDemo.isEnabled { selectedSmartScanScopes = SmartScanScope.defaultSelection }
-        else { selectedSmartScanScopes = SmartScanScope.selection(in: cleanupPreferences) }
+        if FeaturePresentationDemo.isEnabled {
+            selectedSmartScanScopes = SmartScanScope.defaultSelection
+            selectedSafeCleanupScopes = SafeCleanupScanScope.defaultSelection
+        } else {
+            selectedSmartScanScopes = SmartScanScope.selection(in: cleanupPreferences)
+            selectedSafeCleanupScopes = SafeCleanupScanScope.selection(in: cleanupPreferences)
+            smartCareResultParts = Self.smartCareResultParts(in: cleanupPreferences)
+        }
 #else
         selectedSmartScanScopes = SmartScanScope.selection(in: cleanupPreferences)
+        selectedSafeCleanupScopes = SafeCleanupScanScope.selection(in: cleanupPreferences)
+        smartCareResultParts = Self.smartCareResultParts(in: cleanupPreferences)
 #endif
         self.fanControlProvider = fanControlProvider
         self.menuBarMemoryStatusProvider = menuBarMemoryStatusProvider
@@ -1489,6 +1574,7 @@ final class ScanStore: ObservableObject {
                 : nil
         )
         self.heavyWorkCoordinator = heavyWorkCoordinator
+        self.systemCacheService = systemCacheService ?? SystemCacheService(coordinator: heavyWorkCoordinator)
         let resolvedActivityStore = heavyWorkActivityStore
             ?? HeavyWorkActivityStore(coordinator: heavyWorkCoordinator)
         self.heavyWorkActivityStore = resolvedActivityStore
@@ -1519,6 +1605,7 @@ final class ScanStore: ObservableObject {
         self.scanReadinessTimeout = scanReadinessTimeout
         self.restoreSavedAccessOperation = restoreSavedAccessOperation
         self.loadScanReadinessSummary = loadScanReadinessSummary
+        self.readableDirectories = readableDirectories
         self.historyLoader = historyLoader
         self.scanHistoryDefaults = scanHistoryDefaults
         self.memoryCoordinator = memoryCoordinator ?? MemoryCoordinator()
@@ -1563,8 +1650,9 @@ final class ScanStore: ObservableObject {
                     await MainActor.run { NSWorkspace.shared.open(url) }
                 }
             )
-        menuBarRefreshInterval = preferences.string(forKey: Self.menuBarRefreshIntervalDefaultsKey)
-            .flatMap(MenuBarRefreshInterval.init(rawValue:))
+        // D127: a stored 5 s choice (no longer offered) reads as 3 s.
+        menuBarRefreshInterval = MenuBarRefreshInterval.stored(
+            preferences.string(forKey: Self.menuBarRefreshIntervalDefaultsKey))
             ?? MenuBarRefreshInterval.defaultValue
         didCompleteInitialPermissionCheck = preferences.bool(forKey: Self.initialPermissionCheckDefaultsKey)
         loadsDefaultCleanReports = cleanReportLoader == nil
@@ -1671,9 +1759,18 @@ final class ScanStore: ObservableObject {
     }
 
     private var activePresentationRoute: ReviewFilter {
-        navigationState.selectedFilter == .utilityHub
+        if startsSmartCareJunkScan { return .overview }
+        return navigationState.selectedFilter == .utilityHub
             ? navigationState.selectedUtilityFilter
             : navigationState.selectedFilter
+    }
+
+    /// D202: the page a scan starting now is for. Smart Care's junk scan is
+    /// the Smart Care page's whatever page is on screen; it used to follow
+    /// the page on screen (on Cleanup it became that page's scan, on Space
+    /// Map, Migration or Duplicates it started that page's scan instead).
+    private var scanPage: ReviewFilter {
+        startsSmartCareJunkScan ? .overview : selectedFilter
     }
 
     private func beginScanPresentation(sessionID: UUID) {
@@ -1795,10 +1892,13 @@ final class ScanStore: ObservableObject {
 #if DEBUG
     /// Installs a static session into the existing Store so screenshots exercise
     /// the production results views without starting a scanner or executor.
+    /// D202: `page: .green` installs the rows as the Cleanup page's own scan.
     func installDebugSmartScanSessionFixture(
-        _ scenario: DebugSmartScanSessionFixture.Scenario
+        _ scenario: DebugSmartScanSessionFixture.Scenario, page: ReviewFilter = .overview
     ) {
         guard scenario == .results else { return }
+        let session = page == .green ? DebugSmartScanSessionFixture.cleanupPageSession
+            : DebugSmartScanSessionFixture.session
 
         scanPresentationTimingTask?.cancel()
         scanPresentationTimingTask = nil
@@ -1814,10 +1914,10 @@ final class ScanStore: ObservableObject {
         isFinalizingMainScan = false
         isCancellingMainScan = false
         mainScanProgress = nil
-        cleanupScanSession = DebugSmartScanSessionFixture.session
+        cleanupScanSession = session
         cleanupSelection = DebugSmartScanSessionFixture.selection
         cleanupDryRunSummary = nil
-        cleanupWorkflowState = .results(sessionID: DebugSmartScanSessionFixture.session.id)
+        cleanupWorkflowState = .results(sessionID: session.id)
         pendingCleanPlan = nil
         pendingCleanPreflight = nil
         cleanupExecutionProgress = nil
@@ -1924,6 +2024,9 @@ final class ScanStore: ObservableObject {
             restoreFolderAccessForLaunch()
             return
         }
+        // D106: the first check lists protected folders, and macOS shows its
+        // permission prompts on the menu-bar display.
+        guard !AcceptanceLaunch.isActive else { return }
 
         refreshScanReadiness(
             markInitialPermissionCheckCompleted: true,
@@ -2041,8 +2144,8 @@ final class ScanStore: ObservableObject {
             } else {
                 self.showActionMessage(
                     L10n.text(
-                        "已保存 \(savedCount) 个文件夹授权，下次打开会自动恢复。",
-                        "Saved access for \(savedCount) folder(s); it will be restored next time."
+                        "已保存 \(ByteFormat.count(savedCount)) 个文件夹授权，下次打开会自动恢复。",
+                        "Saved access for \(ByteFormat.count(savedCount)) folder(s); it will be restored next time."
                     )
                 )
             }
@@ -2073,7 +2176,7 @@ final class ScanStore: ObservableObject {
 #if DEBUG
         guard !isDebugSmartScanSessionFixtureActive else { return }
 #endif
-        guard selectedFilter != .overview || !selectedSmartScanScopes.isEmpty else {
+        guard scanPage != .overview || !selectedSmartScanScopes.isEmpty else {
             showActionMessage(L10n.text("请至少选择一个扫描项目。", "Select at least one scan item."))
             return
         }
@@ -2134,10 +2237,16 @@ final class ScanStore: ObservableObject {
     /// Starts a new main scan, including a new presentation identity. Page
     /// refresh commands enter through startScanRespectingAccessGuide instead.
     func startScan() {
+        beginScan(rescanning: nil)
+    }
+
+    /// Review A-R3: with `session`, the scan covers what that finished
+    /// session covered, whatever the scan preferences say now.
+    private func beginScan(rescanning session: ScanSession?) {
 #if DEBUG
         guard !isDebugSmartScanSessionFixtureActive else { return }
 #endif
-        guard selectedFilter != .overview || !selectedSmartScanScopes.isEmpty else {
+        guard session != nil || scanPage != .overview || !selectedSmartScanScopes.isEmpty else {
             showActionMessage(L10n.text("请至少选择一个扫描项目。", "Select at least one scan item."))
             return
         }
@@ -2154,9 +2263,13 @@ final class ScanStore: ObservableObject {
             return
         }
         scanPresentationRoute = activePresentationRoute
+        if let session {
+            startCleanupV2Scan(rescanning: session)
+            return
+        }
         guard (cleanupFeatureConfiguration.mode == .legacy
-                && !(selectedFilter == .overview && selectedSmartScanScopes != SmartScanScope.defaultSelection))
-                || ReviewFilter.fileWorkspaceCases.contains(selectedFilter) else {
+                && !(scanPage == .overview && selectedSmartScanScopes != SmartScanScope.defaultSelection))
+                || ReviewFilter.fileWorkspaceCases.contains(scanPage) else {
             startCleanupV2Scan()
             return
         }
@@ -2165,6 +2278,7 @@ final class ScanStore: ObservableObject {
         // Only a main legacy scan replaces this session. Reset its dependent
         // state together so no selection, plan or workflow outlives the result.
         cleanupScanSession = nil
+        accessReturnNotice = nil
         cleanupActiveRuleSet = nil
         cleanupSelection = CleanupSelection()
         cleanupDryRunSummary = nil
@@ -2179,7 +2293,7 @@ final class ScanStore: ObservableObject {
         cleanupWorkflowState = .idle
         let generation = UUID()
         let mode = currentScanMode
-        let scansSmartHealth = selectedFilter == .overview && selectedSmartScanScopes.contains(.health)
+        let scansSmartHealth = scanPage == .overview && selectedSmartScanScopes.contains(.health)
         let healthOperation = smartScanHealthOperation
         smartScanHealthSnapshot = nil
         mainScanGeneration = generation
@@ -2272,7 +2386,7 @@ final class ScanStore: ObservableObject {
     /// Uses the same feature-owned entry points as the page's refresh action.
     /// Returning true also covers a feature refusing a refresh while busy.
     private func refreshFileWorkspaceIfSelected() -> Bool {
-        switch selectedFilter {
+        switch scanPage {
         case .largeFiles:
             largeFilesWorkspace.startStorageAnalysis()
         case .migration:
@@ -2296,6 +2410,53 @@ final class ScanStore: ObservableObject {
             transitionScanPresentation(to: .cancelling, matching: generation)
         }
         mainScanTask?.cancel()
+    }
+
+    private func refreshSystemCachesAfterScan(_ session: ScanSession) {
+        systemCacheInventoryTask?.cancel()
+        systemCacheInventory = nil
+        pendingSystemCacheClear = nil
+        guard session.outcome != .cancelled, session.smartScanScopes != [.health] else { return }
+        systemCacheInventoryTask = Task { @MainActor [weak self] in
+            await self?.refreshSystemCacheInventory(sessionID: session.id)
+        }
+    }
+
+    func refreshSystemCacheInventory(sessionID: ScanSessionID? = nil) async {
+        let inventory = await systemCacheService.inventory()
+        guard !Task.isCancelled, sessionID == nil || cleanupScanSession?.id == sessionID else { return }
+        systemCacheInventory = inventory
+    }
+
+    func cancelSystemCacheInventory() async {
+        systemCacheInventoryTask?.cancel()
+        await systemCacheInventoryTask?.value
+        systemCacheInventoryTask = nil
+    }
+
+    func requestSystemCacheClear(_ selected: Set<SystemCacheID>) {
+        guard !isClearingSystemCaches, !selected.isEmpty, let inventory = systemCacheInventory else { return }
+        let items = inventory.items.filter { selected.contains($0.cache) && SystemCachePresentation.isSelectable($0) }
+        guard items.count == selected.count, Set(items.map(\.cache)) == selected else { return }
+        pendingSystemCacheClear = .init(items: items)
+    }
+
+    func cancelSystemCacheClear() { pendingSystemCacheClear = nil }
+
+    func confirmSystemCacheClear(planID: UUID) async {
+        guard !isClearingSystemCaches, let plan = pendingSystemCacheClear, plan.id == planID else { return }
+        pendingSystemCacheClear = nil
+        isClearingSystemCaches = true
+        systemCacheResultMessage = nil
+        do {
+            let reply = try await systemCacheService.clear(plan.directories)
+            systemCacheResultMessage = SystemCachePresentation.result(reply)
+        } catch {
+            systemCacheResultMessage = (error as? LocalizedError)?.errorDescription
+                ?? L10n.text("系统缓存未能全部清除，请稍后重试。", "System caches could not all be cleared. Try again later.")
+        }
+        await refreshSystemCacheInventory()
+        isClearingSystemCaches = false
     }
 
     func setCleanupCandidate(_ candidateID: ScanCandidateID, selected: Bool) {
@@ -2327,12 +2488,136 @@ final class ScanStore: ObservableObject {
         SmartScanScope.save(selectedSmartScanScopes, in: cleanupPreferences)
     }
 
+    /// D168: Smart Care's cleanup card scans both file scopes; health is no
+    /// longer part of Smart Scan (it stays in My Tools).
+    func prepareSmartCareCleanupScopes() {
+        guard selectedSmartScanScopes != SmartCareModule.cleanupScopes,
+              !isPreparingScan, !isCleanupExecutionActive else { return }
+        selectedSmartScanScopes = SmartCareModule.cleanupScopes
+        SmartScanScope.save(selectedSmartScanScopes, in: cleanupPreferences)
+    }
+
+    /// Where Smart Care keeps which modules it scans (D168), beside the
+    /// Smart Scan scopes.
+    var smartCarePreferences: UserDefaults { cleanupPreferences }
+
+    // MARK: D202 — Smart Care's results and the modules' own
+
+    static let smartCareResultPartsKey = "smart-care.result-parts.v1"
+
+    static func smartCareResultParts(in defaults: UserDefaults) -> Set<SmartCareModule> {
+        Set((defaults.stringArray(forKey: smartCareResultPartsKey) ?? []).compactMap(SmartCareModule.init(rawValue:)))
+    }
+
+    /// D202: Smart Care's junk scan, the Smart Care page's own whatever page is
+    /// on screen (its scopes, its session, its route).
+    func startSmartCareJunkScan() {
+        prepareSmartCareCleanupScopes()
+        startsSmartCareJunkScan = true
+        defer { startsSmartCareJunkScan = false }
+        startScanRespectingAccessGuide()
+    }
+
+    /// D202: Smart Care is about to scan `part`; what the scan leaves in the
+    /// shared stores is Smart Care's.
+    func beginSmartCarePart(_ part: SmartCareModule) {
+        smartCareScanningPart = part
+        markSmartCareResultParts(smartCareResultParts.union([part]))
+    }
+
+    func endSmartCarePart(_ part: SmartCareModule) {
+        if smartCareScanningPart == part { smartCareScanningPart = nil }
+    }
+
+    /// D202: a scan of `part` that Smart Care did not start, a module page's
+    /// own. Its result is the module's; Smart Care, whose cards read the
+    /// shared stores, goes back to its landing. On Smart Care's Review of
+    /// `part` a scan stays Smart Care's: it is that page's refresh, as after
+    /// disabling a login item there.
+    func noteModuleScan(_ part: SmartCareModule) {
+        guard smartCareScanningPart != part, smartCareResultParts.contains(part),
+              navigationState.smartCareReview != part else { return }
+        markSmartCareResultParts(smartCareResultParts.subtracting([part]))
+        onModuleScanReplacedSmartCarePart?(part)
+    }
+
+    /// D202: whether `part`'s result in the shared stores is Smart Care's. A
+    /// mark whose result is gone (cleared since, or not restored at launch)
+    /// counts as none. Without the privacy store a protection mark counts.
+    func smartCareHolds(_ part: SmartCareModule, privacy: BrowserPrivacyStore? = nil) -> Bool {
+        guard smartCareResultParts.contains(part) else { return false }
+        if smartCareScanningPart == part { return true }
+        switch part {
+        case .cleanup: return cleanupScanSession?.smartScanScopes != nil
+        case .protection: return privacy.map { $0.state != .idle } ?? true
+        case .performance: return hasScannedStartupItems || isLoadingStartupItems
+        case .applications: return isLoadingAppUpdates || appUpdatesLastScannedAt != nil
+        case .clutter: return duplicateFilesWorkspace.hasScanned || duplicateFilesWorkspace.isScanning
+        }
+    }
+
+    /// D202: whether a module page shows `part`'s result: its own, or Smart
+    /// Care's while Smart Care's Review is on it.
+    func moduleShowsResult(_ part: SmartCareModule, privacy: BrowserPrivacyStore? = nil) -> Bool {
+        !smartCareHolds(part, privacy: privacy) || navigationState.smartCareReview == part
+    }
+
+    /// D202: Smart Care's Review opens `filter` on Smart Care's result for
+    /// `part`; the sidebar keeps Smart Care until another page is chosen.
+    func showSmartCareReview(_ filter: ReviewFilter, part: SmartCareModule) {
+        showFilter(filter)
+        navigationState.beginSmartCareReview(part)
+    }
+
+    /// D202: Smart Care's Start Over, and Done after its Run, clear what Smart
+    /// Care's scan left in the shared stores, and only that (a module's own
+    /// result is not marked). App update checks are the app's facts; their
+    /// mark only goes.
+    func clearSmartCareResults(privacy: BrowserPrivacyStore?) {
+        let parts = smartCareResultParts.filter { smartCareHolds($0, privacy: privacy) }
+        // A junk part Smart Care stopped or could not finish has no session
+        // but leaves its page; that goes too (a module's own session stays).
+        let junkIsSmartCares = smartCareResultParts.contains(.cleanup)
+            && (cleanupScanSession.map { $0.smartScanScopes != nil } ?? true)
+        markSmartCareResultParts([])
+        if junkIsSmartCares { startOverV2Results() }
+        if parts.contains(.protection), let privacy, privacy.state != .scanning { privacy.clearSession() }
+        if parts.contains(.performance) { startOverStartupItems() }
+        if parts.contains(.clutter) { duplicateFilesWorkspace.startOver() }
+    }
+
+    /// D202: whether the junk flow on screen belongs to a module page's own
+    /// scan, which Smart Care's page does not show. Cleaning, verifying and
+    /// the cleanup's completed page stay everyone's.
+    static func junkFlowIsAModules(state: SmartScanPresentationState, route: ReviewFilter?,
+                                   session: ScanSession?, cancellingCleanup: Bool) -> Bool {
+        switch state {
+        case .preparing, .scanning, .finalizing:
+            return route.map { $0 != .overview } ?? false
+        case .cancelling:
+            return !cancellingCleanup && (route.map { $0 != .overview } ?? false)
+        case .results, .confirming:
+            return session.map { scanRoute(of: $0) != .overview } ?? false
+        case .idle, .cleaning, .verifying, .completed, .cancelled, .failed:
+            return false
+        }
+    }
+
+    private func markSmartCareResultParts(_ parts: Set<SmartCareModule>) {
+        guard parts != smartCareResultParts else { return }
+        smartCareResultParts = parts
+        cleanupPreferences.set(SmartCareModule.allCases.filter(parts.contains).map(\.rawValue),
+                               forKey: Self.smartCareResultPartsKey)
+    }
+
     func toggleSafeCleanupScope(_ scope: SafeCleanupScanScope) {
+        guard !isPreparingScan, !isCleanupExecutionActive else { return }
         if selectedSafeCleanupScopes.contains(scope) {
             selectedSafeCleanupScopes.remove(scope)
         } else {
             selectedSafeCleanupScopes.insert(scope)
         }
+        SafeCleanupScanScope.save(selectedSafeCleanupScopes, in: cleanupPreferences)
     }
 
     func setCleanupCandidates(_ candidateIDs: [ScanCandidateID], selected: Bool) {
@@ -2549,7 +2834,8 @@ final class ScanStore: ObservableObject {
         reviewRiskAcknowledged: Bool = false,
         protectedRiskAcknowledged: Bool = false,
         protectedTrashMoveAcknowledged: Bool = false,
-        permanentDeletionAcknowledged: Bool = false
+        permanentDeletionAcknowledged: Bool = false,
+        scaleAcknowledged: CleanPlanScaleAlert? = nil
     ) {
 #if DEBUG
         guard !isDebugSmartScanSessionFixtureActive else { return }
@@ -2589,6 +2875,15 @@ final class ScanStore: ObservableObject {
             errorMessage = L10n.text(
                 "请先完成清空废纸篓的两项确认。",
                 "Complete both confirmations for emptying the Trash."
+            )
+            return
+        }
+        // D101 G13: an unusually large run is confirmed for the very summary
+        // shown; a check again that changes it needs a new confirmation.
+        guard preflight.scaleAlert == nil || preflight.scaleAlert == scaleAcknowledged else {
+            errorMessage = L10n.text(
+                "本次清理规模异常，请先核对规模摘要并确认。",
+                "This cleanup is unusually large. Review its summary and confirm first."
             )
             return
         }
@@ -2664,7 +2959,10 @@ final class ScanStore: ObservableObject {
             pendingCleanPlan = nil
             cleanupWorkflowState = .completed(reportID: report.id)
             cleanupResultReturn = (report.id, presentationSessionID)
-            cleanupSelection = CleanupSelection()
+            // D214: a run that never started keeps the selection for a retry.
+            if report.startRefusal == nil {
+                cleanupSelection = CleanupSelection()
+            }
             let terminalPresentationState: SmartScanPresentationState
             switch report.outcome {
             case .completed, .partiallyCompleted:
@@ -3083,7 +3381,11 @@ final class ScanStore: ObservableObject {
             scanPresentationTimingTask?.cancel()
             scanPresentationTimingTask = nil
             scanPresentationPhaseStartedAt = Date()
-            cleanupSelection = CleanupSelection()
+            // D214: after a run that never started, the rows come back as they
+            // were selected.
+            if report.startRefusal == nil {
+                cleanupSelection = CleanupSelection()
+            }
             cleanupWorkflowState = .results(sessionID: session.id)
             return
         }
@@ -3105,7 +3407,77 @@ final class ScanStore: ObservableObject {
         lastCleanReport = nil
         cleanupRecoveryReport = nil
         cleanupResultReturn = nil
-        startScanRespectingAccessGuide()
+        if let session = cleanupScanSession, selectedFilter == .green {
+            // D192 / A-R3: a results-page rescan keeps that run's rule scope.
+            beginScan(rescanning: session)
+        } else {
+            startScanRespectingAccessGuide()
+        }
+    }
+
+    /// D141 revision (live check 2026-10-20): "重新开始" on a studio result
+    /// page, before anything is cleaned, returns Smart Scan, Safe Cleanup and
+    /// Developer Files to their start pages. Its confirmation says the results
+    /// are not kept, so the session and what depends on it go, as when a new
+    /// scan replaces them; a receipt stays until dismissed.
+    /// `resetSmartScanPresentation` only leaves a terminal page, so on a
+    /// result page it did nothing.
+    func startOverV2Results() {
+        guard !scanPresentationState.isTerminal else {
+            resetSmartScanPresentation()
+            return
+        }
+        guard canLeaveV2Results else { return }
+        cleanupPlanTask?.cancel()
+        cleanupPlanTask = nil
+        cleanupPlanGeneration = nil
+        cleanupScanSession = nil
+        accessReturnNotice = nil
+        smartScanHealthSnapshot = nil
+        cleanupActiveRuleSet = nil
+        cleanupSelection = CleanupSelection()
+        cleanupDryRunSummary = nil
+        pendingCleanPlan = nil
+        pendingCleanPreflight = nil
+        cleanupResultReturn = nil
+        cleanupWorkflowState = .idle
+        scanPresentationTimingTask?.cancel()
+        scanPresentationTimingTask = nil
+        scanPresentation.reset()
+        scanPresentationRoute = nil
+    }
+
+    /// D141 revision: "重新扫描" on a studio result page scans the shown
+    /// session's scope again on that scope's page, as the classic list's
+    /// refresh button does. `rescanAfterV2Cleanup` only runs after a terminal
+    /// outcome, so on a result page it did nothing.
+    func rescanV2Results() {
+        guard !scanPresentationState.isTerminal else {
+            rescanAfterV2Cleanup()
+            return
+        }
+        guard canLeaveV2Results else { return }
+        if let session = cleanupScanSession {
+            selectedFilter = Self.scanRoute(of: session)
+        }
+        if let session = cleanupScanSession, selectedFilter == .green {
+            // D192 / A-R3: a results-page rescan keeps that run's rule scope.
+            beginScan(rescanning: session)
+        } else {
+            startScanRespectingAccessGuide()
+        }
+    }
+
+    /// Nothing is planned, confirmed or running for the shown results.
+    private var canLeaveV2Results: Bool {
+        guard !isCleanupExecutionActive, !isPreparingScan, canEditV2CleanupSelection else { return false }
+        switch cleanupWorkflowState {
+        case .idle, .results:
+            return true
+        case .buildingPlan, .preflighting, .awaitingConfirmation, .executing,
+             .cancellingExecution, .completed, .failed:
+            return false
+        }
     }
 
     /// The page whose scan produced `session`.
@@ -3120,9 +3492,9 @@ final class ScanStore: ObservableObject {
     /// an empty candidate list. Health-only/review-only scans did not scan junk.
     func cleanupSession(for filter: ReviewFilter) -> ScanSession? {
         guard let session = cleanupScanSession else { return nil }
-        if let scopes = session.smartScanScopes, filter == .green || filter == .devCaches {
-            return scopes.contains(.cleanupCandidates) ? session : nil
-        }
+        // D202: Smart Care's junk scan shows on Smart Care only (it used to
+        // fill the Cleanup and developer pages too).
+        if session.smartScanScopes != nil, filter == .green || filter == .devCaches { return nil }
         if filter == .devCaches {
             // A dedicated Safe Cleanup run only updates its own page.
             guard session.includedRuleIDs == nil else { return nil }
@@ -3223,10 +3595,13 @@ final class ScanStore: ObservableObject {
     }
 
     private func currentV2ExcludedURLs() -> [URL] {
-        CleanupMigration.v2ExcludedURLs()
+        CleanupMigration.v2ExcludedURLs(defaults: appPreferences, userHomeURL: cleanupUserHomeURL)
     }
 
-    private func startCleanupV2Scan() {
+    /// `session`: review A-R3, a rescan takes its coverage (Smart Scan
+    /// scopes, categories and rules) from that finished session, so scan
+    /// preferences changed since neither narrow it nor are changed by it.
+    private func startCleanupV2Scan(rescanning session: ScanSession? = nil) {
         guard !isCleanupExecutionActive else {
             showActionMessage(L10n.text(
                 "当前安全清理尚未结束，暂不能开始新的扫描。",
@@ -3234,18 +3609,20 @@ final class ScanStore: ObservableObject {
             ))
             return
         }
-        guard selectedFilter != .green || !selectedSafeCleanupScopes.isEmpty else {
+        guard session != nil || scanPage != .green || !selectedSafeCleanupScopes.isEmpty else {
             showActionMessage(L10n.text(
                 "请至少选择一个扫描项目。",
                 "Select at least one scan item."
             ))
             return
         }
-        let smartScopes = selectedFilter == .overview ? selectedSmartScanScopes : nil
-        let safeCleanupScopes = selectedFilter == .green ? selectedSafeCleanupScopes : nil
+        let smartScopes = session.map(\.smartScanScopes) ?? (scanPage == .overview ? selectedSmartScanScopes : nil)
+        let safeCleanupScopes = session == nil && scanPage == .green ? selectedSafeCleanupScopes : nil
         let healthOperation = smartScanHealthOperation
         let generation = UUID()
         beginScanPresentation(sessionID: generation)
+        // D202: a junk scan of the Cleanup or developer page is the module's own.
+        if (session.map(Self.scanRoute(of:)) ?? scanPage) != .overview { noteModuleScan(.cleanup) }
         let activeRules: CleanupRuleSet
         do {
             activeRules = try cleanupRuleSetLoader()
@@ -3273,6 +3650,7 @@ final class ScanStore: ObservableObject {
         errorMessage = nil
         actionMessage = nil
         cleanupScanSession = nil
+        accessReturnNotice = nil
         smartScanHealthSnapshot = nil
         cleanupSelection = CleanupSelection()
         cleanupDryRunSummary = nil
@@ -3291,26 +3669,31 @@ final class ScanStore: ObservableObject {
         let operation = cleanupScanOperation
         let selectedRules = smartScopes.map { scopes in
             activeRules.rules.filter { rule in scopes.contains { $0.includes(rule) } }
-        } ?? (selectedFilter == .green
+        } ?? (scanPage == .green
             ? activeRules.rules.filter { rule in
                 safeCleanupScopes?.contains(where: { $0.includes(rule) }) ?? false
             }
             : [])
         let narrowedSmartScan = smartScopes.map { !$0.contains(.cleanupCandidates) || !$0.contains(.filesToReview) } ?? false
+        let pageCategoryIDs: Set<String>? = narrowedSmartScan
+            ? Set(selectedRules.map(\.categoryID))
+            : scanPage == .devCaches
+            ? ["developer"]
+            : scanPage == .green
+                ? Set(selectedRules.map(\.categoryID))
+                : nil
+        let pageRuleIDs: Set<String>? = scanPage == .green || narrowedSmartScan
+            ? Set(selectedRules.map(\.id))
+            : nil
+        // A rescan covers its session's categories and rules; exclusions and
+        // the developer threshold are always the current ones.
         let request = CleanupScanRequest(
             userHomeURL: cleanupUserHomeURL,
-            excludedURLs: currentV2ExcludedURLs(),
+            excludedURLs: appPreferences === UserDefaults.standard ? [] : currentV2ExcludedURLs(),
+            ignoreList: currentIgnoreListSnapshot(),
             developerInactivityThresholdDays: developerInactivityThresholdDays,
-            includedCategoryIDs: narrowedSmartScan
-                ? Set(selectedRules.map(\.categoryID))
-                : selectedFilter == .devCaches
-                ? ["developer"]
-                : selectedFilter == .green
-                    ? Set(selectedRules.map(\.categoryID))
-                    : nil,
-            includedRuleIDs: selectedFilter == .green || narrowedSmartScan
-                ? Set(selectedRules.map(\.id))
-                : nil
+            includedCategoryIDs: session.map(\.includedCategoryIDs) ?? pageCategoryIDs,
+            includedRuleIDs: session.map(\.includedRuleIDs) ?? pageRuleIDs
         )
 
         mainScanTask = Task { @MainActor [weak self] in
@@ -3355,6 +3738,7 @@ final class ScanStore: ObservableObject {
                 }
 
                 cleanupScanSession = session
+                refreshSystemCachesAfterScan(session)
                 smartScanHealthSnapshot = session.smartScanHealthSnapshot
                 cleanupSelection = .defaults(in: session)
                 cleanupWorkflowState = .results(sessionID: session.id)
@@ -3514,6 +3898,242 @@ final class ScanStore: ObservableObject {
         refreshScanReadiness(showCompletionMessage: true)
     }
 
+    /// D100 G5: the app became active again, for example after access was
+    /// granted in System Settings. Only the roots the current scan could not
+    /// read are read again, read-only, and only once each per run; a root
+    /// that became readable is offered for a rescan. Nothing scans here.
+    func checkAccessAfterReturn() {
+        // D106: no protected-folder probe in an acceptance session (see above).
+        guard !AcceptanceLaunch.isActive else { return }
+        // Read the roots first: a readiness refresh counts as preparing a
+        // scan and would hold the check back.
+        offerRescanIfAccessReturned()
+        if scanReadinessSummary?.blockedCount ?? 0 > 0 {
+            refreshScanReadiness()
+        }
+    }
+
+    private func offerRescanIfAccessReturned() {
+        guard accessReturnCheckTask == nil,
+              let session = cleanupScanSession,
+              showsSettledScanResults else { return }
+        let paths = accessReturnTracker.pathsToCheck(in: session.permissions)
+        guard !paths.isEmpty else { return }
+        let probe = readableDirectories
+        let ruleTitles = Dictionary(
+            (cleanupActiveRuleSet?.rules ?? []).map { ($0.id, CleanupRuleCopy.title(for: $0)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        accessReturnCheckTask = Task { [weak self] in
+            let readable = await Task.detached(priority: .utility) { probe(paths) }.value
+            guard let self else { return }
+            accessReturnCheckTask = nil
+            guard cleanupScanSession?.id == session.id else { return }
+            let newlyReadable = accessReturnTracker.recordReadable(readable, among: paths)
+            guard !newlyReadable.isEmpty else { return }
+            accessReturnNotice = ScanAccessReturnNotice(
+                session: session,
+                readablePaths: newlyReadable,
+                ruleTitles: ruleTitles
+            )
+        }
+    }
+
+    /// D104 G5: the user asked to scan the locations that became readable.
+    /// Only the rules whose roots this session could not read, and that are
+    /// readable now, run again, under the same heavy-work lease as any scan;
+    /// what they find joins this session's results (`mergingRescan`) and
+    /// nothing else is read again. When the rules changed since the session,
+    /// or one of them is gone, the session's own coverage runs again instead
+    /// (review A-R3). Starting clears the notice; a stopped or failed scan of
+    /// the new locations leaves the results as they were and offers it again.
+    func rescanAfterAccessReturn() {
+        guard let session = cleanupScanSession, showsSettledScanResults,
+              let notice = accessReturnNotice, notice.sessionID == session.id else { return }
+        selectedFilter = Self.scanRoute(of: session)
+        let ruleIDs = session.deniedRuleIDs(at: notice.paths)
+        guard !ruleIDs.isEmpty,
+              let rules = try? cleanupRuleSetLoader(),
+              rules.rulesVersion == session.rulesVersion,
+              session.rulesProvenance.map({ $0 == rules.effectiveProvenance }) ?? true,
+              ruleIDs.isSubset(of: Set(rules.rules.map(\.id))),
+              CleanupMigration.migrateIfNeeded(activeRules: rules).didComplete else {
+            // Review A-R3: the finished session's own coverage, so the
+            // locations the notice names are scanned even if the scan
+            // preferences changed.
+            beginScan(rescanning: session)
+            return
+        }
+        beginNewLocationScan(of: session, ruleIDs: ruleIDs, rules: rules, notice: notice)
+    }
+
+    /// D104 G5: scans `ruleIDs` as part of `session` and merges what they
+    /// find. The progress page shows while it runs, so the results cannot be
+    /// selected or cleaned in between; a plan or dry run made before is
+    /// dropped because the results change.
+    private func beginNewLocationScan(
+        of session: ScanSession,
+        ruleIDs: Set<String>,
+        rules: CleanupRuleSet,
+        notice: ScanAccessReturnNotice
+    ) {
+#if DEBUG
+        guard !isDebugSmartScanSessionFixtureActive else { return }
+#endif
+        guard !isScanning,
+              !isScanningDuplicates,
+              !largeFilesWorkspace.isScanning,
+              !largeFilesWorkspace.isAnalyzingStorage,
+              !duplicateFilesWorkspace.isScanning,
+              !isCleanupExecutionActive else { return }
+        scanPresentationRoute = activePresentationRoute
+        let generation = UUID()
+        beginScanPresentation(sessionID: generation)
+        mainScanUsesRules = true
+        mainScanGeneration = generation
+        mainScanProgress = .starting(mode: currentScanMode)
+        mainScanLastProgressPublishedAt = nil
+        isScanning = true
+        isFinalizingMainScan = false
+        isCancellingMainScan = false
+        scheduleScanningPresentation(for: generation)
+        errorMessage = nil
+        actionMessage = nil
+        accessReturnNotice = nil
+        cleanupDryRunSummary = nil
+        cleanupPlanTask?.cancel()
+        cleanupPlanTask = nil
+        cleanupPlanGeneration = nil
+        pendingCleanPlan = nil
+        pendingCleanPreflight = nil
+
+        let coordinator = heavyWorkCoordinator
+        let activityStore = heavyWorkActivityStore
+        let operation = cleanupScanOperation
+        // The session's own threshold keeps its rows judged alike; exclusions
+        // are always the current ones.
+        let request = CleanupScanRequest(
+            userHomeURL: cleanupUserHomeURL,
+            excludedURLs: appPreferences === UserDefaults.standard ? [] : currentV2ExcludedURLs(),
+            ignoreList: currentIgnoreListSnapshot(),
+            developerInactivityThresholdDays: session.developerInactivityThresholdDays,
+            includedRuleIDs: ruleIDs,
+            sessionID: session.id
+        )
+
+        mainScanTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if mainScanGeneration == generation {
+                    mainScanGeneration = nil
+                    mainScanTask = nil
+                    isScanning = false
+                    isFinalizingMainScan = false
+                    isCancellingMainScan = false
+                }
+            }
+            do {
+                let rescan = try await coordinator.withLease(owner: .mainScan) { _ in
+                    await activityStore.refresh()
+                    let publish: CleanupScanProgressHandler = { [weak self] progress in
+                        await MainActor.run {
+                            guard let self,
+                                  self.mainScanGeneration == generation else { return }
+                            self.publishMainScanProgress(
+                                DiskScanProgress(cleanupProgress: progress),
+                                force: progress.phase != .enumerating
+                            )
+                        }
+                    }
+                    return try await operation(request, publish)
+                }
+                await activityStore.refresh()
+                guard mainScanGeneration == generation else { return }
+                guard rescan.outcome != .cancelled,
+                      let current = cleanupScanSession, current.id == session.id else {
+                    returnToUnchangedResults(.cancelled, matching: generation, offering: notice)
+                    showActionMessage(L10n.text(
+                        "已停止扫描新位置，结果保持不变，未改动任何文件",
+                        "Scanning the new locations stopped; the results are unchanged and no files changed"
+                    ))
+                    return
+                }
+                guard let merged = current.mergingRescan(rescan, ofRules: ruleIDs) else {
+                    returnToUnchangedResults(.failed, matching: generation, offering: notice)
+                    errorMessage = L10n.text(
+                        "没能把新位置加入本次结果，结果保持不变，未改动任何文件；可以再试一次",
+                        "The new locations could not be added to these results; they are unchanged and no files changed. Try again."
+                    )
+                    return
+                }
+                isFinalizingMainScan = true
+                // A plan checks its rows against the rules they were found
+                // with; these are the session's (same version and fingerprint).
+                cleanupActiveRuleSet = rules
+                cleanupSelection = cleanupSelection.addingDefaults(forRowsAddedTo: current, in: merged)
+                cleanupScanSession = merged
+                cleanupWorkflowState = .results(sessionID: merged.id)
+                finishScanPresentation(with: .results, matching: generation)
+                let stillDenied = merged.permissions.contains {
+                    ruleIDs.contains($0.ruleID) && $0.status == .permissionDenied
+                }
+                showActionMessage(stillDenied
+                    ? L10n.text(
+                        "已扫描新可读的位置并加入本次结果；仍有位置无法读取，详见扫描范围",
+                        "The newly readable locations were scanned and added; some still cannot be read, see the scan coverage"
+                    )
+                    : L10n.text(
+                        "已扫描新可读的位置并加入本次结果；其他结果保持不变",
+                        "The newly readable locations were scanned and added; the other results are unchanged"
+                    ))
+            } catch {
+                guard mainScanGeneration == generation else {
+                    await activityStore.refresh()
+                    return
+                }
+                if error is CancellationError {
+                    returnToUnchangedResults(.cancelled, matching: generation, offering: notice)
+                    showActionMessage(L10n.text(
+                        "已停止扫描新位置，结果保持不变，未改动任何文件",
+                        "Scanning the new locations stopped; the results are unchanged and no files changed"
+                    ))
+                } else {
+                    returnToUnchangedResults(.failed, matching: generation, offering: notice)
+                    errorMessage = error.localizedDescription
+                }
+                await activityStore.refresh()
+            }
+        }
+    }
+
+    /// D104 G5: the scan of the new locations stopped or failed. The results
+    /// it would have added to are shown again unchanged, with the notice.
+    private func returnToUnchangedResults(
+        _ terminalState: SmartScanPresentationState,
+        matching generation: UUID,
+        offering notice: ScanAccessReturnNotice
+    ) {
+        finishScanPresentation(with: terminalState, matching: generation)
+        if scanPresentation.returnToResults(matching: generation) {
+            scanPresentationPhaseStartedAt = Date()
+        }
+        if cleanupScanSession?.id == notice.sessionID {
+            accessReturnNotice = notice
+        }
+    }
+
+    /// A finished scan's results are on screen (they are also kept after a
+    /// cancel or a cleanup) and nothing scans or cleans.
+    private var showsSettledScanResults: Bool {
+        (scanPresentationState == .results || scanPresentationState.isTerminal)
+            && !isPreparingScan
+            && !isCleanupExecutionActive
+    }
+
+    func dismissAccessReturnNotice() {
+        accessReturnNotice = nil
+    }
+
     func items(for filter: ReviewFilter) -> [StorageItem] {
         if filter == .duplicates,
            duplicateFilesWorkspace.hasScanned || duplicateFilesWorkspace.isScanning || !duplicateFilesWorkspace.items.isEmpty {
@@ -3554,20 +4174,18 @@ final class ScanStore: ObservableObject {
     func requestEmptyTrash() {
         guard canRequestEmptyTrash else { return }
         actionMessage = nil
-        pendingEmptyTrashSummary = nil
+        pendingEmptyTrash = nil
         isCheckingTrashSummary = true
+        let service = scanHeavyWorkService
 
         Task {
             do {
-                let summary = try await Task.detached(priority: .userInitiated) {
-                    try CleanupService.trashSummary()
-                }.value
-
-                if summary.isEmpty {
+                // D101 L5: the confirmation and the deletion use this one frozen list.
+                if let frozen = try await service.freezeTrash(), !frozen.entries.isEmpty {
+                    pendingEmptyTrash = frozen
+                } else {
                     removeTrashItemsFromCurrentResult()
                     showActionMessage(L10n.text("废纸篓已经是空的", "Trash is already empty"))
-                } else {
-                    pendingEmptyTrashSummary = summary
                 }
             } catch {
                 errorMessage = error.localizedDescription
@@ -3578,7 +4196,7 @@ final class ScanStore: ObservableObject {
     }
 
     func cancelEmptyTrash() {
-        pendingEmptyTrashSummary = nil
+        pendingEmptyTrash = nil
     }
 
     func refreshScanHistory() {
@@ -3751,11 +4369,11 @@ final class ScanStore: ObservableObject {
                 )
                 if outcome.cancelled {
                     errorMessage = L10n.text(
-                        "清理已停止。已移动的路径保留恢复回执，另有 \(outcome.notProcessedPaths.count) 条路径未执行。",
-                        "Cleanup stopped. Moved paths retain recovery receipts; \(outcome.notProcessedPaths.count) paths were not executed.")
+                        "清理已停止。已移动的路径保留恢复回执，另有 \(ByteFormat.count(outcome.notProcessedPaths.count)) 条路径未执行。",
+                        "Cleanup stopped. Moved paths retain recovery receipts; \(ByteFormat.count(outcome.notProcessedPaths.count)) paths were not executed.")
                 } else if outcome.failedTitles.isEmpty {
                     showActionMessage(L10n.text(
-                        "\(movedCount) 个可安全清理项目已移到废纸篓，清空后才释放空间",
+                        "\(ByteFormat.count(movedCount)) 个可安全清理项目已移到废纸篓，清空后才释放空间",
                         "\(L10n.items(movedCount)) marked safe to clean moved to Trash; space is freed after Trash is emptied"
                     ))
                 } else {
@@ -3763,7 +4381,7 @@ final class ScanStore: ObservableObject {
                         separator: L10n.text("、", ", ")
                     )
                     errorMessage = L10n.text(
-                        "\(movedCount) 项已移到废纸篓，\(outcome.failedTitles.count) 项失败：\(titleList)。清空后才释放空间",
+                        "\(ByteFormat.count(movedCount)) 项已移到废纸篓，\(ByteFormat.count(outcome.failedTitles.count)) 项失败：\(titleList)。清空后才释放空间",
                         "\(L10n.items(movedCount)) moved to Trash; \(L10n.items(outcome.failedTitles.count)) failed: \(titleList). Space is freed after Trash is emptied"
                     )
                 }
@@ -3788,9 +4406,17 @@ final class ScanStore: ObservableObject {
         cleanupOperationSnapshot = nil
     }
 
-    func confirmEmptyTrash() {
-        guard pendingEmptyTrashSummary != nil, canRequestEmptyTrash else { return }
-        pendingEmptyTrashSummary = nil
+    /// D101 L5: D23's two confirmations. Deletes only the entries frozen when
+    /// the confirmation opened.
+    func confirmEmptyTrash(
+        acknowledgesPermanentDeletion: Bool,
+        acknowledgesTrashContentsReviewed: Bool
+    ) {
+        guard let frozen = pendingEmptyTrash,
+              acknowledgesPermanentDeletion,
+              acknowledgesTrashContentsReviewed,
+              canRequestEmptyTrash else { return }
+        pendingEmptyTrash = nil
         isEmptyingTrash = true
         errorMessage = nil
         let generation = UUID()
@@ -3802,24 +4428,20 @@ final class ScanStore: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let summary = try await coordinator.withLease(owner: .emptyTrash) { lease in
+                let result = try await coordinator.withLease(owner: .emptyTrash) { lease in
                     await activityStore.refresh()
-                    return try await service.emptyTrash(lease: lease)
+                    return try await service.emptyTrash(frozen, lease: lease)
                 }
                 await activityStore.refresh()
                 guard emptyTrashGeneration == generation else { return }
 
-                removeTrashItemsFromCurrentResult()
+                removeTrashItemsFromCurrentResult(deleted: result.deletedNames, in: frozen.trashURL)
 
-                if summary.isEmpty {
-                    showActionMessage(L10n.text("废纸篓已经是空的", "Trash is already empty"))
+                let message = Self.emptyTrashResultMessage(result)
+                if result.failedCount > 0 {
+                    errorMessage = message
                 } else {
-                    showActionMessage(
-                        L10n.text(
-                            "已清空废纸篓：\(summary.itemCount) 项 · \(ByteFormat.string(summary.totalBytes))",
-                            "Emptied Trash: \(L10n.items(summary.itemCount)) · \(ByteFormat.string(summary.totalBytes))"
-                        )
-                    )
+                    showActionMessage(message)
                 }
             } catch {
                 guard emptyTrashGeneration == generation else {
@@ -3834,6 +4456,27 @@ final class ScanStore: ObservableObject {
             emptyTrashGeneration = nil
             isEmptyingTrash = false
         }
+    }
+
+    /// D101 L5: entries kept or not deleted are named in the result.
+    nonisolated static func emptyTrashResultMessage(_ result: FrozenTrashEmptyResult) -> String {
+        var parts = [L10n.text(
+            "已清空废纸篓：\(ByteFormat.count(result.deletedCount)) 项 · \(ByteFormat.storageString(result.deletedBytes))",
+            "Emptied Trash: \(L10n.items(result.deletedCount)) · \(ByteFormat.storageString(result.deletedBytes))"
+        )]
+        if result.skippedCount > 0 {
+            parts.append(L10n.text(
+                "\(ByteFormat.count(result.skippedCount)) 项在确认后有变化，已保留",
+                "\(L10n.items(result.skippedCount)) changed after confirmation and were kept"
+            ))
+        }
+        if result.failedCount > 0 {
+            parts.append(L10n.text(
+                "\(ByteFormat.count(result.failedCount)) 项未能删除",
+                "\(L10n.items(result.failedCount)) could not be deleted"
+            ))
+        }
+        return parts.joined(separator: L10n.text("；", "; "))
     }
 
     func reveal(_ path: String) {
@@ -3861,11 +4504,21 @@ final class ScanStore: ObservableObject {
         showActionMessage(L10n.text("已打开登录项设置；仍需在系统设置里手动确认更改", "Login Items settings opened; changes still need manual confirmation in System Settings"))
     }
 
+    /// Report §4 item 12 (CleanMyMac's Start Over): Performance goes back to
+    /// its landing page. The items read stay, so the landing page can say how
+    /// many were read last time; Scan there reads them again. Nothing while
+    /// they are read or a change runs.
+    func startOverStartupItems() {
+        guard canRefreshStartupItems else { return }
+        hasScannedStartupItems = false
+    }
+
     func refreshStartupItems(
         priority: TaskPriority = .userInitiated,
         includeBackgroundTaskDiagnostic: Bool = false
     ) {
         guard canRefreshStartupItems else { return }
+        noteModuleScan(.performance)
         startupOperationPreviewTask?.cancel()
         startupOperationPreviewTask = nil
         startupOperationPreviewGeneration = nil
@@ -4091,7 +4744,7 @@ final class ScanStore: ObservableObject {
     func revealStartupCandidate(_ candidate: StartupItemsDomain.Candidate) {
         guard let url = candidate.plistURL ?? candidate.executableURL ?? candidate.applicationURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
-        showActionMessage(L10n.text("已在 Finder 中显示，未修改启动项", "Shown in Finder; no startup item was changed"))
+        showActionMessage(L10n.text("已在访达中显示，未修改启动项", "Shown in Finder; no startup item was changed"))
     }
 
     func openParentApplication(for candidate: StartupItemsDomain.Candidate) {
@@ -4164,7 +4817,14 @@ final class ScanStore: ObservableObject {
             }.value
             guard let self else { return }
             menuBarMemoryProcessTask = nil
-            guard !Task.isCancelled, generation == menuBarMemoryProcessGeneration else { return }
+            guard !Task.isCancelled, generation == menuBarMemoryProcessGeneration else {
+                // D127: the memory page reopened while this read ran; its
+                // immediate read waited for this one to exit.
+                if resident, generation != menuBarMemoryProcessGeneration, menuBarProcessDemand == .memory {
+                    refreshMenuBarResidentSamples()
+                }
+                return
+            }
             guard resident ? menuBarResidentContext?.plan?.cadence.suspended == false : canAdoptLiveMemoryProcesses,
                   (resident ? menuBarPreparedMemoryAppsDate : memorySnapshot?.generatedAt)
                     .map({ snapshot.generatedAt >= $0 }) ?? true else { return }
@@ -4203,10 +4863,26 @@ final class ScanStore: ObservableObject {
         if menuBarResidentContext != nil {
             if menuBarProcessDemand == .power, resolved != .power { systemEnergyAccumulator.endAttributedObservation() }
             menuBarProcessDemand = resolved
+            // D127 (iStat `stopItemsForKey:` then `startItemsForKey:`): leaving a
+            // page stops its reads and drops its rates, which described an
+            // interval that is over; the next page starts from a new baseline
+            // at once. A running physical read keeps the gate (handle kept);
+            // its completion starts the new read. Pausing keeps what is shown.
+            menuBarVisibleProcessGeneration &+= 1
+            menuBarVisibleProcessTask?.cancel()
+            cancelMenuBarMemoryProcessRefresh()
+            menuBarResidentProcessStartedAt = nil
+            menuBarResidentMemoryStartedAt = nil
+            menuBarResidentFirstAttemptAt = nil
+            menuBarResidentProcessBaselineReset = true
+            // D171: assigning nil to nil would still publish (@Published), so
+            // a page change with nothing shown and the same pending state
+            // published once per change (MenuBarPublishLoopTests).
+            if !isMenuBarRefreshPaused, menuBarPreparedProcesses != nil { menuBarPreparedProcesses = nil }
             setMenuBarProcessSampleState(
-                pending: [.processor, .disk, .power].contains(resolved)
-                    && menuBarPreparedProcesses == nil && !isMenuBarProcessSampleUnavailable,
-                unavailable: isMenuBarProcessSampleUnavailable)
+                pending: [.processor, .disk, .power].contains(resolved) && menuBarPreparedProcesses == nil,
+                unavailable: false)
+            if [.processor, .disk, .power, .memory].contains(resolved) { refreshMenuBarResidentSamples() }
             return
         }
         menuBarVisibleProcessGeneration &+= 1
@@ -4234,6 +4910,8 @@ final class ScanStore: ObservableObject {
         guard [.processor, .disk, .power, .memory].contains(resolved) else { return }
         let generation = menuBarVisibleProcessGeneration
         let sampler = menuBarContinuousProcessSampler
+        // D171: a page with nothing kept lists its first read at once.
+        let listsFirstRead = menuBarPreparedProcesses == nil && MenuBarProcessSamplingDemand.listsFirstRead(resolved)
         // Review P2-8: "正在采样…" lasts until the first measurement or the
         // timeout; then the page says "未测量" and why. Sampling continues.
         if isMenuBarProcessSamplePending {
@@ -4249,8 +4927,9 @@ final class ScanStore: ObservableObject {
         menuBarVisibleProcessTask = Task { @MainActor [weak self] in
             guard !Task.isCancelled else { return }
             await sampler.reset()
-            // The first read is the baseline; the first measurement follows
-            // after a short interval, later ones at the regular cadence.
+            // The first read is the baseline (D171: listed at once on the CPU
+            // and disk pages); the first measurement follows after a short
+            // interval, later ones at the regular cadence.
             var isBaseline = resolved != .memory
             while !Task.isCancelled {
                 let started = ContinuousClock.now
@@ -4260,7 +4939,8 @@ final class ScanStore: ObservableObject {
                     refreshMenuBarMemoryProcesses()
                 } else {
                     let worker = Task.detached(priority: .utility) {
-                        guard let snapshot = await sampler.sample(), !Task.isCancelled else { return Optional<MenuBarPreparedProcesses>.none }
+                        guard let snapshot = await sampler.sample(listingFirstRead: listsFirstRead),
+                              !Task.isCancelled else { return Optional<MenuBarPreparedProcesses>.none }
                         return MenuBarPreparedProcesses(snapshot: snapshot)
                     }
                     let prepared = await withTaskCancellationHandler {
@@ -4268,15 +4948,7 @@ final class ScanStore: ObservableObject {
                     } onCancel: { worker.cancel() }
                     guard !Task.isCancelled, !isMenuBarRefreshPaused,
                           menuBarVisibleProcessGeneration == generation else { return }
-                    if let prepared {
-                        menuBarPreparedProcesses = prepared
-                        setMenuBarProcessSampleState(pending: false, unavailable: false)
-                        if resolved == .power {
-                            systemEnergyAccumulator.recordAttributed(prepared.snapshot,
-                                powerSource: menuBarAuxiliaryMonitorState.batterySnapshot?.powerSource ?? .unknown,
-                                continuous: true)
-                        }
-                    }
+                    if let prepared { adoptMenuBarProcesses(prepared) }
                 }
                 let interval = isBaseline
                     ? MenuBarPerformancePolicy.firstProcessSampleInterval
@@ -4301,6 +4973,39 @@ final class ScanStore: ObservableObject {
         }
     }
 
+    /// Shows a process read of the current page (both drivers).
+    private func adoptMenuBarProcesses(_ prepared: MenuBarPreparedProcesses) {
+        menuBarPreparedProcesses = prepared
+        setMenuBarProcessSampleState(pending: false, unavailable: false)
+        if menuBarProcessDemand == .power {
+            systemEnergyAccumulator.recordAttributed(prepared.snapshot,
+                powerSource: menuBarAuxiliaryMonitorState.batterySnapshot?.powerSource ?? .unknown,
+                continuous: true)
+        }
+    }
+
+    /// D171: the resident first read, unless a page change or a suspension
+    /// superseded it while it ran.
+    private func adoptFirstMenuBarProcessRead(_ prepared: MenuBarPreparedProcesses, generation: Int) {
+        guard !Task.isCancelled, generation == menuBarVisibleProcessGeneration,
+              menuBarResidentContext?.plan?.cadence.suspended == false else { return }
+        adoptMenuBarProcesses(prepared)
+    }
+
+    /// One counter-frame read off the main actor; cancelling the caller
+    /// cancels it, and the caller's handle stays until the read exits.
+    nonisolated private static func readMenuBarProcesses(
+        _ sampler: MenuBarProcessSampler, resettingBaseline: Bool, listingFirstRead: Bool
+    ) async -> MenuBarPreparedProcesses? {
+        let worker = Task.detached(priority: .utility) {
+            if resettingBaseline { await sampler.reset() }
+            return await sampler.sample(listingFirstRead: listingFirstRead).flatMap { snapshot in
+                MenuBarPreparedProcesses.fitsCache(snapshot) ? MenuBarPreparedProcesses(snapshot: snapshot) : nil
+            }
+        }
+        return await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+    }
+
     private var canAdoptLiveMemoryProcesses: Bool {
         !isMenuBarRefreshPaused && canRefreshMemory
             && selectedMemoryProcessIDs.isEmpty && pendingMemoryProcess == nil
@@ -4313,9 +5018,12 @@ final class ScanStore: ObservableObject {
         menuBarMemoryProcessTask?.cancel()
     }
 
+    /// D144 "释放内存": the bounded push (`MemoryReclaimer`) under the
+    /// memory lease. `cancelMemoryOptimization()` stops it between steps.
     func optimizeMemory() {
         guard canOptimizeMemory else { return }
         isOptimizingMemory = true
+        isReclaimingMemory = true
         errorMessage = nil
         let generation = UUID()
         memoryOptimizationGeneration = generation
@@ -4323,7 +5031,7 @@ final class ScanStore: ObservableObject {
         let service = scanHeavyWorkService
         let activityStore = heavyWorkActivityStore
 
-        Task { @MainActor [weak self] in
+        memoryOptimizationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let result = try await coordinator.withLease(owner: .memoryOptimization) { lease in
@@ -4335,7 +5043,8 @@ final class ScanStore: ObservableObject {
 
                 adoptMenuBarMemorySnapshot(result.snapshot, as: .primaryAndMenuFromRefresh)
                 memoryOptimizationResult = result
-                showActionMessage(memoryOptimizationMessage(for: result.status))
+                showActionMessage(result.reclaim.map(Self.memoryReclaimMessage)
+                    ?? memoryOptimizationMessage(for: result.status))
             } catch {
                 guard memoryOptimizationGeneration == generation else {
                     await activityStore.refresh()
@@ -4348,7 +5057,26 @@ final class ScanStore: ObservableObject {
             guard memoryOptimizationGeneration == generation else { return }
             memoryOptimizationGeneration = nil
             isOptimizingMemory = false
+            isReclaimingMemory = false
             refreshMenuBarMonitor()
+        }
+    }
+
+    /// One line for the push, from what was measured (never "已释放 N" for
+    /// cache macOS already counted as available).
+    nonisolated static func memoryReclaimMessage(_ outcome: MemoryReclaimer.Outcome) -> String {
+        switch outcome.stopReason {
+        case .nothingToReclaim:
+            return L10n.text("可收回的文件缓存不多，无需释放", "Little file cache to hand back; nothing was done")
+        case .pressureAlreadyRaised:
+            return L10n.text("内存压力已升高，请退出占用多的应用", "Memory pressure is raised; quit apps that use a lot of memory")
+        case .cancelled:
+            return L10n.text("已取消释放内存，占用的内存已归还", "Freeing up memory was cancelled; memory was returned")
+        default:
+            guard let gained = outcome.idleDeltaBytes, gained > 0 else {
+                return L10n.text("已请求系统收回缓存，空闲内存没有明显变化", "Asked the system to hand back cache; idle memory did not change noticeably")
+            }
+            return L10n.text("空闲内存增加 \(ByteFormat.memoryString(gained))", "Idle memory up by \(ByteFormat.memoryString(gained))")
         }
     }
 
@@ -4882,6 +5610,7 @@ final class ScanStore: ObservableObject {
         memoryCoordinator.cancel()
         memoryOptimizationState = memoryCoordinator.state
         isOptimizingMemory = false
+        isReclaimingMemory = false
     }
 
     func prepareMemoryOptimizationForTermination() async {
@@ -4945,6 +5674,15 @@ final class ScanStore: ObservableObject {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Report §4 item 12 (CleanMyMac's Start Over): Applications goes back to
+    /// its landing page; Scan there reads the apps again. Nothing while they
+    /// are read, an uninstall runs or related files are being cleaned. (The
+    /// manager clears its own ticks: `ApplicationsManagerModel.startOver`.)
+    func startOverInstalledApps() {
+        guard canRefreshInstalledApps else { return }
+        hasScannedInstalledApps = false
     }
 
     func refreshInstalledApps(priority: TaskPriority = .userInitiated) {
@@ -5204,14 +5942,14 @@ final class ScanStore: ObservableObject {
                 ))
             } else if !result.movedRelatedItems.isEmpty {
                 showActionMessage(L10n.text(
-                    "已将 \(result.movedRelatedItems.count) 个关联文件移到废纸篓，共 \(ByteFormat.string(result.movedRelatedBytes))",
-                    "\(result.movedRelatedItems.count) associated files moved to Trash, \(ByteFormat.string(result.movedRelatedBytes)) total"
+                    "已将 \(ByteFormat.count(result.movedRelatedItems.count)) 个关联文件移到废纸篓，共 \(ByteFormat.storageString(result.movedRelatedBytes))",
+                    "\(ByteFormat.count(result.movedRelatedItems.count)) associated files moved to Trash, \(ByteFormat.storageString(result.movedRelatedBytes)) total"
                 ))
             }
             if result.unresolvedRelatedCount > 0 && errorMessage == nil {
                 errorMessage = L10n.text(
-                    "有 \(result.unresolvedRelatedCount) 个关联文件未能处理",
-                    "\(result.unresolvedRelatedCount) associated files could not be processed"
+                    "有 \(ByteFormat.count(result.unresolvedRelatedCount)) 个关联文件未能处理",
+                    "\(ByteFormat.count(result.unresolvedRelatedCount)) associated files could not be processed"
                 )
             }
             isCleaningRelatedAppFiles = false
@@ -5228,15 +5966,15 @@ final class ScanStore: ObservableObject {
         }
 
         let base = L10n.text(
-            "已将 \(app.name) 和 \(result.movedRelatedItems.count) 个关联文件移到废纸篓，共 \(ByteFormat.string(result.movedBytes))；清空后才释放空间",
-            "\(app.name) and \(result.movedRelatedItems.count) associated files moved to Trash, \(ByteFormat.string(result.movedBytes)) total; space is freed after Trash is emptied"
+            "已将 \(app.name) 和 \(ByteFormat.count(result.movedRelatedItems.count)) 个关联文件移到废纸篓，共 \(ByteFormat.storageString(result.movedBytes))；清空后才释放空间",
+            "\(app.name) and \(ByteFormat.count(result.movedRelatedItems.count)) associated files moved to Trash, \(ByteFormat.storageString(result.movedBytes)) total; space is freed after Trash is emptied"
         )
 
         guard result.unresolvedRelatedCount > 0 else { return base }
 
         return L10n.text(
-            "\(base)。\(result.unresolvedRelatedCount) 个关联文件未处理，可在详情里复核。",
-            "\(base). \(result.unresolvedRelatedCount) associated files were not processed; review details if needed."
+            "\(base)。\(ByteFormat.count(result.unresolvedRelatedCount)) 个关联文件未处理，可在详情里复核。",
+            "\(base). \(ByteFormat.count(result.unresolvedRelatedCount)) associated files were not processed; review details if needed."
         )
     }
 
@@ -5479,6 +6217,27 @@ final class ScanStore: ObservableObject {
     }
 
     func refreshAppUpdates() {
+        // D106: the scan runs brew, mas and msupdate, contacts update servers
+        // and can resume a saved queue that relaunches or installs apps.
+        guard !AcceptanceLaunch.isActive else {
+            showActionMessage(L10n.text("验收模式不检查应用更新。", "Acceptance mode does not check for app updates."))
+            return
+        }
+        // D202: the updater's own check; what it finds is not Smart Care's.
+        if appUpdateScanOperation == nil, canRefreshAppUpdates { noteModuleScan(.applications) }
+        runAppUpdateCheck(resumesSavedQueue: true)
+    }
+
+    /// D168: Smart Care's check only reads. It neither resumes a saved update
+    /// queue nor the website update assistant, nor runs the automatic-update
+    /// policy; the updater's own check (above) still does all three.
+    func checkAppUpdatesForSmartCare() {
+        // D106: an acceptance session checks nothing (see above).
+        guard !AcceptanceLaunch.isActive else { return }
+        runAppUpdateCheck(resumesSavedQueue: false)
+    }
+
+    private func runAppUpdateCheck(resumesSavedQueue: Bool) {
         guard appUpdateScanOperation == nil, canRefreshAppUpdates else { return }
         let isPostUpdateRefresh = appUpdatesAutoRescanPending
         pendingOneClickUpdatePlan = nil
@@ -5524,6 +6283,8 @@ final class ScanStore: ObservableObject {
         if !isPostUpdateRefresh {
             appUpdates.removeAll()
         }
+        let ignoreSnapshot = currentIgnoreListSnapshot()
+        let ignoredVersionSnapshot = appPreferences === UserDefaults.standard ? [:] : AppUpdateIgnoreService.ignoredVersions(defaults: appPreferences)
         let sourceConfiguration = AppUpdateSourcePreferences.configuration(defaults: appPreferences)
         let preferences = ApplicationUpdatePreferences.snapshot(defaults: appPreferences)
         let additionalDirectoryBookmarks = FolderAccessGrantService.savedAccessBookmarkData(defaults: appPreferences)
@@ -5597,7 +6358,7 @@ final class ScanStore: ObservableObject {
                         onApplications: { [weak self] applications in
                             await MainActor.run { [weak self] in
                                 guard let self, self.appUpdateScanGeneration == generation else { return }
-                                self.upsertIncrementalAppUpdates(applications)
+                                self.upsertIncrementalAppUpdates(ignoreSnapshot.applying(to: applications))
                             }
                         }
                     )
@@ -5629,7 +6390,8 @@ final class ScanStore: ObservableObject {
                             "This update source is disabled in Settings."
                         )
                     }
-                    if AppUpdateIgnoreService.isIgnored(item, defaults: appPreferences) {
+                    if ignoreSnapshot.ignoresApplication(bundleIdentifier: item.bundleIdentifier, path: item.path, category: .updates, latestVersion: item.latestVersion)
+                        || (item.latestVersion.map { ignoredVersionSnapshot[AppUpdateIgnoreService.identifier(for: item)] == $0.trimmed } ?? false) {
                         item.updateStatus = .ignored
                         item.canAutomaticallyUpdate = false
                         item.requiresUserInteraction = true
@@ -5649,11 +6411,13 @@ final class ScanStore: ObservableObject {
                         token: presentationToken
                     )
                 }
-                await restoreApplicationUpdateQueueIfNeeded(applications: apps)
-                await restoreWebsiteUpdateAssistantIfNeeded(applications: apps)
+                if resumesSavedQueue {
+                    await restoreApplicationUpdateQueueIfNeeded(applications: apps)
+                    await restoreWebsiteUpdateAssistantIfNeeded(applications: apps)
+                }
                 if isPostUpdateRefresh {
                     finishPendingAppUpdateReportAfterRefresh()
-                } else if !isRunningOneClickUpdate {
+                } else if !isRunningOneClickUpdate, resumesSavedQueue {
                     evaluateAutomaticUpdatePolicyAfterScanIfNeeded()
                 }
             } catch is CancellationError {
@@ -5731,6 +6495,7 @@ final class ScanStore: ObservableObject {
     }
 
     func prepareApplicationUpdatesOnLaunch() {
+        guard !AcceptanceLaunch.isActive else { return }
         guard ApplicationUpdateCheckSchedule.shouldCheck(preferences: ApplicationUpdatePreferences.snapshot(defaults: appPreferences), defaults: appPreferences), canRefreshAppUpdates else { return }
         pendingAutomaticUpdateEvaluation = true
         refreshAppUpdates()
@@ -5783,7 +6548,7 @@ final class ScanStore: ObservableObject {
         case .readingMetadata:
             return AppUpdateProgress(
                 title: L10n.text("正在读取应用信息", "Reading application metadata"),
-                detail: "\(progress.scannedCount) / \(progress.discoveredCount)",
+                detail: "\(ByteFormat.count(progress.scannedCount)) / \(ByteFormat.count(progress.discoveredCount))",
                 fraction: 0.08 + ratio * 0.42,
                 systemImage: "app.badge.checkmark"
             )
@@ -5811,7 +6576,7 @@ final class ScanStore: ObservableObject {
         case .identifyingSources:
             return AppUpdateProgress(
                 title: L10n.text("正在识别更新来源", "Identifying update sources"),
-                detail: "\(progress.scannedCount) / \(progress.discoveredCount)",
+                detail: "\(ByteFormat.count(progress.scannedCount)) / \(ByteFormat.count(progress.discoveredCount))",
                 fraction: 0.64 + ratio * 0.34,
                 systemImage: "checkmark.shield"
             )
@@ -5989,6 +6754,113 @@ final class ScanStore: ObservableObject {
             }
             return true
         }
+    }
+
+    func currentIgnoreListSnapshot() -> IgnoreListSnapshot {
+        ignoreListStore?.snapshot() ?? .empty
+    }
+
+    // MARK: D207 ignore list in the managers (CleanMyMac: Add to Ignore List · Put Back)
+
+    /// D207: each candidate's ignore-list category, as the scan files its rule
+    /// (`IgnoreCategory.cleanup(for:)`).
+    func cleanupIgnoreCategories(in session: ScanSession) -> [ScanCandidateID: IgnoreCategory] {
+        var categories: [ScanCandidateID: IgnoreCategory] = [:]
+        for category in session.categories {
+            for subcategory in category.subcategories {
+                for candidate in subcategory.candidates {
+                    categories[candidate.id] = .cleanup(for: CareJunkGroup.group(categoryID: category.id, candidates: [candidate]))
+                }
+            }
+        }
+        return categories
+    }
+
+    var canIgnoreCleanupCandidates: Bool { canEditV2CleanupSelection && cleanupScanSession != nil }
+
+    /// D207 (CleanMyMac's Add to Ignore List in the Cleanup Manager): the
+    /// candidates go on the ignore list under their rule's junk category and
+    /// leave this result as a scan leaves out what the list covers — out of
+    /// the groups, the totals and the selection, among the ignored. A whole
+    /// folder holding what the list now covers leaves too. Put Back returns
+    /// them, selected as they were. Not while a cleanup is planned or runs.
+    func ignoreCleanupCandidates(_ ids: [ScanCandidateID]) {
+        guard canIgnoreCleanupCandidates, let session = cleanupScanSession else { return }
+        let requested = Set(ids)
+        let categories = cleanupIgnoreCategories(in: session)
+        let chosen = session.candidates.filter { requested.contains($0.id) }
+        guard !chosen.isEmpty, let snapshot = ignoreFeedback.add(chosen.map { candidate in
+            IgnoreListFeedback.Item(target: IgnoreListTarget(path: candidate.snapshot.standardizedPath),
+                                    category: categories[candidate.id] ?? .systemJunk,
+                                    name: CareStudioCandidateRow.title(for: candidate))
+        }) else { return }
+        let covered = Set(session.candidates.filter {
+            snapshot.ignores(path: $0.snapshot.standardizedPath, category: categories[$0.id] ?? .systemJunk,
+                             includingDescendants: true)
+        }.map(\.id))
+        guard !covered.isEmpty else { return }
+        let wasSelected = cleanupSelection.selectedCandidateIDs.intersection(covered)
+        setCleanupCandidates(Array(covered), selected: false)
+        let (remaining, held) = session.holdingBack(covered)
+        cleanupScanSession = remaining
+        ignoreFeedback.onPutBack { [weak self] snapshot in
+            self?.putBackCleanupCandidates(held, categories: categories, selected: wasSelected, snapshot: snapshot)
+        }
+    }
+
+    /// Put Back: what the list no longer covers returns to this session.
+    private func putBackCleanupCandidates(_ held: [HeldCleanupCandidate], categories: [ScanCandidateID: IgnoreCategory],
+                                          selected: Set<ScanCandidateID>, snapshot: IgnoreListSnapshot) {
+        guard canIgnoreCleanupCandidates, let session = cleanupScanSession else { return }
+        let returning = held.filter {
+            !snapshot.ignores(path: $0.candidate.snapshot.standardizedPath, category: categories[$0.candidate.id] ?? .systemJunk,
+                              includingDescendants: true)
+        }
+        cleanupScanSession = session.puttingBack(returning)
+        setCleanupCandidates(Array(selected.intersection(returning.map(\.candidate.id))), selected: true)
+    }
+
+    func canAddAppUpdateToIgnoreList(_ app: AppUpdateItem) -> Bool {
+        canModifyAppUpdateList && app.updateStatus != .ignored && appUpdates.contains { $0.id == app.id }
+    }
+
+    /// D207 (CleanMyMac's Add to Ignore List in the updater): these apps'
+    /// updates go on the ignore list for good. Their rows say "已忽略" and
+    /// leave the counts, the plan and the batches, as a check marks them; Put
+    /// Back gives each row the state it had.
+    func ignoreAppUpdates(_ apps: [AppUpdateItem]) {
+        let chosen = apps.filter(canAddAppUpdateToIgnoreList)
+        guard !chosen.isEmpty, let snapshot = ignoreFeedback.add(chosen.map { app in
+            IgnoreListFeedback.Item(target: .application(bundleIdentifier: app.bundleIdentifier, path: app.path),
+                                    category: .updates, name: app.name)
+        }) else { return }
+        let marked = snapshot.applying(to: appUpdates)
+        var previous: [String: AppUpdateItem] = [:]
+        for (old, new) in zip(appUpdates, marked) where new.updateStatus == .ignored && old.updateStatus != .ignored {
+            previous[old.id] = old
+        }
+        guard !previous.isEmpty else { return }
+        appUpdates = marked
+        ignoredAppUpdateCount = appUpdates.filter { $0.updateStatus == .ignored }.count
+        refreshVisibleAppUpdateInventory()
+        ignoreFeedback.onPutBack { [weak self] snapshot in self?.putBackAppUpdates(previous, snapshot: snapshot) }
+    }
+
+    /// Put Back: rows the list no longer covers get the state they had.
+    private func putBackAppUpdates(_ previous: [String: AppUpdateItem], snapshot: IgnoreListSnapshot) {
+        guard canModifyAppUpdateList else { return }
+        appUpdates = appUpdates.map { app in
+            guard let old = previous[app.id], app.updateStatus == .ignored,
+                  !snapshot.ignoresApplication(bundleIdentifier: app.bundleIdentifier, path: app.path, category: .updates,
+                                               latestVersion: app.latestVersion) else { return app }
+            var restored = app
+            restored.updateStatus = old.updateStatus
+            restored.canAutomaticallyUpdate = old.canAutomaticallyUpdate
+            restored.requiresUserInteraction = old.requiresUserInteraction
+            return restored
+        }
+        ignoredAppUpdateCount = appUpdates.filter { $0.updateStatus == .ignored }.count
+        refreshVisibleAppUpdateInventory()
     }
 
     func ignoreAppUpdate(_ app: AppUpdateItem) {
@@ -6505,8 +7377,8 @@ final class ScanStore: ObservableObject {
                 status: appStoreFailed > 0 || appStoreCancelled > 0 ? .failed : (appStoreSkipped == automaticAppStoreTasks.count ? .skipped : .succeeded),
                 command: nil,
                 detail: L10n.text(
-                    "App Store 自动队列：\(appStoreCompleted) 个成功，\(appStoreFailed) 个失败，\(appStoreCancelled) 个取消，\(appStoreSkipped) 个跳过",
-                    "App Store automatic queue: \(appStoreCompleted) succeeded, \(appStoreFailed) failed, \(appStoreCancelled) cancelled, \(appStoreSkipped) skipped"
+                    "App Store 自动队列：\(ByteFormat.count(appStoreCompleted)) 个成功，\(ByteFormat.count(appStoreFailed)) 个失败，\(ByteFormat.count(appStoreCancelled)) 个取消，\(ByteFormat.count(appStoreSkipped)) 个跳过",
+                    "App Store automatic queue: \(ByteFormat.count(appStoreCompleted)) succeeded, \(ByteFormat.count(appStoreFailed)) failed, \(ByteFormat.count(appStoreCancelled)) cancelled, \(ByteFormat.count(appStoreSkipped)) skipped"
                 )
             )
         }
@@ -6520,15 +7392,15 @@ final class ScanStore: ObservableObject {
                 status: failed > 0 || cancelled > 0 ? .failed : (completed == 0 && skipped > 0 ? .skipped : .succeeded),
                 command: nil,
                 detail: L10n.text(
-                    "\(providers)：\(completed) 个成功，\(failed) 个失败，\(cancelled) 个取消，\(skipped) 个跳过",
-                    "\(providers): \(completed) succeeded, \(failed) failed, \(cancelled) cancelled, \(skipped) skipped"
+                    "\(providers)：\(ByteFormat.count(completed)) 个成功，\(ByteFormat.count(failed)) 个失败，\(ByteFormat.count(cancelled)) 个取消，\(ByteFormat.count(skipped)) 个跳过",
+                    "\(providers): \(ByteFormat.count(completed)) succeeded, \(ByteFormat.count(failed)) failed, \(ByteFormat.count(cancelled)) cancelled, \(ByteFormat.count(skipped)) skipped"
                 )
             ),
             generatedAt: Date()
         )
         showActionMessage(L10n.text(
-            "更新完成：\(completed) 个成功，\(failed) 个失败，\(cancelled) 个取消，\(skipped) 个跳过",
-            "Updates finished: \(completed) succeeded, \(failed) failed, \(cancelled) cancelled, \(skipped) skipped"
+            "更新完成：\(ByteFormat.count(completed)) 个成功，\(ByteFormat.count(failed)) 个失败，\(ByteFormat.count(cancelled)) 个取消，\(ByteFormat.count(skipped)) 个跳过",
+            "Updates finished: \(ByteFormat.count(completed)) succeeded, \(ByteFormat.count(failed)) failed, \(ByteFormat.count(cancelled)) cancelled, \(ByteFormat.count(skipped)) skipped"
         ) + (skipReasons.isEmpty ? "" : "：" + skipReasons))
         relaunchApplicationsAfterSuccessfulUpdate(snapshot)
         Task {
@@ -6653,6 +7525,7 @@ final class ScanStore: ObservableObject {
     /// contracts and never feed a second scanner.
     func scanDuplicateFiles() {
         guard canScanDuplicates else { return }
+        noteModuleScan(.clutter)
         errorMessage = nil
         actionMessage = nil
         isScanningDuplicates = true
@@ -6853,18 +7726,29 @@ final class ScanStore: ObservableObject {
             if !(await CleanReportStore.recordDetached(report, journal: operationJournal)) {
                 errorMessage = L10n.text("回执保存失败；本次已完成的移动仍保留在结果中。", "Receipt saving failed; completed moves remain in this result.")
             }
-            duplicateCleanupReport = report
-            let movedPaths = Set(report.items.compactMap { item -> String? in
-                guard case .moved = item.outcome else { return nil }
-                return PathSafety.lexicalPath(item.sourcePath)
-            })
-            markDuplicateItemsMoved(at: movedPaths)
-            duplicateFilesWorkspace.clearSelection()
-            showActionMessage(L10n.text(
-                "已处理 \(report.summary.movedItemCount) 个重复副本；项目仍可从废纸篓或隔离区恢复。",
-                "Handled \(report.summary.movedItemCount) duplicate copies; items remain recoverable from Trash or quarantine."
-            ))
+            finishVerifiedDuplicateCleanup(with: report)
         }
+    }
+
+    /// The duplicates' results and selection after a run. D214: a run that
+    /// never started says so and why, and keeps the selection for a retry.
+    func finishVerifiedDuplicateCleanup(with report: CleanReport) {
+        duplicateCleanupReport = report
+        if let refusal = report.startRefusal {
+            showActionMessage(CleanStartRefusalPresentation.title + L10n.text("：", ": ")
+                + CleanStartRefusalPresentation.message(refusal))
+            return
+        }
+        let movedPaths = Set(report.items.compactMap { item -> String? in
+            guard case .moved = item.outcome else { return nil }
+            return PathSafety.lexicalPath(item.sourcePath)
+        })
+        markDuplicateItemsMoved(at: movedPaths)
+        duplicateFilesWorkspace.clearSelection()
+        showActionMessage(L10n.text(
+            "已处理 \(ByteFormat.count(report.summary.movedItemCount)) 个重复副本；项目仍可从废纸篓或隔离区恢复。",
+            "Handled \(ByteFormat.count(report.summary.movedItemCount)) duplicate copies; items remain recoverable from Trash or quarantine."
+        ))
     }
 
     func cancelVerifiedDuplicateCleanupExecution() {
@@ -6910,8 +7794,8 @@ final class ScanStore: ObservableObject {
                     errorMessage = L10n.text("恢复结果写入失败，请保留当前回执。", "Recovery result could not be saved. Keep this receipt.")
                 }
                 showActionMessage(L10n.text(
-                    "已恢复 \(recovery.restoredCount) 个重复副本。",
-                    "Restored \(recovery.restoredCount) duplicate copies."
+                    "已恢复 \(ByteFormat.count(recovery.restoredCount)) 个重复副本。",
+                    "Restored \(ByteFormat.count(recovery.restoredCount)) duplicate copies."
                 ))
             } catch {
                 await activityStore.refresh()
@@ -7446,8 +8330,8 @@ final class ScanStore: ObservableObject {
 
     private func presentRestoreSummary(_ summary: TrashRestoreSummary) {
         let restoredText = L10n.text(
-            "已恢复 \(summary.restoredCount) 项到原位置",
-            "Restored \(summary.restoredCount) item(s) to their original locations"
+            "已恢复 \(ByteFormat.count(summary.restoredCount)) 项到原位置",
+            "Restored \(ByteFormat.count(summary.restoredCount)) item(s) to their original locations"
         )
         let skippedCount = summary.conflictCount + summary.missingCount + summary.failedCount
         guard skippedCount > 0 else {
@@ -7456,8 +8340,8 @@ final class ScanStore: ObservableObject {
         }
 
         errorMessage = L10n.text(
-            "\(restoredText)。跳过 \(skippedCount) 项：同名冲突 \(summary.conflictCount)，废纸篓中已不存在 \(summary.missingCount)，恢复失败 \(summary.failedCount)。未覆盖或删除任何现有文件。",
-            "\(restoredText). Skipped \(skippedCount): \(summary.conflictCount) name conflict(s), \(summary.missingCount) no longer in Trash, and \(summary.failedCount) failed. No existing files were overwritten or deleted."
+            "\(restoredText)。跳过 \(ByteFormat.count(skippedCount)) 项：同名冲突 \(ByteFormat.count(summary.conflictCount))，废纸篓中已不存在 \(ByteFormat.count(summary.missingCount))，恢复失败 \(ByteFormat.count(summary.failedCount))。未覆盖或删除任何现有文件。",
+            "\(restoredText). Skipped \(ByteFormat.count(skippedCount)): \(ByteFormat.count(summary.conflictCount)) name conflict(s), \(ByteFormat.count(summary.missingCount)) no longer in Trash, and \(ByteFormat.count(summary.failedCount)) failed. No existing files were overwritten or deleted."
         )
     }
 
@@ -7645,7 +8529,7 @@ final class ScanStore: ObservableObject {
         } else if summary.blockedCount == 0 {
             showActionMessage(L10n.text("权限检查完成：关键位置可读", "Permission check complete: key locations are readable"))
         } else {
-            showActionMessage(L10n.text("权限检查完成：\(summary.blockedCount) 个位置仍受限", "Permission check complete: \(summary.blockedCount) location(s) still limited"))
+            showActionMessage(L10n.text("权限检查完成：\(ByteFormat.count(summary.blockedCount)) 个位置仍受限", "Permission check complete: \(ByteFormat.count(summary.blockedCount)) location(s) still limited"))
         }
     }
 
@@ -7696,6 +8580,22 @@ final class ScanStore: ObservableObject {
         result = current
     }
 
+    /// B-R3: after emptying a frozen Trash, only the rows for entries it
+    /// deleted leave the scan result; an entry kept, not deleted or not read
+    /// back stays listed.
+    private func removeTrashItemsFromCurrentResult(deleted names: [String], in trashURL: URL) {
+        guard var current = result, !names.isEmpty else { return }
+        let trash = PathSafety.lexicalPath(trashURL.path)
+        let deleted = names.map { PathSafety.lexicalPath(trash + "/" + $0) }
+        let kept = current.items.filter { item in
+            guard item.sourceID == "trash_bins" else { return false }
+            let path = PathSafety.lexicalPath(item.path)
+            return !deleted.contains { path == $0 || path.hasPrefix($0 + "/") }
+        }
+        current.replaceItems(sourceID: "trash_bins", with: kept)
+        result = current
+    }
+
     private func memoryExecutionMessage(
         _ result: MemoryOptimizationExecutionResult
     ) -> String {
@@ -7707,8 +8607,8 @@ final class ScanStore: ObservableObject {
         }.count
         let unresolved = max(0, result.targetResults.count - verified - exitedBeforeRequest)
         return L10n.text(
-            "已验证退出 \(verified) 个进程；操作前已退出 \(exitedBeforeRequest) 个；未完成或无法验证 \(unresolved) 个。实际内存变化已单独重测。",
-            "Verified \(verified) process exits; \(exitedBeforeRequest) had already exited; \(unresolved) were incomplete or unverifiable. Actual memory change was remeasured separately."
+            "已验证退出 \(ByteFormat.count(verified)) 个进程；操作前已退出 \(ByteFormat.count(exitedBeforeRequest)) 个；未完成或无法验证 \(ByteFormat.count(unresolved)) 个。实际内存变化已单独重测。",
+            "Verified \(ByteFormat.count(verified)) process exits; \(ByteFormat.count(exitedBeforeRequest)) had already exited; \(ByteFormat.count(unresolved)) were incomplete or unverifiable. Actual memory change was remeasured separately."
         )
     }
 
@@ -7747,3 +8647,14 @@ final class ScanStore: ObservableObject {
         }
     }
 }
+
+#if DEBUG
+extension ScanStore {
+    /// Offscreen layout evidence only (D119): renders the mini window's pages
+    /// with the demo processes without starting a process sampler.
+    func publishMenuBarPreparedProcessesForTesting(_ prepared: MenuBarPreparedProcesses?, memoryApps: [MemoryAppUsage] = []) {
+        menuBarPreparedProcesses = prepared
+        menuBarPreparedMemoryApps = memoryApps
+    }
+}
+#endif

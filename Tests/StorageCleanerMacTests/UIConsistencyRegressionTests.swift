@@ -33,35 +33,44 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(content.contains("MainWindowChromeConfigurator()"))
         XCTAssertFalse(content.contains("ToolbarItem(placement: .primaryAction)"))
         XCTAssertFalse(content.contains("SettingsLink"))
-        XCTAssertTrue(sidebar.contains("private struct SidebarFooter: View"))
-        XCTAssertTrue(sidebar.contains("SettingsLink"))
+        // D154: CleanMyMac has no Settings row in its sidebar; Settings opens
+        // from the app menu (⌘,). The foot keeps the version line.
+        XCTAssertFalse(sidebar.contains("SettingsLink"))
+        XCTAssertTrue(sidebar.contains("private var footerLine: some View"))
         XCTAssertTrue(modulePresentation.contains("struct MainContentHost<Content: View>: View"))
         XCTAssertTrue(itemList.contains("ItemListResponsiveLayout.mode(availableWidth:"))
         XCTAssertFalse(itemList.contains("HSplitView"))
         XCTAssertTrue(itemList.contains(".appSelectableRowSurface("))
         XCTAssertGreaterThanOrEqual(occurrences(of: "LightfieldSettingsSection {", in: settings), 5)
-        XCTAssertTrue(settings.contains("private var settingsSidebar: some View"))
-        XCTAssertTrue(settings.contains("SettingsLightfieldPane(category: category)"))
+        // D154 batch 3I (the user's decision, 2026-10-21): CleanMyMac's tabs
+        // across the top replace the D3/D53 settings sidebar; the tabs keep
+        // the categories, the selection binding and arrow-key movement (was
+        // `private var settingsSidebar: some View` and
+        // `SettingsLightfieldPane(category: category)`).
+        XCTAssertTrue(settings.contains("private var settingsTabBar: some View"))
+        XCTAssertTrue(settings.contains("SettingsLightfieldPane(category: category, drawsBackdrop: false)"))
         XCTAssertTrue(settings.contains("ForEach(SettingsCategory.allCases)"))
         XCTAssertTrue(settings.contains("settingsSelection.wrappedValue = category"))
         XCTAssertTrue(settings.contains(".onMoveCommand { direction in"))
-        // DECISIONS D3: Settings rows use the sidebar row surface (themed
-        // fill and stroke, hover) in the window's own theme color. D53
-        // §3.2.2 gives the main sidebar a sliding module-gradient block;
-        // the Settings window moves to it in V4 (UI-V2-SPEC §5).
+        // D53 §3.2.2 still gives the main window's sidebar its sliding
+        // module-gradient block.
         XCTAssertTrue(sidebar.contains("struct SidebarRowBackground: View"))
-        XCTAssertTrue(sidebar.contains("SidebarSelectionBlock(pigment: pigment)"))
+        XCTAssertTrue(sidebar.contains("SidebarSelectionBlock(family: family, onStudio: onStudio)"))
         XCTAssertTrue(sidebar.contains(".matchedGeometryEffect(id: \"sidebar.selection\", in: namespace)"))
         XCTAssertTrue(settings.contains("RoundedRectangle(cornerRadius: 8)"))
         XCTAssertTrue(settings.contains(".fill(FeatureLightfieldPalette.accent(.overview).opacity"))
         XCTAssertFalse(settings.contains("AppAppearanceColors.selectedSurface"))
-        // Sidebar focus and B2 row interaction remain accessible.
+        // Tab focus and B2 row interaction remain accessible.
         XCTAssertTrue(settings.contains(".focusEffectDisabled()"))
         XCTAssertTrue(settings.contains(".buttonStyle(FeatureLightfieldRowButtonStyle())"))
-        // Fixed sidebar remains visible at every supported window width.
-        XCTAssertTrue(settings.contains("settingsSidebar.frame(width: viewport.size.width < 820 ? 180 : FeatureLightfield.sidebarWidth)"))
-        XCTAssertTrue(settings.contains("HStack(spacing: 0)"))
-        XCTAssertTrue(settings.contains("settingsSidebar.frame(width:"))
+        // The tabs sit above the pane at every supported window width
+        // (`SettingsLightfieldGeometryTests` checks them in a window; was a
+        // fixed sidebar beside it: `settingsSidebar.frame(width:
+        // viewport.size.width < 820 ? 180 : FeatureLightfield.sidebarWidth)`
+        // in an `HStack(spacing: 0)`).
+        XCTAssertTrue(settings.contains("SettingsTabBar(selected: selectedCategory)"))
+        XCTAssertTrue(settings.contains("VStack(spacing: 0)"))
+        XCTAssertFalse(settings.contains("settingsSidebar"))
         XCTAssertFalse(settings.contains("List(selection: settingsSelection)"))
         XCTAssertTrue(settings.contains("settingsPane(for: selectedCategory)"))
         XCTAssertTrue(settings.contains("FeatureLightfieldHairline()"))
@@ -88,7 +97,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Views/MenuBarPanelChrome.swift"
         )
 
-        XCTAssertTrue(settings.contains("private var settingsSidebar: some View"))
+        // D154 batch 3I: the tabs replace the sidebar (was
+        // `private var settingsSidebar: some View`).
+        XCTAssertTrue(settings.contains("private var settingsTabBar: some View"))
         XCTAssertTrue(settings.contains("FeatureLightfieldRowButtonStyle()"))
         XCTAssertTrue(settings.contains("settingsPane(for: selectedCategory)"))
         XCTAssertTrue(settings.contains("FeatureLightfieldHairline()"))
@@ -432,7 +443,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(results.contains("红色 · 高风险"))
         XCTAssertTrue(results.contains("长期建议"))
         XCTAssertTrue(results.contains("displayedSubcategories(for risk:"))
-        XCTAssertTrue(results.contains("发现 \\(ByteFormat.string(safeBytes)) 可安全清理"))
+        // D178: decimal sizes (was `ByteFormat.string(safeBytes)`).
+        XCTAssertTrue(results.contains("发现 \\(ByteFormat.storageString(safeBytes)) 可安全清理"))
         XCTAssertTrue(results.contains("需要人工判断"))
         // D19: every listed item is selectable, so the cards and tiers count
         // only selectable items and the read-only reference card is gone.
@@ -593,6 +605,20 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(confirmation.contains("清空废纸篓 · 不可恢复"))
         XCTAssertTrue(confirmation.contains("acknowledgesPermanentDeletion"))
         XCTAssertTrue(confirmation.contains("acknowledgesTrashContentsReviewed"))
+        // D101 G13: an unusually large run is confirmed once more, for the
+        // very summary shown, and the confirm button waits for it.
+        XCTAssertTrue(confirmation.contains("本次清理规模异常，需要再确认一次"))
+        let compactExecution = try XCTUnwrap(
+            SwiftSourceScanning.compactSourceCode()["Sources/StorageCleanerMac/Views/CleanupExecutionViews.swift"])
+        for fragment in [
+            "ifletscaleAlert=preflight.scaleAlert{scaleConfirmation(scaleAlert)}",
+            "Toggle(isOn:Binding(get:{acknowledgedScaleAlert==alert},set:{acknowledgedScaleAlert=$0?alert:nil}))",
+            "permanentDeletionAcknowledged:permanentDeletionAcknowledged,scaleAcknowledged:acknowledgedScaleAlert)",
+            "||!permanentDeletionAcknowledged||!scaleAcknowledged)",
+            "privatevarscaleAcknowledged:Bool{preflight.scaleAlert==nil||acknowledgedScaleAlert==preflight.scaleAlert}"
+        ] {
+            XCTAssertTrue(compactExecution.contains(fragment), fragment)
+        }
 
         XCTAssertTrue(progressPage.contains("CleanupExecutionStageList("))
         XCTAssertTrue(progressPage.contains("onCancel: (() -> Void)?"))
@@ -654,7 +680,8 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(row.contains("CleanupRiskBadge(risk: candidate.risk)"))
         XCTAssertFalse(row.contains(".accessibilityElement(children: .ignore)"))
         XCTAssertTrue(row.contains("查看 \\(candidate.sourceURL.lastPathComponent) 的详细信息"))
-        XCTAssertTrue(row.contains("在 Finder 中显示 \\(candidate.sourceURL.lastPathComponent)"))
+        // D225补＋旧值：was “在 Finder 中显示 …”; the app says “在访达中显示” everywhere (the English is unchanged).
+        XCTAssertTrue(row.contains("在访达中显示 \\(candidate.sourceURL.lastPathComponent)"))
         XCTAssertFalse(compactContent.contains("candidate.snapshot.standardizedPath"))
         XCTAssertTrue(details.contains("candidate.snapshot.standardizedPath"))
         XCTAssertTrue(details.contains("candidate.reason"))
@@ -933,15 +960,16 @@ final class UIConsistencyRegressionTests: XCTestCase {
             to: "struct AppUpdaterView: View {"
         )
 
-        XCTAssertTrue(
-            uninstaller.contains("AppUninstallListPresentation.make(")
-        )
+        // CleanMyMac Applications manager (handoffs/app-lifecycle-cmm.md):
+        // the explicit scan still comes first; the result is the manager.
+        XCTAssertTrue(uninstaller.contains("ApplicationsManagerView(store: store)"))
         XCTAssertTrue(
             uninstaller.contains(
                 "if !store.hasScannedInstalledApps"
             )
         )
-        XCTAssertTrue(uninstaller.contains("AppUninstallScanLandingView(store: store)"))
+        // D154: the explicit scan is CleanMyMac's Applications landing.
+        XCTAssertTrue(uninstaller.contains("CareStudioApplicationsStart(store: store)"))
         XCTAssertFalse(uninstaller.contains("Task.sleep(for: .milliseconds(300))"))
         XCTAssertFalse(uninstaller.contains(".task {"))
         // D67: uninstall uses the lightfield skeleton and an explicit scan callback.
@@ -1212,7 +1240,11 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(panelChrome.contains("kind: .glass"))
 
         XCTAssertFalse(geek.contains("private struct GeekMetricTile"))
-        XCTAssertTrue(geek.contains("GeekCombinedCard(height: GeekPanelLayout.overviewProcessorCardHeight)"))
+        // D118 (2026-10-18): overview cards are iStat cards, which keep the
+        // one golden combined-card surface. Was
+        // `GeekCombinedCard(height: GeekPanelLayout.overviewProcessorCardHeight)`.
+        XCTAssertTrue(geek.contains("GeekIStatCard(height: GeekPanelLayout.overviewProcessorCardHeight)"))
+        XCTAssertTrue(geekComponents.contains("GeekCombinedCard(height: height, contentInsets: EdgeInsets())"))
         XCTAssertFalse(geek.contains("GeekBatteryLevelBar("))
         XCTAssertFalse(geek.contains(".environment(\\.geekCombinedCardUsesDivider, true)"))
         XCTAssertTrue(combinedCardDivider.contains("static let defaultValue = false"))
@@ -1267,7 +1299,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(geekCharts.contains("AdvancedPanelTypography.caption"))
         XCTAssertTrue(geekCharts.contains("LazyVGrid(columns: legendColumns"))
         XCTAssertTrue(geekCharts.contains("HStack(spacing: 6)"))
-        XCTAssertTrue(geekCharts.contains(".miniWindowTooltipChrome()"))
+        // D121 (2026-10-18): the history tooltip is iStat's dark box, the
+        // shared chrome's `.history` style (was `.miniWindowTooltipChrome()`).
+        XCTAssertTrue(geekCharts.contains(".miniWindowTooltipChrome(.history)"))
         XCTAssertFalse(geekCharts.contains(".background(.regularMaterial)"))
         XCTAssertFalse(smartCare.contains(".background(tint.opacity(0.10), in: RoundedRectangle"))
     }
@@ -1334,7 +1368,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
             at: "Sources/StorageCleanerMac/Services/NativeNetworkProcessService.swift"
         )
 
-        XCTAssertTrue(source.contains("GeekCombinedCard(height: 150)"))
+        // D119 (2026-10-18): iStat's 150 pt bandwidth section, laid out on
+        // its offsets (was `GeekCombinedCard(height: 150)`).
+        XCTAssertTrue(source.contains("GeekIStatCard(height: GeekNetworkBandwidthLayout.cardHeight)"))
+        XCTAssertEqual(GeekNetworkBandwidthLayout.cardHeight, 150)
         XCTAssertTrue(source.contains("GeekVPNDisclosure"))
         XCTAssertTrue(source.contains("networkTopologySnapshot?.activeVPNTunnel"))
         XCTAssertTrue(source.contains("geekPhysicalNetwork"))
@@ -1343,16 +1380,26 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(source.contains("tunnel.tunnelIPv4"))
         XCTAssertTrue(source.contains("tunnel.tunnelIPv6"))
         XCTAssertTrue(source.contains("tunnel.scopedDNSServers"))
-        XCTAssertTrue(source.contains("additionalScopedDNSCount"))
-        XCTAssertTrue(source.contains("另有 \\(additionalScopedDNSCount) 条 DNS"))
+        // D125 (2026-10-19): every scoped DNS server is a row of the VPN's
+        // IPv4 or IPv6 section, as in iStat (was three rows and "N more");
+        // `MiniWindowIStatInterfaceLayoutTests` checks the rows.
+        XCTAssertFalse(source.contains("additionalScopedDNSCount"))
+        XCTAssertFalse(source.contains("另有 \\(additionalScopedDNSCount) 条 DNS"))
+        XCTAssertTrue(source.contains("GeekIStatInterfaceModel(tunnel: tunnel)"))
         XCTAssertTrue(source.contains("VPNControlCapabilityResolver"))
         XCTAssertTrue(source.contains("下载峰值"))
         XCTAssertTrue(source.contains("上传峰值"))
-        XCTAssertTrue(source.contains("会话累计"))
+        // D146 (2026-10-19): iStat's peak row has no session totals (was
+        // `XCTAssertTrue(source.contains("会话累计"))`).
+        XCTAssertFalse(source.contains("会话累计"))
         XCTAssertTrue(source.contains("Public IP"))
-        XCTAssertTrue(source.contains("本地 IP 地址"))
-        XCTAssertTrue(source.contains("sessionUploadedBytes"))
-        XCTAssertTrue(source.contains("sessionDownloadedBytes"))
+        // D140 (2026-10-19): iStat's "IP 地址" section (was "本地 IP 地址").
+        XCTAssertFalse(source.contains("L10n.text(\"本地 IP 地址\""))
+        XCTAssertTrue(source.contains("title: GeekIStatInterfaceModel.addressesTitle"))
+        // D146: the page shows no session totals (was `XCTAssertTrue` for
+        // both: the peak row read them).
+        XCTAssertFalse(source.contains("sessionUploadedBytes"))
+        XCTAssertFalse(source.contains("sessionDownloadedBytes"))
         XCTAssertTrue(source.contains("GeekNetworkProcessRow"))
         XCTAssertTrue(source.contains("networkProcessSnapshot"))
         XCTAssertTrue(source.contains("networkProcessSamplingState"))
@@ -1361,11 +1408,16 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(source.contains("暂时无法读取进程流量"))
         XCTAssertFalse(source.contains("等待采样"))
         XCTAssertFalse(source.contains("逐进程实时流量未采样"))
-        XCTAssertTrue(source.contains("GeekCombinedCard(height: geekNetworkProcessCardHeight)"))
+        // D119 (2026-10-18): iStat's process section at its row capacity
+        // (was `GeekCombinedCard(height: geekNetworkProcessCardHeight)`).
+        XCTAssertTrue(source.contains("GeekIStatProcessSection(rowCapacity: geekNetworkProcessCapacity)"))
         XCTAssertTrue(source.contains("ProgressView()"))
-        XCTAssertTrue(source.contains("if showsIPv6"))
+        // D140 (2026-10-19): one row per listed address in iStat's IP section
+        // (were `if showsIPv6` and the address's `.help(value)`).
+        XCTAssertFalse(source.contains("if showsIPv6"))
+        XCTAssertTrue(source.contains("GeekIStatIPSection("))
         XCTAssertTrue(source.contains(".truncationMode(.middle)"))
-        XCTAssertTrue(source.contains(".help(value)"))
+        XCTAssertFalse(source.contains(".help(value)"))
         XCTAssertTrue(source.contains("geekNetworkProcessStatusText"))
         XCTAssertTrue(source.contains("MAC Address"))
         XCTAssertTrue(source.contains("IPv6"))
@@ -1471,7 +1523,11 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(metricContent.contains("if model.progress != nil"))
         XCTAssertTrue(metricContent.contains("progress: model.progress"))
         XCTAssertFalse(geek.contains("private struct GeekMetricTile"))
-        XCTAssertTrue(geek.contains("GeekCombinedCard(height: GeekPanelLayout.overviewProcessorCardHeight)"))
+        // D118 (2026-10-18): overview cards are iStat cards, which keep the
+        // one golden combined-card surface. Was
+        // `GeekCombinedCard(height: GeekPanelLayout.overviewProcessorCardHeight)`.
+        XCTAssertTrue(geek.contains("GeekIStatCard(height: GeekPanelLayout.overviewProcessorCardHeight)"))
+        XCTAssertTrue(geekComponents.contains("GeekCombinedCard(height: height, contentInsets: EdgeInsets())"))
         XCTAssertFalse(geek.contains("presentation:"))
         XCTAssertTrue(geekComponents.contains("struct GeekCombinedRing: View"))
         XCTAssertTrue(geekComponents.contains("struct GeekMetricGrid: View"))
@@ -1921,9 +1977,10 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(overview.contains("AppSymbolIcon("))
         XCTAssertTrue(utilities.contains("isDecorative: true"))
         XCTAssertTrue(sidebar.contains("FeatureLightfieldArtwork(art:"))
-        // D53 (UI-V2-SPEC 1.4): sidebar rows use module-colored icon tiles.
-        XCTAssertTrue(sidebar.contains("IconTile("))
-        XCTAssertTrue(sidebar.contains("filter.moduleTheme.pigment"))
+        // D154: every sidebar row is a module mark; the Settings tile left
+        // with the Settings row. The classic block keeps the module pigment.
+        XCTAssertFalse(sidebar.contains("IconTile("))
+        XCTAssertTrue(sidebar.contains("family.primaryRoute.moduleTheme.pigment"))
         XCTAssertTrue(symbols.contains("static let showMainWindow = \"macwindow\""))
         XCTAssertTrue(models.contains("AppSymbols.Navigation.safeCleanup"))
         XCTAssertTrue(controls.contains("AppDesignTokens.Palette.accent : nil"))
@@ -1979,8 +2036,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(components.contains("AppIconView("))
         XCTAssertFalse(workspace.contains("asset: .smartCareHero"))
         XCTAssertTrue(sidebar.contains("FeatureLightfieldArtwork(art:"))
-        // D67: generated 20 pt thumbnails belong to clickable navigation rows.
-        XCTAssertTrue(sidebar.contains(".frame(width: 20, height: 20)"))
+        // D67/D154: generated thumbnails belong to clickable navigation rows
+        // (26 pt module marks, as CleanMyMac's sidebar).
+        XCTAssertTrue(sidebar.contains(".frame(width: Self.glyphSide, height: Self.glyphSide)"))
         // D64②: the shared header has no decorative icon; the central
         // illustration remains on its agreed surface and stays decorative.
         let header = try sourceSegment(components,
@@ -2122,20 +2180,21 @@ final class UIConsistencyRegressionTests: XCTestCase {
         let sidebar = try sourceText(
             at: "Sources/StorageCleanerMac/Views/SidebarView.swift"
         )
+        // D154: the module rows and the version line of the CleanMyMac sidebar.
         let navigationRow = try sourceSegment(
             sidebar,
-            from: "private struct SidebarNavigationRow: View {",
-            to: "private struct SidebarFooter: View {"
+            from: "private struct SidebarModuleRow: View {",
+            to: "private struct SidebarSelectionBlock: View {"
         )
         let footer = try sourceSegment(
             sidebar,
-            from: "private struct SidebarFooter: View {",
-            to: "#if DEBUG"
+            from: "private var footerLine: some View {",
+            to: "private var sidebarToggleButton: some View {"
         )
 
         XCTAssertTrue(navigationRow.contains(".lineLimit(2)"))
-        XCTAssertTrue(navigationRow.contains(".frame(minHeight: AppDesignTokens.Layout.sidebarRowHeight)"))
-        XCTAssertFalse(navigationRow.contains(".frame(height: AppDesignTokens.Layout.sidebarRowHeight)"))
+        XCTAssertTrue(navigationRow.contains(".frame(minHeight: rowHeight)"))
+        XCTAssertFalse(navigationRow.contains(".frame(height: rowHeight)"))
         XCTAssertTrue(footer.contains(".fixedSize(horizontal: false, vertical: true)"))
         XCTAssertFalse(footer.contains(".frame(height: AppDesignTokens.Layout.sidebarRowHeight)"))
     }
@@ -2150,7 +2209,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertTrue(card.contains("memoryProcessTitle"))
         XCTAssertTrue(card.contains("memoryProcessActions"))
         XCTAssertTrue(card.contains(".frame(maxWidth: .infinity, alignment: .trailing)"))
-        let header = try r2SourceDeclaration("private var memoryProcessHeader:", in: memory)
+        // D139: the header is built for each form of the quit button (was
+        // `private var memoryProcessHeader:`).
+        let header = try r2SourceDeclaration("private func memoryProcessHeader(", in: memory)
         XCTAssertTrue(header.contains("memoryProcessTitle"))
         XCTAssertTrue(header.contains("memoryProcessActions"))
         XCTAssertFalse(header.contains(".frame(width:"))

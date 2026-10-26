@@ -22,7 +22,12 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
     // MARK: - Anchor view reporting
 
     func testAnchorViewReportsAfterItsWindowOrAnAncestorMoves() async throws {
-        let panel = MenuBarStatusPanel(contentRect: NSRect(x: 100, y: 100, width: 300, height: 200))
+        // D172 (R2h, old values: origins on the menu-bar display): the D106
+        // gate moves a shown window that is not on the test display back
+        // onto it, so the window origins are on that display, or the
+        // window never moves and reports nothing new.
+        let origin = try testScreen().frame.origin
+        let panel = MenuBarStatusPanel(contentRect: NSRect(x: origin.x + 100, y: origin.y + 100, width: 300, height: 200))
         panel.isReleasedWhenClosed = false
         defer { panel.close() }
         let container = NSView(frame: NSRect(x: 10, y: 10, width: 200, height: 100))
@@ -37,7 +42,7 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
         await settle()
         XCTAssertEqual(reported, [onScreen()], "the first report follows the attachment")
 
-        panel.setFrameOrigin(NSPoint(x: 160, y: 130))
+        panel.setFrameOrigin(NSPoint(x: origin.x + 160, y: origin.y + 130))
         await settle()
         XCTAssertEqual(reported.count, 2, "a moved window changes every anchor's screen rect")
         XCTAssertEqual(reported.last, onScreen())
@@ -59,7 +64,7 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
         XCTAssertEqual(reported.count, 4)
 
         anchor.removeFromSuperview()
-        panel.setFrameOrigin(NSPoint(x: 200, y: 150))
+        panel.setFrameOrigin(NSPoint(x: origin.x + 200, y: origin.y + 150))
         await settle()
         XCTAssertEqual(reported.count, 4, "a detached anchor stops reporting")
     }
@@ -134,10 +139,12 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
         harness.hook.action = { [weak panel = harness.session.panel, weak coordinator = harness.coordinator] in
             guard let panel, let coordinator else { return }
             // The memory card, 120 pt below the overview's top edge, with the
-            // overview being the right column of a left cascade.
+            // overview being the left column of a right cascade (D123
+            // (2026-10-19): menus open right first; was the right column of
+            // a left cascade, x: panel.frame.maxX - 304 + 8).
             coordinator.registerAnchor(
                 id: .module(.memory),
-                screenRect: NSRect(x: panel.frame.maxX - 304 + 8, y: panel.frame.maxY - 120 - 106, width: 288, height: 106),
+                screenRect: NSRect(x: panel.frame.minX + 8, y: panel.frame.maxY - 120 - 106, width: 288, height: 106),
                 contentKind: "memory"
             )
         }
@@ -148,8 +155,10 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
                         "the anchor was registered while the frame was applied")
         let frames = harness.session.visibleAttachedContentFramesForTesting
         XCTAssertEqual(frames.count, 2)
-        XCTAssertEqual(frames[1].maxY - frames[0].maxY, 120, accuracy: 0.5,
-                       "the registered card top, not the default memory offset "
+        // D123 (2026-10-19): the page opens 8 pt above the registered card
+        // top so their first cards line up (was 120, the card top).
+        XCTAssertEqual(frames[1].maxY - frames[0].maxY, 112, accuracy: 0.5,
+                       "8 pt above the registered card top, not the default memory offset "
                        + "\(GeekPanelPresentationMetrics.detailVerticalOffset(for: .memory, density: .geek))")
     }
 
@@ -169,13 +178,18 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
             session?.setGeekSection(.processor)
         }
         // Any request that re-solves the cascade and applies a new frame.
-        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.powerDetailWidth, height: 500))
+        // D119 (old value: 500): the 330 pt power page is shorter than the
+        // 553 pt overview (D118), so only a page taller than the overview
+        // changes the frame.
+        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.powerDetailWidth, height: 600))
 
         XCTAssertNil(harness.hook.action, "the nested request was made during the frame")
         XCTAssertEqual(harness.session.geekSection, .processor)
         let frames = harness.session.visibleAttachedContentFramesForTesting
-        XCTAssertEqual(frames[0].width, MiniWindowStyleTokens.detailWidth,
-                       "the 312 pt page, not the 264 pt power column the view no longer shows")
+        // D119 (old value: `detailWidth`, now 301, the 312 pt page before):
+        // the CPU page is 272.
+        XCTAssertEqual(frames[0].width, MiniWindowStyleTokens.processorDetailWidth,
+                       "the 272 pt CPU page, not the 240 pt power column the view no longer shows")
         XCTAssertEqual(harness.session.panel.frame.width, frames[0].width + frames[1].width, accuracy: 0.5)
     }
 
@@ -192,15 +206,18 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
         harness.hook.action = { [weak session = harness.session, hook = harness.hook] in
             hook.action = nil
             session?.setGeekSection(.processor)
-            session?.setDetailSize(CGSize(width: MiniWindowStyleTokens.detailWidth, height: 630))
+            session?.setDetailSize(CGSize(width: MiniWindowStyleTokens.processorDetailWidth, height: 630))
         }
-        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.powerDetailWidth, height: 500))
+        // D119 (old value: 500): taller than the 553 pt overview, so the
+        // measurement changes the frame (the 330 pt power page is shorter).
+        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.powerDetailWidth, height: 600))
 
         XCTAssertNil(harness.hook.action, "both calls were made during the frame")
         XCTAssertEqual(harness.session.geekSection, .processor,
                        "the page change is not replaced by the measurement that followed it")
         let frames = harness.session.visibleAttachedContentFramesForTesting
-        XCTAssertEqual(frames[0].size, CGSize(width: MiniWindowStyleTokens.detailWidth, height: 630))
+        // D119 (old value: `detailWidth` × 630, now 301): the CPU page is 272 wide.
+        XCTAssertEqual(frames[0].size, CGSize(width: MiniWindowStyleTokens.processorDetailWidth, height: 630))
     }
 
     /// A measured secondary size that arrives during the frame updates the
@@ -247,7 +264,11 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
             issued += 1
             session.setGeekSection(issued.isMultiple(of: 2) ? .power : .processor)
         }
-        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.detailWidth, height: 380))
+        // D119 (old value: 380, which shrank the 708 pt CPU page): the 484 pt
+        // CPU page is shorter than the 553 pt overview (D118), so only a
+        // taller measurement changes the frame. Each page change after it
+        // does too: the 240 pt power and 272 pt CPU pages differ in width.
+        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.processorDetailWidth, height: 600))
         harness.hook.action = nil
         XCTAssertGreaterThan(issued, 8, "the chain went past the synchronous replay limit (8)")
 
@@ -275,12 +296,17 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
             issued += 1
             session.setGeekSection(session.geekSection == .power ? .processor : .power)
         }
-        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.detailWidth, height: 380))
+        // D119 (old value: 380): a measurement shorter than the 553 pt
+        // overview no longer changes the frame, and the hook never ran.
+        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.processorDetailWidth, height: 600))
         await settle(turns: 30)
         let afterSettling = issued
         await settle(turns: 20)
         harness.session.programmaticFrameDidApplyForTesting = nil
 
+        // D172 (R2h): the calls ran and undid each other more than once (a
+        // review found that more than 0 also held with a single call).
+        XCTAssertGreaterThan(afterSettling, 1, "the applied frames ran the hook, and its calls undid each other")
         XCTAssertEqual(issued, afterSettling, "replaying stopped instead of running on every turn")
         XCTAssertLessThanOrEqual(afterSettling, 40, "a bounded number of replays for one operation")
         // A later call from outside is still applied.
@@ -309,13 +335,19 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
             guard let session, pairs < 21 else { return }
             pairs += 1
             lastSection = pairs.isMultiple(of: 2) ? .processor : .power
-            lastHeight = CGFloat(400 + pairs)
+            // D119 (old value: 400 + pairs): each reported height changes the
+            // frame, so every call runs this hook as before; the 330 pt power
+            // and 484 pt CPU pages are shorter than the 553 pt overview
+            // (D118), and only a height above it changes the frame.
+            lastHeight = CGFloat(600 + pairs)
             session.setGeekSection(lastSection)
             session.setDetailSize(CGSize(width: lastSection == .power ? MiniWindowStyleTokens.powerDetailWidth
-                                                                      : MiniWindowStyleTokens.detailWidth,
+                                                                      : MiniWindowStyleTokens.processorDetailWidth,
                                          height: lastHeight))
         }
-        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.detailWidth, height: 380))
+        // D119 (old value: 380): taller than the 553 pt overview, so the
+        // measurement changes the frame (the 484 pt CPU page is shorter).
+        harness.session.setDetailSize(CGSize(width: MiniWindowStyleTokens.processorDetailWidth, height: 600))
         await settle(turns: 30)
         harness.session.programmaticFrameDidApplyForTesting = nil
 
@@ -362,7 +394,8 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
         )
         session.setGeekSection(.memory)
         let frames = session.visibleAttachedContentFramesForTesting
-        XCTAssertEqual(frames[1].maxY - frames[0].maxY, 120, accuracy: 0.5,
+        // D123 (2026-10-19): 8 pt above the card's offset (was 120).
+        XCTAssertEqual(frames[1].maxY - frames[0].maxY, 112, accuracy: 0.5,
                        "the layout offset places the page; the stale screen rect is not needed")
 
         // A changed offset moves the page; a native report without layout
@@ -374,7 +407,8 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
             layoutOffset: 300
         )
         var moved = session.visibleAttachedContentFramesForTesting
-        XCTAssertEqual(moved[1].maxY - moved[0].maxY, 300, accuracy: 0.5)
+        // D123 (2026-10-19): 8 pt above the offset (was 300).
+        XCTAssertEqual(moved[1].maxY - moved[0].maxY, 292, accuracy: 0.5)
         coordinator.registerAnchor(
             id: .module(.memory),
             screenRect: NSRect(x: -5_000, y: -5_200, width: 288, height: 106),
@@ -382,7 +416,7 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
         )
         XCTAssertEqual(coordinator.anchorRegistry.snapshot(for: .module(.memory))?.layoutOffset, 300)
         moved = session.visibleAttachedContentFramesForTesting
-        XCTAssertEqual(moved[1].maxY - moved[0].maxY, 300, accuracy: 0.5)
+        XCTAssertEqual(moved[1].maxY - moved[0].maxY, 292, accuracy: 0.5, "D123: was 300")
     }
 
     // MARK: - Helpers
@@ -405,7 +439,7 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
     }
 
     private func makeHarness() throws -> Harness {
-        let screen = try XCTUnwrap(NSScreen.screens.first, "Tests require an attached screen")
+        let screen = try testScreen()
         let suiteName = TestPreferenceDomain.makeSuite()
         let defaults = try XCTUnwrap(TestPreferenceDomain.open(suiteName: suiteName))
         let coordinator = GeekPanelCoordinator()
@@ -429,6 +463,13 @@ final class MiniWindowAnchorGeometryTests: XCTestCase {
             anchor: NSRect(x: visible.midX - 12, y: visible.maxY - 24, width: 24, height: 20),
             defaults: defaults, suiteName: suiteName
         )
+    }
+
+    /// D172 (R2h, old value: `NSScreen.screens.first`, the menu-bar
+    /// display): the display this run's windows are placed on (D106).
+    private func testScreen() throws -> NSScreen {
+        try XCTUnwrap(DisplayConfinementGate.shared.targetScreen() ?? NSScreen.screens.first,
+                      "Tests require an attached screen")
     }
 
     private func settle(turns: Int = 3) async {

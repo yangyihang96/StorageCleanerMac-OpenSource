@@ -20,7 +20,7 @@ struct MSeriesRawResultView: View {
                             Text(statistics.median, format: .number.precision(.fractionLength(2)))
                                 .monospacedDigit()
                             Text(metric.unit).foregroundStyle(.secondary)
-                            Text("n=\(statistics.sampleCount) · \(statistics.confidence.rawValue)")
+                            Text("n=\(ByteFormat.count(statistics.sampleCount)) · \(statistics.confidence.rawValue)")
                                 .foregroundStyle(.secondary).monospacedDigit()
                         } else {
                             Text(status(metric.availability)).foregroundStyle(.secondary)
@@ -35,13 +35,13 @@ struct MSeriesRawResultView: View {
                         HStack {
                             Text(title(metric.id)); Spacer()
                             if let statistics = metric.statistics {
-                                Text("\(statistics.median.formatted(.number.precision(.fractionLength(2)))) \(metric.unit) · n=\(statistics.sampleCount)")
+                                Text("\(statistics.median.formatted(.number.precision(.fractionLength(2)))) \(metric.unit) · n=\(ByteFormat.count(statistics.sampleCount))")
                                     .monospacedDigit()
                             } else { Text(status(metric.availability)) }
                         }.font(AppDesignTokens.Typography.metadata)
                     }
                 }
-                Text(L10n.text("测试写入：", "Test writes: ") + ByteFormat.string(Int64(result.writtenBytes)))
+                Text(L10n.text("测试写入：", "Test writes: ") + ByteFormat.storageString(Int64(result.writtenBytes)))
                     .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
                 Text(result.plan).font(AppDesignTokens.Typography.metadata).textSelection(.enabled)
             }

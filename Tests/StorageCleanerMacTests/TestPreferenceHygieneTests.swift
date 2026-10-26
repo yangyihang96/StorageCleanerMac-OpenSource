@@ -413,6 +413,7 @@ final class TestPreferenceHygieneTests: XCTestCase {
         "StorageCleanerMacTests/MemoryHeadroomSysctlTests.swift": 2, // 内存余量文案及恢复。
         "StorageCleanerMacTests/MenuBarSecondaryVisualConsistencyTests.swift": 2, // 二级页视觉矩阵及恢复。
         "StorageCleanerMacTests/MiniWindowConsistencyRuleTests.swift": 2, // 小窗一致性文案及恢复。
+        "StorageCleanerMacTests/MiniWindowIStatHistoryLayoutTests.swift": 2, // D121 三级历史页中英文尺寸及恢复。
         "StorageCleanerMacTests/MiniWindowLogicTestSupport.swift": 2, // 小窗逻辑共用语言 scope 及恢复。
         "StorageCleanerMacTests/MiniWindowRowLayoutTests.swift": 2, // 小窗行布局中英矩阵及恢复。
         "StorageCleanerMacTests/SafeCleanupScopeCardLayoutTests.swift": 2, // 清理范围卡中英矩阵及恢复。

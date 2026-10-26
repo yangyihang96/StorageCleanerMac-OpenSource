@@ -348,11 +348,14 @@ final class DesignSystemV2Tests: XCTestCase {
             XCTAssertLessThanOrEqual(overview.maxY, 72.5, "\(size)")
             XCTAssertFalse(title.intersects(overview), "\(size)")
             let snapshot = try XCTUnwrap(store.memorySnapshot)
-            let expectedUsed = snapshot.measuredUsedBytes.map { ByteFormat.string(Int64(clamping: $0)) } ?? "—"
-            let expectedTotal = snapshot.measurements.physicalBytes.value.map { ByteFormat.string(Int64(clamping: $0)) } ?? "—"
+            // D178: memory as Activity Monitor writes it, in GB (was `ByteFormat.string`, in GiB).
+            let expectedUsed = snapshot.measuredUsedBytes.map { ByteFormat.memoryString(Int64(clamping: $0)) } ?? "—"
+            let expectedTotal = snapshot.measurements.physicalBytes.value.map { ByteFormat.memoryString(Int64(clamping: $0)) } ?? "—"
+            // The summary shows a shared unit apart (2.0.1: “41.0 / 48.0 GiB”).
+            let split = LightfieldMemoryResultOverview.sharedUnit(expectedUsed + " / " + expectedTotal)
             try await host.waitForAccessibility(labels: [
                 L10n.text("内存总览 · 已用 / 总量", "Memory Overview · Used / Total")
-                    + " · " + expectedUsed + " / " + expectedTotal])
+                    + " · " + split.value + (split.unit.isEmpty ? "" : " " + split.unit)])
             XCTAssertEqual(action.height, 32, accuracy: 0.5)
             let target = try XCTUnwrap(frames["lightfield.primary.hitTarget"])
             let footer = try XCTUnwrap(frames["lightfield.status"])
@@ -550,6 +553,9 @@ final class V0LayoutHost {
         let recorder = self.recorder
         controller = NSHostingController(rootView: AnyView(
             root
+                // D141: the V0 layouts this host checks are now the classic
+                // view; the studio pages have their own tests.
+                .environment(\.careStudioClassicResults, true)
                 .background(GeometryReader { proxy in
                     Color.clear.preference(key: LayoutFramePreferenceKey.self,
                                            value: ["v0.viewport": proxy.frame(in: .global)])

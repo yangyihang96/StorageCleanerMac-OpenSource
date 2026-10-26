@@ -31,6 +31,22 @@ final class HelperUpgradeSafetyTests: XCTestCase {
             clientIdentifier: "com.attacker.app", expectedIdentifier: StorageCleanerBuildIdentity.appBundleIdentifier))
     }
 
+    /// D98 ②: even with the very same chain,
+    /// only the app's exact bundle identifier is a fan-control client; the
+    /// helpers, the Finder extension and the other channel's app are not.
+    func testSameCertificatesWithAnotherIdentifierAreRejected() {
+        let chain = [Data([10]), Data([11])]
+        let app = StorageCleanerBuildIdentity.appBundleIdentifier
+        let otherChannel = StorageCleanerBuildIdentity.isBeta ? "com.local.StorageCleanerMac" : "com.local.StorageCleanerMac.beta"
+        for identifier in ["", StorageCleanerBuildIdentity.helperLabel, app + ".FileOperationHelper",
+                           app + ".FinderUninstall", otherChannel, app.uppercased(), app + " "] {
+            XCTAssertFalse(HelperClientSigningPolicy.permits(helperCertificates: chain, clientCertificates: chain,
+                clientIdentifier: identifier, expectedIdentifier: app), identifier)
+        }
+        XCTAssertFalse(HelperClientSigningPolicy.permits(helperCertificates: chain, clientCertificates: Array(chain.reversed()),
+            clientIdentifier: app, expectedIdentifier: app))
+    }
+
     func testOnlyCompleteClientAuthorityAndTrustedChangedBinaryCanYield() {
         for original in [false, true] {
             for installedTeam in [false, true] {
@@ -159,6 +175,84 @@ final class HelperUpgradeSafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("pendingRequestCount == 0"))
         XCTAssertTrue(source.contains("fanCurveController = nil"))
         XCTAssertFalse(source.contains("case upgradeHelper"))
+    }
+
+    /// D98 ②: before anything is exported the listener needs the startup
+    /// identity, the client's audit token and a passing check, and refuses on
+    /// any Security error. The check validates the code behind that exact
+    /// audit token, then compares its chain with the helper's own and its
+    /// identifier with the app's. Comments and strings are blanked and
+    /// whitespace ignored, so neither documentation nor layout decides.
+    func testClientCheckComparesTheAuditTokenCodeWithTheHelperChain() throws {
+        let compact = SwiftSourceScanning.compact(SwiftSourceScanning.code(try read("Sources/FanControlHelper/main.swift")))
+        func body(_ marker: String, in text: String) throws -> String { try SwiftSourceScanning.body(of: marker, in: text) }
+
+        let listener = try body("shouldAcceptNewConnectionnewConnection:NSXPCConnection)->Bool", in: compact)
+        XCTAssertTrue(listener.hasPrefix("do{guardletstartupIdentity,lettoken=CodeSigningCheck.auditToken(for:newConnection),"
+            + "tryCodeSigningCheck.clientMatchesHelper(auditToken:token,helperIdentity:startupIdentity.signing)else{"), listener)
+        XCTAssertTrue(try body("helperIdentity:startupIdentity.signing)else", in: listener).hasSuffix("returnfalse"))
+        XCTAssertTrue(try body("}catch", in: listener).hasSuffix("returnfalse"))
+        let export = try XCTUnwrap(listener.range(of: "newConnection.exportedInterface="))
+        XCTAssertFalse(listener[..<export.lowerBound].contains("returntrue"))
+        XCTAssertTrue(listener.hasSuffix("newConnection.resume()returntrue"), listener)
+
+        XCTAssertEqual(try body("staticfuncclientMatchesHelper(auditToken:audit_token_t,helperIdentity:SigningIdentity)throws->Bool",
+                                in: compact),
+                       "letclientIdentity=trysigningIdentity(for:auditToken)returnHelperClientSigningPolicy.permits("
+                       + "helperCertificates:helperIdentity.certificates.map{SecCertificateCopyData($0)asData},"
+                       + "clientCertificates:clientIdentity.certificates.map{SecCertificateCopyData($0)asData},"
+                       + "clientIdentifier:clientIdentity.identifier,expectedIdentifier:mainApplicationIdentifier)")
+        XCTAssertTrue(compact.contains("privatestaticletmainApplicationIdentifier=StorageCleanerBuildIdentity.appBundleIdentifier"))
+
+        let guest = try body("privatestaticfuncsigningIdentity(forauditToken:audit_token_t)throws->SigningIdentity", in: compact)
+        XCTAssertTrue(guest.hasPrefix("lettokenData=withUnsafeBytes(of:auditToken){Data($0)}asCFData"), guest)
+        XCTAssertTrue(guest.contains(
+            "trycheck(SecCodeCopyGuestWithAttributes(nil,[kSecGuestAttributeAudit:tokenData]asCFDictionary,[],&code))"), guest)
+        XCTAssertTrue(guest.hasSuffix("returntrysigningIdentity(for:staticCode)"), guest)
+        let identity = try body("privatestaticfuncsigningIdentity(forcode:SecStaticCode)throws->SigningIdentity", in: compact)
+        XCTAssertTrue(identity.hasPrefix("trycheck(SecStaticCodeCheckValidity(code,"), identity)
+        XCTAssertTrue(identity.contains("identifier:values?[kSecCodeInfoIdentifierasString]"), identity)
+        XCTAssertTrue(identity.contains("certificates:values?[kSecCodeInfoCertificatesasString]"), identity)
+    }
+
+    /// D102 L1: after those checks and before anything is exported, the
+    /// listener sets the requirement built once at startup for the app (its
+    /// identifier, this helper's leaf certificate and Team ID) and refuses
+    /// when there is none. The client's running code must also be valid, not
+    /// only its file. Start-up fan recovery still runs before the listener
+    /// opens, never through a connection.
+    func testListenerSetsTheStartupRequirementBeforeExport() throws {
+        let compact = SwiftSourceScanning.compact(SwiftSourceScanning.code(try read("Sources/FanControlHelper/main.swift")))
+        func body(_ marker: String, in text: String) throws -> String { try SwiftSourceScanning.body(of: marker, in: text) }
+
+        let listener = try body("shouldAcceptNewConnectionnewConnection:NSXPCConnection)->Bool", in: compact)
+        let order = try ["CodeSigningCheck.clientMatchesHelper(auditToken:", "CodeSigningCheck.shouldYieldToReplacement(auditToken:",
+                         "}catch{", "guardletclientRequirementelse{", "newConnection.setCodeSigningRequirement(clientRequirement)",
+                         "newConnection.exportedInterface=", "newConnection.resume()"]
+            .map { try XCTUnwrap(listener.range(of: $0), $0).lowerBound }
+        XCTAssertEqual(order, order.sorted(), listener)
+        XCTAssertTrue(try body("guardletclientRequirementelse", in: listener).hasSuffix("returnfalse"))
+        XCTAssertEqual(SwiftSourceScanning.occurrences(of: "setCodeSigningRequirement(", in: compact), 1)
+
+        let initializer = try body("overrideinit()", in: compact)
+        let startup = try XCTUnwrap(initializer.range(of: "startupIdentity=tryCodeSigningCheck.captureStartupIdentity()"))
+        let built = try XCTUnwrap(initializer.range(of: "clientRequirement=startupIdentity.flatMap{identityin"
+            + "identity.signing.certificates.first.flatMap{leafin"
+            + "FanControlPeerRequirement.expression(identifier:StorageCleanerBuildIdentity.appBundleIdentifier,"
+            + "leafCertificate:SecCertificateCopyData(leaf)asData,teamIdentifier:identity.signing.teamIdentifier)}}"), initializer)
+        XCTAssertLessThan(startup.lowerBound, built.lowerBound)
+        XCTAssertEqual(SwiftSourceScanning.occurrences(of: "clientRequirement=", in: compact), 1, "set only at startup")
+
+        let guest = try body("privatestaticfuncsigningIdentity(forauditToken:audit_token_t)throws->SigningIdentity", in: compact)
+        let steps = try ["trycheck(SecCodeCopyGuestWithAttributes(", "trycheck(SecCodeCheckValidity(code,[],nil))",
+                         "trycheck(SecCodeCopyStaticCode(code,[],&staticCode))"]
+            .map { try XCTUnwrap(guest.range(of: $0), $0).lowerBound }
+        XCTAssertEqual(steps, steps.sorted(), guest)
+
+        let run = try body("funcrun()", in: compact)
+        let recovery = try XCTUnwrap(run.range(of: "startupSafety.start(recoverFans:"))
+        let open = try XCTUnwrap(run.range(of: "listener.resume()"))
+        XCTAssertLessThan(recovery.lowerBound, open.lowerBound)
     }
 
     func testLaunchdRestartsOnlyUnsuccessfulExitAndRetainsDemandService() throws {

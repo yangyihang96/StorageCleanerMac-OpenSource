@@ -20,7 +20,7 @@ enum ExternalUninstallRejection: Equatable, Sendable {
         case .handoff(.pathTooLong):
             L10n.text("路径过长", "Path is too long")
         case .handoff(.overLimit):
-            L10n.text("一次最多处理 \(FinderUninstallHandoff.maximumApplications) 个应用", "At most \(FinderUninstallHandoff.maximumApplications) apps at a time")
+            L10n.text("一次最多处理 \(ByteFormat.count(FinderUninstallHandoff.maximumApplications)) 个应用", "At most \(ByteFormat.count(FinderUninstallHandoff.maximumApplications)) apps at a time")
         case .missing:
             L10n.text("已不存在或替身已失效", "No longer exists, or the alias is broken")
         case .systemApplication:
@@ -139,7 +139,7 @@ struct ExternalUninstallRejectionSummary: Equatable, Sendable {
             "• " + Self.displayName(entry.path) + separator + entry.reason.title
         }
         let more = entries.count + droppedCount - min(entries.count, Self.maximumListedItems)
-        let tail = more > 0 ? ["• " + L10n.text("另有 \(more) 项", "\(more) more")] : []
+        let tail = more > 0 ? ["• " + L10n.text("另有 \(ByteFormat.count(more)) 项", "\(ByteFormat.count(more)) more")] : []
         message = ([L10n.text("以下项目没有打开卸载审阅：", "These items were not opened for uninstall review:")] + lines + tail)
             .joined(separator: "\n")
     }

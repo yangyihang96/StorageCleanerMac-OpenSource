@@ -79,6 +79,15 @@ enum ReviewFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
     case energy
     case uninstall
     case updater
+    /// D154: CleanMyMac 5's Cloud Cleanup, My Tools and My Activity modules.
+    case cloudCleanup
+    case myTools
+    case myActivity
+    /// D154 batch 2: the D160–D165 tool pages (Applications → Extensions,
+    /// Performance → Maintenance, My Clutter → Chat Files).
+    case extensions
+    case maintenance
+    case chatFiles
 
     var id: String { rawValue }
 
@@ -99,6 +108,12 @@ enum ReviewFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .energy: L10n.text("能耗", "Energy")
         case .uninstall: L10n.text("卸载", "Uninstall")
         case .updater: L10n.text("应用更新", "App Updates")
+        case .cloudCleanup: L10n.text("云盘清理", "Cloud Cleanup")
+        case .myTools: L10n.text("我的工具", "My Tools")
+        case .myActivity: L10n.text("我的活动", "My Activity")
+        case .extensions: L10n.text("扩展", "Extensions")
+        case .maintenance: L10n.text("维护任务", "Maintenance")
+        case .chatFiles: L10n.text("聊天文件", "Chat Files")
         }
     }
 
@@ -119,12 +134,19 @@ enum ReviewFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .energy: AppSymbols.Navigation.energy
         case .uninstall: AppSymbols.Navigation.uninstall
         case .updater: AppSymbols.Navigation.appUpdates
+        case .cloudCleanup: "icloud"
+        case .myTools: "wrench.and.screwdriver"
+        case .myActivity: "chart.line.uptrend.xyaxis"
+        case .extensions: "puzzlepiece.extension"
+        case .maintenance: "wrench.adjustable"
+        case .chatFiles: "bubble.left.and.bubble.right"
         }
     }
 
     var tier: StorageTier? {
         switch self {
-        case .overview, .healthHub, .performance, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub, .startup, .memory, .energy, .uninstall, .updater:
+        case .overview, .healthHub, .performance, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub, .startup, .memory, .energy, .uninstall, .updater,
+             .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             nil
         case .green: .green
         }
@@ -132,9 +154,10 @@ enum ReviewFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
 
     var isStorageFilter: Bool {
         switch self {
-        case .overview, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates:
+        case .overview, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .cloudCleanup, .chatFiles:
             true
-        case .healthHub, .performance, .utilityHub, .startup, .memory, .energy, .uninstall, .updater:
+        case .healthHub, .performance, .utilityHub, .startup, .memory, .energy, .uninstall, .updater,
+             .myTools, .myActivity, .extensions, .maintenance:
             false
         }
     }
@@ -171,7 +194,8 @@ enum ReviewFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .startup, .memory, .energy, .uninstall, .updater:
             .utilityHub
-        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub:
+        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub,
+             .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             self
         }
     }
@@ -180,7 +204,8 @@ enum ReviewFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .startup, .memory, .energy, .uninstall, .updater:
             .utilityHub
-        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub:
+        case .overview, .healthHub, .performance, .green, .privacy, .devCaches, .largeFiles, .migration, .duplicates, .utilityHub,
+             .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             self
         }
     }
@@ -337,6 +362,7 @@ struct StorageItem: Identifiable, Hashable, Sendable {
 }
 
 struct ScanResult: Sendable {
+    var ignoredCounts: [IgnoreCategory: Int] = [:]
     private struct DecisionByteTotals: Sendable {
         let green: Int64
         let yellow: Int64
@@ -462,7 +488,7 @@ struct ScanResult: Sendable {
         switch filter {
         case .overview, .healthHub, .performance, .utilityHub, .startup, .memory, .energy, .uninstall, .updater:
             return topItems
-        case .privacy:
+        case .privacy, .cloudCleanup, .myTools, .myActivity, .extensions, .maintenance, .chatFiles:
             return []
         case .devCaches:
             return sourceItems([

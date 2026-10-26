@@ -34,6 +34,14 @@ extension CleanupRunningApplicationChecking {
 
 protocol CleanupCapacityReading: Sendable {
     func availableCapacity(at url: URL) async -> Int64?
+    /// D101 G13: the used space of the volume holding `url`.
+    func usedCapacity(at url: URL) async -> Int64?
+}
+
+extension CleanupCapacityReading {
+    /// A reader that cannot tell leaves G13's volume check out; the item
+    /// count is still checked.
+    func usedCapacity(at _: URL) async -> Int64? { nil }
 }
 
 /// D23: one frozen Trash entry to delete permanently, with the identities
@@ -207,6 +215,28 @@ struct FoundationCleanupPermanentDeleter: CleanupPermanentDeleting {
         }
         guard errno == 0 else { throw CleanupTrashDeletionFailure.system(errno) }
         return names
+    }
+
+    /// D101 L5: the identity `remove` compares, read without following a
+    /// link, so a frozen list matches exactly what is checked at deletion.
+    /// Nil when nothing is there.
+    static func identity(at url: URL) throws -> FileIdentity? {
+        var status = stat()
+        var code: Int32 = 0
+        let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else {
+                code = EINVAL
+                return -1
+            }
+            let value = lstat(path, &status)
+            code = errno
+            return value
+        }
+        guard result == 0 else {
+            if code == ENOENT || code == ENOTDIR { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        return identity(of: status)
     }
 
     private static func identity(of status: stat) -> FileIdentity {
@@ -386,6 +416,14 @@ struct FoundationCleanupCapacityReader: CleanupCapacityReading {
             forKeys: [.volumeAvailableCapacityForImportantUsageKey]
         ).volumeAvailableCapacityForImportantUsage
     }
+
+    func usedCapacity(at url: URL) async -> Int64? {
+        guard let values = try? url.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]),
+              let total = values.volumeTotalCapacity,
+              let available = values.volumeAvailableCapacity,
+              total > available else { return nil }
+        return Int64(total - available)
+    }
 }
 
 actor SafeCleanupExecutor {
@@ -396,6 +434,8 @@ actor SafeCleanupExecutor {
     private let runningApplicationChecker: any CleanupRunningApplicationChecking
     private let capacityReader: any CleanupCapacityReading
     private let deleter: any CleanupPermanentDeleting
+    /// D181: checks a volume's Trash folder again right before deleting in it.
+    private let volumeTrashLocator: any VolumeTrashLocating
     private let coordinator: HeavyWorkCoordinator
     private let persistReport: @Sendable (CleanReport, [String: FileIdentity]) throws -> Void
     private var consumedPlanIDs = Set<CleanPlanID>()
@@ -413,6 +453,7 @@ actor SafeCleanupExecutor {
             FoundationCleanupRunningApplicationChecker(),
         capacityReader: any CleanupCapacityReading = FoundationCleanupCapacityReader(),
         deleter: any CleanupPermanentDeleting = FoundationCleanupPermanentDeleter(),
+        volumeTrashLocator: any VolumeTrashLocating = VolumeTrashLocator(),
         coordinator: HeavyWorkCoordinator,
         persistReport: @escaping @Sendable (CleanReport, [String: FileIdentity]) throws -> Void = { _, _ in }
     ) {
@@ -423,6 +464,7 @@ actor SafeCleanupExecutor {
         self.runningApplicationChecker = runningApplicationChecker
         self.capacityReader = capacityReader
         self.deleter = deleter
+        self.volumeTrashLocator = volumeTrashLocator
         self.coordinator = coordinator
         self.persistReport = persistReport
     }
@@ -465,14 +507,30 @@ actor SafeCleanupExecutor {
                 status: reason.map(CleanPreflightItemStatus.skipped) ?? .ready
             ))
         }
+        let readyIDs = Set(results.compactMap { $0.status == .ready ? $0.planItemID : nil })
         let report = CleanPreflightReport(
             planID: plan.id,
             checkedAt: Date(),
             items: results,
-            failure: nil
+            failure: nil,
+            scaleAlert: await scaleAlert(for: plan.items.filter { readyIDs.contains($0.id) },
+                                         rules: context.activeRules)
         )
         preflightReports[plan.id] = report
         return report
+    }
+
+    /// D101 G13: judged on the items that will run. Each volume's used space
+    /// is read once, at the first such item on it.
+    private func scaleAlert(for items: [CleanPlanItem], rules: CleanupRuleSet) async -> CleanPlanScaleAlert? {
+        var usedBytes: [String: Int64] = [:]
+        var readVolumes = Set<String>()
+        for item in items where readVolumes.insert(item.expectedSnapshot.volumeIdentifier).inserted {
+            usedBytes[item.expectedSnapshot.volumeIdentifier] = await capacityReader.usedCapacity(at: item.sourceURL)
+        }
+        let titles = Dictionary(rules.rules.map { ($0.id, CleanupRuleCopy.title(for: $0)) },
+                                uniquingKeysWith: { first, _ in first })
+        return CleanPlanScaleAlert(items: items, usedBytes: usedBytes) { titles[$0] ?? $0 }
     }
 
     func execute(
@@ -482,30 +540,30 @@ actor SafeCleanupExecutor {
     ) async -> CleanReport {
         let startedAt = Date()
         guard context.featureConfiguration.mode == .v2Full else {
-            return terminalFailureReport(
+            return notStartedReport(
                 plan: plan,
                 startedAt: startedAt,
-                code: .featureDisabled
+                refusal: CleanFailure(code: .featureDisabled, detailCode: nil)
             )
         }
         guard plan.sessionID == context.activeSessionID,
               plan.rulesVersion == context.activeRules.rulesVersion,
               plan.rulesProvenance == context.activeRules.effectiveProvenance,
               !consumedPlanIDs.contains(plan.id) else {
-            return terminalFailureReport(
+            return notStartedReport(
                 plan: plan,
                 startedAt: startedAt,
-                code: .planIntegrityFailed
+                refusal: CleanFailure(code: .planIntegrityFailed, detailCode: nil)
             )
         }
         let planItemIDs = Set(plan.items.map(\.id))
         guard let approvedPlanItemIDs = context.approvedPlanItemIDs,
               !approvedPlanItemIDs.isEmpty,
               approvedPlanItemIDs.isSubset(of: planItemIDs) else {
-            return terminalFailureReport(
+            return notStartedReport(
                 plan: plan,
                 startedAt: startedAt,
-                code: .planIntegrityFailed
+                refusal: CleanFailure(code: .planIntegrityFailed, detailCode: nil)
             )
         }
 
@@ -523,10 +581,10 @@ actor SafeCleanupExecutor {
         do {
             lease = try await coordinator.acquire(owner: .cleanup)
         } catch {
-            return terminalFailureReport(
+            return notStartedReport(
                 plan: plan,
                 startedAt: startedAt,
-                code: .coordinatorBusy
+                refusal: CleanStartRefusalPresentation.leaseRefusal(error)
             )
         }
         let capacityBefore = await capacityReader.availableCapacity(at: context.userHomeURL)
@@ -544,7 +602,8 @@ actor SafeCleanupExecutor {
                 cancelled: false, availableSpaceDeltaBytes: nil), identities)
         } catch {
             await coordinator.release(lease)
-            return terminalFailureReport(plan: plan, startedAt: startedAt, code: .persistenceFailed)
+            return notStartedReport(plan: plan, startedAt: startedAt,
+                                    refusal: CleanFailure(code: .persistenceFailed, detailCode: "intent-write-failed"))
         }
 
         await progress(progressSnapshot(plan: plan, items: reportItems, currentRuleID: nil))
@@ -808,12 +867,22 @@ actor SafeCleanupExecutor {
             case .otherVolume: return .skipped(.volumeChanged)
             }
         }
-        if let remaining = try? metadataReader.snapshot(at: item.sourceURL),
-           remaining.identity == item.expectedSnapshot.identity {
-            return .failed(CleanFailure(
-                code: .deletionOutcomeUnknown,
-                detailCode: "item-still-present"
-            ))
+        // Deleted only once the entry is seen to be gone or replaced. A
+        // readback that fails (permission, I/O) shows neither (as B-R2 found
+        // in the menu command).
+        do {
+            let snapshot = try item.ruleID == "trash.icloud-drive"
+                ? metadataReader.metadataOnlySnapshot(at: item.sourceURL) : metadataReader.snapshot(at: item.sourceURL)
+            if snapshot.identity == item.expectedSnapshot.identity {
+                return .failed(CleanFailure(
+                    code: .deletionOutcomeUnknown,
+                    detailCode: "item-still-present"
+                ))
+            }
+        } catch CleanupFileSystemError.vanished {
+            // Gone.
+        } catch {
+            return .failed(CleanFailure(code: .deletionOutcomeUnknown, detailCode: "deletion-readback-failed"))
         }
         return .deleted(CleanupDeletionReceipt(
             originalPath: item.expectedSnapshot.standardizedPath,
@@ -941,6 +1010,17 @@ actor SafeCleanupExecutor {
             return .pathOutsideAllowedRoot
         }
 
+        // D183: recheck the exact home-relative root, final name and depth
+        // at preflight and again after the durable move intent.
+        if rule.effectiveCandidateScope == .namedDescendantDirectories {
+            guard rootPath == PathSafety.lexicalPath(context.userHomeURL.appendingPathComponent(rule.root.path).path),
+                  sourcePath == PathSafety.lexicalPath(item.expectedSnapshot.standardizedPath),
+                  item.expectedSnapshot.identity.entryKind == .directory,
+                  CleanupNamedDescendantScope.matches(sourcePath: sourcePath, rootPath: rootPath, rule: rule) else {
+                return .pathOutsideAllowedRoot
+            }
+        }
+
         let excludedPaths = context.excludedURLs.map {
             PathSafety.lexicalPath($0.path)
         }
@@ -967,6 +1047,10 @@ actor SafeCleanupExecutor {
         guard current.identity.entryKind != .symbolicLink,
               !current.hasSymbolicLinkComponent else {
             return .symbolicLinkDetected
+        }
+        if rule.effectiveCandidateScope == .namedDescendantDirectories,
+           PathSafety.lexicalPath(current.standardizedPath) != sourcePath {
+            return .pathOutsideAllowedRoot
         }
         guard PathSafety.isContained(
             current.standardizedPath,
@@ -1293,8 +1377,10 @@ actor SafeCleanupExecutor {
     }
 
     /// D23: each frozen Trash entry is re-read right before deletion. It must
-    /// still be the same file, directly inside the user's own `~/.Trash`; a
-    /// symbolic link is only removed while it points back inside the Trash.
+    /// still be the same file, directly inside the user's own `~/.Trash` (or,
+    /// D181, the user's Trash folder on that mounted volume, checked again by
+    /// `VolumeTrashLocator`); a symbolic link is only removed while it points
+    /// back inside the Trash.
     private func permanentDeletionSkipReason(
         for item: CleanPlanItem,
         context: CleanupExecutionContext
@@ -1313,14 +1399,30 @@ actor SafeCleanupExecutor {
             return .rulesChanged
         }
         let homeURL = context.userHomeURL
-        let trashURL = homeURL.appendingPathComponent(rule.root.path, isDirectory: true)
+        let trashURL: URL
+        let trashIsExpected: Bool
+        switch rule.root.kind {
+        case .mountedVolumeTrashes:
+            trashURL = URL(fileURLWithPath: PathSafety.lexicalPath(item.allowedRootURL.path), isDirectory: true)
+            trashIsExpected = VolumeTrashLocator.isTrashPath(trashURL.path, uid: getuid())
+                && volumeTrashLocator.isValidTrash(trashURL, uid: getuid())
+        case .homeRelative:
+            trashURL = homeURL.appendingPathComponent(rule.root.path, isDirectory: true)
+            trashIsExpected = PathSafety.isContained(
+                PathSafety.lexicalPath(trashURL.path),
+                in: PathSafety.lexicalPath(homeURL.path),
+                resolvingSymlinks: false
+            )
+        case .applicationsDirectory:
+            return .rulesChanged
+        }
         let trashPath = PathSafety.lexicalPath(trashURL.path)
         let sourcePath = PathSafety.lexicalPath(item.sourceURL.path)
         guard item.sourceURL.isFileURL,
               PathSafety.lexicalPath(item.allowedRootURL.path) == trashPath,
               PathSafety.lexicalPath(item.sourceURL.deletingLastPathComponent().path) == trashPath,
               sourcePath != trashPath,
-              PathSafety.isContained(trashPath, in: PathSafety.lexicalPath(homeURL.path), resolvingSymlinks: false) else {
+              trashIsExpected else {
             return .pathOutsideAllowedRoot
         }
         if ScanExclusionService.intersectsExcludedTree(
@@ -1330,7 +1432,9 @@ actor SafeCleanupExecutor {
             return .excludedByUser
         }
         // P2-3: still a real folder, and the very Trash folder the scan saw.
-        guard let trash = try? metadataReader.snapshot(at: trashURL),
+        let trashSnapshot = try? rule.isICloudDriveTrash
+            ? metadataReader.metadataOnlySnapshot(at: trashURL) : metadataReader.snapshot(at: trashURL)
+        guard let trash = trashSnapshot,
               trash.identity.entryKind == .directory,
               !trash.hasSymbolicLinkComponent,
               let scannedTrash = item.allowedRootIdentity,
@@ -1340,7 +1444,8 @@ actor SafeCleanupExecutor {
 
         let current: FileSnapshot
         do {
-            current = try metadataReader.snapshot(at: item.sourceURL)
+            current = try rule.isICloudDriveTrash
+                ? metadataReader.metadataOnlySnapshot(at: item.sourceURL) : metadataReader.snapshot(at: item.sourceURL)
         } catch CleanupFileSystemError.vanished {
             return await volumeChecker.isAvailable(
                 volumeIdentifier: item.expectedSnapshot.volumeIdentifier
@@ -1360,9 +1465,10 @@ actor SafeCleanupExecutor {
         guard current.isWritableVolume else {
             return .volumeReadOnly
         }
-        // P2-5: an entry that became a cloud placeholder is left alone.
-        guard !current.isCloudPlaceholder,
-              current.isCloudItem == item.expectedSnapshot.isCloudItem else {
+        // P2-5: ordinary Trash leaves placeholders alone; D192's exact
+        // iCloud Trash rule can unlink the same identity in either cloud state.
+        guard rule.isICloudDriveTrash || (!current.isCloudPlaceholder
+              && current.isCloudItem == item.expectedSnapshot.isCloudItem) else {
             return .cloudStateChanged
         }
         if current.identity.entryKind == .symbolicLink {
@@ -1634,24 +1740,24 @@ actor SafeCleanupExecutor {
         )
     }
 
-    private func terminalFailureReport(
+    /// D214: a run refused before its first item. Nothing was tried, so every
+    /// item is “not run” rather than failed (was `.failed` with the refusal's
+    /// code), and the report keeps the reason for the pages and the records.
+    private func notStartedReport(
         plan: CleanPlan,
         startedAt: Date,
-        code: CleanFailureCode
+        refusal: CleanFailure
     ) -> CleanReport {
-        let items = plan.items.map {
-            reportItem(
-                for: $0,
-                outcome: .failed(CleanFailure(code: code, detailCode: nil))
-            )
-        }
-        return makeReport(
+        var report = makeReport(
             plan: plan,
             startedAt: startedAt,
-            items: items,
+            items: plan.items.map { reportItem(for: $0, outcome: .notProcessed) },
             cancelled: false,
             availableSpaceDeltaBytes: nil
         )
+        report.outcome = .failed
+        report.startRefusal = refusal
+        return report
     }
 
     private func makeReport(

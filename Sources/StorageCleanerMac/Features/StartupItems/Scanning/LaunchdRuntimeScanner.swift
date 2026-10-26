@@ -1,4 +1,11 @@
+import AppKit
 import Foundation
+
+/// An application as `NSWorkspace` lists it (D192: login items' run state).
+struct StartupRunningApplication: Sendable, Equatable {
+    let bundleURL: URL?
+    let pid: Int32
+}
 
 /// Supplements filesystem discovery with runtime evidence. It intentionally
 /// does not use `launchctl list` as a discovery source: disabled and unloaded
@@ -7,24 +14,41 @@ struct LaunchdRuntimeScanner: StartupItemScanning {
     private let runner: any StartupCommandRunning
     private let parser: LaunchctlOutputParser
     private let executableURL: URL
+    private let runningApplications: @Sendable () async -> [StartupRunningApplication]
 
     init(
         runner: any StartupCommandRunning = StructuredStartupCommandRunner(),
         parser: LaunchctlOutputParser = LaunchctlOutputParser(),
-        executableURL: URL = URL(fileURLWithPath: "/bin/launchctl")
+        executableURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
+        runningApplications: @escaping @Sendable () async -> [StartupRunningApplication] = LaunchdRuntimeScanner.currentApplications
     ) {
         self.runner = runner
         self.parser = parser
         self.executableURL = executableURL.standardizedFileURL
+        self.runningApplications = runningApplications
     }
 
     let source = StartupItemsDomain.ScanSource.launchdRuntime
     let coverageIdentifier = "launchd.runtime.current-user-and-third-party-system"
 
     func scan(context: StartupScanContext) async throws -> [StartupItemsDomain.Candidate] {
-        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else { return [] }
-        let known = context.seedCandidates.filter { $0.label?.isEmpty == false }
-        guard !known.isEmpty else { return [] }
+        let labelled = context.seedCandidates.filter { $0.label?.isEmpty == false }
+        // D192: an Open at Login app or a login-item helper app is not a
+        // launchd job under its BTM identifier ("2.com.example.app"), so
+        // asking launchctl by that label always answered "not running"
+        // (10-23 test beta: all nine login items, Claude included, while
+        // they ran). Such items run as applications; the application list
+        // answers for them.
+        var applicationResults: [StartupItemsDomain.Candidate] = []
+        let applications = labelled.filter { Self.applicationBundlePath(of: $0) != nil }
+        if !applications.isEmpty {
+            let running = await runningApplications()
+            applicationResults = applications.map { Self.applicationRuntimeCandidate(from: $0, running: running) }
+        }
+        let known = labelled.filter { Self.applicationBundlePath(of: $0) == nil }
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path), !known.isEmpty else {
+            return applicationResults
+        }
 
         let GUI = "gui/\(context.currentUserID)"
         async let legacyListResult = runner.run(
@@ -91,7 +115,56 @@ struct LaunchdRuntimeScanner: StartupItemScanning {
             // Apple system daemons remain read-only and do not incur hundreds
             // of individual diagnostic subprocesses.
         }
-        return result
+        return applicationResults + result
+    }
+
+    static func currentApplications() async -> [StartupRunningApplication] {
+        await MainActor.run {
+            NSWorkspace.shared.runningApplications.map {
+                StartupRunningApplication(bundleURL: $0.bundleURL, pid: $0.processIdentifier)
+            }
+        }
+    }
+
+    /// The .app an Open at Login item opens (its own URL, or the app it was
+    /// attributed to), or a login item's own helper .app. nil for anything
+    /// else, which keeps the launchctl lookup.
+    static func applicationBundlePath(of candidate: StartupItemsDomain.Candidate) -> String? {
+        let urls: [URL?]
+        switch candidate.kind {
+        case .openAtLogin: urls = [candidate.executableURL, candidate.applicationURL]
+        case .loginItem: urls = [candidate.executableURL]
+        default: return nil
+        }
+        return urls.compactMap { $0 }
+            .first { $0.pathExtension.caseInsensitiveCompare("app") == .orderedSame }
+            .map { $0.standardizedFileURL.path }
+    }
+
+    private static func applicationRuntimeCandidate(
+        from candidate: StartupItemsDomain.Candidate,
+        running: [StartupRunningApplication]
+    ) -> StartupItemsDomain.Candidate {
+        let path = applicationBundlePath(of: candidate)
+        let match = running.first { $0.bundleURL?.standardizedFileURL.path == path }
+        var updated = candidate
+        updated.state.process = match.map { .running(pid: $0.pid) } ?? .stopped
+        return StartupItemsDomain.Candidate(
+            id: "runtime:\(candidate.scope.rawValue):\(candidate.label ?? candidate.id)",
+            source: .launchdRuntime,
+            kind: candidate.kind,
+            scope: candidate.scope,
+            name: candidate.name,
+            label: candidate.label,
+            plistURL: candidate.plistURL,
+            executableURL: candidate.executableURL,
+            applicationURL: candidate.applicationURL,
+            configuration: candidate.configuration,
+            state: updated.state,
+            attribution: candidate.attribution,
+            actionCapability: candidate.actionCapability,
+            diagnosticEvidence: [match == nil ? "running-applications:absent" : "running-applications:present"]
+        )
     }
 
     private func GUIRuntimeCandidates(

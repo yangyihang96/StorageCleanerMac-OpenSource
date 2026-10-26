@@ -1,7 +1,9 @@
 import Combine
 import Foundation
 
-/// D74: resident prestored demand is independent of the user's 1/2/5-second display setting.
+/// D74: resident prestored demand does not depend on what is displayed.
+/// D127: it is read on the user's 1/2/3-second tick, panel open or closed
+/// (was 5 s while closed whatever the 1/2/5-second setting).
 /// A disabled source contributes no fabricated point to background history.
 struct MenuBarSamplingPlan: Equatable, Sendable {
     let primaryKinds: Set<MenuBarMetricKind>
@@ -33,10 +35,15 @@ struct MenuBarSamplingPlan: Equatable, Sendable {
         return Self(
             primaryKinds: kinds,
             panelVisible: panelVisible && !stopped,
-            needsStatusBattery: !stopped && statusVisible && statusMode == .deviceStatus,
+            // D153: the combined icon draws the same battery reading; its
+            // Wi-Fi, network and volume come from its own event monitors.
+            needsStatusBattery: !stopped && statusVisible
+                && (statusMode == .deviceStatus || statusMode == .combinedStatus),
             needsStatusWiFi: !stopped && statusVisible && statusMode == .deviceStatus,
+            // D127: custom fan control reads sensors at least every 2 s; a
+            // faster tick (1 s) reads them on every tick like everything else.
             thermalInterval: customFanControlActive && !lowPower
-                ? SystemMonitorSamplingInterval.interactive : cadence.expensive,
+                ? min(SystemMonitorSamplingInterval.interactive, cadence.expensive) : cadence.expensive,
             gpuInterval: cadence.expensive,
             cadence: cadence
         )
@@ -246,12 +253,25 @@ actor MenuBarMemoryStatusSampler {
     }
 }
 
-/// Visible page attribution only. D74 resident enumeration continues even
-/// without this consumer, using its slower process cadence.
+/// The open page that shows a process list. D127: without one, resident
+/// sampling enumerates no processes (D74 kept enumerating every 10–15 s).
+/// D167: the module page (level 2) shows the process card, as iStat's module
+/// menus do, so opening it starts the reads. Was: only while a level-3 page
+/// was open (`tertiaryVisible`, 1.9's process pages), which after D119 left
+/// the level-2 cards on "正在准备采样" until a history page was opened.
 enum MenuBarProcessSamplingDemand {
-    static func section(_ section: PanelSection, tertiaryVisible: Bool) -> PanelSection? {
-        guard tertiaryVisible,
-              [.processor, .memory, .disk, .power].contains(section) else { return nil }
-        return section
+    static func section(_ section: PanelSection) -> PanelSection? {
+        [.processor, .memory, .disk, .power].contains(section) ? section : nil
+    }
+
+    /// D171 (iStat `startItemsForKey:`, spec §8): the CPU and disk pages list
+    /// their first read at once, every rate 0, and the first delta 0.5 s
+    /// later (was "正在采样…" until that delta, D127/D129). The memory list
+    /// needs no baseline. The power page still waits for its first delta:
+    /// iStat's energy list keeps apps whose power reaches a configured
+    /// threshold, whose default the spec does not give, and on a first read
+    /// (power 0) our significant-energy list would be empty.
+    static func listsFirstRead(_ section: PanelSection) -> Bool {
+        section == .processor || section == .disk
     }
 }
