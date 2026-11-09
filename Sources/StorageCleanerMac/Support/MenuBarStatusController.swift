@@ -33,6 +33,71 @@ struct MenuBarStatusRenderIdentity: Equatable {
     }
 }
 
+/// D270: macOS 27 hides a status item that System Settings → Menu Bar →
+/// "Allow in the Menu Bar" does not allow without changing its `isVisible`:
+/// the system never places it, and its button stays at the placeholder below
+/// the main screen (`0,-11,53x22`). An allowed item is placed in the active
+/// display's menu bar 0.08–0.25 s after it is created, also while that menu
+/// bar is hidden (a full-screen Space, or "Automatically hide and show the
+/// menu bar: Always"). On the way it passes frames off every screen, at height
+/// 0 and mid-animation, so a measurement that finds the button in a menu bar
+/// counts for good and one that finds it anywhere else answers nothing.
+/// Measured 2026-10-29/30 with a probe app (`review-fixes/d270-signal`).
+@MainActor
+final class MenuBarStatusItemPlacement {
+    /// How far below its screen's top edge a placed button's top can sit: the
+    /// measured buttons sat 3–4 pt below it (34 pt mid-animation), the
+    /// placeholder and the frames on the way 850 pt or more.
+    nonisolated static let menuBarBandDepth: CGFloat = 40
+    /// A launch with the panel alone waits this long for the system to place
+    /// the item before it counts as not shown.
+    nonisolated static let launchWait: Duration = .seconds(10)
+    nonisolated static let pollInterval: Duration = .milliseconds(100)
+
+    private let buttonFrame: @MainActor () -> NSRect?
+    private let screenFrames: @MainActor () -> [NSRect]
+    private(set) var isPlaced = false
+
+    init(buttonFrame: @escaping @MainActor () -> NSRect?,
+         screenFrames: @escaping @MainActor () -> [NSRect] = { NSScreen.screens.map(\.frame) }) {
+        self.buttonFrame = buttonFrame
+        self.screenFrames = screenFrames
+    }
+
+    /// Measures now; true once any measurement has found the button in a menu bar.
+    @discardableResult
+    func measure() -> Bool {
+        if !isPlaced, let frame = buttonFrame(),
+           Self.isInMenuBar(buttonFrame: frame, screenFrames: screenFrames()) {
+            isPlaced = true
+        }
+        return isPlaced
+    }
+
+    /// True as soon as the button is placed, false once `timeout` passes first.
+    func wait(timeout: Duration) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !measure() {
+            guard clock.now < deadline, !Task.isCancelled else { return false }
+            try? await Task.sleep(for: Self.pollInterval)
+        }
+        return true
+    }
+
+    /// The button's center lies on a screen whose top edge is at most
+    /// `menuBarBandDepth` above the button's top edge.
+    nonisolated static func isInMenuBar(buttonFrame frame: NSRect, screenFrames: [NSRect]) -> Bool {
+        guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+              frame.width > 0, frame.height > 0 else { return false }
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        return screenFrames.contains { screen in
+            let depth = screen.maxY - frame.maxY
+            return screen.contains(center) && depth >= 0 && depth <= menuBarBandDepth
+        }
+    }
+}
+
 @MainActor
 final class MenuBarStatusController: NSObject, ObservableObject {
     static let shared = MenuBarStatusController()
@@ -46,6 +111,11 @@ final class MenuBarStatusController: NSObject, ObservableObject {
     private var deviceStatusCancellable: AnyCancellable?
     private var appearanceObservation: NSKeyValueObservation?
     private var statusVisibilityObservation: NSKeyValueObservation?
+    /// D270: whether the system has placed the status item in a menu bar.
+    private lazy var statusItemPlacement = MenuBarStatusItemPlacement(buttonFrame: { [weak self] in
+        self?.currentStatusButtonScreenFrame()
+    })
+    private var placementCancellable: AnyCancellable?
     private var samplingEnvironmentCancellable: AnyCancellable?
     private var sleepCancellables: [AnyCancellable] = []
     private var systemSleeping = false
@@ -93,6 +163,20 @@ final class MenuBarStatusController: NSObject, ObservableObject {
             .sink { @Sendable _ in
                 Task { @MainActor in refresh() }
             }
+    }
+
+    /// D256: a quit keeps the panel only when there is one in the menu bar.
+    var hasStatusItem: Bool { statusItem != nil }
+    /// D270: whether the panel can be reached from the menu bar now: the item
+    /// is visible and the system has placed it in a menu bar.
+    var isShowingStatusItem: Bool { statusItem?.isVisible == true && statusItemPlacement.measure() }
+    var isPanelShown: Bool { panelSession?.panel.isVisible == true }
+
+    /// D270: true once the system places the status item in a menu bar, false
+    /// when there is no item or `timeout` passes first.
+    func waitForStatusItemPlacement(timeout: Duration) async -> Bool {
+        guard statusItem != nil else { return false }
+        return await statusItemPlacement.wait(timeout: timeout)
     }
 
     func install(store: ScanStore, computerHealthStore: ComputerHealthStore) {
@@ -143,6 +227,7 @@ final class MenuBarStatusController: NSObject, ObservableObject {
 
         self.statusItem = statusItem
         updateSamplingContext(store: store)
+        watchStatusItemPlacement(button)
         statusVisibilityObservation = statusItem.observe(\.isVisible, options: [.new]) { [weak self, weak store] _, _ in
             Task { @MainActor in
                 guard let self, let store else { return }
@@ -152,6 +237,7 @@ final class MenuBarStatusController: NSObject, ObservableObject {
                 if self.statusDisplayMode == .combinedStatus {
                     self.updateStatusItem(snapshot: store.menuBarMonitorSnapshot)
                 }
+                MenuBarOnlyMode.shared.statusItemVisibilityChanged(isShowing: self.isShowingStatusItem)
             }
         }
         samplingEnvironmentCancellable = Publishers.Merge(
@@ -275,8 +361,13 @@ final class MenuBarStatusController: NSObject, ObservableObject {
             || MiniWindowDemoData.isCapturingMenuBarPanelSnapshots
 #endif
         if shouldOpenPanel {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                guard let self, let button = self.statusItem?.button else { return }
+            // D270: the panel opens under its status item, so not before the
+            // system places the item; one it never places opens no panel (a
+            // launch with the panel alone then opens the main program).
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, await self.waitForStatusItemPlacement(timeout: MenuBarStatusItemPlacement.launchWait),
+                      let button = self.statusItem?.button else { return }
                 if let session = self.panelSession,
                    session.panel.isVisible,
                    session.panel.isOnActiveSpace {
@@ -284,6 +375,30 @@ final class MenuBarStatusController: NSObject, ObservableObject {
                 }
                 self.presentPanel(from: button)
             }
+        }
+    }
+
+    /// D270: until the system places the item, every move, resize and screen
+    /// change of its window and every screen-parameter change measures again,
+    /// and the launch polls for `launchWait`. None of them counts as "gone",
+    /// and a placed item stays counted.
+    private func watchStatusItemPlacement(_ button: NSStatusBarButton) {
+        let center = NotificationCenter.default
+        var publishers = [center.publisher(for: NSApplication.didChangeScreenParametersNotification)]
+        if let window = button.window {
+            publishers += [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
+                           NSWindow.didChangeScreenNotification].map { center.publisher(for: $0, object: window) }
+        }
+        placementCancellable = Publishers.MergeMany(publishers).sink { @Sendable [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.statusItemPlacement.measure() else { return }
+                self.placementCancellable = nil
+            }
+        }
+        Task { @MainActor [weak self] in
+            guard let placement = self?.statusItemPlacement,
+                  await placement.wait(timeout: MenuBarStatusItemPlacement.launchWait) else { return }
+            self?.placementCancellable = nil
         }
     }
 

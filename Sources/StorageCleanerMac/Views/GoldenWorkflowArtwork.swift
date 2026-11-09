@@ -34,7 +34,7 @@ struct GoldenWorkflowArtwork: View {
                             .position(x: origin.x + side * xs[index], y: origin.y + side * 0.64)
                     }
                     Text(L10n.text("流程示意 · 尚未执行", "Workflow · Not started"))
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .font(.system(size: 11)).foregroundStyle(.readableSecondary)
                         .position(x: proxy.size.width / 2, y: origin.y + side * 0.77)
                 }
             }

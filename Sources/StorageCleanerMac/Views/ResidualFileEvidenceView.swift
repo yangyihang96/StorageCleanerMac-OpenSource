@@ -23,7 +23,7 @@ struct ResidualFileEvidenceView: View {
                         "Read-only leads; excluded from cleanup plans"
                     ))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 12)
@@ -66,7 +66,7 @@ struct ResidualFileEvidenceView: View {
                     "\(ByteFormat.count(result.inspectedEntryCount)) inspected · \(ByteFormat.count(result.candidates.count)) leads for review"
                 ))
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 if result.reachedLimit || result.unreadableRootCount > 0 || result.cancelled {
                     Label(
                         L10n.text("检查不完整，结果仅覆盖已读取位置。", "The check is incomplete; results cover only readable locations."),
@@ -93,14 +93,14 @@ struct ResidualFileEvidenceView: View {
                                     .lineLimit(1)
                                 Text(candidate.path)
                                     .font(AppDesignTokens.Typography.metadata)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.readableSecondary)
                                     .lineLimit(2)
                                     .textSelection(.enabled)
                             }
                             Spacer(minLength: 8)
                             Text(candidate.location)
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                             Button(L10n.text("在访达中显示", "Show in Finder")) {
                                 NSWorkspace.shared.activateFileViewerSelecting([
                                     URL(fileURLWithPath: candidate.path)

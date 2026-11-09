@@ -98,6 +98,8 @@ struct SidebarView: View {
             }
         }
         .environment(\.canvasTheme, AppCanvasTheme.resolve(rawValue: canvasThemeRawValue))
+        // D279: the sidebar is on the page's gradient, under its veil.
+        .environment(\.careStudioTextGround, studioFamily)
         .onAppear { highlightedFamily = currentFamily }
         .onChange(of: currentFamily) { _, family in
             withAnimation(AppMotion.selection(reduceMotion: reduceMotion)) {
@@ -149,7 +151,7 @@ struct SidebarView: View {
             HStack(spacing: 6) {
                 Text(SidebarVersionLabel.text)
                     .font(AppDesignTokens.TypeScale.caption)
-                    .foregroundStyle(studioFamily != nil ? CareStudioInk.tertiary : AppDesignTokens.Palette.sidebarSecondaryText)
+                    .foregroundStyle(studioFamily != nil ? AnyShapeStyle(CareStudioInk.tertiary) : AnyShapeStyle(AppDesignTokens.Palette.sidebarSecondaryText))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel(SidebarVersionLabel.text)
@@ -169,7 +171,8 @@ struct SidebarView: View {
             AppIconButton(
                 title: title,
                 systemImage: isRail ? "sidebar.leading" : "sidebar.squares.leading",
-                tint: studioFamily != nil ? CareStudioInk.secondary : AppDesignTokens.Palette.sidebarSecondaryText
+                // D279: an icon tint, it keeps its value.
+                tint: studioFamily != nil ? CareStudioInk.secondary.base : AppDesignTokens.Palette.sidebarSecondaryText
             ) {
                 onTogglePresentation()
             }

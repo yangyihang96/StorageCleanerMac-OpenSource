@@ -194,7 +194,7 @@ struct CareStudioBulletRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(bullet.title)
                     .font(.system(size: CareStudioMetrics.bulletSize, weight: .semibold))
-                    .foregroundStyle(bullet.isSelected == false ? CareStudioInk.tertiary : CareStudioInk.primary)
+                    .foregroundStyle(bullet.isSelected == false ? AnyShapeStyle(CareStudioInk.tertiary) : AnyShapeStyle(CareStudioInk.primary))
                     .lineLimit(1)
                 if let detail = bullet.detail {
                     Text(detail)
@@ -208,7 +208,7 @@ struct CareStudioBulletRow: View {
                 Spacer(minLength: 12)
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(isSelected ? CareStudioInk.primary : CareStudioInk.tertiary)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(CareStudioInk.primary) : AnyShapeStyle(CareStudioInk.tertiary))
                     .opacity(isHovered || !isSelected ? 1 : 0.85)
                     .accessibilityHidden(true)
             }
@@ -242,6 +242,10 @@ struct CareStudioHeadline: View {
                 .foregroundStyle(CareStudioInk.secondary)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
+                // D238 (review P2-13): the accessibility tree reads the words
+                // without D228's word joiners (it read “整⁠理⁠重⁠复⁠…”); the
+                // drawn text keeps them, so lines still break between phrases.
+                .accessibilityRepresentation { Text(CareStudioLineBreaks.plain(subtitle ?? module.subtitle)) }
                 .padding(.top, compact ? 6 : 10)
             if !bullets.isEmpty {
                 // Names alone keep CleanMyMac's 52 pt pitch; a reading under

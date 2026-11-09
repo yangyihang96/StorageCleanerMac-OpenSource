@@ -323,7 +323,7 @@ enum PanelChartDateFormatting {
             switch style {
             case .dateAndTime:
                 if chinese {
-                    formatter.dateFormat = "M月d日 a h:mm"
+                    formatter.dateFormat = "M月d日 HH:mm"
                 } else {
                     formatter.setLocalizedDateFormatFromTemplate("MMMdjmm")
                 }
@@ -350,7 +350,7 @@ enum PanelChartDateFormatting {
     static func string(
         for date: Date,
         visibleDuration: TimeInterval,
-        locale: Locale = .current,
+        locale: Locale = L10n.dateLocale,
         timeZone: TimeZone = .current
     ) -> String {
         formatterCache.string(
@@ -367,7 +367,7 @@ enum PanelChartDateFormatting {
     static func tooltipLines(
         for date: Date,
         visibleDuration: TimeInterval,
-        locale: Locale = .current,
+        locale: Locale = L10n.dateLocale,
         timeZone: TimeZone = .current
     ) -> (time: String, date: String?) {
         (

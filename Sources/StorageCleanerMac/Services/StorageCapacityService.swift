@@ -44,6 +44,8 @@ struct StorageCapacitySnapshot: Equatable, Sendable {
     /// User-visible capacity comparable to Finder's available-space figure.
     /// The important-usage value may include capacity macOS can reclaim, while
     /// `availableBytes` deliberately remains the stricter filesystem-free value.
+    /// Health judgements (System Health's capacity score, D230 My Activity)
+    /// use the important-usage value.
     var userAvailableBytes: Int64 {
         min(
             totalBytes,

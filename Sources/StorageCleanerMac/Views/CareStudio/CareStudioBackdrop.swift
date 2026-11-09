@@ -96,7 +96,7 @@ final class CareStudioCanvas: ObservableObject {
 }
 
 /// One drifting light in the module gradient.
-private struct CareStudioGlow {
+struct CareStudioGlow {
     let colorIndex: Int
     /// Resting centre, as a fraction of the window.
     let anchor: CGPoint
@@ -133,7 +133,8 @@ struct CareStudioBackdrop: View {
         self.init(family: module.family, reportsWindowSize: reportsWindowSize)
     }
 
-    private static let glows: [CareStudioGlow] = [
+    /// D276: `CareStudioPalette.readableText` checks text against these.
+    nonisolated static let glows: [CareStudioGlow] = [
         CareStudioGlow(colorIndex: 0, anchor: CGPoint(x: 0.28, y: 0.06), radius: 0.58,
                        wander: CGSize(width: 0.10, height: 0.08), phase: 0.0, opacity: 0.70),
         CareStudioGlow(colorIndex: 1, anchor: CGPoint(x: 0.60, y: 0.94), radius: 0.44,

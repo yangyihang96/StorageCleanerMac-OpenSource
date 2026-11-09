@@ -99,7 +99,7 @@ struct MiniWindowCleanupPresentation {
             return isCancelled ? L10n.text("扫描已取消", "Scan Cancelled")
                 : L10n.text("可安全清理", "Safe Cleanup")
         case .history:
-            let time = date?.formatted(.dateTime.year().month().day().hour().minute().locale(L10n.locale)) ?? "--"
+            let time = date?.appFormatted(.dateTime.year().month().day().hour().minute()) ?? "--"
             return L10n.text("上次扫描 · \(time)", "Last Scan · \(time)")
         case .empty:
             return L10n.text("尚未扫描", "Not Scanned Yet")

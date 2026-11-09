@@ -14,8 +14,12 @@ enum BackgroundTaskManagementScanError: LocalizedError, Equatable {
             L10n.text("当前系统没有可用的后台任务诊断工具。", "The background-task diagnostic tool is not available on this system.")
         case let .restricted(detail):
             L10n.text("后台任务诊断受系统授权限制：\(detail)", "Background-task diagnostics are restricted by system authorization: \(detail)")
+        // D229＋旧值“后台助手没有运行或不是当前版本，登录项要用“完整扫描”读取。”: the
+        // Startup Manager's button is named Retry System Items once a read
+        // failed, so the reason names no button.
         case .helperUnavailable:
-            L10n.text("后台助手没有运行或不是当前版本，登录项要用“完整扫描”读取。", "The background helper is not running or is from another build; use Full Scan to read login items.")
+            L10n.text("后台助手没有回应或不是当前版本；可以稍后重试，或在启动项管理里做一次需要管理员确认的完整读取。",
+                      "The background helper did not answer or is from another build; try again later, or run a full read in the Startup Manager, which asks for administrator approval.")
         }
     }
 }

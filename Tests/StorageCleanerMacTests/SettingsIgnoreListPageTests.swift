@@ -42,7 +42,8 @@ final class SettingsIgnoreListPageTests: XCTestCase {
     func testOnlyAShortWindowScrollsTheWholePage() {
         let cases: [(CGSize, Bool)] = [(.init(width: 1180, height: 760), false), (.init(width: 934, height: 673), false),
             (.init(width: 1000, height: 700), false), (.init(width: 1680, height: 1050), false),
-            (.init(width: 820, height: 560), true), (.init(width: 560, height: 441), true), (.init(width: 677, height: 390), true)]
+            // D272: 820 × 560 has room now that the footer is gone (was true).
+            (.init(width: 820, height: 560), false), (.init(width: 560, height: 441), true), (.init(width: 677, height: 390), true)]
         for (window, scrolls) in cases {
             let size = CGSize(width: window.width, height: window.height - 28 - SettingsTabBar.height - 1)
             let geometry = SettingsLightfieldGeometry(size: size, category: .ignoreList)
@@ -52,12 +53,10 @@ final class SettingsIgnoreListPageTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(geometry.content.height, Metrics.minimumHeight, "\(window)")
             if scrolls {
                 XCTAssertEqual(geometry.content.minY, frozen.content.minY, "\(window)")
-                XCTAssertEqual(geometry.footer.minY, geometry.content.maxY + 24, "\(window)")
-                XCTAssertEqual(geometry.footer.height, 108, "\(window)")
-                XCTAssertEqual(geometry.documentHeight, geometry.footer.maxY, "\(window)")
+                // D272: the page ends with its content (was with the 108 pt footer below it).
+                XCTAssertEqual(geometry.documentHeight, geometry.content.maxY, "\(window)")
             } else {
                 XCTAssertEqual(geometry.content, frozen.content, "\(window)")
-                XCTAssertEqual(geometry.footer, frozen.footer, "\(window)")
             }
         }
     }

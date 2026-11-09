@@ -953,6 +953,8 @@ final class ApplicationsManagerModel: ObservableObject {
             scanLeftoversAndInstallers()
             // CleanMyMac: "It will be quit and completely removed".
             if let selfRequestID, collected.contains(where: { $0.id == selfRequestID && $0.applicationRemoved }) {
+                // D256: the removed app must not stay behind in the menu bar.
+                AppQuitIntent.shared.markFinal()
                 NSApp.terminate(nil)
             }
         }

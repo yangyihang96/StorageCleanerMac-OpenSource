@@ -161,8 +161,8 @@ struct GoldenUnmeasuredCapacity: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(L10n.text("文件系统已用", "Filesystem used"))
                 Text(capacity.map { ByteFormat.storageString($0.usedBytes) + " / " + ByteFormat.storageString($0.totalBytes) } ?? "—")
-                    .monospacedDigit().foregroundStyle(.secondary)
-                Text(L10n.text("预计可释放 —", "Potential savings —")).foregroundStyle(.secondary)
+                    .monospacedDigit().foregroundStyle(.readableSecondary)
+                Text(L10n.text("预计可释放 —", "Potential savings —")).foregroundStyle(.readableSecondary)
             }.font(.system(size: 10))
         }
         .accessibilityElement(children: .combine)

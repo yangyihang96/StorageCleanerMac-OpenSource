@@ -41,12 +41,18 @@ final class FanControlPeerRequirementTests: XCTestCase {
     /// only the nil branch. The source shows the signed branch is open to the
     /// helper alone and hands this process's leaf certificate and Team ID to
     /// the builder checked below.
+    /// D246＋旧值: the certificates are read in signerRequirement, which
+    /// currentSigner reaches through the kept requirement (old: the `let leaf`
+    /// and `return expression(…)` checks below were made on currentSigner).
     func testCurrentSignerUsesTheCheckedBuilder() throws {
         let source = try String(contentsOf: SwiftSourceScanning.projectRoot
             .appendingPathComponent("Sources/FanControlShared/FanControlPeerRequirement.swift"), encoding: .utf8)
-        let body = SwiftSourceScanning.compact(try SwiftSourceScanning.body(
+        let current = SwiftSourceScanning.compact(try SwiftSourceScanning.body(
             of: "public static func currentSigner(peerIdentifier: String) -> String?", in: SwiftSourceScanning.code(source)))
-        XCTAssertTrue(body.hasPrefix("guardpeerIdentifier==StorageCleanerBuildIdentity.helperLabelelse{returnnil}"), body)
+        XCTAssertTrue(current.hasPrefix("guardpeerIdentifier==StorageCleanerBuildIdentity.helperLabelelse{returnnil}"), current)
+        XCTAssertTrue(current.hasSuffix("returnstartupSigner.value{signerRequirement(peerIdentifier:peerIdentifier)}"), current)
+        let body = SwiftSourceScanning.compact(try SwiftSourceScanning.body(
+            of: "private static func signerRequirement(peerIdentifier: String) -> String?", in: SwiftSourceScanning.code(source)))
         XCTAssertTrue(body.contains("letleaf=certificates.first"), body)
         XCTAssertTrue(body.hasSuffix("returnexpression(identifier:peerIdentifier,leafCertificate:SecCertificateCopyData(leaf)asData,"
             + "teamIdentifier:values[kSecCodeInfoTeamIdentifierasString]as?String??\"\")"), body)

@@ -280,12 +280,17 @@ final class CleanupJournalEvents: @unchecked Sendable {
                                recovery: [CleanupRecoveryReport]?,
                                authorizations: [String: CleanupRestoreAuthorization]?,
                                ownership: [String: UninstallOwnershipEvidence]? = nil) -> CleanReport {
-        CleanReport(id: header.id, planID: header.planID, sessionID: header.sessionID,
+        var report = CleanReport(id: header.id, planID: header.planID, sessionID: header.sessionID,
             rulesVersion: header.rulesVersion, disposition: header.disposition, scanWasPartial: header.scanWasPartial,
             startedAt: header.startedAt, completedAt: header.completedAt, outcome: header.outcome,
             items: items, summary: header.summary, persistenceFailure: header.persistenceFailure,
             recoveryAttempts: recovery, restoreAuthorizations: authorizations, uninstallOwnership: ownership,
             rulesProvenance: header.rulesProvenance)
+        // D252: the header's own optional fields travel with every event;
+        // before, a replayed event dropped them.
+        report.startRefusal = header.startRefusal
+        report.thinningSwaps = header.thinningSwaps
+        return report
     }
     private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     private static func read(_ handle: FileHandle, count: Int) throws -> Data {

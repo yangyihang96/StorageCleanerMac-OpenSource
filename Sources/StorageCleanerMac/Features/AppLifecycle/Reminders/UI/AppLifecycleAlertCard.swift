@@ -60,7 +60,7 @@ struct AppLifecycleAlertCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text(description(for: alert))
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
@@ -167,7 +167,7 @@ struct AppLifecycleAlertCard: View {
                         if !app.version.isEmpty {
                             Text(app.version)
                                 .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 0)
@@ -177,7 +177,7 @@ struct AppLifecycleAlertCard: View {
                 if apps.count > 4 {
                     Text(L10n.text("另有 \(apps.count - 4) 个应用", "\(apps.count - 4) more"))
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
             }
             .padding(10)
@@ -191,7 +191,7 @@ struct AppLifecycleAlertCard: View {
         case .scanDue(let lastScanAt, let cadence):
             VStack(alignment: .leading, spacing: 6) {
                 detailRow(L10n.text("上次扫描", "Last Scan"),
-                          value: lastScanAt.formatted(.dateTime.year().month().day().hour().minute().locale(L10n.locale)))
+                          value: lastScanAt.appFormatted(.dateTime.year().month().day().hour().minute()))
                 detailRow(L10n.text("提醒频率", "Reminder Frequency"), value: cadence.title)
             }
             .padding(10)
@@ -207,7 +207,7 @@ struct AppLifecycleAlertCard: View {
             Spacer(minLength: 8)
             Text(value)
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .monospacedDigit()
                 .lineLimit(1)
         }
@@ -272,7 +272,7 @@ struct AppLifecycleAlertCard: View {
                     Spacer()
                     Text(L10n.text("\(ByteFormat.count(items)) 项 · \(ByteFormat.storageString(total))", "\(L10n.items(items)) · \(ByteFormat.storageString(total))"))
                         .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .monospacedDigit()
                 }
                 ProgressView()
@@ -358,7 +358,7 @@ private struct EmptyTrashInlineConfirmation: View {
             Text(L10n.text("只删除现在废纸篓里的这些项目；之后放进去的会保留。其中如有早先清理移入的文件，之后也无法再从“操作记录”恢复。",
                            "Only the items in the Trash now are deleted; anything put there afterwards stays. Files an earlier cleanup moved there can no longer be restored from Operation History."))
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Toggle(L10n.text("我了解这些项目会被永久删除，无法恢复", "I understand these items will be permanently deleted"), isOn: $permanent)
                 .toggleStyle(.checkbox)
@@ -404,7 +404,7 @@ private struct EmptyTrashFinishedRow: View {
                 if result.skippedCount + result.failedCount > 0 {
                     Text(L10n.text("\(result.skippedCount + result.failedCount) 项未删除，仍在废纸篓", "\(result.skippedCount + result.failedCount) item(s) were kept in the Trash"))
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
             }
             Spacer()

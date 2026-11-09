@@ -119,6 +119,15 @@ python3 -B "$ROOT_DIR/script/check_private_api.py"
 # reason and a count per file (BOARD L8, DECISIONS D100).
 python3 -B "$ROOT_DIR/script/test_check_deletion_process_inventory.py"
 python3 -B "$ROOT_DIR/script/check_deletion_process_inventory.py"
+# D234: Chinese UI text goes through L10n.text(zh, en); the English interface
+# showed the project-artifacts sheet in Chinese (review 2026-10-27, P2-9).
+(cd "$ROOT_DIR/script" && python3 -B test_check_cjk_literals.py)
+python3 -B "$ROOT_DIR/script/check_cjk_literals.py"
+# D263: the AI assistant bridge and gateway as real processes over a real socket
+# with real (ad-hoc) signatures. The official MCP SDK and schema checks run when
+# given --sdk and --schemas, and say NOT_RUN otherwise.
+python3 -B "$ROOT_DIR/Tests/agent-e2e/run_e2e.py" \
+  --bin-dir "$(swift build --scratch-path "$VERIFY_ROOT/debug" --show-bin-path)" --evidence "$VERIFY_ROOT/agent-e2e"
 # Cloud-sync conflict copies ("Name 2.swift") must never sit next to sources.
 if find Sources Tests -type f -name '* [0-9]*' | grep -E ' [0-9]+\.[^/]+$'; then
   echo "Conflict copies found in Sources/Tests; move them out of the source tree." >&2

@@ -639,23 +639,10 @@ actor SafeCleanupExecutor {
                 break
             }
 
-            if let reason = await skipReason(for: item, context: context, rechecksWrites: false) {
-                if Task.isCancelled {
-                    cancelled = true
-                    reportItems.append(contentsOf: plan.items[index...].map { reportItem(for: $0, outcome: .notProcessed) })
-                    break
-                }
-                reportItems.append(reportItem(for: item, outcome: .skipped(reason)))
-                await progress(progressSnapshot(
-                    plan: plan,
-                    items: reportItems,
-                    currentRuleID: item.ruleID
-                ))
-                continue
-            }
-
             // 保留身份、路径、卷和运行状态核对；写入遍历留到持久化意图之后，
             // 避免对同一目录重复走三遍。系统移动仍是基于路径的 API。
+            // D244（审阅 P2-4）＋旧值：这里曾紧接着用相同参数调用两次，
+            // 每项多做一次快照、卷检查和运行应用查询。
             if let reason = await skipReason(for: item, context: context, rechecksWrites: false) {
                 if Task.isCancelled {
                     cancelled = true

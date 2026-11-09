@@ -21,7 +21,7 @@ struct UninstallPreviewSheet: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(app.name).font(AppDesignTokens.Typography.inlineTitle).fixedSize(horizontal: false, vertical: true)
                     Text(result != nil ? (residual ? L10n.text("残留清理结果", "Leftover Cleanup Result") : L10n.text("卸载结果", "Uninstall Result")) : residual ? L10n.text("残留文件", "Leftover Files") : app.versionDisplay)
-                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                 }
                 Spacer(minLength: 0)
                 if isProcessing || store.isPreparingUninstall { ProgressView().controlSize(.small) }
@@ -44,24 +44,24 @@ struct UninstallPreviewSheet: View {
                         }
                         if store.isPreparingUninstall {
                             Text(L10n.text("正在检查关联文件…", "Checking related files…"))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                         } else {
                             fileGroup(verified: true)
                             fileGroup(verified: false)
                             if app.relatedItems.isEmpty {
                                 Text(L10n.text("未发现关联文件", "No related files found"))
-                                    .foregroundStyle(.secondary).padding(.vertical, 12)
+                                    .foregroundStyle(.readableSecondary).padding(.vertical, 12)
                             }
                         }
                         Text(L10n.text("所选数据会一并移入废纸篓。驱动、扩展和订阅可能需另行处理。",
                             "Selected data also moves to Trash. Drivers, extensions and subscriptions may require separate action."))
-                            .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                            .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                         // D93: the six fixed confirmation fields; a running app is named here, before Uninstall is clicked.
                         if !store.isPreparingUninstall {
                             OperationConfirmationFactsView(facts: confirmationFacts, showsItemList: false)
                         }
                     }
-                    if let recovery = store.operationRecoveryResult { Text(recovery.resultMessage).foregroundStyle(.secondary) }
+                    if let recovery = store.operationRecoveryResult { Text(recovery.resultMessage).foregroundStyle(.readableSecondary) }
                 }.font(AppDesignTokens.Typography.secondary).padding(16).frame(maxWidth: .infinity, alignment: .leading)
             }.frame(minHeight: embedded ? 0 : 160, maxHeight: embedded ? .infinity : 480)
             AppSeparator()
@@ -91,7 +91,7 @@ struct UninstallPreviewSheet: View {
                       systemImage: "info.circle").fontWeight(.medium)
                 Text(L10n.text("“\(uninstaller.name)”与此应用由同一开发者签名（Team ID \(uninstaller.teamIdentifier)）。打开后本应用不会接着删除。",
                                "“\(uninstaller.name)” is signed by the same developer as this app (Team ID \(uninstaller.teamIdentifier)). Opening it does not make this app delete anything."))
-                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary).fixedSize(horizontal: false, vertical: true)
                 pathLabel(uninstaller.url.path)
                 Button(L10n.text("打开卸载程序", "Open Uninstaller")) { Task { await vendorUninstaller.open() } }
                     .appButtonChrome(.secondary).disabled(vendorUninstaller.isOpening || isProcessing)
@@ -99,7 +99,7 @@ struct UninstallPreviewSheet: View {
                 .background(AppAppearanceColors.secondarySurface, in: RoundedRectangle(cornerRadius: 10))
         }
         if let message = vendorUninstaller.message {
-            Text(message).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+            Text(message).font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -129,7 +129,7 @@ struct UninstallPreviewSheet: View {
                 HStack {
                     Text(verified ? L10n.text("关联文件", "Related Files") : L10n.text("保留文件", "Kept Files"))
                         .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    Text(ByteFormat.count(items.count)).foregroundStyle(.secondary).monospacedDigit()
+                    Text(ByteFormat.count(items.count)).foregroundStyle(.readableSecondary).monospacedDigit()
                     Spacer()
                     // D87: high-value data (browser profiles, Docker data) is
                     // never part of the bulk selection; it is ticked one by one.
@@ -151,7 +151,7 @@ struct UninstallPreviewSheet: View {
                                      "Includes settings and local data, kept by default; checked items move to Trash.")
                          : L10n.text("包含设置和本地数据，默认保留；勾选后才会随应用移入废纸篓。",
                                      "Includes settings and local data, kept by default; checked items move to Trash with the app."))
-                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                 }
                 ForEach(items) { relatedRow($0, selectable: verified) }
             }
@@ -165,13 +165,13 @@ struct UninstallPreviewSheet: View {
                     else { store.uninstallSelectedPaths.remove(item.path) }
                 })) { Text(UninstallPresentation.category(item.path)) }.toggleStyle(.checkbox).labelsHidden()
                     .accessibilityLabel(UninstallPresentation.category(item.path) + " " + item.path)
-            } else { Image(systemName: "lock.fill").foregroundStyle(.secondary).frame(width: 16) }
+            } else { Image(systemName: "lock.fill").foregroundStyle(.readableSecondary).frame(width: 16) }
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(UninstallPresentation.category(item.path)).fontWeight(.medium)
                     Spacer(minLength: 6)
                     Text(item.sizeIsKnown ? ByteFormat.storageString(item.sizeBytes) : L10n.text("大小未知", "Unknown size"))
-                        .foregroundStyle(.secondary).monospacedDigit().fixedSize()
+                        .foregroundStyle(.readableSecondary).monospacedDigit().fixedSize()
                 }
                 pathLabel(item.path)
                 if let highValue = UninstallVendorRules.highValueData(path: item.path) {
@@ -181,7 +181,7 @@ struct UninstallPreviewSheet: View {
                 }
                 if !selectable {
                     HStack(alignment: .top) {
-                        Text(item.ownershipBlockReason.title).foregroundStyle(.secondary)
+                        Text(item.ownershipBlockReason.title).foregroundStyle(.readableSecondary)
                         Spacer(minLength: 4)
                         Button(L10n.text("查看", "Reveal")) { store.reveal(item.path) }.appButtonChrome(.tertiary)
                             .foregroundStyle(AppDesignTokens.Palette.information).help(L10n.text("在访达中显示", "Show in Finder"))
@@ -202,7 +202,7 @@ struct UninstallPreviewSheet: View {
                     Text(ByteFormat.storageString(knownBytes) + (selected.contains(where: { !$0.sizeIsKnown }) ? " + ?" : "")).monospacedDigit()
                 }
                 Text(L10n.text("移入废纸篓，可恢复；清空前不释放空间。", "Recoverable in Trash; space is freed only when Trash is emptied."))
-                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
             }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { actions }
@@ -242,7 +242,7 @@ struct UninstallPreviewSheet: View {
         return VStack(alignment: .leading, spacing: 12) {
             Label(result.title, systemImage: result.systemImage)
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
-            Text(result.summary).foregroundStyle(.secondary)
+            Text(result.summary).foregroundStyle(.readableSecondary)
             // D93: four groups; the app moved to Trash is not counted as freed space.
             // A row refused while the app is running reads "Skipped (the app is running)",
             // as the confirmation said; the receipt warning is shown below (P2-3, P2-7).
@@ -261,7 +261,7 @@ struct UninstallPreviewSheet: View {
                     if case .failed(let failure) = item.outcome, let detail = failure.detailCode, detail != "move-in-flight" {
                         DisclosureGroup(L10n.text("技术详情", "Technical Details")) {
                             Text(detail).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                        }.font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                        }.font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                     }
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                     .background(AppAppearanceColors.secondarySurface, in: RoundedRectangle(cornerRadius: 10))
@@ -271,7 +271,7 @@ struct UninstallPreviewSheet: View {
                 ForEach(retained) { item in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(UninstallPresentation.category(item.path))
-                        Text(selectablePaths.contains(item.path) ? L10n.text("未勾选，已保留", "Not selected; kept") : item.ownershipBlockReason.title).foregroundStyle(.secondary)
+                        Text(selectablePaths.contains(item.path) ? L10n.text("未勾选，已保留", "Not selected; kept") : item.ownershipBlockReason.title).foregroundStyle(.readableSecondary)
                         pathLabel(item.path)
                     }
                 }
@@ -388,7 +388,7 @@ struct UninstallPathLabel: View {
     let path: String
     var body: some View {
         Text(UninstallPresentation.displayPath(path)).font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+            .foregroundStyle(.readableSecondary).lineLimit(2).truncationMode(.middle)
             .textSelection(.enabled).help(path)
     }
 }

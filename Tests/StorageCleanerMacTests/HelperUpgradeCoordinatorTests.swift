@@ -296,7 +296,8 @@ final class HelperUpgradeCoordinatorTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let source = try SettingsSourceContract.source(at: root.appendingPathComponent("Sources/StorageCleanerMac/Views/SettingsView.swift"))
         XCTAssertTrue(source.contains("!fanControl.isHelperReachable, fanControl.offersHelperReconnect"))
-        XCTAssertTrue(source.contains("Button(fanControl.helperReconnectTitle)"))
+        // D272: was Button(fanControl.helperReconnectTitle); the settings link row now.
+        XCTAssertTrue(source.contains("SettingsLinkRow(title: fanControl.helperReconnectTitle)"))
         XCTAssertTrue(source.contains("fanControl.helperReconnectWaitSeconds > 0"))
         XCTAssertTrue(source.contains("await fanControl.reconnectHelper()"))
         XCTAssertTrue(source.contains("在系统设置中重新批准"))

@@ -45,7 +45,7 @@ struct DuplicateCloneMergeSheet: View {
             Text(L10n.text("每个副本都留在原处，名字、内容、标签、权限和日期都不变，只是和保留的那份共用同一份磁盘空间；以后改动其中一份，另一份不受影响。被换下的原数据会移到废纸篓，可以在“操作记录”里放回。",
                            "Every copy stays where it is with the same name, content, tags, permissions and dates; it just shares disk space with the kept copy, and changing one later leaves the other alone. The replaced data goes to the Trash and can be put back from Operation History."))
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             content
             HStack {
@@ -89,12 +89,12 @@ struct DuplicateCloneMergeSheet: View {
                     ForEach(action.skipSummary, id: \.reason) { item in
                         Text(L10n.text("\(ByteFormat.count(item.count)) 个不合并：\(item.reason.title)", "\(ByteFormat.count(item.count)) not merged: \(item.reason.title)"))
                             .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                     Text(L10n.text("合并前会再次核对每个副本的内容（SHA-256），正在被应用打开或刚改动过的会跳过。",
                                    "Each copy's content is checked again (SHA-256) right before it merges; copies open in an app or just changed are skipped."))
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -107,7 +107,7 @@ struct DuplicateCloneMergeSheet: View {
                 Text(progress.currentName.map { L10n.text("正在合并：\($0)", "Merging: \($0)") }
                      ?? L10n.text("正在把换下的数据移到废纸篓…", "Moving the replaced data to the Trash…"))
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -121,7 +121,7 @@ struct DuplicateCloneMergeSheet: View {
                         .font(.system(size: 13, weight: .medium))
                     if !outcome.skipped.isEmpty {
                         Text(L10n.text("\(ByteFormat.count(outcome.skipped.count)) 个没有合并，保持原样。", "\(ByteFormat.count(outcome.skipped.count)) were not merged and are unchanged."))
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .font(.system(size: 12)).foregroundStyle(.readableSecondary)
                     }
                     if !outcome.failed.isEmpty {
                         Text(L10n.text("\(ByteFormat.count(outcome.failed.count)) 个合并失败，文件保持原样。", "\(ByteFormat.count(outcome.failed.count)) failed and are unchanged."))

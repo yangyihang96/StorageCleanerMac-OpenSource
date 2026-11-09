@@ -197,7 +197,7 @@ struct CareStudioToolCard: View {
             HStack(spacing: 4) {
                 Image(systemName: isFavorite ? "star.fill" : "star")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(isFavorite ? CareStudioInk.badgeAttention : CareStudioInk.secondary)
+                    .foregroundStyle(isFavorite ? AnyShapeStyle(CareStudioInk.badgeAttention) : AnyShapeStyle(CareStudioInk.secondary))
                 Text(isFavorite ? L10n.text("已收藏", "Saved") : L10n.text("收藏", "Save"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(CareStudioInk.secondary)

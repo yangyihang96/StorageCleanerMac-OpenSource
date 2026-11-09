@@ -81,7 +81,7 @@ struct BenchmarkV7PerformanceSummaryView: View {
                 "Strengths and weaknesses compare the four results against the same V7 reference. They show performance emphasis, not hardware faults."
             ))
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -100,12 +100,12 @@ struct BenchmarkV7PerformanceSummaryView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(categoryTitle(item.category))
                     .font(AppDesignTokens.Typography.secondary.weight(.semibold))
                 Text(referenceText(item.ratio))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -121,7 +121,7 @@ struct BenchmarkV7PerformanceSummaryView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(L10n.text("整体均衡", "Balanced overall"))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(L10n.text("四项差距较小", "Small four-category gap"))
                     .font(AppDesignTokens.Typography.secondary.weight(.semibold))
                 Text(L10n.text(
@@ -129,7 +129,7 @@ struct BenchmarkV7PerformanceSummaryView: View {
                     "Largest gap " + percent(profile.relativeSpread)
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -147,7 +147,7 @@ struct BenchmarkV7PerformanceSummaryView: View {
                     .monospacedDigit()
                 Text(referenceText(item.ratio))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
 
             ProgressView(value: item.ratio, total: profile.scaleMaximum)
@@ -248,7 +248,7 @@ struct BenchmarkV7RunProgressView: View {
             HStack(spacing: 12) {
                 if let repetition = state.repetition, repetition > 0 {
                     Text(L10n.text("第 \(ByteFormat.count(repetition)) 次采样", "Sample \(ByteFormat.count(repetition))"))
-                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                        .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                 }
                 Spacer(minLength: 0)
                 if let progressValue {
@@ -266,7 +266,7 @@ struct BenchmarkV7RunProgressView: View {
             if let progressValue { ProgressView(value: progressValue).tint(accent) }
             stageGrid
             Text(stageCaption)
-                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
         .accessibilityElement(children: .contain)
@@ -309,7 +309,7 @@ struct BenchmarkV7RunProgressView: View {
                 .font(.system(size: 14, weight: .semibold))
             Text(stage.title)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(status == .waiting ? .secondary : .primary)
+                .foregroundStyle(status == .waiting ? AnyShapeStyle(.readableSecondary) : AnyShapeStyle(.primary))
                 .lineLimit(cardPresentation == .running ? 1 : nil)
                 .help(stage.title)
                 .fixedSize(horizontal: false, vertical: true)
@@ -567,7 +567,7 @@ struct BenchmarkCompactTemperature: View {
                 .foregroundStyle(accent)
                 .accessibilityHidden(true)
             Text(L10n.text("芯片温度", "Chip temperature"))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Text(BenchmarkSystemMonitor.temperatureText(
                 BenchmarkSystemMonitor.latestChipTemperature(in: telemetryPoints)
             ))
@@ -652,6 +652,7 @@ struct BenchmarkSystemMonitor: View {
                 HStack(spacing: 4) {
                     Text(L10n.text("最近采样", "Last sample"))
                     Text(point.date, format: .dateTime.hour().minute().second())
+                        .environment(\.locale, L10n.dateLocale)
                         .monospacedDigit()
                 }
                 .lineLimit(1)
@@ -661,7 +662,7 @@ struct BenchmarkSystemMonitor: View {
             }
         }
         .font(AppDesignTokens.Typography.metadata)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
     }
 
     /// The live load curves in their own area below the dial: a caption with
@@ -675,7 +676,7 @@ struct BenchmarkSystemMonitor: View {
                 legendDot("GPU", tint: AppDesignTokens.Palette.caution)
                 Spacer(minLength: AppDesignTokens.Spacing.small)
                 Text(L10n.text("最近 2 分钟 · 0–100%", "Last 2 minutes · 0–100%"))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
             .font(AppDesignTokens.Typography.metadata)
             .lineLimit(1)
@@ -691,7 +692,7 @@ struct BenchmarkSystemMonitor: View {
                 }
                 .font(AppDesignTokens.Typography.metadata)
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 36)
                 .padding(.bottom, 16)
                 .accessibilityLabel(L10n.text("负载纵轴：0、50、100 百分比", "Load axis: 0, 50, 100 percent"))
@@ -733,7 +734,7 @@ struct BenchmarkSystemMonitor: View {
             Circle().fill(tint).frame(width: 6, height: 6)
             Text(title)
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .accessibilityElement(children: .combine)
     }
 
@@ -765,7 +766,7 @@ struct BenchmarkSystemMonitor: View {
             VStack(spacing: 2) {
                 Text(L10n.text("芯片温度", "Chip temperature"))
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(Self.temperatureText(latestChipTemperature))
                     .font(.system(size: max(16, diameter * 0.13), weight: .medium))
                     .monospacedDigit()
@@ -773,7 +774,7 @@ struct BenchmarkSystemMonitor: View {
                     .accessibilityValue(Self.temperatureText(latestChipTemperature))
                 Text("0–100°C")
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
             .lineLimit(1)
             .frame(width: diameter * 0.7)

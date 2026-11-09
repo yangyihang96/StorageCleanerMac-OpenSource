@@ -599,7 +599,10 @@ final class TestPreferenceHygieneTests: XCTestCase {
         "StorageCleanerMacTests/FileAnalysisTrashTests.swift": 3,
         // 仅规则模型的虚拟 /Users/fixture 字符串；不创建目录、不写真实应用数据。
         "StorageCleanerMacTests/FileAnalysisTrashCostTests.swift": 1,
-        "StorageCleanerMacTests/CleanupExecutionSafetyTests.swift": 1
+        "StorageCleanerMacTests/CleanupExecutionSafetyTests.swift": 1,
+        // D263：只比对虚拟 /Users/fixture 下的路径字符串；不创建目录、不写真实应用数据。
+        "AgentBridgeTests/AgentBridgeEnvironmentTests.swift": 1,
+        "AgentBridgeTests/AgentLocationAndPeerTests.swift": 2
     ]
 
     private static func realLibraryPathViolations(analysis: TestSourceFacts, path: String) -> [String] {

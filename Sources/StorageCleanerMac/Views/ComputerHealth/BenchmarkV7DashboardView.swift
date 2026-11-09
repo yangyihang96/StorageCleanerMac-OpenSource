@@ -162,7 +162,7 @@ struct BenchmarkV7DashboardView: View {
         ViewThatFits(in: .horizontal) {
             pagePicker.fixedSize(horizontal: true, vertical: false)
             Picker(L10n.text("性能测试页面", "Performance benchmark page"), selection: $selectedPage) { pageOptions }
-                .pickerStyle(.menu).labelsHidden()
+                .pickerStyle(.menu).featureLightfieldMenuTint().labelsHidden()
                 .accessibilityLabel(L10n.text("性能测试页面", "Performance benchmark page"))
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -326,7 +326,7 @@ struct BenchmarkV7DashboardView: View {
                 : L10n.text("结果仅保存在本机；完成校准前显示原始数据。",
                             "Results stay on this Mac; raw data is shown until calibration."))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
 #if DEBUG
@@ -373,7 +373,7 @@ struct BenchmarkV7DashboardView: View {
                     "18 Core workloads run automatically, estimated up to \(durationText(Double(officialPlan.expectedMaximumDurationSeconds)))"
                 ))
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
                 DisclosureGroup(L10n.text("测试项目与边界", "Workloads and limits")) {
@@ -386,7 +386,7 @@ struct BenchmarkV7DashboardView: View {
                     "This protocol reports raw performance, not hardware diagnosis. Release calibration is incomplete, so no whole-machine performance index is generated. Read verification is outside read timing."
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
                 if let explanation {
@@ -400,13 +400,13 @@ struct BenchmarkV7DashboardView: View {
                         systemImage: "arrow.uturn.backward.circle"
                     )
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 }
 
                 if let preflightWarning = preflightWarning {
                     Label(preflightWarning, systemImage: "info.circle")
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -442,7 +442,7 @@ struct BenchmarkV7DashboardView: View {
                                 ? L10n.text("尚未测试", "Not tested")
                                 : L10n.text("未记录", "Unavailable"))
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                     .frame(maxWidth: .infinity)
                     .accessibilityElement(children: .combine)
@@ -453,9 +453,10 @@ struct BenchmarkV7DashboardView: View {
                 HStack(spacing: AppDesignTokens.Spacing.small) {
                     Text(L10n.text("上次完整记录", "Last complete record"))
                     Text(historyTimestamp(result), format: .dateTime.year().month().day().hour().minute())
+                        .environment(\.locale, L10n.dateLocale)
                 }
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -518,12 +519,13 @@ struct BenchmarkV7DashboardView: View {
                         .monospacedDigit()
                     Text(L10n.text("综合分", "Overall score"))
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Spacer()
                     if let completedAt = result.completedAt {
                         Text(completedAt, format: .dateTime.year().month().day().hour().minute())
+                            .environment(\.locale, L10n.dateLocale)
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                 }
 
@@ -547,7 +549,7 @@ struct BenchmarkV7DashboardView: View {
                             Text("Workload \(result.versions.workloadVersion)")
                         }
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .textSelection(.enabled)
                     }
                 }
@@ -558,7 +560,7 @@ struct BenchmarkV7DashboardView: View {
                     "No complete result for the current benchmark version yet"
                 ))
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
         }
         .padding(AppDesignTokens.Layout.sectionPadding)
@@ -579,7 +581,7 @@ struct BenchmarkV7DashboardView: View {
         return VStack(alignment: .leading, spacing: 3) {
             Text(categoryTitle(category))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Text(detail)
                 .font(AppDesignTokens.Typography.secondary.weight(.semibold))
                 .monospacedDigit()
@@ -603,16 +605,17 @@ struct BenchmarkV7DashboardView: View {
                         .monospacedDigit()
                     Text(L10n.text("综合最佳", "Best overall"))
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Spacer()
                     VStack(alignment: .trailing, spacing: 2) {
                         Text(historyTimestamp(result), format: .dateTime.year().month().day().hour().minute())
+                            .environment(\.locale, L10n.dateLocale)
                         if let duration = resultDurationText(result) {
                             Text(L10n.text("用时 \(duration)", "Duration \(duration)"))
                         }
                     }
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 }
 
                 Text(L10n.text(
@@ -620,7 +623,7 @@ struct BenchmarkV7DashboardView: View {
                     "Scoring algorithm: \(currentScoringVersion)"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .textSelection(.enabled)
 
                 LazyVGrid(
@@ -652,18 +655,19 @@ struct BenchmarkV7DashboardView: View {
         return VStack(alignment: .leading, spacing: 3) {
             Text(categoryTitle(category))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Text(scoreText(score))
                 .font(AppDesignTokens.Typography.cardTitle)
                 .monospacedDigit()
             if let result {
                 Text(historyTimestamp(result), format: .dateTime.year().month().day())
+                    .environment(\.locale, L10n.dateLocale)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             } else {
                 Text(L10n.text("暂无结果", "No result"))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         }
         .padding(AppDesignTokens.Spacing.small)
@@ -685,7 +689,7 @@ struct BenchmarkV7DashboardView: View {
                 "Stored only on this Mac"
             ))
             .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
 
             if let message = historyStatusMessage {
@@ -729,13 +733,14 @@ struct BenchmarkV7DashboardView: View {
             HStack(alignment: .top, spacing: AppDesignTokens.Spacing.small) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(historyTimestamp(result), format: .dateTime.year().month().day().hour().minute())
+                        .environment(\.locale, L10n.dateLocale)
                         .font(AppDesignTokens.Typography.secondary.weight(.semibold))
                     Text(L10n.text(
                         "协议 \(result.versions.planVersion) · \(result.versions.scoringVersion)",
                         "Protocol \(result.versions.planVersion) · \(result.versions.scoringVersion)"
                     ))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -755,13 +760,13 @@ struct BenchmarkV7DashboardView: View {
                         .monospacedDigit()
                     Text(L10n.text("综合分", "Overall score"))
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Spacer()
                 }
             } else {
                 Text(L10n.text("本次未生成综合分", "No overall score was generated for this run"))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
 
             if let raw = result.mSeries {
@@ -776,7 +781,7 @@ struct BenchmarkV7DashboardView: View {
                     "Record kept; incompatible version, excluded from best and comparison"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -856,7 +861,7 @@ struct BenchmarkV7DashboardView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.text("第一条", "First"))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Text(scoreText(firstScore))
                         .font(AppDesignTokens.Typography.cardTitle)
                         .monospacedDigit()
@@ -865,7 +870,7 @@ struct BenchmarkV7DashboardView: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(L10n.text("第二条", "Second"))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Text(scoreText(secondScore))
                         .font(AppDesignTokens.Typography.cardTitle)
                         .monospacedDigit()
@@ -891,7 +896,7 @@ struct BenchmarkV7DashboardView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(categoryTitle(category))
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                             Text(signedScoreText(secondCategory - firstCategory))
                                 .font(AppDesignTokens.Typography.secondary.weight(.semibold))
                                 .monospacedDigit()
@@ -977,7 +982,7 @@ struct BenchmarkV7DashboardView: View {
                     "这条早期记录没有保存完整测试环境。",
                     "This early record did not retain a complete test environment."
                 ))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
 
             if let executions = result.workloadExecutions, !executions.isEmpty {
@@ -1019,19 +1024,19 @@ struct BenchmarkV7DashboardView: View {
                         .font(AppDesignTokens.Typography.secondary.weight(.semibold))
                     ForEach(Array(result.runtimeWarnings.enumerated()), id: \.offset) { entry in
                         Text("• \(entry.element)")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                 }
             }
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .textSelection(.enabled)
     }
 
     private func detailRow(_ title: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.small) {
             Text(title)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Spacer(minLength: AppDesignTokens.Spacing.small)
             Text(value)
                 .multilineTextAlignment(.trailing)
@@ -1168,7 +1173,7 @@ struct BenchmarkV7DashboardView: View {
         let duration = execution.elapsedSeconds < 10
             ? "\(execution.elapsedSeconds.formatted(.number.precision(.fractionLength(2))))s"
             : durationText(execution.elapsedSeconds)
-        let start = execution.startedAt.formatted(date: .omitted, time: .standard)
+        let start = execution.startedAt.appFormatted(date: .omitted, time: .standard)
         return "\(status) · \(duration) · \(start)"
     }
 

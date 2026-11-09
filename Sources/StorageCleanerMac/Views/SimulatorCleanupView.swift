@@ -178,7 +178,7 @@ struct SimulatorCleanupView: View {
                     .font(AppDesignTokens.Typography.sectionTitle)
                 Text(controller.status)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
@@ -213,15 +213,15 @@ struct SimulatorCleanupView: View {
                             Text(item.bytes.map { ByteFormat.storageString($0) } ?? L10n.text("大小未知", "Size unknown"))
                                 .font(AppDesignTokens.Typography.metadata)
                                 .monospacedDigit()
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                         }
                         Text(item.detail)
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(item.identifier)
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.readableTertiary)
                             .textSelection(.enabled)
                     }
                     .padding(.vertical, 4)
@@ -239,7 +239,7 @@ struct SimulatorCleanupView: View {
                 "Lists only unavailable devices and runtimes no device uses (preview and test devices included). Each is deleted with simctl's own command, permanently, without the Trash."
             ))
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
             Divider()
             HStack {
@@ -282,7 +282,7 @@ struct SimulatorCleanupView: View {
                     "Only the \(ByteFormat.count(facts.itemCount)) item(s) selected when this confirmation opened are deleted. The list is read again first: devices that became available and runtimes a device now uses are kept, and nothing runs while Xcode or Simulator is open."
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 Toggle(isOn: $acknowledgesPermanentDeletion) {
                     Text(L10n.text(

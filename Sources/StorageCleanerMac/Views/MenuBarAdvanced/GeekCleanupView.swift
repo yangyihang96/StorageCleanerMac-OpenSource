@@ -364,7 +364,7 @@ struct GeekSmartCleanupContent<Actions: View>: View {
         let renderedNotice = presentation.notice
         return Text(renderedNotice)
             .font(AdvancedPanelTypography.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(minHeight: 34, alignment: .topLeading)
             .cleanupNoticeReadback(renderedNotice)
@@ -396,7 +396,7 @@ struct GeekCleanupItemsViewport<Content: View>: View {
             if overflows {
                 Text(renderedHint)
                     .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
                     .frame(height: GeekCleanupRowLayout.scrollHintHeight)
                     .cleanupHintReadback(renderedHint)
@@ -449,7 +449,7 @@ struct AdvancedSmartCleanupItemRow: View {
         return HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(renderedName).font(AdvancedPanelTypography.body.weight(.semibold)).lineLimit(1)
-                Text(renderedCategory).font(AdvancedPanelTypography.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(renderedCategory).font(AdvancedPanelTypography.caption).foregroundStyle(.readableSecondary).lineLimit(1)
             }
             Spacer(minLength: 8)
             Text(renderedSize).font(AdvancedPanelTypography.compactValue).monospacedDigit().fixedSize()

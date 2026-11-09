@@ -4,7 +4,7 @@ import SwiftUI
 
 extension SettingsView {
     var aboutSection: some View {
-        VStack(alignment: .leading, spacing: 26) {
+        VStack(alignment: .leading, spacing: 24) {
             HStack(spacing: AppDesignTokens.Spacing.medium) {
                 AppIconView(
                     asset: .appMain,
@@ -18,83 +18,61 @@ extension SettingsView {
                         .font(.system(size: 28, weight: .bold))
                     Text(runtimeInfo.versionDisplay)
                         .font(.system(size: 15))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .monospacedDigit()
                 }
             }
             .padding(.vertical, 8)
             LightfieldSettingsSection {
-            DisclosureGroup(L10n.text("构建与运行信息", "Build & Runtime")) {
-                if let buildInfo = runtimeInfo.buildInfo, buildInfo.isBeta {
-                    LabeledContent("Build", value: buildInfo.build)
-                    LabeledContent("Commit", value: buildInfo.commitDisplay)
-                    LabeledContent(
-                        L10n.text("构建日期", "Built"),
-                        value: buildInfo.buildDate
-                    )
-                    LabeledContent(
-                        L10n.text("构建配置", "Configuration"),
-                        value: buildInfo.configuration
-                    )
+                SettingsLinkRow(title: runtimeInfo.buildInfo?.isBeta == true
+                    ? L10n.text("复制测试版信息", "Copy Beta Information")
+                    : L10n.text("复制诊断信息", "Copy Diagnostics")) {
+                    copyRuntimeDiagnostics()
                 }
-                LabeledContent("Bundle ID", value: runtimeInfo.bundleIdentifier)
-                LabeledContent(L10n.text("运行位置", "Runtime"), value: runtimeInfo.kind.detail)
-                LabeledContent(
-                    L10n.text("清理架构", "Cleanup Architecture"),
-                    value: CleanupFeatureConfiguration(
-                        mode: cleanupArchitectureMode
-                    ).diagnosticValue
-                )
 
-            }
-
-            DisclosureGroup {
-                VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
-                    LabeledContent(
-                        L10n.text("分发状态", "Distribution"),
-                        value: runtimeInfo.distributionStatus
-                    )
-                    LabeledContent(
-                        L10n.text("授权稳定性", "Access Stability"),
-                        value: runtimeInfo.authorizationStabilityStatus
-                    )
+                SettingsLinkRow(title: L10n.text("支持包预览与导出", "Preview & Export Support Bundle")) {
+                    supportSnapshot = RedactedSupportSnapshot(runtime: runtimeInfo,
+                        systemVersion: ProcessInfo.processInfo.operatingSystemVersion,
+                        reports: scanStore?.operationReports ?? [])
+                    showsSupportExport = true
                 }
-                .padding(.top, AppDesignTokens.Spacing.small)
-            } label: {
-                Text(
-                    L10n.text("安装与授权详情", "Installation & Access Details")
-                )
-            }
+                .sheet(isPresented: $showsSupportExport) {
+                    if let supportSnapshot { RedactedSupportExportView(snapshot: supportSnapshot) }
+                }
 
-            Button {
-                copyRuntimeDiagnostics()
-            } label: {
-                Text(
-                    runtimeInfo.buildInfo?.isBeta == true
-                        ? L10n.text("复制测试版信息", "Copy Beta Information")
-                        : L10n.text("复制诊断信息", "Copy Diagnostics")
-                )
-            }
+                SettingsExpandableRow(title: L10n.text("详细信息", "Details"), expanded: $aboutDetailsExpanded) {
+                    VStack(alignment: .leading, spacing: 0) { aboutDetailRows }
+                }
 
-            Button {
-                supportSnapshot = RedactedSupportSnapshot(runtime: runtimeInfo,
-                    systemVersion: ProcessInfo.processInfo.operatingSystemVersion,
-                    reports: scanStore?.operationReports ?? [])
-                showsSupportExport = true
-            } label: {
-                Text(L10n.text("支持包预览与导出", "Preview & Export Support Bundle"))
-            }
-            .sheet(isPresented: $showsSupportExport) {
-                if let supportSnapshot { RedactedSupportExportView(snapshot: supportSnapshot) }
-            }
-
-            if let diagnosticNotice {
-                SettingsNoticeView(notice: diagnosticNotice)
-            }
+                if let diagnosticNotice {
+                    SettingsNoticeView(notice: diagnosticNotice)
+                }
             } header: {
-                Text(L10n.text("版本与诊断", "Version & Diagnostics"))
+                Text(L10n.text("诊断与支持", "Diagnostics & Support"))
             }
         }
+    }
+
+    /// D272: the build, the install and the access details in one place, behind
+    /// one row (were two disclosure groups).
+    @ViewBuilder
+    private var aboutDetailRows: some View {
+        if let buildInfo = runtimeInfo.buildInfo, buildInfo.isBeta {
+            aboutDetailRow("Build", buildInfo.build)
+            aboutDetailRow("Commit", buildInfo.commitDisplay)
+            aboutDetailRow(L10n.text("构建日期", "Built"), buildInfo.buildDate)
+            aboutDetailRow(L10n.text("构建配置", "Configuration"), buildInfo.configuration)
+        }
+        aboutDetailRow("Bundle ID", runtimeInfo.bundleIdentifier)
+        aboutDetailRow(L10n.text("运行位置", "Runtime"), runtimeInfo.kind.detail)
+        aboutDetailRow(L10n.text("清理架构", "Cleanup Architecture"),
+                       CleanupFeatureConfiguration(mode: cleanupArchitectureMode).diagnosticValue)
+        aboutDetailRow(L10n.text("分发状态", "Distribution"), runtimeInfo.distributionStatus)
+        aboutDetailRow(L10n.text("授权稳定性", "Access Stability"), runtimeInfo.authorizationStabilityStatus)
+    }
+
+    private func aboutDetailRow(_ title: String, _ value: String) -> some View {
+        LightfieldSettingsRow { SettingsValueRow(title: title, value: value) }
     }
 
     func copyRuntimeDiagnostics() {

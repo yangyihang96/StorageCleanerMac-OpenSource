@@ -12,9 +12,16 @@ struct StartupItemsScanProgress: Equatable, Sendable {
 
 /// Window-scoped actions let Command-R and Command-F target this console only
 /// while it owns focus, instead of stealing the app-wide storage scan shortcut.
-struct StartupItemsKeyboardActions {
+/// D248: equal within one main window (MainWindowCommandScope); the closures
+/// reach only that window's store and the notification center.
+struct StartupItemsKeyboardActions: Equatable {
+    let scope: MainWindowCommandScope
     let refresh: @MainActor () -> Void
     let focusSearch: @MainActor () -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.scope == rhs.scope
+    }
 }
 
 private struct StartupItemsKeyboardActionsKey: FocusedValueKey {
@@ -292,7 +299,7 @@ struct StartupItemsDashboardView: View {
                 Toggle(L10n.text("显示 Apple 系统项目", "Show Apple System Items"), isOn: $includeAppleSystem)
             }
         } label: { Text(L10n.text("筛选", "Filters")).font(.system(size: 13)) }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
         .accessibilityLabel(L10n.text("筛选与显示", "Filter and Display"))
 
@@ -473,7 +480,7 @@ struct StartupItemRow: View {
                 } label: {
                     Text(L10n.text("更多", "More")).font(.system(size: 13))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .help(L10n.text("更多操作", "More Actions"))
                 .accessibilityLabel(L10n.text("更多操作", "More Actions"))
             }
@@ -523,7 +530,7 @@ private struct StartupItemStatusLabel: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            LightfieldStatusGlyph(status: item.metadataPillStatus, symbol: statusSymbol, color: statusTint)
+            LightfieldStatusGlyph(status: item.metadataPillStatus, symbol: statusSymbol, style: statusTint)
             Text(shortStatus).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
         }.foregroundStyle(statusTint)
         .accessibilityElement(children: .ignore)
@@ -552,14 +559,16 @@ private struct StartupItemStatusLabel: View {
         }
     }
 
-    private var statusTint: Color {
+    /// D279: the grey states read on the page's gradient (`CareStudioText`);
+    /// the status colours keep their values.
+    private var statusTint: AnyShapeStyle {
         let palette = FeatureLightfieldPalette.resolve(scheme)
-        if item.requiresAdministrator || item.hasConfigurationIssue { return palette.warningColor }
-        if item.isSystemSettingsOnly || item.isReadOnly { return palette.fg3 }
+        if item.requiresAdministrator || item.hasConfigurationIssue { return AnyShapeStyle(palette.warningColor) }
+        if item.isSystemSettingsOnly || item.isReadOnly { return AnyShapeStyle(palette.fg3) }
         switch item.state.process {
-        case .running: return FeatureLightfieldStatus.normal.color(palette)
-        case .failed: return palette.warningColor
-        case .waiting, .stopped, .unknown: return palette.fg3
+        case .running: return AnyShapeStyle(FeatureLightfieldStatus.normal.color(palette))
+        case .failed: return AnyShapeStyle(palette.warningColor)
+        case .waiting, .stopped, .unknown: return AnyShapeStyle(palette.fg3)
         }
     }
 

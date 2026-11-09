@@ -52,7 +52,7 @@ struct OperationConfirmationFactsView: View {
             ForEach(facts.rows) { row in
                 HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.medium) {
                     Text(row.field.title)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .frame(width: 96, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(row.value)
@@ -79,19 +79,19 @@ private struct OperationConfirmationItemRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: AppDesignTokens.Spacing.small)
                 Text(item.bytes.map { ByteFormat.storageString($0) } ?? L10n.text("大小未知", "Unknown size"))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                     .fixedSize()
             }
             if let path = item.path {
                 Text(path)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
             if let detail = item.detail, !detail.isEmpty {
                 Text(detail)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -127,7 +127,7 @@ struct OperationCompletionTallyView: View {
             ForEach(showsReceiptNote ? tally.capacityLines : tally.spaceLines, id: \.self) { line in
                 Text(line)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -148,7 +148,7 @@ struct OperationCompletionTallyView: View {
                                             .font(AppDesignTokens.Typography.compactLabelEmphasis)
                                             .fixedSize(horizontal: false, vertical: true)
                                         Text("\(entry.bucket.title)\(L10n.text("：", ": "))\(entry.detail)")
-                                            .foregroundStyle(.secondary)
+                                            .foregroundStyle(.readableSecondary)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
                                 }
@@ -195,7 +195,7 @@ struct CleanupRuleExplanationView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(line.title)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Text(line.value)
                         .font(AppDesignTokens.Typography.body)
                         .fixedSize(horizontal: false, vertical: true)

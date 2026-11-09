@@ -308,7 +308,9 @@ final class MenuBarPanelInteractionTests: XCTestCase {
         XCTAssertTrue(componentsSource.contains("var overviewContextMenu: some View"))
         XCTAssertTrue(componentsSource.contains("return actions.contextMenuContents"))
         XCTAssertFalse(componentsSource.contains("var overviewToolbar:"))
-        XCTAssertTrue(overviewSource.components(separatedBy: ".contextMenu {").dropFirst().contains {
+        // D257 (10-28): applied through MenuBarOnlyAwareContextMenu, which
+        // rebuilds the menu when the main program is quit or opened again.
+        XCTAssertTrue(overviewSource.components(separatedBy: ".modifier(MenuBarOnlyAwareContextMenu {").dropFirst().contains {
             $0.components(separatedBy: "}").first?.contains("overviewContextMenu") == true
         })
         let contextMenu = try XCTUnwrap(chromeSource.components(separatedBy: "var contextMenuContents: some View {").last?

@@ -20,6 +20,7 @@ struct MiniWindowEmptyConfigurationView: View {
             Text(L10n.text("未显示任何模块", "No visible modules"))
             Button(L10n.text("小窗设置…", "Panel Settings…")) {
                 UserDefaults.standard.set("miniWindow", forKey: "settings.selected-category.v1")
+                UserDefaults.standard.set(SettingsMenuBarPage.panelContent.rawValue, forKey: SettingsMenuBarPage.defaultsKey)
                 openSettings()
             }
         }
@@ -38,6 +39,8 @@ struct MiniWindowConfigurationSettingsView: View {
     @State private var previewHistory = false
     @State private var targetedGap: Int?
     @State private var previewRanges: [GeekDashboardModule: GeekChartRange] = [:]
+    // D136: the volumes hidden from the mini window's disk page.
+    @AppStorage(MiniWindowHiddenItems.disksKey) private var hiddenDiskKeysRaw = ""
 
     var body: some View {
         SettingsPreviewColumns {
@@ -106,14 +109,14 @@ struct MiniWindowConfigurationSettingsView: View {
                         .accessibilityLabel(L10n.text("下移", "Move down") + item.module.title)
                 }
                 .buttonStyle(FeatureLightfieldRowButtonStyle())
-                .foregroundStyle(FeatureLightfieldPalette.accent(.overview))
+                .foregroundStyle(FeatureLightfieldPalette.settingsAction)
                 .frame(height: 44)
                 .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
             }
             gap(draft.value.modules.count)
+            hiddenDisksRow
             LightfieldSettingsRow {
-                Toggle(L10n.text("MacBook 示例（仅预览）", "MacBook example (preview only)"), isOn: $notebookExample)
-                    .toggleStyle(.switch)
+                SettingsToggleRow(title: L10n.text("MacBook 示例（仅预览）", "MacBook example (preview only)"), isOn: $notebookExample)
                     .lightfieldComponentProbe("miniSettings.notebookExample")
             }
             .onChange(of: notebookExample) { previewSection = nil; previewHistory = false }
@@ -122,12 +125,30 @@ struct MiniWindowConfigurationSettingsView: View {
         .onChange(of: draft.value.modules) { previewSection = nil; previewHistory = false }
     }
 
+    /// D136: iStat's Statistics › Reset Disk Filtering shows every hidden volume
+    /// again. A volume is hidden from the top-right corner of its detail in the panel.
+    private var hiddenDisksRow: some View {
+        let count = MiniWindowHiddenItems.keys(from: hiddenDiskKeysRaw).count
+        return LightfieldSettingsRow {
+            SettingsRow(title: L10n.text("隐藏的磁盘", "Hidden Disks"),
+                        caption: L10n.text("在小窗磁盘卷详情的右上角隐藏磁盘卷。", "Hide a volume from the top-right corner of its detail in the panel.")) {
+                HStack(spacing: 16) {
+                    Text(count == 0 ? L10n.text("无", "None") : L10n.text("\(ByteFormat.count(count)) 个", ByteFormat.count(count)))
+                        .font(.system(size: 13))
+                        .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
+                    if count > 0 {
+                        SettingsLinkButton(title: L10n.text("显示隐藏的磁盘", "Show Hidden Disks")) { hiddenDiskKeysRaw = "" }
+                    }
+                }
+            }
+        }
+    }
+
     @ViewBuilder private var actions: some View {
-        Button(L10n.text("恢复默认", "Defaults")) { draft.reset() }
-            .buttonStyle(FeatureLightfieldRowButtonStyle())
+        SettingsLinkButton(title: L10n.text("恢复默认", "Defaults")) { draft.reset() }
             .lightfieldComponentProbe("miniSettings.actions.defaults")
-        Button(L10n.text("取消", "Cancel")) { draft.cancel(); notice = nil }
-            .disabled(!draft.isDirty).buttonStyle(FeatureLightfieldRowButtonStyle())
+        SettingsLinkButton(title: L10n.text("取消", "Cancel")) { draft.cancel(); notice = nil }
+            .disabled(!draft.isDirty)
             .lightfieldComponentProbe("miniSettings.actions.cancel")
         Button(L10n.text("应用", "Apply")) { apply() }
             .buttonStyle(FeatureLightfieldButtonStyle(module: .overview))
@@ -171,6 +192,13 @@ struct MiniWindowConfigurationSettingsView: View {
                     Button(item.module.title) { previewSection = item.module; previewHistory = false }
                 }
             }
+            // D274: the settings form's row button style would draw this as plain text.
+            // Its title acts, so the blue of SettingsLinkButton, and the arrow says it
+            // opens a menu. The style insets its title 3 pt from the rows' left edge.
+            .menuStyle(.borderlessButton)
+            .tint(FeatureLightfieldPalette.settingsAction)
+            .fixedSize()
+            .padding(.leading, -3)
             if let section = previewSection {
                 HStack {
                     Text(section.title).font(AppTypography.sectionTitle)

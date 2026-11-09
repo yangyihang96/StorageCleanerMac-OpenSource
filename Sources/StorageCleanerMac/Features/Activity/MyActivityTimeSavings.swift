@@ -63,6 +63,11 @@ struct MyActivityTimeSavings: Equatable, Sendable {
         }
     }
 
+    /// D233: how many operations the estimate counts (the card's second line).
+    var totalOperations: Int {
+        counts.values.reduce(0) { Self.add($1, to: $0) }
+    }
+
     func minutes(for category: Category) -> Int {
         let product = (counts[category] ?? 0).multipliedReportingOverflow(by: category.minutesPerOperation)
         return product.overflow ? Int.max : product.partialValue

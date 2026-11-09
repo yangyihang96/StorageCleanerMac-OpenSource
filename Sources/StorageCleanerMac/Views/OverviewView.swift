@@ -120,7 +120,7 @@ struct OverviewView: View {
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.borderlessButton).careStudioActionTint()
             .menuIndicator(.hidden)
             .accessibilityLabel(L10n.text("更多操作", "More Actions"))
             .help(L10n.text("更多操作", "More Actions"))
@@ -168,7 +168,7 @@ struct OverviewView: View {
 
             Text(L10n.scanSeconds(result.scanSeconds))
             .font(AppDesignTokens.Typography.body)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .monospacedDigit()
             .fixedSize(horizontal: false, vertical: true)
 
@@ -657,7 +657,7 @@ private struct PermissionRequirementRow: View {
 
                 Text(detail)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -696,7 +696,7 @@ private struct TierSummaryCard: View {
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(AppDesignTokens.Typography.compactLabel)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.readableTertiary)
                 }
 
                 Text(ByteFormat.storageString(bytes))
@@ -705,7 +705,7 @@ private struct TierSummaryCard: View {
 
                 Text(L10n.items(count))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(16)
@@ -774,7 +774,7 @@ private struct SmartCareResultTaskTile: View {
                 if !detail.isEmpty {
                     Text(detail)
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 

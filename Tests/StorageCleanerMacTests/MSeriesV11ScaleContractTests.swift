@@ -9,31 +9,42 @@ enum MSeriesV11ScaleContract {
     static let allowed: [String: [String: Site]] = [
         "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldResultSpace.swift": [
             // D77: exact shared numeric expression, never a row/section label.
-            "compact-result-value": .init(minimum: 0.5, receiver: "Text(value.valuePrefix).font(.system(size:13)).foregroundColor(palette.fg2)+Text(value.value).font(.system(size:22,weight:.semibold)).foregroundColor(value.status?.color(palette)??palette.fg)+Text(value.unit.isEmpty?\"\":\"\"+value.unit).font(.system(size:13)).foregroundColor(FeatureLightfieldPalette.accent(module))).monospacedDigit().lineLimit(1)"),
+            // D276＋旧值：单位为 .foregroundColor(FeatureLightfieldPalette.accent(module))。
+            // D279＋旧值：.foregroundColor(palette.fg2)。
+            "compact-result-value": .init(minimum: 0.5, receiver: "Text(value.valuePrefix).font(.system(size:13)).foregroundStyle(palette.fg2)+Text(value.value).font(.system(size:22,weight:.semibold)).foregroundColor(value.status?.color(palette)??palette.fg)+Text(value.unit.isEmpty?\"\":\"\"+value.unit).font(.system(size:13)).foregroundColor(FeatureLightfieldPalette.actionText(module))).monospacedDigit().lineLimit(1)"),
         ],
         "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldComponents.swift": [
             "ring-fitted-value": .init(minimum: 0.1, receiver: "Text(value).font(.system(size:typography.valueSize,weight:.bold)).monospacedDigit().lineLimit(1)"),
             "ring-fitted-unit": .init(minimum: 0.1, receiver: "Text(unit).font(.system(size:typography.unitSize,weight:.medium)).lineLimit(1)"),
-            "ring-fitted-label": .init(minimum: 0.1, receiver: "Text(label).font(.system(size:typography.labelSize,weight:labelIsStatus?.semibold:.regular)).foregroundStyle(labelIsStatus?color:palette.fg2).lineLimit(1)"),
-            "metric-value": .init(minimum: 0.5, receiver: "Text(metric.value).font(.system(size:showsLabels?22:15,weight:.semibold)).foregroundColor(metric.status?.color(palette)??palette.fg)+Text(metric.unit.isEmpty?\"\":\"\"+metric.unit).font(.system(size:15)).foregroundColor(palette.fg2)).monospacedDigit().lineLimit(1)"),
-            "summary-primary": .init(minimum: 0.5, receiver: "Text(valuePrefix).font(.system(size:15)).foregroundColor(palette.fg2)+Text(value).font(.system(size:primaryCaption.isEmpty?52:46,weight:.bold)).foregroundColor(primaryStatus?.color(palette)??palette.fg)+Text(\"\"+unit).font(.system(size:24,weight:.semibold)).foregroundColor(FeatureLightfieldPalette.accent(module))).monospacedDigit().lineLimit(1)"),
-            "summary-secondary": .init(minimum: 0.5, receiver: "Text(metric.valuePrefix).font(.system(size:15)).foregroundColor(palette.fg2)+Text(metric.value).font(.system(size:primaryCaption.isEmpty?24:28,weight:.semibold)).foregroundColor(metric.status?.color(palette)??palette.fg)+Text(metric.unit.isEmpty?\"\":\"\"+metric.unit).font(.system(size:15)).foregroundColor(palette.fg2)).monospacedDigit().lineLimit(1)"),
+            // D279＋旧值：.foregroundStyle(labelIsStatus?color:palette.fg2)。
+            "ring-fitted-label": .init(minimum: 0.1, receiver: "Text(label).font(.system(size:typography.labelSize,weight:labelIsStatus?.semibold:.regular)).foregroundStyle(labelIsStatus?AnyShapeStyle(color):AnyShapeStyle(palette.fg2)).lineLimit(1)"),
+            // D279＋旧值：.foregroundColor(palette.fg2)。
+            "metric-value": .init(minimum: 0.5, receiver: "Text(metric.value).font(.system(size:showsLabels?22:15,weight:.semibold)).foregroundColor(metric.status?.color(palette)??palette.fg)+Text(metric.unit.isEmpty?\"\":\"\"+metric.unit).font(.system(size:15)).foregroundStyle(palette.fg2)).monospacedDigit().lineLimit(1)"),
+            // D276＋旧值：单位为 .foregroundColor(FeatureLightfieldPalette.accent(module))。
+            // D279＋旧值：.foregroundColor(palette.fg2)。
+            "summary-primary": .init(minimum: 0.5, receiver: "Text(valuePrefix).font(.system(size:15)).foregroundStyle(palette.fg2)+Text(value).font(.system(size:primaryCaption.isEmpty?52:46,weight:.bold)).foregroundColor(primaryStatus?.color(palette)??palette.fg)+Text(\"\"+unit).font(.system(size:24,weight:.semibold)).foregroundColor(FeatureLightfieldPalette.actionText(module))).monospacedDigit().lineLimit(1)"),
+            // D279＋旧值：.foregroundColor(palette.fg2)。
+            "summary-secondary": .init(minimum: 0.5, receiver: "Text(metric.valuePrefix).font(.system(size:15)).foregroundStyle(palette.fg2)+Text(metric.value).font(.system(size:primaryCaption.isEmpty?24:28,weight:.semibold)).foregroundColor(metric.status?.color(palette)??palette.fg)+Text(metric.unit.isEmpty?\"\":\"\"+metric.unit).font(.system(size:15)).foregroundStyle(palette.fg2)).monospacedDigit().lineLimit(1)"),
         ],
         "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldCharts.swift": [
             "chart-axis": .init(minimum: 0.75, receiver: "Text(LightfieldAxisLabel.display(text)).font(.system(size:axis==.percent?13:11,design:.monospaced)).lineLimit(1)"),
-            "chart-readout": .init(minimum: 0.8, receiver: "Text(samples[index].time.formatted(date:.omitted,time:.shortened)+\"·\"+detail(at:index)).font(.system(size:13,weight:.semibold,design:.monospaced)).foregroundStyle(palette.fg).lineLimit(1)"),
+            // D253＋旧值：Text(samples[index].time.formatted(date:.omitted,time:.shortened)+"·"+detail(at:index))…；
+            // 横轴不是时刻的曲线（经过秒数、功率）读横轴的值。
+            "chart-readout": .init(minimum: 0.8, receiver: "Text(readoutLabel(at:index,precise:false)+\"·\"+detail(at:index)).font(.system(size:13,weight:.semibold,design:.monospaced)).foregroundStyle(palette.fg).lineLimit(1)"),
             "disk-value": .init(minimum: 0.8, receiver: "Text(item.formattedValue).font(.system(size:13)).monospacedDigit().foregroundStyle(palette.fg2).lineLimit(1)"),
             "donut-center": .init(minimum: 0.5, receiver: "Text(centerValue).font(.system(size:15,weight:.semibold)).monospacedDigit().lineLimit(1)"),
             "donut-value": .init(minimum: 0.5, receiver: "Text(item.formattedValue).monospacedDigit().lineLimit(1)"),
             "donut-share": .init(minimum: 0.5, receiver: "Text(share.map{String(format:\"%.1f%%\",$0*100)}??(item.value==0?\"0.0%\":\"—\")).monospacedDigit().foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2).lineLimit(1)"),
         ],
         "Sources/StorageCleanerMac/Views/ComputerHealth/PerformanceBenchmarkV11ResultPage.swift": [
-            "result-secondary": .init(minimum: 0.5, receiver: "Text(metric.valuePrefix).font(.system(size:13)).foregroundColor(palette.fg2)+Text(metric.value).font(.system(size:22,weight:.semibold)).foregroundColor(metric.status?.color(palette)??palette.fg)).monospacedDigit().lineLimit(1)"),
+            // D279＋旧值：.foregroundColor(palette.fg2)。
+            "result-secondary": .init(minimum: 0.5, receiver: "Text(metric.valuePrefix).font(.system(size:13)).foregroundStyle(palette.fg2)+Text(metric.value).font(.system(size:22,weight:.semibold)).foregroundColor(metric.status?.color(palette)??palette.fg)).monospacedDigit().lineLimit(1)"),
             "result-ratio": .init(minimum: 0.5, receiver: "Text(ratio.map{MSeriesV11PagePresentation.number($0,digits:2)+\"×\"}??MSeriesV11PagePresentation.calibration).font(.system(size:17,weight:.semibold,design:.monospaced)).lineLimit(1)"),
         ],
         "Sources/StorageCleanerMac/Views/ComputerHealth/PerformanceBenchmarkV11RawRow.swift": [
             "raw-value": .init(minimum: 0.5, receiver: "Text(metric?.statistics.map{MSeriesV11PagePresentation.number($0.median,digits:2)}??MSeriesV11PagePresentation.availability(metric?.availability.rawValue??\"unknown\")).monospacedDigit().lineLimit(1)"),
-            "raw-comparison": .init(minimum: 0.5, receiver: "Group{ifletmetric,letchange=MSeriesV11PagePresentation.comparison(metric,previous:previous,currentResult:currentResult,previousResult:previousResult){Text((change.percent>=0?\"+\":\"\")+MSeriesV11PagePresentation.number(change.percent)+\"%·\"+(abs(change.percent)<0.000001?L10n.text(\"持平\",\"Same\"):change.improved?L10n.text(\"改善\",\"Better\"):L10n.text(\"降低\",\"Worse\"))).foregroundStyle(abs(change.percent)<0.000001?palette.fg2:change.improved?FeatureLightfieldStatus.normal.color(palette):palette.warningColor)}else{Text(L10n.text(\"上次：不可比\",\"Previous:incomparable\")).foregroundStyle(palette.fg2)}}.monospacedDigit().lineLimit(1)"),
+            // D279＋旧值：.foregroundStyle(abs(change.percent)<0.000001?palette.fg2:change.improved?FeatureLightfieldStatus.normal.color(palette):palette.warningColor)。
+            "raw-comparison": .init(minimum: 0.5, receiver: "Group{ifletmetric,letchange=MSeriesV11PagePresentation.comparison(metric,previous:previous,currentResult:currentResult,previousResult:previousResult){Text((change.percent>=0?\"+\":\"\")+MSeriesV11PagePresentation.number(change.percent)+\"%·\"+(abs(change.percent)<0.000001?L10n.text(\"持平\",\"Same\"):change.improved?L10n.text(\"改善\",\"Better\"):L10n.text(\"降低\",\"Worse\"))).foregroundStyle(abs(change.percent)<0.000001?AnyShapeStyle(palette.fg2):AnyShapeStyle(change.improved?FeatureLightfieldStatus.normal.color(palette):palette.warningColor))}else{Text(L10n.text(\"上次：不可比\",\"Previous:incomparable\")).foregroundStyle(palette.fg2)}}.monospacedDigit().lineLimit(1)"),
         ],
         "Sources/StorageCleanerMac/Views/ComputerHealth/PerformanceBenchmarkV11RunningPage.swift": [
             "running-progress": .init(minimum: 0.5, receiver: "Text(run.displayedFraction.map{\"\\(Int(($0*100).rounded()))%\"}??MSeriesV11PagePresentation.unread).font(.system(size:64,weight:.bold)).monospacedDigit().foregroundStyle(palette.fg).lineLimit(1)"),
@@ -49,11 +60,13 @@ enum MSeriesV11ScaleContract {
         ],
         "Sources/StorageCleanerMac/Views/FilesLightfield/FileMigrationLightfieldView.swift": [
             "migration-free": .init(minimum: 0.5, receiver: "Text(destination.map{L10n.text(\"可用\",\"Free\")+ByteFormat.storageString($0.availableBytes)+\"·\"+$0.fileSystem}??\"—\").font(.system(size:13)).monospacedDigit().lineLimit(1)", count: 1, named: false),
-            "migration-date": .init(minimum: 0.5, receiver: "Text(entry.modifiedAt.map{$0.formatted(date:.numeric,time:.omitted)}??L10n.text(\"未知\",\"Unknown\")).font(.system(size:13)).monospacedDigit().lineLimit(1)", count: 1, named: false),
+            // D275＋旧值：$0.formatted(date:.numeric,time:.omitted)。
+            "migration-date": .init(minimum: 0.5, receiver: "Text(entry.modifiedAt.map{$0.appFormatted(date:.numeric,time:.omitted)}??L10n.text(\"未知\",\"Unknown\")).font(.system(size:13)).monospacedDigit().lineLimit(1)", count: 1, named: false),
             "migration-size": .init(minimum: 0.5, receiver: "Text(ByteFormat.storageString(entry.item.sizeBytes)).font(.system(size:15)).monospacedDigit().lineLimit(1)", count: 1, named: false),
         ],
         "Sources/StorageCleanerMac/Views/FilesLightfield/DuplicateFilesLightfieldView.swift": [
-            "duplicate-date": .init(minimum: 0.5, receiver: "Text(modifiedAt.map{$0.formatted(date:.numeric,time:.omitted)}??L10n.text(\"未知\",\"Unknown\")).font(.system(size:13)).monospacedDigit().lineLimit(1)", count: 1, named: false),
+            // D275＋旧值：$0.formatted(date:.numeric,time:.omitted)。
+            "duplicate-date": .init(minimum: 0.5, receiver: "Text(modifiedAt.map{$0.appFormatted(date:.numeric,time:.omitted)}??L10n.text(\"未知\",\"Unknown\")).font(.system(size:13)).monospacedDigit().lineLimit(1)", count: 1, named: false),
             "duplicate-size": .init(minimum: 0.5, receiver: "Text(ByteFormat.storageString(item.sizeBytes)).font(.system(size:13)).monospacedDigit().lineLimit(1)", count: 2, named: false),
         ],
         "Sources/StorageCleanerMac/Views/DesignSystem/FeatureLightfieldFileComponents.swift": [

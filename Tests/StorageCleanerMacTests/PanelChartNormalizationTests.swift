@@ -1472,7 +1472,8 @@ final class PanelChartNormalizationTests: XCTestCase {
         expectedConcise.timeStyle = .medium
         XCTAssertEqual(concise, expectedConcise.string(from: beforeMidnight))
 
-        let expectedDate = "8月3日 下午 3:20"
+        // D275＋旧值："8月3日 下午 3:20"；中文日期一律 24 小时制。
+        let expectedDate = "8月3日 15:20"
         XCTAssertEqual(
             PanelChartDateFormatting.string(
                 for: beforeMidnight,
@@ -1498,7 +1499,8 @@ final class PanelChartNormalizationTests: XCTestCase {
                 locale: chinese,
                 timeZone: timeZone
             ),
-            "8月4日 上午 12:05"
+            // D275＋旧值："8月4日 上午 12:05"。
+            "8月4日 00:05"
         )
         XCTAssertEqual(
             PanelChartDateFormatting.string(
@@ -1507,7 +1509,8 @@ final class PanelChartNormalizationTests: XCTestCase {
                 locale: chinese,
                 timeZone: timeZone
             ),
-            "8月4日 下午 12:00"
+            // D275＋旧值："8月4日 下午 12:00"。
+            "8月4日 12:00"
         )
 
         let english = PanelChartDateFormatting.string(

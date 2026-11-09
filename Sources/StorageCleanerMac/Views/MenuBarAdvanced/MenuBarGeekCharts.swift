@@ -811,7 +811,7 @@ struct GeekBarTimelineLabels: View {
         .monospaced()
         .lineLimit(1)
         .minimumScaleFactor(includesDate ? 0.65 : 1)
-        .foregroundStyle(.tertiary)
+        .foregroundStyle(.readableTertiary)
         .accessibilityHidden(true)
     }
 }
@@ -854,7 +854,7 @@ struct GeekHistoryAxisFooter: View {
                 }
                 .help(Self.gapHelp)
                 Text("·")
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.readableTertiary)
             }
             Text(Self.centerLabel(valueRange: valueRange, isUpdating: isUpdating,
                                   halvesScaleSeparately: halvesScaleSeparately))
@@ -864,7 +864,7 @@ struct GeekHistoryAxisFooter: View {
             Text(L10n.text("现在", "Now"))
         }
         .font(AdvancedPanelTypography.chartLabel)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .monospacedDigit()
         .lineLimit(1)
         // D121: history plots keep the card's 8 pt inset (iStat's 8 + 359 +
@@ -1990,7 +1990,7 @@ struct GeekPrecisionLineChart: View {
             .stroke(.secondary.opacity(0.16), style: StrokeStyle(lineWidth: 0.5))
             Text(unit.formatted(value, compact: true))
                 .font(.system(size: 9, weight: .regular))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .monospacedDigit()
                 .lineLimit(1)
                 .frame(width: 54, alignment: .trailing)
@@ -2497,7 +2497,7 @@ struct GeekPrecisionNetworkChart: View {
                             }
                             .font(AdvancedPanelTypography.caption)
                             .monospaced()
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.readableTertiary)
                             .transaction { transaction in
                                 transaction.animation = nil
                             }
@@ -2824,7 +2824,7 @@ struct GeekDiskIOChart: View {
                         }
                         .font(AdvancedPanelTypography.caption)
                         .monospaced()
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.readableTertiary)
                         .transaction { transaction in
                             transaction.animation = nil
                         }

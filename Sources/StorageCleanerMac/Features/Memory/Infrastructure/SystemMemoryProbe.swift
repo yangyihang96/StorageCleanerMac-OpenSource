@@ -56,7 +56,8 @@ actor MemoryHistoryStore {
 actor SystemMemoryProbe: MemoryProbing {
     static let shared = SystemMemoryProbe()
 
-    private struct PageReadings: Sendable {
+    /// The kernel's page counters under vm_stat's names, and the page size.
+    struct PageReadings: Sendable {
         let pageSize: UInt64
         let values: [String: UInt64]
     }
@@ -92,15 +93,18 @@ actor SystemMemoryProbe: MemoryProbing {
     private let history: MemoryHistoryStore
     private let clock = ContinuousClock()
     private let systemPressureLevelCode: @Sendable () -> Int32?
+    private let pageReadings: @Sendable () -> PageReadings?
     private let processCache: ProcessSamplingCache
 
     init(
         history: MemoryHistoryStore = MemoryHistoryStore(),
         systemPressureLevelCode: @escaping @Sendable () -> Int32? = SystemMemoryProbe.readSystemPressureLevelCode,
+        pageReadings: @escaping @Sendable () -> PageReadings? = SystemMemoryProbe.readPageReadings,
         processCache: ProcessSamplingCache = .shared
     ) {
         self.history = history
         self.systemPressureLevelCode = systemPressureLevelCode
+        self.pageReadings = pageReadings
         self.processCache = processCache
     }
 
@@ -126,7 +130,7 @@ actor SystemMemoryProbe: MemoryProbing {
     ) async -> MemorySnapshot {
         let capturedInstant = clock.now
         let capturedAt = Date()
-        let pageReadings = Self.pageReadings()
+        let pageReadings = self.pageReadings()
         let physicalBytes = ProcessInfo.processInfo.physicalMemory
         let swapReadings = Self.swapReadings()
         let pressureReading = includePressureReading
@@ -152,14 +156,10 @@ actor SystemMemoryProbe: MemoryProbing {
             return result.partialValue
         }
 
+        // "Pages free" leaves the speculative pages out, as vm_stat does: they
+        // are file pages read ahead, counted once, in "File-backed pages" (D278).
         let speculative = byteValue("Pages speculative")
-        let rawFree = byteValue("Pages free")
-        let freeBytes = Self.safeAdd(
-            rawFree,
-            speculative,
-            warningName: "freeBytes",
-            warnings: &warnings
-        )
+        let freeBytes = byteValue("Pages free")
         let inactive = byteValue("Pages inactive")
         let fileBacked = byteValue("File-backed pages")
         let purgeable = byteValue("Pages purgeable")
@@ -331,11 +331,21 @@ actor SystemMemoryProbe: MemoryProbing {
         return result.partialValue
     }
 
-    private static func pageReadings() -> PageReadings? {
+    /// D277: the count every `host_statistics64(HOST_VM_INFO64)` call passes,
+    /// in `integer_t`s: the SDK's `HOST_VM_INFO64_REV1_COUNT` (a macro Swift does
+    /// not import), where revision 2's `swapped_count` starts, 38. Revision 1
+    /// holds every counter the app reads. The whole struct is the SDK's latest
+    /// revision, 104 with the macOS 27.2 SDK, and macOS 26.6.2 knows only 62, so
+    /// its kernel logged "count is larger than expected" on each call, about
+    /// every 2 seconds.
+    static let vmStatisticsCount = mach_msg_type_number_t(
+        MemoryLayout<vm_statistics64_data_t>.offset(of: \.swapped_count)! / MemoryLayout<integer_t>.size
+    )
+
+    /// One reading of the kernel's page counters; the probe's default source.
+    static let readPageReadings: @Sendable () -> PageReadings? = {
         var stats = vm_statistics64()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
-        )
+        var count = SystemMemoryProbe.vmStatisticsCount
         let result = withUnsafeMutablePointer(to: &stats) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
                 host_statistics64(mach_host_self(), HOST_VM_INFO64, rebound, &count)
@@ -347,10 +357,19 @@ actor SystemMemoryProbe: MemoryProbing {
         guard host_page_size(mach_host_self(), &rawPageSize) == KERN_SUCCESS,
               rawPageSize > 0 else { return nil }
 
-        return PageReadings(
-            pageSize: UInt64(rawPageSize),
+        return SystemMemoryProbe.pageReadings(statistics: stats, pageSize: UInt64(rawPageSize))
+    }
+
+    /// The counters under vm_stat's names. D278: `free_count` already holds
+    /// the speculative pages (mach/vm_statistics.h), and so does
+    /// `external_page_count`, as file pages read ahead. "Pages free" is
+    /// `free_count - speculative_count`, the free pages vm_stat prints, so
+    /// free plus the file cache counts each page once.
+    nonisolated static func pageReadings(statistics stats: vm_statistics64, pageSize: UInt64) -> PageReadings {
+        PageReadings(
+            pageSize: pageSize,
             values: [
-                "Pages free": UInt64(stats.free_count),
+                "Pages free": UInt64(stats.free_count - min(stats.free_count, stats.speculative_count)),
                 "Pages active": UInt64(stats.active_count),
                 "Pages inactive": UInt64(stats.inactive_count),
                 "Pages speculative": UInt64(stats.speculative_count),

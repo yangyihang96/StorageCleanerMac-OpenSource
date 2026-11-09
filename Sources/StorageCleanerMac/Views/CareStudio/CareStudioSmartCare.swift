@@ -116,7 +116,9 @@ enum SmartCareSummaries {
         case .performance:
             let maintenance = ToolboxStores.of(store).maintenance
             let tasks = maintenance.summary.recommendedCount
-            let reading = StartupReadPresentation(coverage: store.startupCoverage)
+            var reading = StartupReadPresentation(coverage: store.startupCoverage)
+            // D229: names the helper's state as the reason when it is the cause.
+            reading.helper = FileOperationHelperEnabler.shared.status
             let startup = StartupItemsPresentation.make(items: store.startupDomainItems, query: "", category: .all,
                                                        status: .all, source: .all, includeAppleSystem: false,
                                                        sort: .recommended, includeTechnicalDetails: false)
@@ -292,14 +294,15 @@ struct SmartCareScanningCollage: View {
         let gap = CareStudioMetrics.tileSpacing
         let rows = [Array(0..<min(3, count)), Array(min(3, count)..<count)].filter { !$0.isEmpty }
         let currentRow = current.flatMap { current in rows.firstIndex { $0.contains(current) } }
-        let height = size.height - CGFloat(rows.count - 1) * gap
+        // D242: never a negative size, however small the space (review P2-2).
+        let height = max(0, size.height - CGFloat(rows.count - 1) * gap)
         var frames = Array(repeating: CGRect.zero, count: count)
         var y: CGFloat = 0
         for (row, members) in rows.enumerated() {
             let rowHeight = rows.count == 2 && currentRow != nil
                 ? height * (row == currentRow ? 0.7 : 0.3)
                 : height / CGFloat(rows.count)
-            let width = size.width - CGFloat(members.count - 1) * gap
+            let width = max(0, size.width - CGFloat(members.count - 1) * gap)
             let share: CGFloat = members.count == 3 ? 0.58 : 0.67
             var x: CGFloat = 0
             for member in members {
@@ -622,7 +625,8 @@ struct SmartCareResultsGrid: View {
                                                   (size.height - CGFloat(rows.count - 1) * gap) / CGFloat(rows.count)))
         var frames: [CGRect] = []
         for (row, columns) in rows.enumerated() {
-            let width = (size.width - CGFloat(columns - 1) * gap) / CGFloat(columns)
+            // D242: never a negative size (review P2-2).
+            let width = max(0, (size.width - CGFloat(columns - 1) * gap) / CGFloat(columns))
             for column in 0..<columns {
                 frames.append(CGRect(x: CGFloat(column) * (width + gap), y: CGFloat(row) * (rowHeight + gap),
                                      width: width, height: rowHeight))

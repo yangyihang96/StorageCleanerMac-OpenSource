@@ -119,8 +119,9 @@ final class MiniWindowIStatHiddenItemsTests: XCTestCase {
         let disk = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/GeekDiskView.swift")
         XCTAssertTrue(disk.contains("showInFinder: { MiniWindowVolumeActions.showInFinder(path: volume.id) }"))
         XCTAssertTrue(disk.contains("hide: { hideDiskVolume(volume.id) }"))
-        let settingsView = try source("Sources/StorageCleanerMac/Views/SettingsView.swift")
-        XCTAssertTrue(settingsView.contains("@AppStorage(MiniWindowHiddenItems.disksKey) var hiddenDiskKeysRaw = \"\""))
+        // D272: the hidden disks moved from General to the panel's content page.
+        let settingsView = try source("Sources/StorageCleanerMac/Views/MiniWindowConfigurationSettingsView.swift")
+        XCTAssertTrue(settingsView.contains("@AppStorage(MiniWindowHiddenItems.disksKey) private var hiddenDiskKeysRaw = \"\""))
         // The panel reads the same key in its store, the standard defaults
         // Settings writes, outside tests.
         let panel = try source("Sources/StorageCleanerMac/Views/MenuBarAdvancedStatusView.swift")
@@ -128,9 +129,9 @@ final class MiniWindowIStatHiddenItemsTests: XCTestCase {
         XCTAssertTrue(panel.contains("store: panelSettingsState.defaults)"))
         let panelSettings = try source("Sources/StorageCleanerMac/Views/MenuBarPanelSettingsView.swift")
         XCTAssertTrue(panelSettings.contains("defaults: UserDefaults = .standard"))
-        let general = try source("Sources/StorageCleanerMac/Views/Settings/SettingsGeneral.swift")
-        XCTAssertTrue(general.contains("hiddenDiskKeysRaw = \"\""), "Reset Disk Filtering clears the list")
-        XCTAssertTrue(general.contains(".disabled(hiddenDiskCount == 0)"))
+        XCTAssertTrue(settingsView.contains("hiddenDiskKeysRaw = \"\""), "Reset Disk Filtering clears the list")
+        // D272: was .disabled(hiddenDiskCount == 0); the action shows only with something to show.
+        XCTAssertTrue(settingsView.contains("if count > 0 {"))
     }
 
     private func renderVolumePage(actions: GeekDiskVolumeActions?) throws -> NSBitmapImageRep {

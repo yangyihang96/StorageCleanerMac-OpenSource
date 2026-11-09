@@ -134,7 +134,7 @@ enum ScanExclusionService {
 
     private static func displayDate(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = L10n.locale
+        formatter.locale = L10n.dateLocale
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter.string(from: date)

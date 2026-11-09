@@ -30,7 +30,7 @@ struct HealthFactorGrid: View {
                 Text(HealthDashboardVisuals.availabilityText(availability) + " · " + scoreText(component))
                 Text(detail(for: factor))
                 if let checkedAt = component?.evaluatedAt {
-                    Text(checkedAt.formatted(date: .abbreviated, time: .shortened)).monospacedDigit()
+                    Text(checkedAt.appFormatted(date: .abbreviated, time: .shortened)).monospacedDigit()
                 }
             }
         }

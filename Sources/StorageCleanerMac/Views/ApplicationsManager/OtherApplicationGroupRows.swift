@@ -83,7 +83,7 @@ struct OtherApplicationGroupRows: View {
                 VStack(alignment: .leading, spacing: 4) {
                     LightfieldPathText(path: copy.path)
                     Text(copy.modifiedAt.map {
-                        L10n.text("修改于 ", "Modified ") + $0.formatted(date: .abbreviated, time: .shortened)
+                        L10n.text("修改于 ", "Modified ") + $0.appFormatted(date: .abbreviated, time: .shortened)
                     } ?? L10n.text("修改时间未知", "Modification date unknown"))
                         .font(.system(size: 11)).foregroundStyle(CareStudioManagerInk.secondary)
                 }

@@ -153,7 +153,15 @@ extension MetadataPillStatus {
         case .none: FeatureLightfieldStatus.normal.color(palette)
         case .warning: FeatureLightfieldStatus.warning.color(palette)
         case .failure: FeatureLightfieldStatus.failure.color(palette)
-        case .locked, .readOnly, .systemSettingsOnly: palette.fg3
+        case .locked, .readOnly, .systemSettingsOnly: palette.fg3.base
+        }
+    }
+    /// D279: as a glyph or a label; the grey states read on the page's
+    /// gradient (`CareStudioText`), the status colours keep their values.
+    func lightfieldStyle(_ palette: FeatureLightfieldPalette) -> AnyShapeStyle {
+        switch self {
+        case .locked, .readOnly, .systemSettingsOnly: AnyShapeStyle(palette.fg3)
+        default: AnyShapeStyle(lightfieldColor(palette))
         }
     }
 }
@@ -162,14 +170,14 @@ struct LightfieldStatusGlyph: View {
     @Environment(\.colorScheme) private var scheme
     let status: MetadataPillStatus
     var symbol: String? = nil
-    var color: Color? = nil
+    var style: AnyShapeStyle? = nil
     private var featureStatus: FeatureLightfieldStatus? = nil
     var tone: FeatureLightfieldStatus? = nil
-    init(status: MetadataPillStatus, symbol: String? = nil, color: Color? = nil,
+    init(status: MetadataPillStatus, symbol: String? = nil, color: Color? = nil, style: AnyShapeStyle? = nil,
          tone: FeatureLightfieldStatus? = nil) {
         self.status = status
         self.symbol = symbol
-        self.color = color
+        self.style = style ?? color.map { AnyShapeStyle($0) }
         self.tone = tone
     }
     init(featureStatus: FeatureLightfieldStatus) {
@@ -178,9 +186,9 @@ struct LightfieldStatusGlyph: View {
     }
     var body: some View {
         Image(systemName: symbol ?? featureStatus?.symbol ?? status.lightfieldSymbol).resizable().scaledToFit()
-            .foregroundStyle(color ?? featureStatus?.color(FeatureLightfieldPalette.resolve(scheme))
-                ?? tone?.color(FeatureLightfieldPalette.resolve(scheme))
-                ?? status.lightfieldColor(FeatureLightfieldPalette.resolve(scheme)))
+            .foregroundStyle(style ?? featureStatus?.style(FeatureLightfieldPalette.resolve(scheme))
+                ?? tone?.style(FeatureLightfieldPalette.resolve(scheme))
+                ?? status.lightfieldStyle(FeatureLightfieldPalette.resolve(scheme)))
             .frame(width: FeatureLightfield.checkSide, height: FeatureLightfield.checkSide)
             .accessibilityElement(children: .ignore).accessibilityLabel(featureStatus?.accessibilityDescription ?? status.lightfieldDescription)
             .accessibilityAddTraits(.isStaticText)
@@ -290,7 +298,7 @@ struct LightfieldRing: View {
                 }.frame(maxWidth: .infinity).frame(height: numberHeight)
                 if !label.isEmpty {
                     Text(label).font(.system(size: typography.labelSize, weight: labelIsStatus ? .semibold : .regular))
-                        .foregroundStyle(labelIsStatus ? color : palette.fg2).lineLimit(1).minimumScaleFactor(0.1) // lightfield-scale-ok: ring-fitted-label
+                        .foregroundStyle(labelIsStatus ? AnyShapeStyle(color) : AnyShapeStyle(palette.fg2)).lineLimit(1).minimumScaleFactor(0.1) // lightfield-scale-ok: ring-fitted-label
                         .frame(maxWidth: .infinity).frame(height: labelHeight)
                         .lightfieldComponentProbe(probeID + ".label")
                 }
@@ -335,7 +343,7 @@ struct LightfieldMetricGroup: View {
                         (Text(metric.value).font(.system(size: 24, weight: .semibold))
                             .foregroundColor(metric.status?.color(FeatureLightfieldPalette.resolve(scheme)) ?? FeatureLightfieldPalette.resolve(scheme).fg)
                             + Text(metric.unit.isEmpty ? "" : " " + metric.unit).font(.system(size: 15))
-                                .foregroundColor(FeatureLightfieldPalette.resolve(scheme).fg2))
+                                .foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2))
                             .monospacedDigit().fixedSize()
                             .lightfieldComponentProbe(probeID + ".value." + metric.id)
                         Text(metric.label).font(.system(size: 13))
@@ -374,7 +382,7 @@ struct LightfieldMetricGroup: View {
         let palette = FeatureLightfieldPalette.resolve(scheme)
         return (Text(metric.value).font(.system(size: showsLabels ? 22 : 15, weight: .semibold))
             .foregroundColor(metric.status?.color(palette) ?? palette.fg)
-            + Text(metric.unit.isEmpty ? "" : " " + metric.unit).font(.system(size: 15)).foregroundColor(palette.fg2))
+            + Text(metric.unit.isEmpty ? "" : " " + metric.unit).font(.system(size: 15)).foregroundStyle(palette.fg2))
             .monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok: metric-value
             .frame(maxWidth: .infinity, alignment: showsLabels ? .leading : .trailing)
             .lightfieldComponentProbe(probeID + ".value." + metric.id)
@@ -492,6 +500,7 @@ struct LightfieldExpandableRow<Leading: View, Content: View>: View {
     var rowHeight: CGFloat = FeatureLightfield.rowHeight
     var reportsCompactBoundaries = false
     var probeID = "lightfield.expandable"
+    var titleWeight: Font.Weight = .semibold
     @Binding var expanded: Bool
     @ViewBuilder var leading: Leading
     @ViewBuilder var content: Content
@@ -504,7 +513,7 @@ struct LightfieldExpandableRow<Leading: View, Content: View>: View {
                 HStack(spacing: 16) {
                     leading
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(title).font(.system(size: 15, weight: .semibold)).lineLimit(1).truncationMode(.middle).help(title)
+                        Text(title).font(.system(size: 15, weight: titleWeight)).lineLimit(1).truncationMode(.middle).help(title)
                             .lightfieldComponentProbe(probeID + ".title")
                         if !subtitle.isEmpty {
                             Text(subtitle).font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
@@ -540,7 +549,7 @@ struct LightfieldTextSegments: View {
             ForEach(titles.indices, id: \.self) { index in
                 Button { selection = index } label: {
                     Text(titles[index]).font(.system(size: 13, weight: selection == index ? .semibold : .regular))
-                        .foregroundStyle(selection == index ? FeatureLightfieldPalette.resolve(scheme).fg : FeatureLightfieldPalette.resolve(scheme).fg2)
+                        .foregroundStyle(selection == index ? AnyShapeStyle(FeatureLightfieldPalette.resolve(scheme).fg) : AnyShapeStyle(FeatureLightfieldPalette.resolve(scheme).fg2))
                         .lineLimit(1).truncationMode(.tail).frame(height: height)
                         .overlay(alignment: .bottom) {
                             if selection == index { Rectangle().fill(FeatureLightfieldPalette.accent(module)).frame(height: 2) }
@@ -599,9 +608,9 @@ struct LightfieldSummary: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(label).font(.system(size: 13)).foregroundStyle(palette.fg2).lineLimit(1)
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    (Text(valuePrefix).font(.system(size: 15)).foregroundColor(palette.fg2)
+                    (Text(valuePrefix).font(.system(size: 15)).foregroundStyle(palette.fg2)
                         + Text(value).font(.system(size: primaryCaption.isEmpty ? 52 : 46, weight: .bold)).foregroundColor(primaryStatus?.color(palette) ?? palette.fg)
-                        + Text(" " + unit).font(.system(size: 24, weight: .semibold)).foregroundColor(FeatureLightfieldPalette.accent(module)))
+                        + Text(" " + unit).font(.system(size: 24, weight: .semibold)).foregroundColor(FeatureLightfieldPalette.actionText(module)))
                         .monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok: summary-primary
                         .lightfieldComponentProbe(probeID + ".primary")
                     if let note {
@@ -633,10 +642,10 @@ struct LightfieldSummary: View {
         return ForEach(secondary) { metric in
             VStack(alignment: .leading, spacing: 4) {
                 Text(metric.label).font(.system(size: 13)).foregroundStyle(palette.fg2).lineLimit(1)
-                (Text(metric.valuePrefix).font(.system(size: 15)).foregroundColor(palette.fg2)
+                (Text(metric.valuePrefix).font(.system(size: 15)).foregroundStyle(palette.fg2)
                     + Text(metric.value).font(.system(size: primaryCaption.isEmpty ? 24 : 28, weight: .semibold)).foregroundColor(metric.status?.color(palette) ?? palette.fg)
                     + Text(metric.unit.isEmpty ? "" : " " + metric.unit).font(.system(size: 15))
-                        .foregroundColor(palette.fg2))
+                        .foregroundStyle(palette.fg2))
                     .monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok: summary-secondary
                     .lightfieldComponentProbe(probeID + ".secondary.value." + metric.id)
                 if !metric.caption.isEmpty {

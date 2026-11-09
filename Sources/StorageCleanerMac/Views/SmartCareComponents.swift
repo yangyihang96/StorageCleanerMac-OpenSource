@@ -28,12 +28,12 @@ struct SmartCareGauge: View {
             } else {
                 Text("--")
                     .font(AppDesignTokens.Typography.heroTitle)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
 
             Text(label)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
 
             ProgressView(value: Double(renderedProgress), total: 1)
                 .progressViewStyle(.linear)
@@ -77,7 +77,7 @@ struct SmartCareMetric: View {
 
             Text(title)
                 .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -208,7 +208,7 @@ struct AppEmptyState<Action: View>: View {
                 if let detail, !detail.isEmpty {
                     Text(detail)
                         .font(AppDesignTokens.Typography.emptyStateDetail)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }

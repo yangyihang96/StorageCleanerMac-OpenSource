@@ -689,6 +689,9 @@ struct CleanupApplicationSnapshot: Sendable {
     var runningBundlePaths: Set<String> = []
     /// The subset of the asked identifiers that belong to an installed app.
     var installedBundleIdentifiers: Set<String> = []
+    /// D251: running apps by normalized name (localized name and bundle file
+    /// name), so a folder such as `~/Library/Logs/Claude` can name its app.
+    var runningApplicationsByName: [String: Set<String>] = [:]
 
     static let empty = CleanupApplicationSnapshot()
 }
@@ -717,7 +720,14 @@ struct WorkspaceCleanupApplicationEnvironment: CleanupApplicationEnvironment {
                 }),
                 installedBundleIdentifiers: Set(bundleIdentifiers.filter {
                     workspace.urlForApplication(withBundleIdentifier: $0) != nil
-                })
+                }),
+                runningApplicationsByName: CleanupOwnerInferencePolicy.runningApplicationsByName(
+                    running.compactMap { application in
+                        application.bundleIdentifier.map { identifier in
+                            (identifier, [application.localizedName,
+                                          application.bundleURL?.deletingPathExtension().lastPathComponent].compactMap { $0 })
+                        }
+                    })
             )
         }
     }
@@ -751,6 +761,35 @@ enum CleanupOwnerInferencePolicy {
     /// diagnostic reports.
     static func isOwnerless(name: String) -> Bool {
         ["DiagnosticReports"].contains(name)
+    }
+
+    /// D251 (G batch): a folder named exactly like a running app, such as
+    /// `~/Library/Logs/Claude`, belongs to it when the name is not a reverse
+    /// domain. Exactly one running app may carry the name; anything else
+    /// stays unresolved.
+    static func runningOwner(forName name: String, runningApplicationsByName: [String: Set<String>]) -> String? {
+        guard bundleIdentifierCandidates(forName: name).isEmpty,
+              let key = normalizedName(name), let owners = runningApplicationsByName[key],
+              owners.count == 1 else { return nil }
+        return owners.first
+    }
+
+    static func runningApplicationsByName(_ applications: [(bundleIdentifier: String, names: [String])]) -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        for application in applications {
+            for name in Set(application.names.compactMap(normalizedName)) {
+                result[name, default: []].insert(application.bundleIdentifier)
+            }
+        }
+        return result
+    }
+
+    /// Case and width folded; at least two characters, so no single letter
+    /// or empty name ever matches an app.
+    static func normalizedName(_ name: String) -> String? {
+        let folded = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .widthInsensitive], locale: nil)
+        return folded.count >= 2 ? folded : nil
     }
 }
 
@@ -2092,6 +2131,9 @@ actor ReadOnlyCleanupScanner {
                         } else if let owner = CleanupOwnerInferencePolicy.owner(
                             forName: candidate.sourceURL.lastPathComponent,
                             installedBundleIdentifiers: applications.installedBundleIdentifiers
+                        ) ?? CleanupOwnerInferencePolicy.runningOwner(
+                            forName: candidate.sourceURL.lastPathComponent,
+                            runningApplicationsByName: applications.runningApplicationsByName
                         ) {
                             resolved.ownerResolution = .inferredFromName
                             resolved.ownerBundleIdentifiers = [owner]

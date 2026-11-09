@@ -14,65 +14,28 @@ struct AppLifecycleReminderSettingsSection: View {
 
     var body: some View {
         LightfieldSettingsSection {
-            Toggle(isOn: binding(\.offersCorrectUninstall)) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L10n.text("应用放进废纸篓时，提醒清理它的残留",
-                                   "Remind me to remove an app's leftovers when it goes to the Trash"))
-                    Text(L10n.text("把应用拖进废纸篓后，菜单栏会提醒你找出它留下的设置和缓存等文件，一起移除。",
-                                   "After you drag an app to the Trash, a reminder in the menu bar helps you find the settings, caches and other files it left and remove them too."))
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+            SettingsToggleRow(
+                title: L10n.text("应用放进废纸篓时，提醒清理它的残留",
+                                 "Remind me to remove an app's leftovers when it goes to the Trash"),
+                caption: L10n.text("把应用拖进废纸篓后，菜单栏会提醒你找出它留下的设置和缓存等文件，一起移除。",
+                                   "After you drag an app to the Trash, a reminder in the menu bar helps you find its settings, caches and other files and remove them too."),
+                isOn: binding(\.offersCorrectUninstall))
+            thresholdRow(title: L10n.text("废纸篓超过这个大小时提醒", "Remind when the Trash grows past"),
+                         caption: trashCaption,
+                         captionColor: center.measurement?.isReadable == false ? .orange : nil,
+                         isOn: binding(\.notifiesTrashSize),
+                         selection: binding(\.trashSizeThresholdBytes),
+                         choices: thresholdChoices)
+            thresholdRow(title: L10n.text("可用空间不足这个值时提醒", "Remind when free space drops below"),
+                         caption: spaceCaption,
+                         captionColor: center.startupDiskSpace.map { $0.availableBytes < snapshot.lowDiskSpaceThresholdBytes } == true ? .orange : nil,
+                         isOn: binding(\.notifiesLowDiskSpace),
+                         selection: binding(\.lowDiskSpaceThresholdBytes),
+                         choices: spaceThresholdChoices)
+            SettingsRow(title: L10n.text("已忽略的提醒：\(ByteFormat.count(ignoredCount)) 项", "Ignored reminders: \(ByteFormat.count(ignoredCount))")) {
+                if ignoredCount > 0 {
+                    SettingsLinkButton(title: L10n.text("重置已忽略的提醒", "Reset Ignored Reminders")) { confirmsReset = true }
                 }
-            }
-            HStack {
-                Toggle(L10n.text("废纸篓超过这个大小时提醒：", "Remind when the Trash grows past"),
-                       isOn: binding(\.notifiesTrashSize))
-                Spacer()
-                Picker("", selection: binding(\.trashSizeThresholdBytes)) {
-                    ForEach(thresholdChoices, id: \.self) { bytes in
-                        Text(AppLifecycleReminderPreferences.thresholdTitle(bytes)).tag(bytes)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .fixedSize()
-                .disabled(!snapshot.notifiesTrashSize)
-            }
-            if let measurement = center.measurement {
-                LabeledContent(L10n.text("废纸篓当前大小", "Trash Now")) {
-                    Text(measurement.isReadable
-                         ? "\(L10n.items(measurement.itemCount)) · \(ByteFormat.storageString(measurement.totalBytes))"
-                         : L10n.text("需要“完全磁盘访问权限”才能读取", "Needs Full Disk Access to read"))
-                        .monospacedDigit()
-                        .foregroundStyle(measurement.isReadable ? Color.primary : Color.orange)
-                }
-            }
-            HStack {
-                Toggle(L10n.text("可用空间不足这个值时提醒：", "Remind when free space drops below"),
-                       isOn: binding(\.notifiesLowDiskSpace))
-                Spacer()
-                Picker("", selection: binding(\.lowDiskSpaceThresholdBytes)) {
-                    ForEach(spaceThresholdChoices, id: \.self) { bytes in
-                        Text(AppLifecycleReminderPreferences.thresholdTitle(bytes)).tag(bytes)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .fixedSize()
-                .disabled(!snapshot.notifiesLowDiskSpace)
-            }
-            if let space = center.startupDiskSpace {
-                LabeledContent(L10n.text("启动磁盘当前可用", "Startup Disk Free Now")) {
-                    Text(ByteFormat.storageString(space.availableBytes))
-                        .monospacedDigit()
-                        .foregroundStyle(space.availableBytes < snapshot.lowDiskSpaceThresholdBytes ? Color.orange : Color.primary)
-                }
-            }
-            HStack {
-                Text(L10n.text("已忽略的提醒：\(ByteFormat.count(ignoredCount)) 项", "Ignored reminders: \(ByteFormat.count(ignoredCount))"))
-                Spacer()
-                Button(L10n.text("重置已忽略的提醒", "Reset Ignored Reminders")) { confirmsReset = true }
-                    .disabled(ignoredCount == 0)
             }
         } header: {
             Text(L10n.text("应用、废纸篓与磁盘提醒", "App, Trash and Disk Reminders"))
@@ -97,6 +60,38 @@ struct AppLifecycleReminderSettingsSection: View {
         .onAppear {
             snapshot = AppLifecycleReminderPreferences.snapshot()
             ignoredCount = center.ignoreList.activeRecords().count
+        }
+    }
+
+    private func thresholdRow(title: String, caption: String?, captionColor: Color?, isOn: Binding<Bool>,
+                              selection: Binding<Int64>, choices: [Int64]) -> some View {
+        SettingsRow(title: title, caption: caption, captionColor: captionColor) {
+            HStack(spacing: 12) {
+                Picker(title, selection: selection) {
+                    ForEach(choices, id: \.self) { bytes in
+                        Text(AppLifecycleReminderPreferences.thresholdTitle(bytes)).tag(bytes)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .featureLightfieldMenuTint()
+                .fixedSize()
+                .disabled(!isOn.wrappedValue)
+                SettingsSwitch(title: title, isOn: isOn)
+            }
+        }
+    }
+
+    private var trashCaption: String? {
+        guard let measurement = center.measurement else { return nil }
+        return L10n.text("废纸篓当前大小", "Trash Now") + " " + (measurement.isReadable
+            ? "\(L10n.items(measurement.itemCount)) · \(ByteFormat.storageString(measurement.totalBytes))"
+            : L10n.text("需要“完全磁盘访问权限”才能读取", "Needs Full Disk Access to read"))
+    }
+
+    private var spaceCaption: String? {
+        center.startupDiskSpace.map {
+            L10n.text("启动磁盘当前可用", "Startup Disk Free Now") + " " + ByteFormat.storageString($0.availableBytes)
         }
     }
 

@@ -524,8 +524,10 @@ final class StartupItemsPresentationTests: XCTestCase {
             sort: .recommended,
             includeTechnicalDetails: false
         )
-        XCTAssertEqual(attention.visibleItems.map(\.id), ["technical-only"])
-        XCTAssertEqual(attention.visibleItems.first?.displayName, "Unknown Background Item")
+        // D235＋旧值：["technical-only"]，首项显示名 "Unknown Background Item"。
+        // 归属未确认不算“需要关注”；它仍在全部列表里（上方断言）且只读。
+        XCTAssertEqual(attention.visibleItems.map(\.id), [])
+        XCTAssertEqual(primary.visibleItems.first { $0.id == "technical-only" }?.displayName, "Unknown Background Item")
         XCTAssertFalse(informationOnly.isActionable)
         XCTAssertFalse(attention.allowsStartupMutationActions)
 
@@ -585,7 +587,8 @@ final class StartupItemsPresentationTests: XCTestCase {
             sort: .recommended,
             includeTechnicalDetails: false
         )
-        XCTAssertEqual(attention.visibleItems.map(\.id), ["unknown-settings"])
+        // D235＋旧值：["unknown-settings"]。归属未确认的系统设置项留在原类别。
+        XCTAssertEqual(attention.visibleItems.map(\.id), [])
         XCTAssertFalse(attention.allowsStartupMutationActions)
         // D64 keeps the System Settings ownership/open-only boundary in one bilingual notice.
         XCTAssertEqual(
@@ -683,10 +686,9 @@ final class StartupItemsPresentationTests: XCTestCase {
             sort: .recommended,
             includeTechnicalDetails: false
         )
-        XCTAssertEqual(
-            Set(attention.visibleItems.map(\.id)),
-            ["low-direct", "low-settings"]
-        )
+        // D235＋旧值：["low-direct", "low-settings"]。归属置信度低本身不是故障；
+        // 两项在全部列表里照旧可见（上方断言），可管理性不变。
+        XCTAssertEqual(Set(attention.visibleItems.map(\.id)), [])
         XCTAssertFalse(attention.allowsStartupMutationActions)
     }
 
@@ -845,12 +847,14 @@ final class StartupItemsPresentationTests: XCTestCase {
 
         XCTAssertEqual(all.count(for: .all), 3)
         XCTAssertEqual(attention.count(for: .all), 3)
-        XCTAssertEqual(all.count(for: .attention), 2)
-        XCTAssertEqual(attention.count(for: .attention), 2)
-        XCTAssertEqual(
-            Set(attention.visibleItems.map(\.id)),
-            ["count-technical", "count-attributed-review"]
-        )
+        // D235＋旧值：2、2 与 [count-technical, count-attributed-review]。归属未确认
+        // 不再算“需要关注”；两项仍只读（下方断言）。
+        XCTAssertEqual(all.count(for: .attention), 0)
+        XCTAssertEqual(attention.count(for: .attention), 0)
+        XCTAssertEqual(Set(attention.visibleItems.map(\.id)), [])
+        XCTAssertEqual(technicalOnly.manageability, .unknown)
+        XCTAssertEqual(attributedReview.manageability, .unknown)
+        XCTAssertFalse(attributedReview.isActionable)
         XCTAssertEqual(technicalOnly.displayName, "Technical Only")
         XCTAssertFalse(technicalOnly.isActionable)
         XCTAssertFalse(attention.allowsStartupMutationActions)
@@ -1174,6 +1178,56 @@ final class StartupItemsPresentationTests: XCTestCase {
             consolePresentation(items: [apple], includeAppleSystem: true).visibleItems.map(\.id),
             ["apple-console"]
         )
+    }
+
+    /// D254 (G batch, install22 14:12): 28 rows under “需要关注” said nothing
+    /// about why; running login items were listed for one stale component.
+    @MainActor func testAttentionRowsNameTheirReasonAndTheAffectedComponents() {
+        let language = MiniWindowLogicLanguageScope(.zhHans)
+        defer { language.restore() }
+        XCTAssertEqual(item(id: "orphan", kind: .orphanedItem, scope: .currentUser, name: "Old Helper").attentionReasonText,
+                       "残留配置")
+        var missing = item(id: "missing", kind: .userLaunchAgent, scope: .currentUser, name: "Missing")
+        missing.components[0].diagnosticEvidence = ["target-missing", "world-writable"]
+        XCTAssertEqual(missing.attentionReasonText, "找不到程序、权限过宽")
+        var unsigned = item(id: "unsigned", kind: .userLaunchAgent, scope: .currentUser, name: "Unsigned")
+        unsigned.components[0].diagnosticEvidence = ["team-identifier-mismatch"]
+        XCTAssertEqual(unsigned.attentionReasonText, "签名异常")
+
+        var grouped = item(id: "grouped", kind: .openAtLogin, scope: .currentUser, name: "Grouped")
+        var stale = component(id: "grouped-agent", kind: .userLaunchAgent, scope: .currentUser, name: "Grouped")
+        stale.diagnosticEvidence = ["unresolved-symbolic-link"]
+        grouped.components.append(stale)
+        XCTAssertTrue(grouped.needsAttention)
+        XCTAssertEqual(grouped.attentionReasonText, "1/2 个组件：链接解析不了")
+
+        let healthy = item(id: "healthy", kind: .userLaunchAgent, scope: .currentUser, name: "Healthy")
+        XCTAssertFalse(healthy.needsAttention)
+        XCTAssertNil(healthy.attentionReasonText, "only an attention row carries a reason")
+    }
+
+    func testEveryAttentionItemHasAReason() {
+        // The reason reads the same evidence as `needsAttention`: no row is
+        // listed under “需要关注” without one.
+        let evidence = ["target-missing", "missing-executable", "signature-invalid", "team-identifier-mismatch",
+                        "group-writable", "world-writable", "unresolved-symbolic-link",
+                        "malformed-plist:x", "orphan-evidence:x"]
+        for value in evidence {
+            var candidate = item(id: value, kind: .userLaunchAgent, scope: .currentUser, name: "Probe")
+            candidate.components[0].diagnosticEvidence = [value]
+            XCTAssertTrue(candidate.needsAttention, value)
+            XCTAssertNotNil(candidate.attentionReasonText, value)
+        }
+        var noPlist = item(id: "no-plist", kind: .userLaunchAgent, scope: .currentUser, name: "Probe")
+        noPlist.components[0].plistURL = nil
+        XCTAssertTrue(noPlist.needsAttention)
+        XCTAssertNotNil(noPlist.attentionReasonText)
+    }
+
+    func testTheStartupRowShowsTheReason() throws {
+        let source = try String(contentsOf: SwiftSourceScanning.projectRoot
+            .appendingPathComponent("Sources/StorageCleanerMac/Views/CareStudio/CareStudioStartup.swift"), encoding: .utf8)
+        XCTAssertTrue(SwiftSourceScanning.code(source).contains("if let reason = item.attentionReasonText"))
     }
 
     private func consolePresentation(

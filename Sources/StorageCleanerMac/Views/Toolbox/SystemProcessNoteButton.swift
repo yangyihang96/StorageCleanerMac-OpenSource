@@ -5,7 +5,9 @@ import SwiftUI
 /// it never offers to end a process.
 struct SystemProcessNoteButton: View {
     let note: SystemProcessNote
-    var tint: Color = .secondary
+    /// D279: a style, so a grey glyph reads on the page's gradient
+    /// (`CareStudioText`).
+    var tint = AnyShapeStyle(Color.secondary)
     /// Opens the related page of this app, when the module wires one.
     var openRelated: ((SystemProcessNote.Related) -> Void)? = nil
 
@@ -13,7 +15,7 @@ struct SystemProcessNoteButton: View {
 
     /// Nothing for a process without a note.
     @ViewBuilder
-    static func forProcess(name: String, path: String? = nil, tint: Color = .secondary,
+    static func forProcess(name: String, path: String? = nil, tint: AnyShapeStyle = AnyShapeStyle(Color.secondary),
                            openRelated: ((SystemProcessNote.Related) -> Void)? = nil) -> some View {
         if let note = SystemProcessNotes.note(forName: name, path: path) {
             SystemProcessNoteButton(note: note, tint: tint, openRelated: openRelated)
@@ -59,11 +61,11 @@ struct SystemProcessNoteCard: View {
             section(L10n.text("为什么会忙", "Why It Gets Busy"), note.whyBusy)
             Label(note.settling.title, systemImage: settlingSymbol)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             section(L10n.text("可以怎么做", "What You Can Do"), note.whatToDo)
             if let related = note.related, let openRelated {
                 Button(relatedTitle(related)) { openRelated(related) }
-                    .buttonStyle(.link)
+                    .buttonStyle(.link).careStudioActionTint()
                     .font(.system(size: 12, weight: .semibold))
             }
         }
@@ -89,7 +91,7 @@ struct SystemProcessNoteCard: View {
 
     private func section(_ title: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.readableSecondary)
             Text(text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
         }
     }

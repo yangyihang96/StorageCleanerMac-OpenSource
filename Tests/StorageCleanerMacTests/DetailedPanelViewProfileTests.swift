@@ -232,7 +232,9 @@ final class DetailedPanelViewProfileTests: XCTestCase {
         XCTAssertFalse(overview.contains("overviewToolbarHeight"))
         // The CPU time picker is a sibling overlay; the removed overview toolbar stays absent.
         XCTAssertFalse(overview.contains("overviewToolbar"))
-        XCTAssertTrue(overview.contains(".contextMenu { overviewContextMenu }"))
+        // D257 (10-28): the context menu is rebuilt when the main program is
+        // quit or opened again while the panel stays open.
+        XCTAssertTrue(overview.contains(".modifier(MenuBarOnlyAwareContextMenu { overviewContextMenu })"))
         XCTAssertFalse(overview.contains("GeekDashboardEditor(state:"))
         XCTAssertFalse(root.contains(".background(.bar)"))
         XCTAssertFalse(root.contains("forcesGeekOverviewToolbar"))

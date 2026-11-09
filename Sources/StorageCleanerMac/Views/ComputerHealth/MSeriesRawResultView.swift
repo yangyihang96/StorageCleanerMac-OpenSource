@@ -12,18 +12,18 @@ struct MSeriesRawResultView: View {
                 Text(L10n.text("本协议整机性能指数：待真实参考校准", "Whole-machine performance index: awaiting reference calibration"))
                     .font(AppDesignTokens.Typography.secondary)
                 Text(L10n.text("A/B/C：样本稳定程度，非统计置信度", "A/B/C: sample stability, not statistical confidence"))
-                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                 ForEach(result.metrics) { metric in
                     HStack(alignment: .firstTextBaseline) {
                         Text(title(metric.id)).frame(maxWidth: .infinity, alignment: .leading)
                         if let statistics = metric.statistics {
                             Text(statistics.median, format: .number.precision(.fractionLength(2)))
                                 .monospacedDigit()
-                            Text(metric.unit).foregroundStyle(.secondary)
+                            Text(metric.unit).foregroundStyle(.readableSecondary)
                             Text("n=\(ByteFormat.count(statistics.sampleCount)) · \(statistics.confidence.rawValue)")
-                                .foregroundStyle(.secondary).monospacedDigit()
+                                .foregroundStyle(.readableSecondary).monospacedDigit()
                         } else {
-                            Text(status(metric.availability)).foregroundStyle(.secondary)
+                            Text(status(metric.availability)).foregroundStyle(.readableSecondary)
                         }
                     }
                     .font(AppDesignTokens.Typography.metadata)
@@ -42,7 +42,7 @@ struct MSeriesRawResultView: View {
                     }
                 }
                 Text(L10n.text("测试写入：", "Test writes: ") + ByteFormat.storageString(Int64(result.writtenBytes)))
-                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                    .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                 Text(result.plan).font(AppDesignTokens.Typography.metadata).textSelection(.enabled)
             }
             .padding(AppDesignTokens.Layout.sectionPadding)

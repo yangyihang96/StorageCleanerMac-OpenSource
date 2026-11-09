@@ -46,10 +46,10 @@ struct SystemUpdateAvailableCard: View {
                         Text(L10n.text("让操作系统得到及时更新，以获取最新功能和安全改进。",
                                        "Keep your operating system updated with the latest features and security improvements."))
                             .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                         Text(updates.map { $0.version.isEmpty ? $0.name : "\($0.name) \($0.version)" }.joined(separator: "、"))
                             .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .lineLimit(2)
                     }
                     Spacer()

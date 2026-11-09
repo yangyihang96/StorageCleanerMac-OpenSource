@@ -74,6 +74,9 @@ struct FeatureOptionsScrollView<Content: View>: View {
     @Environment(\.colorScheme) private var scheme
     @ViewBuilder let content: Content
 
+    /// D240: each scroller's own space (nested scrollers have their own prefix).
+    private var viewportSpace: String { probePrefix + ".viewportSpace" }
+
     var body: some View {
         GeometryReader { proxy in
             let overflowing = FeatureScrollGeometry.overflows(contentHeight: naturalFrame.height,
@@ -142,12 +145,19 @@ struct FeatureOptionsScrollView<Content: View>: View {
                 .background {
                     GeometryReader { document in
                         Color.clear.preference(key: FeatureScrollFrameKey.self,
-                            value: [probePrefix + ".natural": document.frame(in: .global)])
+                            value: [probePrefix + ".natural": document.frame(in: .named(viewportSpace))])
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: balancesContent ? visibleHeight : nil,
                        alignment: balancesContent ? .leading : .topLeading)
         }
+        // D240 (review P2-3): both frames are read in the viewport's own space,
+        // so moving or resizing the page around the scroller no longer changes
+        // them; only scrolling and the document's size do. In `.global` every
+        // outer layout pass moved them and re-wrote this view's state, and the
+        // 2.0.1 log had “Bound preference FeatureScrollFrameKey tried to update
+        // multiple times per frame”. `hasMore` compares the two either way.
+        .coordinateSpace(name: viewportSpace)
         .scrollIndicators(.automatic)
         .frame(height: visibleHeight)
         .clipped()
@@ -155,7 +165,7 @@ struct FeatureOptionsScrollView<Content: View>: View {
         .background {
             GeometryReader { viewport in
                 Color.clear.preference(key: FeatureScrollFrameKey.self,
-                    value: [probePrefix + ".visible": viewport.frame(in: .global)])
+                    value: [probePrefix + ".visible": CGRect(origin: .zero, size: viewport.size)])
             }
         }
 #if DEBUG

@@ -252,13 +252,13 @@ struct LargeFileStorageMap: View {
             if let selectedEntry {
                 Text(StorageTreemapPresentation.displaySize(for: selectedEntry))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                     .fixedSize()
                 if hasListFilter, !filteredEntries.contains(where: { $0.id == selectedEntry.id }) {
                     Text(L10n.text("筛选外的选择", "Selection outside filter"))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .help(L10n.text("选择已保留；清除筛选可在列表中显示", "Selection is kept; clear filters to show it in the list"))
                 }
             }
@@ -271,7 +271,7 @@ struct LargeFileStorageMap: View {
         ScrollView(.horizontal, showsIndicators: false) {
             Text(path)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.readableTertiary)
                 .fixedSize(horizontal: true, vertical: false)
         }
         .accessibilityLabel(selectedEntry == nil
@@ -325,7 +325,7 @@ struct LargeFileStorageMap: View {
         } label: {
             Text(entryFilter.title)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .accessibilityLabel(L10n.text("当前层类型筛选", "Current Folder Type Filter"))
     }
@@ -340,7 +340,7 @@ struct LargeFileStorageMap: View {
         } label: {
             Text(entrySort.title)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .accessibilityLabel(L10n.text("当前层排序", "Current Folder Sort"))
     }
@@ -348,7 +348,7 @@ struct LargeFileStorageMap: View {
     private var listMatchCount: some View {
         Text(L10n.text("\(ByteFormat.count(filteredEntries.count)) / \(ByteFormat.count(entries.count)) 项", "\(ByteFormat.count(filteredEntries.count)) / \(ByteFormat.count(entries.count)) items"))
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .monospacedDigit()
             .fixedSize()
             .accessibilityLabel(L10n.text("匹配 \(ByteFormat.count(filteredEntries.count)) 项，共 \(ByteFormat.count(entries.count)) 项", "\(ByteFormat.count(filteredEntries.count)) matches out of \(ByteFormat.count(entries.count)) items"))
@@ -387,7 +387,7 @@ struct LargeFileStorageMap: View {
             }
         }
         .font(AppDesignTokens.Typography.compactLabel)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .fixedSize(horizontal: true, vertical: false)
     }
 
@@ -402,7 +402,7 @@ struct LargeFileStorageMap: View {
                         if index > 0 {
                             Image(systemName: "chevron.right")
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.readableTertiary)
                                 .accessibilityHidden(true)
                         }
                         Button {
@@ -576,7 +576,7 @@ struct LargeFileStorageMap: View {
                     ? L10n.text("图中仍显示完整目录", "Map shows the entire folder")
                     : mapHeaderDetail)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
             }
         }
@@ -589,7 +589,7 @@ struct LargeFileStorageMap: View {
             Text(StorageTreemapPresentation.displaySize(for: summaryEntry(snapshot)))
             .font(AppDesignTokens.Typography.compactLabel)
             .monospacedDigit()
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: true, vertical: false)
         }
     }
@@ -727,7 +727,7 @@ struct LargeFileStorageMap: View {
                             ProgressView()
                             Text(L10n.text("正在打开下一层…", "Opening Next Level…"))
                                 .font(AppDesignTokens.Typography.secondary)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                         }
                         .frame(width: 240)
                         .frame(maxHeight: .infinity)
@@ -785,7 +785,7 @@ struct LargeFileStorageMap: View {
                     : AppDesignTokens.Palette.warning)
             Text(storageMapStatusText(snapshot))
                 .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -796,7 +796,7 @@ struct LargeFileStorageMap: View {
             Text(String(format: L10n.text("索引 %.1f 秒", "Indexed in %.1f sec"), analysis.scanSeconds))
                 .font(AppDesignTokens.Typography.metadata)
                 .monospacedDigit()
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.readableTertiary)
                 .fixedSize(horizontal: true, vertical: false)
         }
     }
@@ -807,7 +807,7 @@ struct LargeFileStorageMap: View {
                 .foregroundStyle(AppDesignTokens.Palette.warning)
             Text(message)
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Button(L10n.text("重试", "Retry")) {
@@ -830,7 +830,7 @@ struct LargeFileStorageMap: View {
                 "Reading this level; folder sizes come from the completed index"
             ))
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
             Button(L10n.text("取消", "Cancel")) {
                 workspace.cancelStorageMapBrowse()
@@ -846,7 +846,7 @@ struct LargeFileStorageMap: View {
         VStack(spacing: 8) {
             Text(title)
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -978,7 +978,7 @@ private struct StorageMapCategoryLegendItem: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .font(AppDesignTokens.Typography.metadata.weight(.medium))
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -1006,7 +1006,7 @@ private struct StorageMapColumn: View {
                         .help(snapshot.path)
                     Text(L10n.items(snapshot.entries.count))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
                 .layoutPriority(1)
 
@@ -1017,7 +1017,7 @@ private struct StorageMapColumn: View {
                     : ByteFormat.storageString(snapshot.referenceBytes))
                     .font(AppDesignTokens.Typography.metadata)
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: true, vertical: false)
             }
             .padding(.horizontal, 10)
@@ -1031,7 +1031,7 @@ private struct StorageMapColumn: View {
                     if entries.isEmpty {
                         Text(L10n.text("没有可显示的项目", "No Items to Display"))
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 24)
                     }
@@ -1165,7 +1165,7 @@ private struct StorageTreemapTile: View {
                             Text(StorageTreemapPresentation.displaySize(for: entry))
                                 .font(AppDesignTokens.Typography.metadata)
                                 .monospacedDigit()
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .lineLimit(1)
                         }
                     }
@@ -1334,7 +1334,7 @@ private struct StorageMapEntryRow: View {
                         Text(StorageTreemapPresentation.displaySize(for: entry))
                             .font(AppDesignTokens.Typography.metadata)
                             .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .fixedSize(horizontal: true, vertical: false)
                         HStack(spacing: 5) {
                             GeometryReader { proxy in
@@ -1349,7 +1349,7 @@ private struct StorageMapEntryRow: View {
                             .accessibilityHidden(true)
                             Text(shareText)
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.readableTertiary)
                                 .monospacedDigit()
                                 .fixedSize(horizontal: true, vertical: false)
                         }
@@ -1357,7 +1357,7 @@ private struct StorageMapEntryRow: View {
                     if entry.canDescend {
                         Image(systemName: "chevron.right")
                             .font(AppDesignTokens.Typography.metadata.weight(.semibold))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.readableTertiary)
                             .accessibilityHidden(true)
                     }
                 }
@@ -1407,10 +1407,10 @@ private struct StorageMapEntryRow: View {
     /// remain short phrases; full explanations are on hover and in review.
     @ViewBuilder
     private var secondaryLines: some View {
-        let metadata = Text(entrySecondaryMetadata).foregroundStyle(.secondary)
+        let metadata = Text(entrySecondaryMetadata).foregroundStyle(.readableSecondary)
         if let note = FileAnalysisTrashPresentation.rowNote(state: trashState) {
             ViewThatFits(in: .horizontal) {
-                (metadata + Text(" · ").foregroundStyle(.secondary) + noteText(note))
+                (metadata + Text(" · ").foregroundStyle(.readableSecondary) + noteText(note))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 VStack(alignment: .leading, spacing: 1) {
@@ -1432,9 +1432,9 @@ private struct StorageMapEntryRow: View {
     private func noteText(_ note: String) -> Text {
         switch trashState {
         case .blocked:
-            Text(Image(systemName: "lock.fill")).foregroundStyle(.tertiary) + Text(" " + note).foregroundStyle(.tertiary)
+            Text(Image(systemName: "lock.fill")).foregroundStyle(.readableTertiary) + Text(" " + note).foregroundStyle(.readableTertiary)
         case .checking:
-            Text(Image(systemName: "clock")).foregroundStyle(.tertiary) + Text(" " + note).foregroundStyle(.tertiary)
+            Text(Image(systemName: "clock")).foregroundStyle(.readableTertiary) + Text(" " + note).foregroundStyle(.readableTertiary)
         default:
             Text(note).foregroundStyle(AppDesignTokens.Palette.storage)
         }

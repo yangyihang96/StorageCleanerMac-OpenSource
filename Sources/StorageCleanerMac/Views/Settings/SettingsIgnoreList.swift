@@ -258,7 +258,7 @@ struct SettingsIgnoreListPage: View {
 
     private func entryRow(_ entry: IgnoreListEntry, _ palette: FeatureLightfieldPalette) -> some View {
         let isSelected = selection.contains(entry.id)
-        var meta = entry.addedAt.formatted(.dateTime.year().month().day().hour().minute())
+        var meta = entry.addedAt.appFormatted(.dateTime.year().month().day().hour().minute())
         if let identifier = entry.target.bundleIdentifier, !identifier.isEmpty {
             meta = identifier + " · " + meta
         }
@@ -363,7 +363,7 @@ extension SettingsView {
                 ForEach(scanStore?.installedApps ?? []) { app in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(app.name).font(.system(size: 13))
-                        Text(app.path).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        Text(app.path).font(.system(size: 11)).foregroundStyle(.readableSecondary).lineLimit(1).truncationMode(.middle)
                     }.tag(app.id)
                 }
             }

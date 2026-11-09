@@ -29,15 +29,18 @@ struct CareStudioActionButton: View {
         }
         .buttonStyle(CareStudioActionButtonStyle(module: module, isHovered: isHovered,
                                                  isEnabled: isEnabled, reduceMotion: reduceMotion))
+        // D231 (review P2-6): the label, hint and value belong to the button.
+        // Set on the framed container below, they made a second element of
+        // the same name (role unknown) beside the button on every page.
+        .accessibilityLabel(fullTitle ?? title)
+        .accessibilityHint(accessibilityHint ?? "")
+        .accessibilityValue(progressAccessibilityValue)
+        .help(fullTitle ?? "")
         .onHover { isHovered = $0 }
         .frame(width: CareStudioMetrics.actionDiameter + 2 * (CareStudioMetrics.actionRingGap + CareStudioMetrics.actionRingWidth),
                height: CareStudioMetrics.actionDiameter + 2 * (CareStudioMetrics.actionRingGap + CareStudioMetrics.actionRingWidth))
         .background { halo }
         .overlay { ring }
-        .accessibilityLabel(fullTitle ?? title)
-        .help(fullTitle ?? "")
-        .accessibilityHint(accessibilityHint ?? "")
-        .accessibilityValue(progressAccessibilityValue)
 #if DEBUG
         .layoutProbe("careStudio.action")
 #endif
@@ -45,10 +48,12 @@ struct CareStudioActionButton: View {
 
     private var label: some View {
         // Longer English titles ("Preparing", "Stopping") take the smaller
-        // size so every title fits the 84 pt circle on one line.
+        // size so every title fits the 84 pt circle on one line. D281: the
+        // title is white, or the day ink where that reads better on the fill
+        // (D282: `buttonFill`).
         Text(title)
             .font(.system(size: title.count >= 8 ? 14 : 16, weight: .semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(CareStudioInk.fillLabel(module.palette.buttonFill))
             .lineLimit(1)
             .padding(.horizontal, 10)
             .frame(width: CareStudioMetrics.actionDiameter, height: CareStudioMetrics.actionDiameter)
@@ -125,10 +130,12 @@ private struct CareStudioActionButtonStyle: ButtonStyle {
         let palette = module.palette
         return configuration.label
             .background {
+                // D282: deeper than `action` where the white title read under
+                // 4.5:1 (applications).
                 Circle()
                     .fill(LinearGradient(
-                        colors: [CareStudioPalette.color(palette.action[0]),
-                                 CareStudioPalette.color(palette.action[1])],
+                        colors: [CareStudioPalette.color(palette.buttonFill[0]),
+                                 CareStudioPalette.color(palette.buttonFill[1])],
                         startPoint: .top, endPoint: .bottom))
                     .overlay {
                         // Glass rim and top highlight.

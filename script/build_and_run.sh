@@ -107,6 +107,11 @@ fi
 FILE_HELPER_NAME="StorageCleanerFileOperationHelper"
 FILE_HELPER_LABEL="$BUNDLE_ID.FileOperationHelper"
 FILE_HELPER_PLIST="$FILE_HELPER_LABEL.plist"
+# D260: the AI assistant bridge, an MCP server and command line that only talks
+# to this app over its private socket. Every bundle carries it; it does nothing
+# until the user turns the interface on in the app.
+AGENT_BRIDGE_PRODUCT="StorageCleanerAgentBridge"
+AGENT_BRIDGE_RELATIVE_PATH="Contents/Helpers/storage-cleaner-agent"
 # D88: Finder right-click entry. A thin Finder Sync extension that only hands
 # selected .app paths to this app's existing uninstall review, by opening them
 # with its host app (open-documents; there is no URL scheme). Only the
@@ -132,6 +137,7 @@ FINDER_EXTENSION_BUNDLE="$APP_PLUGINS/$FINDER_EXTENSION_NAME.appex"
 FINDER_EXTENSION_BINARY="$FINDER_EXTENSION_BUNDLE/Contents/MacOS/$FINDER_EXTENSION_NAME"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 APP_FAN_HELPER="$APP_RESOURCES/$FAN_HELPER_NAME"
+APP_AGENT_BRIDGE="$APP_BUNDLE/$AGENT_BRIDGE_RELATIVE_PATH"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_FILE="AppIcon.icns"
 ARTWORK_FILE="AppIcon.png"
@@ -432,6 +438,10 @@ mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS" "$APP_LAUNCH_DAEMONS"
 /usr/bin/ditto --norsrc "$FAN_HELPER_BINARY" "$APP_FAN_HELPER"
 [ -x "$BUILD_BIN_DIR/StorageCleanerUpdateAskpass" ]
 /usr/bin/ditto --norsrc "$BUILD_BIN_DIR/StorageCleanerUpdateAskpass" "$APP_RESOURCES/StorageCleanerUpdateAskpass"
+[ -x "$BUILD_BIN_DIR/$AGENT_BRIDGE_PRODUCT" ]
+mkdir -p "$(dirname "$APP_AGENT_BRIDGE")"
+/usr/bin/ditto --norsrc "$BUILD_BIN_DIR/$AGENT_BRIDGE_PRODUCT" "$APP_AGENT_BRIDGE"
+chmod +x "$APP_AGENT_BRIDGE"
 [ -x "$BUILD_BIN_DIR/$FILE_HELPER_NAME" ]
 /usr/bin/ditto --norsrc "$BUILD_BIN_DIR/$FILE_HELPER_NAME" "$APP_RESOURCES/$FILE_HELPER_NAME"
 cat >"$APP_LAUNCH_DAEMONS/$FILE_HELPER_PLIST" <<PLIST
@@ -704,6 +714,8 @@ codesign "${sign_args[@]}" -i "$FILE_HELPER_LABEL" --sign "$SIGN_IDENTITY" "$APP
 codesign --verify --strict "$APP_RESOURCES/$FILE_HELPER_NAME"
 codesign "${sign_args[@]}" -i "$BUNDLE_ID.update-askpass" --sign "$SIGN_IDENTITY" "$APP_RESOURCES/StorageCleanerUpdateAskpass" >/dev/null
 codesign --verify --strict "$APP_RESOURCES/StorageCleanerUpdateAskpass"
+codesign "${sign_args[@]}" -i "$BUNDLE_ID.agent-bridge" --sign "$SIGN_IDENTITY" "$APP_AGENT_BRIDGE" >/dev/null
+codesign --verify --strict "$APP_AGENT_BRIDGE"
 # Nested code is signed before the outer bundle; the extension is sandboxed.
 if [ "$EMBED_FINDER_EXTENSION" -eq 1 ]; then
   codesign "${sign_args[@]}" -i "$FINDER_EXTENSION_ID" --entitlements "$FINDER_EXTENSION_ENTITLEMENTS" \
@@ -800,10 +812,17 @@ verify_sparkle_bundle() {
   local fan_helper_signing_info
   fan_helper_signing_info="$(codesign -d --verbose=4 "$APP_FAN_HELPER" 2>&1)"
   [[ "$fan_helper_signing_info" == *"Identifier=$FAN_HELPER_LABEL"* ]]
+  [ -x "$APP_AGENT_BRIDGE" ]
+  codesign --verify --strict --verbose=4 "$APP_AGENT_BRIDGE"
+  local agent_bridge_signing_info
+  agent_bridge_signing_info="$(codesign -d --verbose=4 "$APP_AGENT_BRIDGE" 2>&1)"
+  [[ "$agent_bridge_signing_info" == *"Identifier=$BUNDLE_ID.agent-bridge"* ]]
+  verify_executable_compatibility "$APP_AGENT_BRIDGE"
   if [ "$BETA_MODE" -eq 1 ]; then
     local app_signing_info
     local app_team
     local helper_team
+    local bridge_team
     app_signing_info="$(codesign -d --verbose=4 "$APP_BUNDLE" 2>&1)"
     [[ "$app_signing_info" != *"Signature=adhoc"* ]]
     [[ "$fan_helper_signing_info" != *"Signature=adhoc"* ]]
@@ -813,6 +832,8 @@ verify_sparkle_bundle() {
     helper_team="$(awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$fan_helper_signing_info")"
     [ -n "$app_team" ]
     [ "$app_team" = "$helper_team" ]
+    bridge_team="$(awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$agent_bridge_signing_info")"
+    [ "$app_team" = "$bridge_team" ]
   fi
   verify_executable_compatibility "$APP_BINARY"
   codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
@@ -859,6 +880,7 @@ verify_beta_bundle_at() {
   [ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$daemon_plist")" = "$FAN_HELPER_LABEL" ]
   [ "$(/usr/libexec/PlistBuddy -c "Print :MachServices:$FAN_HELPER_LABEL" "$daemon_plist")" = "true" ]
   codesign --verify --strict --verbose=4 "$helper"
+  codesign --verify --strict --verbose=4 "$bundle/$AGENT_BRIDGE_RELATIVE_PATH"
   codesign --verify --deep --strict --verbose=4 "$bundle"
 }
 

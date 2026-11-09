@@ -47,6 +47,20 @@ Before the app deletes history directly (Chromium-family browsers only), it back
 
 本应用直接删除浏览记录（仅 Chromium 系浏览器）之前，会把该浏览器的整个历史数据库备份到应用的 Application Support 文件夹。备份里仍有被删除的页面，7 天后自动删除（应用一直开着也按时删除）。最多保留 12 份；恢复过的备份和结果未能确认的备份不计入份数，但同样到期删除。任何一份都可以在删除结果或“最近的删除”里提前删除，删除时直接删除、不移到废纸篓。用备份恢复之前，会先把当前的浏览记录另存为一份备份，因此恢复也可以撤销。备份不会上传，存放备份的文件夹已排除在时间机器备份之外（其他备份软件不一定遵守这一设置）。时间机器里可能仍有浏览器自己的历史数据库的早期副本，本应用不会改动它们。备份说明只记录浏览器、配置文件和条数。
 
+## AI assistant interface
+
+Settings › AI Assistant can let AI assistants on this Mac, such as Claude Desktop, Claude Code or Codex, read the app's state. The switch is off by default; while it is off nothing listens and the interface writes nothing.
+
+**Where the data goes.** A client starts the bridge inside the app bundle, and the bridge reaches the app over a private Unix socket in the app's data folder (`Agent/s`, folder 0700, socket 0600). There is no network port, URL scheme or AppleScript, and the app sends nothing anywhere for this feature. What a client does with what it reads is up to that client: an assistant may send it to the model service it uses, so approve only assistants you trust with this information.
+
+**What an approved client can read.** App status, live readings, the health check, existing results for junk, login items, installed apps and app updates, operation records, hardware operation records, and scan and capacity history. Results contain names, sizes and paths, with the home folder written as `~`; item identifiers are tokens valid for one run of the app. Rows from the mail, chat-file and privacy rules give only category, count and size, not file names.
+
+**What it cannot read.** File contents, browsing history entries, cookies, mail contents and process command lines are not offered by any tool.
+
+**Approval.** Each client is approved in the app the first time it connects, as read only or denied. The decision binds to the client's signing identity (its path, if it has no signature) and can be revoked. Decisions are kept in the app's preferences.
+
+**Access log.** Each call adds a line to `Agent/access.jsonl` in the app's data folder: time, client, tool, level and outcome. Arguments and returned data are never written. Entries are kept for 30 days or 5,000 lines, are shown only in Settings, and no tool can read them.
+
 ## Public network address and country lookup
 
 Public IP and country lookup have independent switches in Settings → Access.

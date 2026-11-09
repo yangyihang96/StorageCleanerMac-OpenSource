@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import Security
 
 /// D102 L7, L1, L2: the requirement each end of the fan-control channel sets
@@ -14,8 +15,19 @@ public enum FanControlPeerRequirement {
     /// certificate (ad hoc or unsigned), so the caller does not connect. The
     /// helper makes its requirement from its startup signature instead, never
     /// from the file on disk, which an update may have replaced.
+    /// D246: the first requirement made is kept for the life of the process.
+    /// Reading the certificates evaluates their trust, which Security reports
+    /// when it runs on the main thread; the app makes it on a background task
+    /// before its first connection, and each connection reads the kept text.
     public static func currentSigner(peerIdentifier: String) -> String? {
         guard peerIdentifier == StorageCleanerBuildIdentity.helperLabel else { return nil }
+        return startupSigner.value { signerRequirement(peerIdentifier: peerIdentifier) }
+    }
+
+    private static let startupSigner = StartupSignerRequirement()
+
+    /// Made from this process's signature: its leaf certificate and Team ID.
+    private static func signerRequirement(peerIdentifier: String) -> String? {
         var code: SecCode?; var staticCode: SecStaticCode?; var info: CFDictionary?
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
               SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
@@ -43,5 +55,21 @@ public enum FanControlPeerRequirement {
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(expression as CFString, [], &requirement) == errSecSuccess else { return nil }
         return expression
+    }
+}
+
+/// D246: the first requirement a process made from its own signature, kept for
+/// the life of the process. Nil (an ad hoc or unsigned process, which has no
+/// certificates to evaluate) is not kept, so it is made again when asked.
+final class StartupSignerRequirement: Sendable {
+    private let kept = OSAllocatedUnfairLock<String?>(initialState: nil)
+
+    func value(making make: () -> String?) -> String? {
+        if let requirement = kept.withLock({ $0 }) { return requirement }
+        guard let made = make() else { return nil }
+        return kept.withLock { requirement in
+            if requirement == nil { requirement = made }
+            return requirement
+        }
     }
 }

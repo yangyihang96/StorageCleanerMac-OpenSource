@@ -638,7 +638,7 @@ struct CareStudioCategoryStrip: View {
                             .foregroundStyle(CareStudioInk.secondary)
                     }
                 }
-                .foregroundStyle(category.state == .pending ? CareStudioInk.tertiary : CareStudioInk.primary)
+                .foregroundStyle(category.state == .pending ? AnyShapeStyle(CareStudioInk.tertiary) : AnyShapeStyle(CareStudioInk.primary))
                 .padding(.horizontal, 10)
                 .frame(height: 26)
                 .background(Capsule(style: .continuous).fill(category.state == .working ? CareStudioInk.pillFill : CareStudioInk.tileFill))

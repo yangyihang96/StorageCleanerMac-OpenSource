@@ -1,3 +1,5 @@
+import AgentGatewayCore
+import AgentShared
 import XCTest
 
 /// 2.0.0 发布前发现：正式打包脚本没有跟上测试版构建脚本，正式包缺文件操作助手、
@@ -26,6 +28,36 @@ final class ReleasePackagingParityTests: XCTestCase {
         XCTAssertTrue(release.contains("-i \"$BUNDLE_ID.update-askpass\""))
         XCTAssertTrue(release.contains("<key>NSAppBundlesUsageDescription</key>"))
         XCTAssertTrue(release.contains("cat >\"$APP_RESOURCES/BuildInfo.plist\""))
+    }
+
+    /// D260: the AI assistant bridge ships in every bundle at the path the
+    /// gateway checks, signed under its own identifier before the outer bundle.
+    func testBothPackagesEmbedSignAndVerifyTheAgentBridge() throws {
+        let run = try MiniWindowLogicFixtures.source("script/build_and_run.sh")
+        let release = try MiniWindowLogicFixtures.source("script/make_release_dmg.sh")
+        for (name, script) in [("build_and_run.sh", run), ("make_release_dmg.sh", release)] {
+            XCTAssertTrue(script.contains("AGENT_BRIDGE_PRODUCT=\"StorageCleanerAgentBridge\""), name)
+            XCTAssertTrue(script.contains("AGENT_BRIDGE_RELATIVE_PATH=\"\(AgentGatewayPolicy.bridgeRelativePath)\""), name)
+            XCTAssertTrue(script.contains("-i \"$BUNDLE_ID\(AgentBridgePeerPolicy.identifierSuffix)\""), name)
+            XCTAssertTrue(script.contains("Identifier=$BUNDLE_ID\(AgentBridgePeerPolicy.identifierSuffix)"), name)
+            XCTAssertTrue(script.contains("verify_executable_compatibility \"") && script.contains("AGENT_BRIDGE"), name)
+        }
+        XCTAssertTrue(release.contains("/usr/bin/ditto --norsrc \"$AGENT_BRIDGE_BINARY\" \"$APP_BUNDLE/$AGENT_BRIDGE_RELATIVE_PATH\""))
+        XCTAssertTrue(run.contains("/usr/bin/ditto --norsrc \"$BUILD_BIN_DIR/$AGENT_BRIDGE_PRODUCT\" \"$APP_AGENT_BRIDGE\""))
+        // Nested code is signed first: the outer signature seals it.
+        let runBridge = try XCTUnwrap(run.range(of: "-i \"$BUNDLE_ID.agent-bridge\""))
+        let runOuter = try XCTUnwrap(run.range(of: "--sign \"$SIGN_IDENTITY\" \"$APP_BUNDLE\" >/dev/null"))
+        XCTAssertLessThan(runBridge.lowerBound, runOuter.lowerBound)
+        let signing = try MiniWindowLogicFixtures.section(release, from: "clean_attrs \"$app_path\"\n", to: "codesign --verify --deep --strict --verbose=4 \"$app_path\"")
+        let releaseBridge = try XCTUnwrap(signing.range(of: "-i \"$BUNDLE_ID.agent-bridge\""))
+        let releaseOuter = try XCTUnwrap(signing.range(of: "--sign \"$SIGN_IDENTITY\" \"$app_path\" >/dev/null"))
+        XCTAssertLessThan(releaseBridge.lowerBound, releaseOuter.lowerBound)
+        XCTAssertTrue(signing.contains("codesign --verify --strict \"$app_path/$AGENT_BRIDGE_RELATIVE_PATH\""))
+        // The Beta's bridge carries the same Team ID as the app (D263).
+        let verify = try MiniWindowLogicFixtures.section(run, from: "verify_sparkle_bundle() {", to: "\n}\n")
+        XCTAssertTrue(verify.contains("[ \"$app_team\" = \"$bridge_team\" ]"))
+        let installed = try MiniWindowLogicFixtures.section(run, from: "verify_beta_bundle_at() {", to: "\n}\n")
+        XCTAssertTrue(installed.contains("codesign --verify --strict --verbose=4 \"$bundle/$AGENT_BRIDGE_RELATIVE_PATH\""))
     }
 
     func testReleaseLinksAgainstTheActualSDKLikeTheRunScript() throws {

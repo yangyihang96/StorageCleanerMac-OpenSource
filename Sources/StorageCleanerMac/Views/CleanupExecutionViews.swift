@@ -71,7 +71,7 @@ struct CleanupPlanConfirmationSheet: View {
                     .monospacedDigit()
                     Text(dispositionSummary(facts))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
                 Spacer()
             }
@@ -106,7 +106,7 @@ struct CleanupPlanConfirmationSheet: View {
                let trashNote = facts.cleanupTrashReleaseNote(planHasTrashMoves: !plan.trashMoveItems.isEmpty) {
                 Label(trashNote, systemImage: "trash")
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
 
             Label(preflightSummary, systemImage: preflight.isConfirmable ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
@@ -155,7 +155,7 @@ struct CleanupPlanConfirmationSheet: View {
                         systemImage: "lock.fill"
                     )
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
 
                     ForEach(Array(plan.items.prefix(3))) { item in
                         let itemStatus = status(for: item)
@@ -182,7 +182,7 @@ struct CleanupPlanConfirmationSheet: View {
                     if plan.items.count > 3 {
                         Text(L10n.text("另有 \(plan.items.count - 3) 项遵循同一冻结计划。", "\(plan.items.count - 3) more item(s) follow this frozen plan."))
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                 }
                 .padding(.top, AppDesignTokens.Spacing.small)
@@ -261,7 +261,7 @@ struct CleanupPlanConfirmationSheet: View {
                 "You manually selected \(ByteFormat.count(plan.reviewItems.count)) item(s) (\(ByteFormat.storageString(plan.reviewItemBytes))). They may contain personal files or app state; confirm content, ownership, and backups."
             ))
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
@@ -274,16 +274,16 @@ struct CleanupPlanConfirmationSheet: View {
                                 Spacer(minLength: 4)
                                 Text(ByteFormat.storageString(item.estimatedSizeBytes))
                                     .font(AppDesignTokens.Typography.metadata)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.readableSecondary)
                                     .monospacedDigit()
                             }
                             Text(item.sourceURL.path)
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                             Text(CleanupRuleCopy.text(for: item.reasonCode))
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         .help(item.sourceURL.path)
@@ -327,7 +327,7 @@ struct CleanupPlanConfirmationSheet: View {
                 "You manually selected \(ByteFormat.count(plan.protectedMoveItems.count)) red item(s) (\(ByteFormat.storageString(plan.protectedMoveItemBytes))). These may be recent developer artifacts or duplicate app copies; confirm no current task uses them. When a whole duplicate-app group was checked, one copy was kept automatically and is not listed below."
             ))
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
@@ -340,12 +340,12 @@ struct CleanupPlanConfirmationSheet: View {
                                 Spacer(minLength: 4)
                                 Text(ByteFormat.storageString(item.estimatedSizeBytes))
                                     .font(AppDesignTokens.Typography.metadata)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.readableSecondary)
                                     .monospacedDigit()
                             }
                             Text(item.sourceURL.path)
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         .help(item.sourceURL.path)
@@ -396,7 +396,7 @@ struct CleanupPlanConfirmationSheet: View {
                 "This permanently deletes the \(ByteFormat.count(plan.permanentDeletionItems.count)) item(s) that were in the Trash during the scan (\(ByteFormat.storageString(plan.permanentDeletionBytes))). They cannot be restored from the Trash afterwards, and files an earlier cleanup moved there can no longer be restored from Operation History. Items put in the Trash after the scan, including this cleanup's files, are not deleted."
             ))
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -409,7 +409,7 @@ struct CleanupPlanConfirmationSheet: View {
                         Spacer(minLength: 4)
                         Text(ByteFormat.storageString(item.estimatedSizeBytes))
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .monospacedDigit()
                     }
                     .help(item.sourceURL.path)
@@ -420,7 +420,7 @@ struct CleanupPlanConfirmationSheet: View {
                         "\(plan.permanentDeletionItems.count - 5) more item(s)"
                     ))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 }
             }
 
@@ -493,7 +493,7 @@ struct CleanupPlanConfirmationSheet: View {
 
             Text(CleanPlanScaleAlertPresentation.summary(alert))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -506,7 +506,7 @@ struct CleanupPlanConfirmationSheet: View {
                         Spacer(minLength: 4)
                         Text("\(L10n.items(rule.itemCount)) · \(ByteFormat.storageString(rule.bytes))")
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .monospacedDigit()
                     }
                 }
@@ -600,7 +600,7 @@ struct CleanupPlanConfirmationSheet: View {
                         "Lists the apps first for your confirmation; only a normal quit request is sent, never a force quit."
                     ))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -658,7 +658,7 @@ struct CleanupPlanConfirmationSheet: View {
                 .monospacedDigit()
             Text(title)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
     }
 
@@ -1219,7 +1219,7 @@ private struct CleanupReportDetailRow: View {
     var body: some View {
         HStack {
             Text(title)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Spacer()
             Text(value)
                 .monospacedDigit()
@@ -1275,7 +1275,7 @@ struct CleanupV2OperationOverlay: View {
                 "Processed \(ByteFormat.count(progress.processedItemCount)) of \(ByteFormat.count(progress.totalItemCount)); \(ByteFormat.count(progress.movedItemCount)) moved, \(ByteFormat.count(progress.skippedItemCount)) skipped, \(ByteFormat.count(progress.failedItemCount)) failed."
             ))
             .font(AppDesignTokens.Typography.body)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .multilineTextAlignment(.center)
 
             Button(L10n.text("安全取消", "Cancel Safely")) {
@@ -1299,7 +1299,7 @@ struct CleanupV2OperationOverlay: View {
                 .font(AppDesignTokens.Typography.sheetTitle)
             Text(OperationResultPresentation(report: report).summary)
             .font(AppDesignTokens.Typography.body)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
 
             OperationCompletionTallyView(tally: OperationCompletionTally(report: report), showsEntryDetails: false)
 
@@ -1333,7 +1333,7 @@ struct CleanupV2OperationOverlay: View {
                     systemImage: "trash"
                 )
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
 
             if report.summary.unverifiedMoveCount > 0 {
@@ -1356,7 +1356,7 @@ struct CleanupV2OperationOverlay: View {
                     systemImage: "arrow.uturn.backward.circle.fill"
                 )
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
 
             HStack(spacing: AppDesignTokens.Spacing.small) {
@@ -1393,7 +1393,7 @@ struct CleanupV2OperationOverlay: View {
                 .monospacedDigit()
             Text(title)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 74)
@@ -1487,7 +1487,7 @@ struct CleanupReportIssueList: View {
                             Spacer(minLength: AppDesignTokens.Spacing.small)
                             Text(Self.detail(item.outcome))
                                 .font(AppDesignTokens.Typography.metadata)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .multilineTextAlignment(.trailing)
                                 .fixedSize(horizontal: false, vertical: true)
                         }

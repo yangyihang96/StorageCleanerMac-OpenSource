@@ -2189,8 +2189,9 @@ final class MenuBarPanelSession: NSObject, NSWindowDelegate {
     private func clampedExpandedAttachedFrame(_ frame: NSRect, screen: NSScreen?) -> NSRect {
         guard let visibleFrame = resolvedVisibleFrame(for: screen) else { return frame }
         let visible = MenuBarPanelPlacement.menuBounds(visibleFrame, margin: 8)
-        let width = min(frame.width, visible.width)
-        let height = min(frame.height, visible.height)
+        // D242: a panel frame is never negative (review P2-2).
+        let width = max(0, min(frame.width, visible.width))
+        let height = max(0, min(frame.height, visible.height))
         return NSRect(
             x: min(max(frame.minX, visible.minX), visible.maxX - width),
             y: min(max(frame.minY, visible.minY), visible.maxY - height),

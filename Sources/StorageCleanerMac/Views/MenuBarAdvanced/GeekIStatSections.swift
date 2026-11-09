@@ -173,7 +173,7 @@ struct GeekIStatNoteCard: View {
         MiniWindowGroup {
             Text(text)
                 .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -498,7 +498,7 @@ struct GeekIStatProcessPlaceholder: View {
             if isLoading {
                 ProgressView().controlSize(.small)
             } else {
-                Text(text).geekIStatLabelText().foregroundStyle(.tertiary)
+                Text(text).geekIStatLabelText().foregroundStyle(.readableTertiary)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

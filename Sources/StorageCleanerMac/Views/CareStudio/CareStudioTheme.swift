@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 
 /// D141 (2026-10-19): the junk-cleanup, startup and memory pages follow the
@@ -404,6 +405,11 @@ enum CareStudioLineBreaks {
         return result
     }
 
+    /// D238: the words without the joiners, for the accessibility tree.
+    static func plain(_ text: String) -> String {
+        text.replacingOccurrences(of: String(wordJoiner), with: "")
+    }
+
     /// Chinese characters, their punctuation and quotes: neither ASCII nor a space.
     private static func isWide(_ character: Character) -> Bool {
         !character.isWhitespace && character.unicodeScalars.allSatisfy { !$0.isASCII }
@@ -469,12 +475,28 @@ struct CareStudioPalette: Equatable, Sendable {
     let deep: UInt32
     let base: UInt32
     let glows: [UInt32]
-    /// Top and bottom of the round main button.
+    /// The module's button colours, top and bottom: its icons, and on a
+    /// lightfield page its checks, charts and links (`FeatureLightfieldPalette.accents`).
     let action: [UInt32]
     let actionGlow: UInt32
     /// Halo colours around the main button (CleanMyMac mixes a warm and a
     /// cool light behind it).
     let halo: [UInt32]
+    /// D282: top and bottom of a filled button with a label, the round main
+    /// button and a lightfield page's primary: `action`, or a deeper pair where
+    /// the white label read under 4.5:1 on it (applications, my tools).
+    let buttonFill: [UInt32]
+
+    init(deep: UInt32, base: UInt32, glows: [UInt32], action: [UInt32], actionGlow: UInt32,
+         halo: [UInt32], buttonFill: [UInt32]? = nil) {
+        self.deep = deep
+        self.base = base
+        self.glows = glows
+        self.action = action
+        self.actionGlow = actionGlow
+        self.halo = halo
+        self.buttonFill = buttonFill ?? action
+    }
 
     static let smartCare = Self(
         deep: 0x230B58, base: 0x4E1C88,
@@ -505,7 +527,10 @@ struct CareStudioPalette: Equatable, Sendable {
         deep: 0x07185A, base: 0x123C8F,
         glows: [0x2B66D6, 0x2A86E0, 0x3048C2],
         action: [0x3F8CFF, 0x1554C8], actionGlow: 0x74B4FF,
-        halo: [0x7FE3FF, 0x7A5BFF])
+        halo: [0x7FE3FF, 0x7A5BFF],
+        // D282: `action` under black 29/255. White on the round button measured
+        // 4.10:1; a lightfield primary, under its 8% top light, would read 3.8:1.
+        buttonFill: [0x387CE2, 0x134AB1])
     static let clutter = Self(
         deep: 0x023A3C, base: 0x0A5A5C,
         glows: [0x169B93, 0x27B5A3, 0x0F7C84],
@@ -525,7 +550,10 @@ struct CareStudioPalette: Equatable, Sendable {
         deep: 0x1E1B3A, base: 0x34305E,
         glows: [0x5A5296, 0x6E5FB0, 0x44407A],
         action: [0x7D72D8, 0x4F45A8], actionGlow: 0x9E94F0,
-        halo: [0xF0A0FF, 0x5C9BFF])
+        halo: [0xF0A0FF, 0x5C9BFF],
+        // D282: `action` under black 8/255. White on the lightfield primary
+        // (energy, health and benchmark results) measured 4.43:1.
+        buttonFill: [0x796ED1, 0x4D43A3])
     static let myActivity = Self(
         deep: 0x1A1440, base: 0x2C2366,
         glows: [0x4B3A9E, 0x5E4AB8, 0x3A2F80],
@@ -547,7 +575,7 @@ struct CareStudioPalette: Equatable, Sendable {
     var daylight: CareStudioPalette {
         CareStudioPalette(deep: Self.mix(deep, whiteness: 0.58), base: Self.mix(base, whiteness: 0.74),
                           glows: glows.map { Self.mix($0, whiteness: 0.66) },
-                          action: action, actionGlow: actionGlow, halo: halo)
+                          action: action, actionGlow: actionGlow, halo: halo, buttonFill: buttonFill)
     }
 
     func resolved(for scheme: ColorScheme) -> CareStudioPalette {
@@ -561,6 +589,102 @@ struct CareStudioPalette: Equatable, Sendable {
         }
         return channel(16) | channel(8) | channel(0)
     }
+
+    /// `top` at `opacity` over `bottom`.
+    static func over(_ top: UInt32, opacity: Double, on bottom: UInt32) -> UInt32 {
+        func channel(_ shift: UInt32) -> UInt32 {
+            let upper = Double((top >> shift) & 255), lower = Double((bottom >> shift) & 255)
+            return UInt32((upper * opacity + lower * (1 - opacity)).rounded()) << shift
+        }
+        return channel(16) | channel(8) | channel(0)
+    }
+
+    /// WCAG 2 contrast of two sRGB colours.
+    static func contrast(_ first: UInt32, _ second: UInt32) -> Double {
+        func luminance(_ hex: UInt32) -> Double {
+            func linear(_ shift: UInt32) -> Double {
+                let value = Double((hex >> shift) & 255) / 255
+                return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(16) + 0.7152 * linear(8) + 0.0722 * linear(0)
+        }
+        let a = luminance(first), b = luminance(second)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
+    /// D276: `hex` moved along its own line, toward black by day and toward
+    /// white at night, until it reads 4.5:1 as text anywhere on this
+    /// gradient. By day the deep corner binds; at night the brightest of the
+    /// base, a white 0.16 tile over it and each glow at its opacity over it
+    /// (`CareStudioBackdrop.glows`). White where even white falls short: the
+    /// performance, clutter and cloud cleanup glows (4.1–4.2:1, as for the
+    /// primary type).
+    func readableText(_ hex: UInt32, night: Bool) -> UInt32 {
+        let grounds = textGrounds(night: night)
+        func reads(_ color: UInt32) -> Bool { grounds.allSatisfy { Self.contrast(color, $0) >= 4.5 } }
+        func moved(_ amount: Double) -> UInt32 {
+            night ? Self.mix(hex, whiteness: amount) : Self.over(0x000000, opacity: amount, on: hex)
+        }
+        guard !reads(hex) else { return hex }
+        guard reads(moved(1)) else { return moved(1) }
+        var low = 0.0, high = 1.0
+        for _ in 0..<16 {
+            let middle = (low + high) / 2
+            if reads(moved(middle)) { high = middle } else { low = middle }
+        }
+        return moved(high)
+    }
+
+    /// The grounds text on this gradient has to read on (`readableText`).
+    func textGrounds(night: Bool) -> [UInt32] {
+        if night {
+            return [base, deep, Self.over(0xFFFFFF, opacity: 0.16, on: base)]
+                + CareStudioBackdrop.glows.map { glow in
+                    Self.over(glows[min(glow.colorIndex, glows.count - 1)], opacity: glow.opacity, on: base)
+                }
+        }
+        let day = daylight
+        return [day.deep, day.base] + day.glows
+    }
+
+    /// D279: the least opacity, from `opacity` up, at which `ink` laid over
+    /// each of the `textGrounds` reads 4.5:1 there; nil when even full ink
+    /// falls short (white on the performance, clutter and cloud cleanup
+    /// glows at night). It is judged as the colour carries it, a float, and
+    /// a raised opacity is a whole 8-bit step: there the blend never falls on
+    /// a half, so neither the float nor an 8-bit alpha rounds a channel the
+    /// other way (a solved double on smart care's day gradient gave
+    /// `Color.secondary` 4.47:1 as a float).
+    func readableOpacity(_ ink: UInt32, from opacity: Double, night: Bool) -> Double? {
+        let grounds = textGrounds(night: night)
+        func reads(_ alpha: Double) -> Bool {
+            let carried = Double(Float(alpha))
+            return grounds.allSatisfy { Self.contrast(Self.over(ink, opacity: carried, on: $0), $0) >= 4.5 }
+        }
+        guard !reads(opacity) else { return opacity }
+        guard reads(1) else { return nil }
+        var low = Int((opacity * 255).rounded(.down)), high = 255
+        while high - low > 1 {
+            let middle = (low + high) / 2
+            if reads(Double(middle) / 255) { high = middle } else { low = middle }
+        }
+        return Double(high) / 255
+    }
+
+    /// D281 (D276 ②): white, or the day ink (`CareStudioInk.dayHex`), for a
+    /// label on a button filled top to bottom with `fill`: whichever reads
+    /// better at its worst row across the label, t 0.35–0.65 of the fill. The
+    /// day ink wins on the cleanup, performance, clutter and cloud cleanup
+    /// fills and on the cleanup result's own orange: white reads 2.7–3.3:1
+    /// there, the ink 4.4–5.6:1. Every other fill keeps white, 4.0–5.5:1,
+    /// where the ink would read 2.7–3.7:1.
+    static func fillLabel(_ fill: [UInt32]) -> UInt32 {
+        guard let top = fill.first else { return 0xFFFFFF }
+        let bottom = fill.count > 1 ? fill[1] : top
+        let rows = (0...6).map { over(bottom, opacity: 0.35 + Double($0) * 0.05, on: top) }
+        func worst(_ label: UInt32) -> Double { rows.map { contrast(label, $0) }.min() ?? 0 }
+        return worst(CareStudioInk.dayHex) > worst(0xFFFFFF) ? CareStudioInk.dayHex : 0xFFFFFF
+    }
 }
 
 /// Text and chrome on top of the module gradient. In dark appearance it is
@@ -570,6 +694,8 @@ struct CareStudioPalette: Equatable, Sendable {
 enum CareStudioInk {
     private static let night = NSColor.white
     private static let day = NSColor(srgbRed: 0.09, green: 0.07, blue: 0.13, alpha: 1)
+    /// D281: the day ink in 8 bits, for judging it on a fill (`CareStudioPalette.fillLabel`).
+    static let dayHex: UInt32 = 0x171221
 
     private static func adaptive(dark: NSColor, light: NSColor) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -578,8 +704,17 @@ enum CareStudioInk {
     }
 
     static let primary = adaptive(dark: night, light: day)
-    static let secondary = adaptive(dark: night.withAlphaComponent(0.74), light: day.withAlphaComponent(0.70))
-    static let tertiary = adaptive(dark: night.withAlphaComponent(0.56), light: day.withAlphaComponent(0.50))
+    /// D281 (D276 ②): the label on a filled button, the round main button and
+    /// a lightfield page's primary: white, or the day ink in both appearances
+    /// where that reads better on the fill (`CareStudioPalette.fillLabel`).
+    /// The fill is the same by day and at night (D141), so the label is too.
+    static func fillLabel(_ fill: [UInt32]) -> Color {
+        CareStudioPalette.fillLabel(fill) == dayHex ? Color(nsColor: day) : .white
+    }
+    /// D279: the two grey levels read 4.5:1 on the page's gradient
+    /// (`CareStudioText`), so on most modules they draw alike.
+    static let secondary = CareStudioText(adaptive(dark: night.withAlphaComponent(0.74), light: day.withAlphaComponent(0.70)))
+    static let tertiary = CareStudioText(adaptive(dark: night.withAlphaComponent(0.56), light: day.withAlphaComponent(0.50)))
     static let hairline = adaptive(dark: night.withAlphaComponent(0.16), light: day.withAlphaComponent(0.12))
     static let tileFill = adaptive(dark: night.withAlphaComponent(0.10), light: night.withAlphaComponent(0.58))
     static let tileFillHover = adaptive(dark: night.withAlphaComponent(0.14), light: night.withAlphaComponent(0.74))
@@ -610,6 +745,22 @@ enum CareStudioInk {
     static func tint(for family: CareStudioFamily) -> Color {
         let palette = family.palette
         return adaptive(dark: srgb(palette.actionGlow), light: srgb(palette.action[1]))
+    }
+
+    /// D276: text that acts on a module's gradient (a menu's title, a link,
+    /// a borderless button) along the lines `tint` starts from, moved until
+    /// it reads 4.5:1 there. By day `tint` measured 1.8–3.2:1 on the deep
+    /// corner, at night 2.3–3.1:1 on the glows. `tint` stays for fills: a
+    /// white tick on a near-white box would vanish.
+    static func actionText(for family: CareStudioFamily) -> Color {
+        actionText(for: family, light: family.palette.actionGlow, deep: family.palette.action[1])
+    }
+
+    /// The same for a page whose accent is not its module's (overview, green).
+    static func actionText(for family: CareStudioFamily, light: UInt32, deep: UInt32) -> Color {
+        let palette = family.palette
+        return adaptive(dark: srgb(palette.readableText(light, night: true)),
+                        light: srgb(palette.readableText(deep, night: false)))
     }
 
     private static func srgb(_ hex: UInt32) -> NSColor {
@@ -676,10 +827,154 @@ extension EnvironmentValues {
         get { self[CareStudioSurfaceKey.self] }
         set { self[CareStudioSurfaceKey.self] = newValue }
     }
+
+    /// D276: `CareStudioInk.actionText` of the page's module; the main window
+    /// sets it on studio pages, nil elsewhere.
+    var careStudioActionText: Color? {
+        get { self[CareStudioActionTextKey.self] }
+        set { self[CareStudioActionTextKey.self] = newValue }
+    }
+
+    /// D279: the module whose gradient the text stands on. The main window
+    /// sets it on studio pages and the sidebar beside them; the light
+    /// manager panels and the readiness panel clear it.
+    var careStudioTextGround: CareStudioFamily? {
+        get { self[CareStudioTextGroundKey.self] }
+        set { self[CareStudioTextGroundKey.self] = newValue }
+    }
 }
 
 private struct CareStudioSurfaceKey: EnvironmentKey {
     static let defaultValue = false
+}
+
+private struct CareStudioActionTextKey: EnvironmentKey {
+    static let defaultValue: Color? = nil
+}
+
+private struct CareStudioTextGroundKey: EnvironmentKey {
+    static let defaultValue: CareStudioFamily? = nil
+}
+
+/// D279: grey and status type in the main window. On a module's gradient
+/// (`careStudioTextGround`) it takes the least change that reads 4.5:1
+/// anywhere there: a translucent ink grows more opaque, up to full ink
+/// (`readableOpacity`); a solid colour moves toward black by day and toward
+/// white at night (`readableText`, as D276's action colour). Elsewhere it is
+/// `base`. As a fill or a line a status colour keeps its own value, as
+/// D276's tint does.
+struct CareStudioText: ShapeStyle, Hashable {
+    let base: Color
+
+    init(_ base: Color) { self.base = base }
+
+    func resolve(in environment: EnvironmentValues) -> Color {
+        guard let family = environment.careStudioTextGround else { return base }
+        return Self.readable(base.resolve(in: environment), on: family, night: environment.colorScheme == .dark)
+    }
+
+    /// `colour` as it reads on `family`'s gradient.
+    static func readable(_ colour: Color.Resolved, on family: CareStudioFamily, night: Bool) -> Color {
+        func byte(_ channel: Float) -> UInt32 { UInt32((min(1, max(0, Double(channel))) * 255).rounded()) }
+        let hex = byte(colour.red) << 16 | byte(colour.green) << 8 | byte(colour.blue)
+        let opacity = min(1, max(0, Double(colour.opacity)))
+        let key = Key(hex: hex, opacity: Int((opacity * 1000).rounded()), family: family, night: night)
+        if let cached = cache.withLock({ $0[key] }) { return cached }
+        let palette = family.palette
+        let readable: Color
+        if opacity < 0.999, let alpha = palette.readableOpacity(hex, from: opacity, night: night) {
+            readable = CareStudioPalette.color(hex, opacity: alpha)
+        } else {
+            readable = CareStudioPalette.color(palette.readableText(hex, night: night))
+        }
+        cache.withLock { $0[key] = readable }
+        return readable
+    }
+
+    private struct Key: Hashable {
+        let hex: UInt32
+        let opacity: Int
+        let family: CareStudioFamily
+        let night: Bool
+    }
+
+    private static let cache = OSAllocatedUnfairLock(initialState: [Key: Color]())
+}
+
+/// D280: SwiftUI's own grey levels in the main window. A text's
+/// `.foregroundStyle(.secondary)` draws the type it inherits at 50% and
+/// `.tertiary` at 25% (measured on macOS 27), whatever levels
+/// `foregroundStyle(_:_:_:)` set above it; only shapes, images and
+/// containers take those levels. On a module's gradient
+/// (`careStudioTextGround`) the level keeps the inherited type and its hue
+/// and takes the least opacity, from its own up, at which the page's type
+/// reads 4.5:1 there (`readableOpacity`), up to the full type. It is judged
+/// with the lightest page type by day (`AppAppearanceColors.ink`) and the
+/// darkest at night (the lightfield rows' `F2F5FF`). Elsewhere it is
+/// SwiftUI's own level.
+struct CareStudioHierarchyText: ShapeStyle, Hashable {
+    enum Level: Hashable, Sendable { case secondary, tertiary }
+    let level: Level
+
+    func resolve(in environment: EnvironmentValues) -> AnyShapeStyle {
+        let own = level == .secondary ? HierarchicalShapeStyle.secondary : .tertiary
+        guard let family = environment.careStudioTextGround,
+              let opacity = Self.opacity(level, on: family, night: environment.colorScheme == .dark)
+        else { return AnyShapeStyle(own) }
+        return AnyShapeStyle(HierarchicalShapeStyle.primary.opacity(opacity))
+    }
+
+    /// The raised opacity on `family`'s gradient, nil where SwiftUI's own
+    /// level already reads.
+    static func opacity(_ level: Level, on family: CareStudioFamily, night: Bool) -> Double? {
+        let key = Key(level: level, family: family, night: night)
+        if let cached = cache.withLock({ $0[key] }) { return cached.value }
+        let own = level == .secondary ? 0.5 : 0.25
+        let ink: UInt32 = night ? 0xF2F5FF : 0x242426
+        let needed = family.palette.readableOpacity(ink, from: own, night: night) ?? 1
+        let value = needed > own ? needed : nil
+        cache.withLock { $0[key] = Cached(value: value) }
+        return value
+    }
+
+    private struct Key: Hashable {
+        let level: Level
+        let family: CareStudioFamily
+        let night: Bool
+    }
+
+    private struct Cached {
+        let value: Double?
+    }
+
+    private static let cache = OSAllocatedUnfairLock(initialState: [Key: Cached]())
+}
+
+extension ShapeStyle where Self == CareStudioHierarchyText {
+    /// D280: `.secondary` that reads on the page's module gradient.
+    static var readableSecondary: CareStudioHierarchyText { CareStudioHierarchyText(level: .secondary) }
+    /// D280: `.tertiary` that reads on the page's module gradient.
+    static var readableTertiary: CareStudioHierarchyText { CareStudioHierarchyText(level: .tertiary) }
+}
+
+/// D276: a borderless menu or button draws its title in the tint, and on a
+/// studio page the tint is the module's fill colour (`CareStudioInk.tint`),
+/// so its title takes the readable action colour instead. Elsewhere, and
+/// before the macOS 26 controls (as D274's menu tint), it keeps the tint it
+/// inherits.
+private struct CareStudioActionTint: ViewModifier {
+    @Environment(\.careStudioActionText) private var actionText
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            if let actionText { content.tint(actionText) } else { content }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func careStudioActionTint() -> some View { modifier(CareStudioActionTint()) }
 }
 
 /// A shared panel: glass on the classic pages, the studio's translucent

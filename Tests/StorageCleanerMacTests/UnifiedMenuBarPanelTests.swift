@@ -454,7 +454,8 @@ final class UnifiedMenuBarPanelTests: XCTestCase {
         XCTAssertTrue(settings.contains("IStatMenuThemeChoice.all"))
         XCTAssertTrue(settings.contains("深色外观主题"))
         XCTAssertFalse(settings.contains("MiniWindowAppearance.allCases"))
-        XCTAssertFalse(settings.contains("小窗外观"))
+        // D272: was XCTAssertFalse for "小窗外观"; that is the menu bar page's part
+        // holding the themes now, and the old control stays gone (the line above).
     }
 
     func testComplexDemandTracksCurrentModuleAndGeekKeepsAttachedOverviewAlive() {

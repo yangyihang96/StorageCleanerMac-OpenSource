@@ -987,6 +987,8 @@ final class ScanStore: ObservableObject {
     private var operationReportTasks: [UUID: Task<Void, Never>] = [:]
     @Published private(set) var operationRecoveryResult: CleanupRecoveryReport?
     @Published private(set) var isRestoringRecordedOperation = false
+    /// D252: the result of “换回原名” in Operation History.
+    @Published private(set) var thinningNameRestoreMessage: String?
 #if DEBUG
     @Published private(set) var isDebugSmartScanSessionFixtureActive = false
     // The launch flag is visible before any parent view can schedule the
@@ -2448,12 +2450,29 @@ final class ScanStore: ObservableObject {
         pendingSystemCacheClear = nil
         isClearingSystemCaches = true
         systemCacheResultMessage = nil
+        let startedAt = Date()
+        var reply: SystemCacheClearReply?
+        var outcomeUnknown = false
         do {
-            let reply = try await systemCacheService.clear(plan.directories)
-            systemCacheResultMessage = SystemCachePresentation.result(reply)
+            let result = try await systemCacheService.clear(plan.directories)
+            reply = result
+            systemCacheResultMessage = SystemCachePresentation.result(result)
         } catch {
+            outcomeUnknown = (error as? SystemCacheServiceError) == .outcomeUnknown
             systemCacheResultMessage = (error as? LocalizedError)?.errorDescription
                 ?? L10n.text("系统缓存未能全部清除，请稍后重试。", "System caches could not all be cleared. Try again later.")
+        }
+        // D249: each clear is a receipt in Operation History, not only this message.
+        if let report = SystemCacheClearReceipt.report(plan: plan, reply: reply, outcomeUnknown: outcomeUnknown,
+                                                       startedAt: startedAt, completedAt: Date()) {
+            if !(await CleanReportStore.recordDetached(report, journal: operationJournal)) {
+                systemCacheResultMessage = [systemCacheResultMessage,
+                                            L10n.text("这次清除的回执没能写入操作记录。", "This clear's receipt could not be written to Operation History.")]
+                    .compactMap { $0 }.joined(separator: " ")
+            }
+            // D249 supplement: Operation History and My Activity read the journal
+            // through this list; it kept the old receipts until Refresh.
+            refreshOperationReports()
         }
         await refreshSystemCacheInventory()
         isClearingSystemCaches = false
@@ -2584,6 +2603,24 @@ final class ScanStore: ObservableObject {
         if parts.contains(.protection), let privacy, privacy.state != .scanning { privacy.clearSession() }
         if parts.contains(.performance) { startOverStartupItems() }
         if parts.contains(.clutter) { duplicateFilesWorkspace.startOver() }
+    }
+
+    /// D259: with only the menu-bar panel left, drop what only the main window
+    /// shows. The panel keeps its live data, memory snapshot and scan history
+    /// summary. Running work keeps everything until it ends (false). The
+    /// pages scan or read again when the main program comes back.
+    @discardableResult
+    func releaseMainWindowData(privacy: BrowserPrivacyStore?) -> Bool {
+        guard heavyWorkActivityStore.activeOwner == nil, !isScanning, !isCleanupExecutionActive else { return false }
+        startOverV2Results()
+        result = nil
+        startOverStartupItems()
+        if !hasScannedStartupItems { startupDomainItems = [] }
+        startOverInstalledApps()
+        if !hasScannedInstalledApps { installedApps = [] }
+        duplicateFilesWorkspace.startOver()
+        if let privacy, privacy.state != .scanning { privacy.clearSession() }
+        return true
     }
 
     /// D202: whether the junk flow on screen belongs to a module page's own
@@ -3281,6 +3318,31 @@ final class ScanStore: ObservableObject {
 
     func restoreRecordedOperation(_ report: CleanReport) {
         restoreRecordedOperations([report])
+    }
+
+    /// D252 (G batch): after the original was put back beside the thinned
+    /// app, one step swaps the names back and moves the thin copy to Trash.
+    func restoreThinnedApplicationName(_ report: CleanReport) {
+        guard !isRestoringRecordedOperation, UniversalBinaryService.offersOriginalNameRestore(report) else { return }
+        isRestoringRecordedOperation = true
+        thinningNameRestoreMessage = nil
+        let journal = operationJournal
+        let receiptTaskID = UUID()
+        operationReportTasks[receiptTaskID] = Task {
+            defer { operationReportTasks[receiptTaskID] = nil }
+            defer { isRestoringRecordedOperation = false }
+            do {
+                let coordinator = heavyWorkCoordinator
+                let result = try await coordinator.withLease(owner: .restore) { _ in
+                    var environment = UniversalBinaryEnvironment()
+                    environment.persist = { try journal.checkpoint($0, expectedIdentities: $1) }
+                    return await UniversalBinaryService.restoreOriginalName(from: report, environment: environment)
+                }
+                thinningNameRestoreMessage = result?.detail
+                    ?? L10n.text("这条记录不能换回原名。", "This record cannot restore the original name.")
+                refreshOperationReports()
+            } catch { handleHeavyWorkError(error) }
+        }
     }
 
     /// Restores what this uninstall review moved: the original receipt and

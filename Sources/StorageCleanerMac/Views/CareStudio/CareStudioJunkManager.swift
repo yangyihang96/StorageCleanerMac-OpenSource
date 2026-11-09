@@ -61,6 +61,8 @@ struct CareStudioJunkManager: View {
             .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
             .padding(CareStudioMetrics.managerInset)
             .environment(\.colorScheme, .light)
+            // D279: the panel is white, not the module's gradient.
+            .environment(\.careStudioTextGround, nil)
         }
         .onAppear {
             CareStudioCanvas.shared.claim(chromeID, animating: false, label: "manager")
@@ -128,7 +130,7 @@ struct CareStudioJunkManager: View {
                         + Text(sort.title).foregroundStyle(CareStudioManagerInk.accent))
                         .font(.system(size: 12, weight: .semibold))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .fixedSize()
             }
         }
@@ -164,7 +166,7 @@ struct CareStudioJunkManager: View {
                 } label: {
                     Text(L10n.text("选择", "Selection")).font(.system(size: 12, weight: .semibold))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .fixedSize()
                 .disabled(!store.canEditV2CleanupSelection)
                 Spacer()
@@ -384,7 +386,7 @@ struct CareStudioJunkManager: View {
                 + Text(title).foregroundStyle(CareStudioManagerInk.accent))
                 .font(.system(size: 12, weight: .semibold))
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .disabled(subgroup.selectableIDs.isEmpty || !store.canEditV2CleanupSelection)
     }

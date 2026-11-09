@@ -74,7 +74,7 @@ struct ExtensionManagerPage: View {
                 } label: {
                     Text(L10n.text("选择", "Selection")).font(.system(size: 12, weight: .semibold))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .fixedSize()
                 .disabled(store.isBusy)
             }

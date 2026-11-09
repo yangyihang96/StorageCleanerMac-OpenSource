@@ -54,6 +54,11 @@ struct MyActivityHealth: Equatable, Sendable {
 
     static var title: String { L10n.text("Mac 健康度", "Mac Health") }
     var statusText: String { grade?.title ?? L10n.text("还没检查过", "Not Checked Yet") }
+    /// D230: the card names its strongest reason under the status (all of
+    /// them stay in the ⓘ popover): the first one found of the highest grade.
+    var primaryReason: Reason? {
+        reasons.max { $0.grade.rawValue < $1.grade.rawValue }
+    }
     var helpText: String {
         if grade == nil { return L10n.text("还没有可用的健康检查快照。", "No health check snapshot is available yet.") }
         if reasons.isEmpty { return L10n.text("最近一次检查的磁盘、容量、备份、稳定性、电池和系统防护未报告这些风险。", "The latest disk, capacity, backup, stability, battery and protection checks reported none of these risks.") }
@@ -78,9 +83,14 @@ struct MyActivityHealth: Equatable, Sendable {
         incomplete = disk.availability != .available
 
         let capacity = snapshot.capacity
+        // D230＋旧值“只看文件系统可用空间（availableBytes）”: judged on the space
+        // macOS can give for important use, as the System Health capacity score
+        // (`ComputerHealthScoring.capacityEvaluation`) and the card's bar do.
+        // The stricter value alone said "Problems Found · below 5%" on a Mac
+        // whose bar read 82% used (3.3% filesystem-free, 17.9% for important use).
         if capacity.availability.hasUsableData,
            let total = capacity.totalBytes, total > 0,
-           let free = capacity.availableBytes, (0...total).contains(free) {
+           let free = capacity.availableForImportantUsageBytes ?? capacity.availableBytes, (0...total).contains(free) {
             let ratio = Double(free) / Double(total)
             if ratio < 0.05 { add(.criticalSpace) }
             else if ratio < 0.10 { add(.lowSpace) }

@@ -114,7 +114,7 @@ struct FanControlEntryRow: View {
                         GeekDisclosureIcon(systemImage: "chevron.forward")
                     }
                     .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .frame(height: Self.headerHeight)
                 } else {
                     HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {

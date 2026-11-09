@@ -68,7 +68,7 @@ struct CareStudioLargeOldManager: View {
             Button(L10n.text("重新扫描大型文件", "Scan Large Files Again"), action: largeFiles.startScan)
                 .disabled(!largeFiles.canScan || !largeOld.canEdit)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .foregroundStyle(CareStudioManagerInk.accent)
         .font(.system(size: 12, weight: .semibold))
@@ -253,7 +253,7 @@ private struct CareStudioLargeOldList: View {
                  : L10n.text("\(title)：\(chosen.joined(separator: "、"))", "\(title): \(chosen.joined(separator: ", "))"))
                 .lineLimit(1)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .foregroundStyle(chosen.isEmpty ? CareStudioManagerInk.secondary : CareStudioManagerInk.accent)
     }
@@ -380,7 +380,7 @@ struct ClutterTrashReviewSheet: View {
                     .font(.system(size: 20, weight: .semibold))
                 Text(detail)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             OperationConfirmationFactsView(facts: .fileAnalysis(review, permission: permission), showsItemList: false)
@@ -395,7 +395,7 @@ struct ClutterTrashReviewSheet: View {
             .frame(maxHeight: 240)
             Text(FileAnalysisTrashPresentation.trashFootnote)
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let notice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill")
@@ -431,11 +431,11 @@ struct ClutterTrashReviewSheet: View {
                 Text(ByteFormat.storageString(item.selection.bytes))
                     .font(.system(size: 12))
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
             Text(item.selection.path)
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
@@ -447,7 +447,7 @@ struct ClutterTrashReviewSheet: View {
             } else if item.hasOtherHardLinks {
                 Text(FileAnalysisTrashPresentation.otherHardLinksNote)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         }
     }

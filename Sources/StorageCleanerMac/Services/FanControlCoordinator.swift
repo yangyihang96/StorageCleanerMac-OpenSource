@@ -28,16 +28,16 @@ enum FanControlHelperStatus: Equatable, Sendable {
         case .enabled:
             L10n.text("已安装", "Installed")
         case .needsMigration:
-            L10n.text("需要迁移旧版辅助程序", "Legacy Helper Migration Required")
+            L10n.text("需要迁移旧版系统助手", "Legacy Helper Migration Required")
         case .unavailable:
-            L10n.text("辅助程序不可用", "Helper Unavailable")
+            L10n.text("系统助手不可用", "Helper Unavailable")
         }
     }
 
     static var unavailableReadOnlyDetail: String {
         L10n.text(
-            "macOS 未识别 App 包内的高级硬件控制服务。LaunchDaemon 需要 Developer ID 签名并完成 Apple 公证；服务缺失或签名无效时也会保持只读。",
-            "macOS did not recognize the bundled advanced hardware-control service. LaunchDaemons require Developer ID signing and Apple notarization; a missing or invalidly signed helper also remains read-only."
+            "macOS 未识别 App 包内的系统助手。它需要 Developer ID 签名并完成 Apple 公证；缺失或签名无效时风扇保持只读。",
+            "macOS did not recognize the bundled system helper. It needs Developer ID signing and Apple notarization; a missing or invalidly signed helper leaves the fans read-only."
         )
     }
 }
@@ -334,6 +334,19 @@ final class FanControlCoordinator: ObservableObject {
                 app: appIdentity,
                 bundledHelper: helperIdentity
             )
+        }
+    }()
+    /// D246: this app's requirement for the helper, made off the main thread
+    /// with the signing checks above, before the first connection. Reading the
+    /// app's certificates evaluates their trust, and Security reports that on
+    /// the main thread ("This method should not be called on the main
+    /// thread", twice per call); helperConnection() made it there for every
+    /// new connection (install22: four reports at launch, two connections).
+    /// currentSigner keeps it, so helperConnection() reads the kept text.
+    private static let helperRequirementTask: Task<Void, Never> = {
+        let label = helperLabel
+        return Task.detached(priority: .utility) {
+            _ = FanControlPeerRequirement.currentSigner(peerIdentifier: label)
         }
     }()
     private var connection: NSXPCConnection?
@@ -965,7 +978,7 @@ final class FanControlCoordinator: ObservableObject {
                 if let serviceUnregistrar {
                     try await serviceUnregistrar()
                 } else {
-                    try await service.unregister()
+                    try await Self.unregisterDaemonOffMain(plistName: Self.helperPlistName)
                 }
             }
             selectedMode = .systemAutomatic
@@ -2404,15 +2417,37 @@ final class FanControlCoordinator: ObservableObject {
             guard await resolveBundledHelperSigningTrust() else {
                 throw FanControlConnectionError.untrustedBundledHelper
             }
-            try service.register()
+            try await Self.registerDaemonOffMain(plistName: Self.helperPlistName)
         }
+    }
+
+    /// D250 (G batch): ServiceManagement checks this app's signature on the
+    /// calling thread for each register and unregister (two Security
+    /// main-thread faults per call). Both run here, off the main thread, on
+    /// their own service object.
+    nonisolated static func registerDaemonOffMain(plistName: String) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            let service = SMAppService.daemon(plistName: plistName)
+            try service.register()
+        }.value
+    }
+
+    nonisolated static func unregisterDaemonOffMain(plistName: String) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            let service = SMAppService.daemon(plistName: plistName)
+            try await service.unregister()
+        }.value
     }
 
     private func resolveBundledHelperSigningTrust() async -> Bool {
         if let bundledHelperSigningIsTrusted {
             return bundledHelperSigningIsTrusted
         }
+        // D246: performSend connects only once trust is recorded here, so the
+        // requirement has been made off the main thread by then.
+        let requirement = Self.helperRequirementTask
         let trusted = await Self.bundledHelperSigningTrustTask.value
+        await requirement.value
         bundledHelperSigningIsTrusted = trusted
         return trusted
     }

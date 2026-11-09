@@ -209,7 +209,7 @@ struct HealthScoreHero: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: AppDesignTokens.Spacing.medium) {
@@ -222,7 +222,7 @@ struct HealthScoreHero: View {
                 }
             }
             .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .monospacedDigit()
 
             if let errorText, !errorText.trimmed.isEmpty {
@@ -259,7 +259,7 @@ struct HealthScoreHero: View {
                 ))
         }
         if let checkedAt {
-            Text(checkedAt.formatted(date: .abbreviated, time: .shortened))
+            Text(checkedAt.appFormatted(date: .abbreviated, time: .shortened))
             .foregroundStyle(AppDesignTokens.Palette.tertiaryText)
         }
     }
@@ -285,7 +285,7 @@ struct HealthScoreHero: View {
                     VStack(spacing: 8) {
                         Text("—").font(.system(size: 32, weight: .medium)).monospacedDigit()
                         Text(evaluation == nil ? L10n.text("尚未检查", "Not Checked") : HealthDashboardText.dataInsufficient)
-                            .font(AppDesignTokens.Typography.secondary).foregroundStyle(.secondary)
+                            .font(AppDesignTokens.Typography.secondary).foregroundStyle(.readableSecondary)
                     }
                 }
                 .frame(width: layout.density == .compact ? 112 : 148, height: layout.density == .compact ? 112 : 148)

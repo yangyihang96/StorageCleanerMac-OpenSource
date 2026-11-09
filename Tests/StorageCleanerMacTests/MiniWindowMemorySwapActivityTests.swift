@@ -88,7 +88,7 @@ final class MiniWindowMemorySwapActivityTests: XCTestCase {
 
     private static func vmStatistics() throws -> (swapins: UInt64, swapouts: UInt64, pageSize: UInt64) {
         var stats = vm_statistics64()
-        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        var count = SystemMemoryProbe.vmStatisticsCount
         let result = withUnsafeMutablePointer(to: &stats) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
                 host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)

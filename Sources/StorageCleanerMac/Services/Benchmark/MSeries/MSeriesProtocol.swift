@@ -95,7 +95,7 @@ struct MSeriesHardware: Codable, Equatable, Sendable {
         let levels = integer("hw.nperflevels") ?? 0
         let memory = ProcessInfo.processInfo.physicalMemory
         var vm = vm_statistics64()
-        var vmCount = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        var vmCount = SystemMemoryProbe.vmStatisticsCount
         let status = withUnsafeMutablePointer(to: &vm) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(vmCount)) {
                 host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &vmCount)

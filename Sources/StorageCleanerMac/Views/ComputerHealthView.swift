@@ -264,7 +264,7 @@ struct ComputerHealthView: View {
                 if let latest = backup.latestCompleteBackup {
                     evidenceValueRow(
                         label: L10n.text("最近完整备份", "Latest Complete Backup"),
-                        value: latest.formatted(date: .abbreviated, time: .shortened)
+                        value: latest.appFormatted(date: .abbreviated, time: .shortened)
                     )
                 }
             }
@@ -277,11 +277,11 @@ struct ComputerHealthView: View {
                     )
                 }
                 Text(L10n.text(
-                    "系统防护读取于 \(protectionSnapshot.checkedAt.formatted(date: .abbreviated, time: .shortened))",
-                    "Protection read at \(protectionSnapshot.checkedAt.formatted(date: .abbreviated, time: .shortened))"
+                    "系统防护读取于 \(protectionSnapshot.checkedAt.appFormatted(date: .abbreviated, time: .shortened))",
+                    "Protection read at \(protectionSnapshot.checkedAt.appFormatted(date: .abbreviated, time: .shortened))"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
 
         }
@@ -300,7 +300,7 @@ struct ComputerHealthView: View {
 
             Text(networkSummary)
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let result = networkStore.lastSuccessfulResult {
@@ -335,10 +335,10 @@ struct ComputerHealthView: View {
                     }
                     Text(String(format: "%.0f ms", result.idleLatencyMilliseconds))
                     Spacer()
-                    Text(result.testedAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(result.testedAt.appFormatted(date: .abbreviated, time: .shortened))
                 }
                 .font(AppTypography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .monospacedDigit()
 
                 if let loadedLatency = result.loadedLatencyP95Milliseconds,
@@ -367,7 +367,7 @@ struct ComputerHealthView: View {
                     Spacer(minLength: 0)
                 }
                 .font(AppTypography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .monospacedDigit()
             }
 
@@ -427,7 +427,7 @@ struct ComputerHealthView: View {
 
             Text(thermalReadinessDetail(presentation))
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 8) {
@@ -437,7 +437,7 @@ struct ComputerHealthView: View {
                 )
                 evidenceValueRow(
                     label: L10n.text("检查时间", "Checked At"),
-                    value: healthStore.lastRefreshAt?.formatted(
+                    value: healthStore.lastRefreshAt?.appFormatted(
                         date: .abbreviated,
                         time: .shortened
                     ) ?? L10n.text("尚未检查", "Not Checked")
@@ -465,7 +465,7 @@ struct ComputerHealthView: View {
                     let coverage = evaluation.coverage.isFinite ? String(Int(min(1, max(0, evaluation.coverage)) * 100)) : "—"
                     Text(L10n.text("评估可信度 \(evaluation.confidence.value)% · 核心证据 \(coverage)%",
                         "Assessment confidence \(evaluation.confidence.value)% · Core evidence \(coverage)%"))
-                    Text(evaluation.evaluatedAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(evaluation.evaluatedAt.appFormatted(date: .abbreviated, time: .shortened))
                     Text(HealthDashboardText.scoreScopeNote)
                     scoreBreakdown(evaluation)
                 }
@@ -505,7 +505,7 @@ struct ComputerHealthView: View {
 
                     Text(component.map { HealthDashboardVisuals.availabilityText($0.availability) }
                         ?? L10n.text("未提供", "Unavailable"))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
 
                     Spacer()
 
@@ -518,12 +518,12 @@ struct ComputerHealthView: View {
                         factor: factor,
                         accounting: accounting
                     ))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .frame(minWidth: 76, alignment: .trailing)
                         .monospacedDigit()
 
-                    Text(component?.evaluatedAt.formatted(date: .abbreviated, time: .shortened) ?? "--")
-                        .foregroundStyle(.tertiary)
+                    Text(component?.evaluatedAt.appFormatted(date: .abbreviated, time: .shortened) ?? "--")
+                        .foregroundStyle(.readableTertiary)
                         .frame(minWidth: 142, alignment: .trailing)
                         .monospacedDigit()
                 }
@@ -541,7 +541,7 @@ struct ComputerHealthView: View {
                     "Explicit system action flags: \(ByteFormat.count(snapshot.actionRequiredIssues.count))"
                 ))
                 .font(AppTypography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
 
             LazyVGrid(columns: environmentColumns, alignment: .leading, spacing: 12) {
@@ -597,7 +597,7 @@ struct ComputerHealthView: View {
                     if let latest = snapshot.backup.latestCompleteBackup {
                         evidenceValueRow(
                             label: L10n.text("最近完整备份", "Latest Complete Backup"),
-                            value: latest.formatted(date: .abbreviated, time: .shortened)
+                            value: latest.appFormatted(date: .abbreviated, time: .shortened)
                         )
                     }
                     if let running = snapshot.backup.isRunning {
@@ -718,7 +718,7 @@ struct ComputerHealthView: View {
             "SMART details come from macOS and may vary by model; the health result uses only the drive's own critical warning and life used."
         ))
         .font(AppTypography.body)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -784,7 +784,7 @@ struct ComputerHealthView: View {
                 "Only opens System Settings and verifies changes after you return; it never writes SMC values or directly limits charging."
             ))
             .font(AppTypography.body)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
 
             if healthStore.batterySettingsAdjustmentState == .unverifiable {
@@ -815,7 +815,7 @@ struct ComputerHealthView: View {
             if let verification = batteryVerificationText {
                 Text(verification)
                     .font(AppTypography.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         }
     }
@@ -831,11 +831,11 @@ struct ComputerHealthView: View {
                 .foregroundStyle(AppDesignTokens.Palette.secondary)
             if let updatedAt {
                 Text(L10n.text(
-                    "更新于 \(updatedAt.formatted(date: .abbreviated, time: .shortened))",
-                    "Updated \(updatedAt.formatted(date: .abbreviated, time: .shortened))"
+                    "更新于 \(updatedAt.appFormatted(date: .abbreviated, time: .shortened))",
+                    "Updated \(updatedAt.appFormatted(date: .abbreviated, time: .shortened))"
                 ))
                 .font(AppTypography.body)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.readableTertiary)
                 .monospacedDigit()
             }
             content()
@@ -866,7 +866,7 @@ struct ComputerHealthView: View {
     private func environmentMetric(title: String, value: String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
-                Text(title).foregroundStyle(.secondary)
+                Text(title).foregroundStyle(.readableSecondary)
             }
             .font(AppTypography.body)
             Text(value)
@@ -883,7 +883,7 @@ struct ComputerHealthView: View {
     private func evidenceValueRow(label: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(label)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Spacer(minLength: 8)
             Text(value)
                 .fontWeight(.medium)

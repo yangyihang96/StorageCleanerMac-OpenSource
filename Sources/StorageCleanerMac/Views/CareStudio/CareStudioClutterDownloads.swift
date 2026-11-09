@@ -75,7 +75,7 @@ struct CareStudioDownloadsManager: View {
             Button(L10n.text("重新读取“下载”文件夹", "Read the Downloads Folder Again"), action: downloads.read)
                 .disabled(downloads.isReading || !downloads.canEdit)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .foregroundStyle(CareStudioManagerInk.accent)
         .font(.system(size: 12, weight: .semibold))

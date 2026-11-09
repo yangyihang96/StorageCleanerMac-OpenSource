@@ -167,10 +167,11 @@ final class IStatMenuThemeTests: XCTestCase {
         let palette = try source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift")
         XCTAssertTrue(palette.contains(".modifier(PanelAppearanceEnvironment())"))
         XCTAssertFalse(palette.contains("PanelSurfacePreset(rawValue:"))
-        let general = try source("Sources/StorageCleanerMac/Views/Settings/SettingsGeneral.swift")
-        XCTAssertTrue(general.contains("items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeDarkID, isDark: true)"))
-        XCTAssertTrue(general.contains("items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeLightID, isDark: false)"))
-        XCTAssertTrue(general.contains("isOn: $menuThemeVibrancy"))
+        // D272: the panel's look moved from General to the menu bar page.
+        let menuBar = try source("Sources/StorageCleanerMac/Views/Settings/SettingsMiniWindow.swift")
+        XCTAssertTrue(menuBar.contains("items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeDarkID, isDark: true)"))
+        XCTAssertTrue(menuBar.contains("items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeLightID, isDark: false)"))
+        XCTAssertTrue(menuBar.contains("isOn: $menuThemeVibrancy"))
     }
 
     /// `updateAccentConfig`: components times 255 truncated, the distance

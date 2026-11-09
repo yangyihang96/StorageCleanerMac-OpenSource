@@ -299,6 +299,8 @@ struct MemorySnapshot: Sendable {
     let generatedAt: Date
     let capturedInstant: ContinuousClock.Instant?
     let physicalBytes: Int64
+    /// vm_stat's "Pages free": `free_count` less the speculative pages,
+    /// which `fileBackedBytes` already holds (D278).
     let freeBytes: Int64
     let inactiveBytes: Int64
     let speculativeBytes: Int64
@@ -765,7 +767,7 @@ struct EnergyMetricEvidence: Hashable, Sendable {
     let intervalSeconds: TimeInterval?
     var detail: String {
         guard let sampledAt else { return source.title }
-        return "\(source.title) · \(sampledAt.formatted(date: .omitted, time: .standard))"
+        return "\(source.title) · \(sampledAt.appFormatted(date: .omitted, time: .standard))"
     }
 }
 
@@ -1371,8 +1373,8 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
         if isLongUnused(), let lastUsedAt {
             let days = max(60, Calendar.current.dateComponents([.day], from: lastUsedAt, to: Date()).day ?? 60)
             reasons.append(L10n.text(
-                "已 \(days) 天未打开，上次使用于 \(lastUsedAt.formatted(date: .abbreviated, time: .omitted))",
-                "Not opened for \(days) days; last used \(lastUsedAt.formatted(date: .abbreviated, time: .omitted))"
+                "已 \(days) 天未打开，上次使用于 \(lastUsedAt.appFormatted(date: .abbreviated, time: .omitted))",
+                "Not opened for \(days) days; last used \(lastUsedAt.appFormatted(date: .abbreviated, time: .omitted))"
             ))
         }
 
@@ -1480,8 +1482,8 @@ struct InstalledAppItem: Identifiable, Hashable, Sendable {
             let days = max(0, Calendar.current.dateComponents([.day], from: lastUsedAt, to: Date()).day ?? 0)
             if isLongUnused() {
                 return L10n.text(
-                    "最近使用于 \(lastUsedAt.formatted(date: .abbreviated, time: .omitted))，已超过 60 天；建议先确认项目或账号依赖后再卸载。",
-                    "Last used \(lastUsedAt.formatted(date: .abbreviated, time: .omitted)), over 60 days ago; confirm project or account dependencies before uninstalling."
+                    "最近使用于 \(lastUsedAt.appFormatted(date: .abbreviated, time: .omitted))，已超过 60 天；建议先确认项目或账号依赖后再卸载。",
+                    "Last used \(lastUsedAt.appFormatted(date: .abbreviated, time: .omitted)), over 60 days ago; confirm project or account dependencies before uninstalling."
                 )
             }
 

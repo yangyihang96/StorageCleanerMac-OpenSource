@@ -80,9 +80,9 @@ struct AppUpdateLightfieldRow: View {
                 HStack(spacing: 8) {
                     LightfieldStatusGlyph(status: handling.status, tone: entry.category == .requiresAuthorization ? .warning : nil)
                     Text(handling.title).font(.system(size: 13)).lineLimit(1).truncationMode(.tail).help(handling.title)
-                        .foregroundStyle(entry.category == .requiresAuthorization
+                        .foregroundStyle(CareStudioText(entry.category == .requiresAuthorization
                             ? FeatureLightfieldPalette.resolve(scheme).warningColor
-                            : handling.status.lightfieldColor(FeatureLightfieldPalette.resolve(scheme)))
+                            : handling.status.lightfieldColor(FeatureLightfieldPalette.resolve(scheme))))
                         .lightfieldComponentProbe(probe + ".handling")
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }

@@ -23,12 +23,25 @@ struct CareStudioActivityHealthCard: View {
                         .padding(18).frame(width: 360, alignment: .leading)
                 }
             }
-            Text(health.statusText)
-                .font(.system(size: 29, weight: .semibold))
-                .foregroundStyle(statusColor)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(health.statusText)
+                    .font(.system(size: 29, weight: .semibold))
+                    .foregroundStyle(statusStyle)
 #if DEBUG
-                .layoutProbe("careStudio.activity.health.status")
+                    .layoutProbe("careStudio.activity.health.status")
 #endif
+                // D230: why, at a glance; ⓘ still lists every reason.
+                if let reason = health.primaryReason {
+                    Text(reason.text)
+                        .font(.system(size: 12))
+                        .foregroundStyle(CareStudioInk.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+#if DEBUG
+                        .layoutProbe("careStudio.activity.health.reason")
+#endif
+                }
+            }
             Text(mac.modelName ?? L10n.text("机型未读取", "Model Unavailable"))
                 .font(.system(size: 13, weight: .medium))
             VStack(alignment: .leading, spacing: 6) {
@@ -47,7 +60,7 @@ struct CareStudioActivityHealthCard: View {
             Spacer(minLength: 0)
             HStack(alignment: .center, spacing: 10) {
                 if let checkedAt = health.checkedAt {
-                    let date = checkedAt.formatted(.dateTime.year().month(.abbreviated).day().hour().minute().locale(L10n.locale))
+                    let date = checkedAt.appFormatted(.dateTime.year().month(.abbreviated).day().hour().minute())
                     Text(L10n.text("检查于 \(date)", "Checked \(date)"))
                         .font(.system(size: 11)).foregroundStyle(CareStudioInk.tertiary)
                 } else {
@@ -71,8 +84,13 @@ struct CareStudioActivityHealthCard: View {
         case .good: CareStudioPalette.color(CareStudioFamily.cleanup.palette.actionGlow)
         case .attention: CareStudioPalette.color(CareStudioFamily.performance.palette.actionGlow)
         case .problem: .red
-        case nil: CareStudioInk.secondary
+        case nil: CareStudioInk.secondary.base
         }
+    }
+    /// D279: the status line is type; with no grade it is grey and reads
+    /// on the page's gradient (`CareStudioText`).
+    private var statusStyle: AnyShapeStyle {
+        health.grade == nil ? AnyShapeStyle(CareStudioInk.secondary) : AnyShapeStyle(statusColor)
     }
 }
 
@@ -88,7 +106,10 @@ struct CareStudioActivityTimeCard: View {
 #if DEBUG
                 .layoutProbe("careStudio.activity.time.value")
 #endif
-            Text(L10n.text("共 \(ByteFormat.count(savings.totalMinutes)) 分钟", "\(ByteFormat.count(savings.totalMinutes)) minutes in total"))
+            // D233＋旧值“共 N 分钟”: the line repeated the value above (“1 小时 45 分钟”
+            // over “共 105 分钟”); it now says what the estimate counts.
+            Text(L10n.text("\(ByteFormat.count(savings.totalOperations)) 次操作",
+                           L10n.englishCount(savings.totalOperations, "operation", "operations")))
                 .font(.system(size: 12)).foregroundStyle(CareStudioInk.secondary)
             ForEach(MyActivityTimeSavings.Category.allCases, id: \.self) { category in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {

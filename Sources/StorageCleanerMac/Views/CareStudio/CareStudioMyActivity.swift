@@ -165,7 +165,7 @@ struct CareStudioMyActivityPage: View {
                 ? L10n.text("正在读取记录…", "Reading records…")
                 : L10n.text("这台 Mac 上还没有清理记录。", "No cleanups recorded on this Mac yet.")
         }
-        let date = since.formatted(date: .long, time: .omitted)
+        let date = since.appFormatted(date: .long, time: .omitted)
         return L10n.text("自 \(date) 起，这台 Mac 上做过的清理和维护。", "Cleanups and maintenance on this Mac since \(date).")
     }
 
@@ -269,7 +269,7 @@ struct CareStudioMyActivityPage: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(CareStudioInk.primary)
                     .lineLimit(1)
-                Text(report.startedAt.formatted(date: .abbreviated, time: .shortened))
+                Text(report.startedAt.appFormatted(date: .abbreviated, time: .shortened))
                     .font(.system(size: 11))
                     .foregroundStyle(CareStudioInk.tertiary)
             }

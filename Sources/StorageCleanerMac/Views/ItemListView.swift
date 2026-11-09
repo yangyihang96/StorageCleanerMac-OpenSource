@@ -329,7 +329,7 @@ struct ItemListView: View {
 
                     Text(L10n.itemBytes(metrics.visibleCount, ByteFormat.storageString(metrics.visibleBytes)))
                         .font(AppDesignTokens.Typography.pageSubtitle)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -433,7 +433,7 @@ struct ItemListView: View {
                 if !recordDetail.trimmed.isEmpty {
                     Text(recordDetail)
                         .font(AppDesignTokens.Typography.compactLabel)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -476,7 +476,7 @@ struct ItemListView: View {
 
     private func cleanupRecordDetail(summary: CleanupHistorySummary, movedCount: Int) -> String {
         if let latest = summary.latest {
-            let latestText = latest.date.formatted(date: .abbreviated, time: .shortened)
+            let latestText = latest.date.appFormatted(date: .abbreviated, time: .shortened)
             return L10n.text(
                 "最近 \(ByteFormat.count(latest.itemCount)) 项 · \(ByteFormat.storageString(latest.totalBytes)) · \(latestText)",
                 "Latest: \(ByteFormat.count(latest.itemCount)) item(s) · \(ByteFormat.storageString(latest.totalBytes)) · \(latestText)"
@@ -629,7 +629,7 @@ private struct ItemRow: View {
                     if item.status == .movedToTrash {
                         Text(L10n.text("已移除", "Removed"))
                             .font(AppDesignTokens.Typography.compactLabel)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                 }
 
@@ -640,7 +640,7 @@ private struct ItemRow: View {
 
                     Text(item.path)
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

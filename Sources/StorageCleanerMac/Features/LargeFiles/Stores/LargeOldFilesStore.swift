@@ -267,7 +267,7 @@ enum LargeOldFilesPresentation {
     /// The row's date, saying which one it is.
     static func dateText(_ row: LargeOldFileRow) -> String {
         guard let date = row.date else { return L10n.text("没有打开或修改时间", "No opened or modified date") }
-        let day = date.formatted(.dateTime.year().month().day().locale(L10n.locale))
+        let day = date.appFormatted(.dateTime.year().month().day())
         return row.dateIsLastOpened
             ? L10n.text("上次打开 \(day)", "Last opened \(day)")
             : L10n.text("无打开记录 · 修改于 \(day)", "Never opened · Modified \(day)")

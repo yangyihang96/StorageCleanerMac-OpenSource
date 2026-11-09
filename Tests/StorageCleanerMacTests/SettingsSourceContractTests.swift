@@ -17,9 +17,11 @@ final class SettingsSourceContractTests: XCTestCase {
         ).filter { $0.pathExtension == "swift" }.map(\.lastPathComponent)
         // D153: plus the combined status icon's section (was without
         // "SettingsCombinedStatusIcon.swift").
+        // D273＋旧值：没有 "SettingsAIAssistant.swift"。AI 助手页是独立视图，只读给它的
+        // AgentInterface，不是 extension SettingsView，所以不进 pageNames。
         XCTAssertEqual(Set(actualPages), Set(pageNames + [
             "SettingsLightfield.swift", "SettingsPermissionRow.swift", "SettingsActivationRefresh.swift", "SettingsMiniWindowPreview.swift",
-            "SettingsCombinedStatusIcon.swift",
+            "SettingsCombinedStatusIcon.swift", "SettingsAIAssistant.swift",
         ]))
 
         let root = try String(contentsOf: settingsURL, encoding: .utf8)
@@ -34,6 +36,38 @@ final class SettingsSourceContractTests: XCTestCase {
             expected += "\n" + page
         }
         XCTAssertEqual(try SettingsSourceContract.source(at: settingsURL), expected)
+    }
+
+    /// D274: a pop-up menu draws its title in the tint, and the window's tint is the
+    /// one for white labels on a fill. The count is the settings window's list.
+    func testEveryMenuPickerInTheSettingsWindowDrawsItsTitleAsAValue() throws {
+        let views = settingsURL.deletingLastPathComponent()
+        let sources = [
+            try SettingsSourceContract.source(at: settingsURL),
+            try String(contentsOf: views.appendingPathComponent("FanCurveEditor.swift"), encoding: .utf8),
+            try String(contentsOf: views.deletingLastPathComponent().appendingPathComponent(
+                "Features/AppLifecycle/Reminders/UI/AppLifecycleReminderSettingsSection.swift"), encoding: .utf8),
+        ]
+        var checked = 0
+        for source in sources {
+            for following in source.components(separatedBy: ".pickerStyle(.menu)").dropFirst() {
+                XCTAssertTrue(following.prefix(60).contains(".featureLightfieldMenuTint()"), String(following.prefix(60)))
+                checked += 1
+            }
+        }
+        XCTAssertEqual(checked, 5)
+    }
+
+    /// D274: as text the overview accent measured 2.3–2.4:1 on the day canvas.
+    func testTextThatActsInTheSettingsWindowTakesTheColorChosenForIt() throws {
+        let settings = try SettingsSourceContract.source(at: settingsURL)
+        let link = try r2SourceDeclaration("struct SettingsLinkButton", in: settings)
+        XCTAssertTrue(link.contains("FeatureLightfieldPalette.settingsAction"))
+        XCTAssertFalse(settings.contains(".foregroundStyle(FeatureLightfieldPalette.accent(.overview)"))
+        let modules = try String(contentsOf: settingsURL.deletingLastPathComponent().appendingPathComponent(
+            "MiniWindowConfigurationSettingsView.swift"), encoding: .utf8)
+        XCTAssertFalse(modules.contains("accent(.overview)"))
+        XCTAssertFalse(settings.contains("FeatureLightfieldBackdrop(module: .overview, phase: .landing"))
     }
 
     func testSharedSourceGuardReadersSeeEveryExtractedCategory() throws {

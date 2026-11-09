@@ -478,7 +478,7 @@ struct BrowserPrivacyRecordResultsView: View {
         } label: {
             Text(L10n.text("排序", "Sort"))
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .accessibilityLabel(L10n.text("结果排序", "Sort Results"))
         .accessibilityValue(store.resultSort.title)
@@ -529,7 +529,7 @@ struct BrowserPrivacyRecordResultsView: View {
         } label: {
             Text(L10n.text("筛选", "Filters"))
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .accessibilityLabel(L10n.text("高级筛选", "Advanced Filters"))
     }
@@ -1069,7 +1069,7 @@ extension BrowserPrivacyRecordResultsView {
                 }
                 .disabled(store.selectedRecordIDs.isEmpty || store.isProcessing)
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.borderlessButton).careStudioActionTint()
             .fixedSize()
             advancedFiltersMenu
         }
@@ -1103,7 +1103,7 @@ private struct BrowserPrivacyRefreshStatus: View {
                 if !detail.isEmpty {
                     Text(detail)
                         .font(AppTypography.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
             }
         }
@@ -1164,7 +1164,7 @@ private struct BrowserPrivacyCoverageRow: View {
                 if let detail = coverage.detail, !detail.isEmpty {
                     Text(detail)
                         .font(AppTypography.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -1197,7 +1197,7 @@ private struct BrowserPrivacyProcessingProgress: View {
                     "Check, delete and verify; records stay until verified; keep browsers closed"
                 ))
                 .font(AppTypography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             }
         }
         .padding(AppDesignTokens.Spacing.medium)
@@ -1245,7 +1245,7 @@ struct BrowserPrivacyProcessingReportView: View {
 
             Text(reportSummary)
                 .font(AppTypography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
 
             // D93: completed / skipped / failed / needs verification per profile;
             // deleting history frees no disk space.
@@ -1269,7 +1269,7 @@ struct BrowserPrivacyProcessingReportView: View {
                         "\(BrowserPrivacyRecoveryText.retentionNotice) To undo, restore it from Recent Deletions in the toolbar."
                     ))
                 .font(AppTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -1293,7 +1293,7 @@ struct BrowserPrivacyProcessingReportView: View {
                         if !detail.isEmpty {
                             Text(detail)
                                 .font(AppTypography.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                         }
                         if let backupID = entry.recoveryBackupID {
                             backupControl(backupID)
@@ -1338,12 +1338,12 @@ struct BrowserPrivacyProcessingReportView: View {
                                 visits: group.recordCount
                             ))
                             .font(AppTypography.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                         }
 
                         Text(BrowserPrivacyPageListText.siteSummary(group.domains))
                             .font(AppTypography.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
 
@@ -1355,7 +1355,7 @@ struct BrowserPrivacyProcessingReportView: View {
 
                         Text(BrowserPrivacyManualWorkflow.historyInstruction(for: group.browser))
                             .font(AppTypography.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .fixedSize(horizontal: false, vertical: true)
 
                         HStack(spacing: AppDesignTokens.Spacing.small) {
@@ -1431,7 +1431,7 @@ struct BrowserPrivacyProcessingReportView: View {
             if let manualActionFeedback {
                 Text(manualActionFeedback)
                     .font(AppTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         }
         .padding(AppDesignTokens.Spacing.small)
@@ -1448,7 +1448,7 @@ struct BrowserPrivacyProcessingReportView: View {
         if removedBackupIDs.contains(backupID) {
             Text(L10n.text("备份已删除", "Backup Deleted"))
                 .font(AppTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         } else if pendingBackupRemoval == backupID {
             VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
                 Label(
@@ -1513,7 +1513,7 @@ struct BrowserPrivacyProcessingReportView: View {
                 Text(title).font(AppTypography.metadata)
                 Text(detail)
                     .font(AppTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -1651,7 +1651,7 @@ private struct BrowserPrivacyReverificationStatusView: View {
                     .foregroundStyle(tint)
                 Text(detail)
                     .font(AppTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -1802,7 +1802,7 @@ private struct BrowserPrivacyRecordsEmptyState: View {
             if !detail.isEmpty {
                 Text(detail)
                     .font(AppTypography.emptyStateDetail)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 430)
             }

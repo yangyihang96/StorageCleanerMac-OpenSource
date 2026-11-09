@@ -1,14 +1,13 @@
 import SwiftUI
 
 extension MemoryReclaimer.Reading {
-    /// The same counters from a memory snapshot (its free bytes include the
-    /// speculative pages).
+    /// The same counters from a memory snapshot (both leave the speculative
+    /// pages out of free, D278).
     init(snapshot: MemorySnapshot) {
-        let speculative = UInt64(max(0, snapshot.speculativeBytes))
         self.init(
             physicalBytes: UInt64(max(0, snapshot.physicalBytes)),
-            freeBytes: UInt64(max(0, snapshot.freeBytes)) - min(UInt64(max(0, snapshot.freeBytes)), speculative),
-            speculativeBytes: speculative,
+            freeBytes: UInt64(max(0, snapshot.freeBytes)),
+            speculativeBytes: UInt64(max(0, snapshot.speculativeBytes)),
             inactiveBytes: UInt64(max(0, snapshot.inactiveBytes)),
             fileBackedBytes: UInt64(max(0, snapshot.fileBackedBytes)),
             purgeableBytes: UInt64(max(0, snapshot.purgeableBytes)),
@@ -323,7 +322,7 @@ struct CareStudioMemoryMeasureCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: value == nil ? 14 : 12, weight: value == nil ? .semibold : .regular))
-                    .foregroundStyle(value == nil ? CareStudioInk.primary : CareStudioInk.secondary)
+                    .foregroundStyle(value == nil ? AnyShapeStyle(CareStudioInk.primary) : AnyShapeStyle(CareStudioInk.secondary))
                     .lineLimit(1)
                 if let value {
                     Text(value)

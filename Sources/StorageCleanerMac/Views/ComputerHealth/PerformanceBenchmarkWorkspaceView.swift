@@ -305,7 +305,7 @@ struct PerformanceBenchmarkPageChrome<Content: View>: View {
                 "结果默认只保存在本机；全球排行需在对应页面确认后才上传匿名字段。",
                 "Results stay on this Mac by default; the global ranking uploads anonymous fields only after your confirmation there."
             ))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
         }
         .font(AppDesignTokens.Typography.secondary)
         .fixedSize(horizontal: false, vertical: true)

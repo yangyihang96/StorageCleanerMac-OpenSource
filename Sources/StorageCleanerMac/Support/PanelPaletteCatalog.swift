@@ -287,7 +287,7 @@ struct PanelPalettePairPreview: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(L10n.text("模拟配色 · 非实时数据", "Color preview · Simulated data"))
                 .font(AppTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) { pair }
                 VStack(spacing: 10) { pair }
@@ -426,7 +426,7 @@ private struct PanelPalettePreviewData: View {
                 Text(L10n.text("系统 8%", "System 8%"))
             }
             .font(.system(size: 9))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             HStack(spacing: 6) {
                 Text("GPU").foregroundStyle(colors.sectionHeader)
                 Capsule().fill(colors.gpu(chartAccent: chartAccent))

@@ -100,8 +100,8 @@ struct MaintenanceReminderSummary: Equatable, Sendable {
         case .scheduled:
             if let nextDueAt {
                 L10n.text(
-                    "下次建议扫描：\(nextDueAt.formatted(date: .abbreviated, time: .shortened))。",
-                    "Next suggested scan: \(nextDueAt.formatted(date: .abbreviated, time: .shortened))."
+                    "下次建议扫描：\(nextDueAt.appFormatted(date: .abbreviated, time: .shortened))。",
+                    "Next suggested scan: \(nextDueAt.appFormatted(date: .abbreviated, time: .shortened))."
                 )
             } else {
                 cadence.detail

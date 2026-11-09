@@ -22,7 +22,7 @@ struct SmartScanReadyStage: View {
                 if let detail {
                     Text(detail)
                         .font(AppDesignTokens.Typography.body)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -46,7 +46,7 @@ struct SmartScanReadyStage: View {
                     .foregroundStyle(AppDesignTokens.Palette.success)
             }
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(.horizontal, 32)
@@ -223,7 +223,7 @@ private struct SmartScanMetric: View {
 
             Text(title)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
@@ -301,11 +301,11 @@ private struct ModuleScanProgressHero: View {
                         "The scan finished; preparing reviewable results."
                     ))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 } else if let currentPath = progress.currentPath {
                     Text(currentPath)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .monospaced()
                 } else {
@@ -314,7 +314,7 @@ private struct ModuleScanProgressHero: View {
                         "\(L10n.items(progress.discoveredItemCount)) · \(ByteFormat.storageString(progress.discoveredBytes)) found"
                     ))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                 }
             }
@@ -357,7 +357,7 @@ struct SmartScanResultRing: View {
             VStack(spacing: AppDesignTokens.Spacing.compact) {
                 Text(L10n.text("已发现候选", "Candidates Found"))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
 
                 Text(ByteFormat.storageString(candidateBytes))
                     .font(AppDesignTokens.Typography.heroTitle)
@@ -365,7 +365,7 @@ struct SmartScanResultRing: View {
 
                 Text(L10n.items(candidateCount))
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
             }
         }
@@ -1134,14 +1134,14 @@ private struct DebugScanIdlePanel: View {
                 .font(AppDesignTokens.Typography.heroTitle)
             Text(scenario.idleDetail)
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
             Label(
                 L10n.text("Debug 固定状态：不会调用扫描服务。", "Debug fixture: no scanner is called."),
                 systemImage: "ladybug.fill"
             )
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
         }
         .padding(32)
         .frame(maxWidth: .infinity, minHeight: 340)
@@ -1163,7 +1163,7 @@ private struct DebugScanPreflightPanel: View {
 
             Text(scenario.preflightDetail)
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
 
             Divider()
 
@@ -1172,7 +1172,7 @@ private struct DebugScanPreflightPanel: View {
                 systemImage: "ladybug.fill"
             )
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
         }
         .padding(24)
         .frame(maxWidth: .infinity, minHeight: 220, alignment: .leading)
@@ -1197,7 +1197,7 @@ private struct DebugScanCleaningPanel: View {
                 .font(AppDesignTokens.Typography.heroTitle)
             Text(L10n.text("第 4 / 7 项 · 固定演示数据，不会移动或删除文件。", "Item 4 of 7 · fixed demo data; no files are moved or deleted."))
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
         }
         .padding(32)
@@ -1219,7 +1219,7 @@ private struct DebugScanTerminalPanel: View {
                 .font(AppDesignTokens.Typography.heroTitle)
             Text(scenario.terminalDetail)
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
         }
         .padding(32)
@@ -1253,7 +1253,7 @@ private struct DebugScanResultPanel: View {
             }
             Text(scenario.resultDetail)
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
         }
         .padding(32)

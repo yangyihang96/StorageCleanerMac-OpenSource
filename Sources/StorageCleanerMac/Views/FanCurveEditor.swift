@@ -21,11 +21,15 @@ struct FanCurveEditor: View {
     @StateObject private var session: FanCurveEditorSession
     let fanReadings: [SystemFanReading]
     var compact: Bool
+    /// D272: the settings window names this editor in its group header and
+    /// uses its own type size and action style. The menu-bar panel keeps its own.
+    var inSettings: Bool
 
     init(
         fanControl: FanControlCoordinator,
         fanReadings: [SystemFanReading],
-        compact: Bool = false
+        compact: Bool = false,
+        inSettings: Bool = false
     ) {
         _fanControl = ObservedObject(wrappedValue: fanControl)
         _store = ObservedObject(wrappedValue: fanControl.curveStore)
@@ -37,6 +41,24 @@ struct FanCurveEditor: View {
         ))
         self.fanReadings = fanReadings
         self.compact = compact
+        self.inSettings = inSettings
+    }
+
+    private var captionFont: Font {
+        inSettings ? .system(size: 13) : AdvancedPanelTypography.caption
+    }
+
+    @ViewBuilder
+    private func editorAction(
+        _ title: String,
+        role: ButtonRole? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        if inSettings {
+            SettingsLinkButton(title: title, role: role, action: action)
+        } else {
+            Button(title, role: role, action: action)
+        }
     }
 
     private var points: [FanCurvePoint] { session.points }
@@ -107,8 +129,8 @@ struct FanCurveEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? MiniWindowStyleTokens.rowSpacing : 10) {
-            if !compact {
+        VStack(alignment: .leading, spacing: compact ? MiniWindowStyleTokens.rowSpacing : (inSettings ? 12 : 10)) {
+            if !compact, !inSettings {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.text("风扇曲线", "Fan Curve"))
                         .font(AdvancedPanelTypography.sectionTitle)
@@ -130,8 +152,8 @@ struct FanCurveEditor: View {
                     Text(L10n.text("RPM 量程未读取", "RPM range unavailable"))
                 }
             }
-            .font(AdvancedPanelTypography.caption)
-            .foregroundStyle(.secondary)
+            .font(captionFont)
+            .foregroundStyle(.readableSecondary)
             .help(L10n.text(
                 "RPM 由各风扇实际读取的最低和最高转速换算；多风扇取目标转速均值。0% 对应最低转速，不代表停转。",
                 "RPM is mapped from each fan's reported minimum and maximum, averaged across fans. 0% means the minimum speed, not a stopped fan."
@@ -145,6 +167,7 @@ struct FanCurveEditor: View {
                 currentTemperature: currentTemperature,
                 currentPercentage: previewPercentage,
                 fanReadings: fanReadings,
+                largeAxisLabels: inSettings,
                 onSelect: session.select,
                 onHover: hoverPoint,
                 onDragBegan: beginDraggingPoint,
@@ -165,38 +188,38 @@ struct FanCurveEditor: View {
 
             if fanControl.isDataOnlyFixture {
                 Text(L10n.text("FIXTURE · 草稿可编辑；禁止硬件应用或 Helper 申请。", "FIXTURE · Draft editing only; hardware writes and Helper registration blocked."))
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .font(captionFont)
+                    .foregroundStyle(.readableSecondary)
             }
 
             if let validationError = session.validationError {
                 Text(validationText(validationError))
-                    .font(AdvancedPanelTypography.caption)
+                    .font(captionFont)
                     .foregroundStyle(AppDesignTokens.Palette.warning)
             } else if fanControl.helperState == .requiresApproval {
                 Text(L10n.text(
                     "系统批准后即可应用温控曲线。",
                     "You can apply the fan curve after system approval."
                 ))
-                .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .font(captionFont)
+                .foregroundStyle(.readableSecondary)
             } else if displayedHasUnappliedChanges,
                       displayedAppliedProfile != nil {
                 Text(L10n.text(
                     "有未应用更改；上次已应用曲线保持不变。",
                     "Unapplied changes do not alter the previously applied curve."
                 ))
-                .font(AdvancedPanelTypography.caption)
+                .font(captionFont)
                 .foregroundStyle(AppDesignTokens.Palette.information)
             } else if displayedAppliedProfile == nil {
                 Text(L10n.text("尚未应用曲线", "No curve is active"))
-                    .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .font(captionFont)
+                    .foregroundStyle(.readableSecondary)
             }
 
             if let message = fanControl.lastMessage {
                 Text(message)
-                    .font(AdvancedPanelTypography.caption)
+                    .font(captionFont)
                     .foregroundStyle(messageTint)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -216,8 +239,8 @@ struct FanCurveEditor: View {
     private var sensorPicker: some View {
         HStack(spacing: 8) {
             Text(L10n.text("温度来源", "Temperature Source"))
-                .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .font(captionFont)
+                .foregroundStyle(.readableSecondary)
             Spacer(minLength: 8)
             Picker(
                 L10n.text("温度来源", "Temperature Source"),
@@ -234,6 +257,7 @@ struct FanCurveEditor: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .featureLightfieldMenuTint()
             .disabled(selectableSensors.isEmpty)
             .accessibilityLabel(L10n.text("曲线温度来源", "Fan-curve temperature source"))
         }
@@ -247,19 +271,15 @@ struct FanCurveEditor: View {
 
     private var editActions: some View {
         HStack(spacing: 8) {
-            Button {
+            editorAction(L10n.text("增加控制点", "Add Point")) {
                 _ = session.addPoint(undoManager: undoManager)
-            } label: {
-                Text(L10n.text("增加控制点", "Add Point"))
             }
             .disabled(points.count >= FanCurveProfile.maximumPointCount)
             .accessibilityLabel(L10n.text("增加风扇曲线控制点", "Add fan-curve point"))
 
-            Button(role: .destructive) {
+            editorAction(L10n.text("删除控制点", "Delete Point"), role: .destructive) {
                 guard let selectedPointID = session.selectedPointID else { return }
                 session.removePoint(id: selectedPointID, undoManager: undoManager)
-            } label: {
-                Text(L10n.text("删除控制点", "Delete Point"))
             }
             .disabled(
                 points.count <= FanCurveProfile.minimumPointCount
@@ -321,7 +341,7 @@ struct FanCurveEditor: View {
             .disabled(point.id == points.last?.id)
             .accessibilityLabel(L10n.text("选中控制点风扇百分比", "Selected point fan percentage"))
         }
-        .font(AdvancedPanelTypography.caption)
+        .font(captionFont)
     }
 
     private var previewRows: some View {
@@ -350,10 +370,10 @@ struct FanCurveEditor: View {
 
     private var bottomActions: some View {
         HStack(spacing: 8) {
-            Button(L10n.text("恢复默认", "Restore Default")) {
+            editorAction(L10n.text("恢复默认", "Restore Default")) {
                 session.restoreDefault(undoManager: undoManager)
             }
-            Button(L10n.text("取消更改", "Discard Changes")) {
+            editorAction(L10n.text("取消更改", "Discard Changes")) {
                 session.discardChanges(
                     to: store.savedProfile,
                     undoManager: undoManager
@@ -379,11 +399,11 @@ struct FanCurveEditor: View {
 
     private func valueRow(_ title: String, _ value: String) -> some View {
         HStack(spacing: 8) {
-            Text(title).foregroundStyle(.secondary)
+            Text(title).foregroundStyle(.readableSecondary)
             Spacer(minLength: 8)
             Text(value).monospacedDigit()
         }
-        .font(AdvancedPanelTypography.caption)
+        .font(captionFont)
     }
 
     private func hoverPoint(_ id: UUID?) {
@@ -522,6 +542,7 @@ private struct FanCurvePlot: View {
     let currentTemperature: Double?
     let currentPercentage: Double?
     var fanReadings: [SystemFanReading] = []
+    var largeAxisLabels = false
     let onSelect: ((UUID) -> Void)?
     let onHover: ((UUID?) -> Void)?
     let onDragBegan: ((UUID) -> Void)?
@@ -718,8 +739,8 @@ private struct FanCurvePlot: View {
     private func axisLabels(plot: CGRect, size: CGSize) -> some View {
         ForEach([100, 50, 0], id: \.self) { percentage in
             Text(axisLabel(percentage: percentage))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(.system(size: largeAxisLabels ? 11 : 9, design: .monospaced))
+                .foregroundStyle(.readableSecondary)
                 .frame(width: max(1, plot.minX - 8), alignment: .trailing)
                 .position(
                     x: (plot.minX - 8) / 2,
@@ -728,12 +749,12 @@ private struct FanCurvePlot: View {
                 )
         }
         Text("25°C")
-            .font(.system(size: 8))
-            .foregroundStyle(.secondary)
+            .font(.system(size: largeAxisLabels ? 11 : 8))
+            .foregroundStyle(.readableSecondary)
             .position(x: plot.minX + 12, y: size.height - 8)
         Text("100°C")
-            .font(.system(size: 8))
-            .foregroundStyle(.secondary)
+            .font(.system(size: largeAxisLabels ? 11 : 8))
+            .foregroundStyle(.readableSecondary)
             .position(x: plot.maxX - 15, y: size.height - 8)
     }
 

@@ -371,7 +371,7 @@ enum DownloadsPresentation {
             parts.append(L10n.text("文件夹 · \(ByteFormat.count(count)) 项", "Folder · \(L10n.items(count))"))
         }
         if let date = row.modifiedAt {
-            let day = date.formatted(.dateTime.year().month().day().locale(L10n.locale))
+            let day = date.appFormatted(.dateTime.year().month().day())
             parts.append(L10n.text("修改于 \(day)", "Modified \(day)"))
         }
         parts.append((row.path as NSString).abbreviatingWithTildeInPath)

@@ -50,21 +50,25 @@ private struct AppButtonChromeModifier: ViewModifier {
                 content
                     .buttonStyle(AppPrimaryButtonStyle())
                     .buttonBorderShape(.roundedRectangle(radius: 9))
+            // D276: these draw their title in the tint; on a studio page it is
+            // the readable action colour, not the module's fill colour.
             case .secondary, .glass:
                 content
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .careStudioActionTint()
             case .smallUtility:
                 content
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.capsule)
+                    .careStudioActionTint()
             case .destructive:
                 content
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.roundedRectangle(radius: 8))
                     .tint(AppDesignTokens.Palette.destructive)
             case .tertiary, .toolbar, .icon, .menu, .disclosure:
-                content.buttonStyle(.borderless)
+                content.buttonStyle(.borderless).careStudioActionTint()
             case .metric, .selectionRow:
                 content.buttonStyle(.plain)
             }

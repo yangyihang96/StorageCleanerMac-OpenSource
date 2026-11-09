@@ -119,7 +119,7 @@ struct StartupItemInspectorView: View {
                     .font(AppTypography.pageTitle)
                 Text(item.displayStatus)
                     .font(AppTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
             Spacer(minLength: 0)
             Button(L10n.text("完成", "Done"), action: dismiss.callAsFunction)
@@ -174,13 +174,13 @@ struct StartupItemInspectorView: View {
                         Spacer(minLength: 0)
                         Text(candidate.state.conciseStatus)
                             .font(AppTypography.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                         if actionCandidates.count > 1,
                            actionCandidates.contains(where: { $0.id == candidate.id }) {
                             Button(componentActionTitle(candidate)) {
                                 requestComponentAction(candidate)
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.bordered).careStudioActionTint()
                         }
                     }
                     StartupInspectorKeyValue(label: L10n.text("来源", "Source"), value: candidate.source.title)
@@ -233,7 +233,7 @@ struct StartupItemInspectorView: View {
                 ForEach(diagnosticLines, id: \.self) { line in
                     Text(line)
                         .font(AppTypography.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .textSelection(.enabled)
                 }
             }
@@ -358,7 +358,7 @@ private struct StartupInspectorKeyValue: View {
         HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.medium) {
             Text(label)
                 .font(AppTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 112, alignment: .leading)
             if selectable {
                 Text(value)

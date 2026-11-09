@@ -70,7 +70,10 @@ private enum RestrictedMove {
               plist["CFBundleIdentifier"] as? String == request.bundleIdentifier,
               (plist["CFBundleShortVersionString"] as? String ?? "") == request.version,
               (plist["CFBundleVersion"] as? String ?? "") == request.build else { throw POSIXError(.EINVAL) }
-        guard NSRunningApplication.runningApplications(withBundleIdentifier: request.bundleIdentifier).isEmpty else {
+        // D245 (review P2-5): read from the process table; `NSRunningApplication`
+        // sees no user's applications from this root daemon.
+        guard !RunningBundleCheck.mainExecutableIsRunning(bundlePath: source.path,
+                                                          executableName: plist["CFBundleExecutable"] as? String) else {
             throw POSIXError(.EBUSY)
         }
         var final = stat()

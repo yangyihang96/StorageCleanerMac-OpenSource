@@ -22,7 +22,7 @@ struct HealthSecurityChecksView: View {
                             Text(finding.evidenceSummary)
                         }
                         if let checkedAt = snapshot?.checkedAt {
-                            Text(checkedAt.formatted(date: .abbreviated, time: .shortened)).monospacedDigit()
+                            Text(checkedAt.appFormatted(date: .abbreviated, time: .shortened)).monospacedDigit()
                         }
                         Button(L10n.text("打开系统设置", "Open System Settings")) {
                             if CleanupService.openSecuritySettings(for: check) {
@@ -103,11 +103,11 @@ struct HealthRecentChangesView: View {
                 ForEach(Array(events.prefix(isExpanded ? ComputerHealthEventRepository.maximumEntryCount : 5))) { event in
                     FeatureLightfieldStatusDisclosure(title: event.check.title,
                         detail: event.oldState.title(for: event.check) + " → " + event.newState.title(for: event.check)
-                            + " · " + event.recordedAt.formatted(date: .abbreviated, time: .shortened),
+                            + " · " + event.recordedAt.appFormatted(date: .abbreviated, time: .shortened),
                         value: event.newState.title(for: event.check), status: Self.status(for: event.newState)) {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(event.evidenceSummary)
-                            Text(event.recordedAt.formatted(date: .abbreviated, time: .standard)).monospacedDigit()
+                            Text(event.recordedAt.appFormatted(date: .abbreviated, time: .standard)).monospacedDigit()
                         }
                     }
                 }

@@ -21,6 +21,7 @@ enum OperationRecordPresentation {
     }
 
     static func title(rulesVersion: String, subject: String?, itemCount: Int = 1) -> String {
+        if rulesVersion == SystemCacheClearReceipt.ruleID { return SystemCacheClearReceipt.historyTitle }
         if rulesVersion == RecentItemsCleanupService.ruleID {
             return L10n.text("最近使用项目 · 移到废纸篓", "Recent Items · Moved to Trash")
         }
@@ -67,7 +68,8 @@ enum OperationRecordPresentation {
     /// Temporary-files receipts moved nothing of the user's, so there is no
     /// "Restore" and no "originally moved" size for them.
     static func offersRestore(rulesVersion: String) -> Bool {
-        !isTemporaryResource(rulesVersion)
+        // D249: a system-cache clear deleted permanently; nothing to put back.
+        !isTemporaryResource(rulesVersion) && rulesVersion != SystemCacheClearReceipt.ruleID
     }
 
     /// D46: Operation History restores only from the user's Trash. An item

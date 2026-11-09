@@ -29,7 +29,7 @@ enum AppUpdateHelperCapabilityGate {
         await finish()
         guard applications.allSatisfy(AppUpdateProtectedReplacementPolicy.accepts),
             let helper = Bundle.main.url(forResource: "StorageCleanerFileOperationHelper", withExtension: nil),
-            AppUpdateBundledCodeTrust.matchesApplication(helper, identifier: FileOperationIdentity.helper) else { throw AuthorizedMoveError.unavailable }
+            await AppUpdateBundledCodeTrust.matchesApplicationOffMain(helper, identifier: FileOperationIdentity.helper) else { throw AuthorizedMoveError.unavailable }
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
         try await Self.boundedRefresh { try await AuthorizedApplicationMover.shared.prepareHelper(refreshRegisteredBuild: false) }
         do {
@@ -71,17 +71,24 @@ enum AppUpdateHelperCapabilityGate {
         if let authorization { AuthorizationFree(authorization, [.destroyRights]) }
         authorization = nil
     }
-    private func openConnection() {
-        guard let requirement = FileOperationPeerRequirement.currentSigner(peerIdentifier: FileOperationIdentity.helper) else { return }
+    /// D241 (review P2-1): built off the main thread (Security's signer lookup).
+    private func openConnection() async {
+        connection = await Task.detached(priority: .userInitiated) {
+            Self.makeConnection().map(FileOperationConnectionHandoff.init(connection:))
+        }.value?.connection
+    }
+    nonisolated private static func makeConnection() -> NSXPCConnection? {
+        guard let requirement = FileOperationPeerRequirement.currentSigner(peerIdentifier: FileOperationIdentity.helper) else { return nil }
         let connection = NSXPCConnection(machServiceName: FileOperationIdentity.helper, options: .privileged)
         connection.setCodeSigningRequirement(requirement)
         connection.remoteObjectInterface = NSXPCInterface(with: FileOperationHelperProtocol.self)
-        connection.resume(); self.connection = connection
+        connection.resume()
+        return connection
     }
     private func capabilities() async throws -> ApplicationReplacementCapabilities {
         try await FileOperationReadRetry.perform {
             self.connection?.invalidate(); self.connection = nil
-            self.openConnection()
+            await self.openConnection()
             let data = try await self.exchange(timeout: 2) { proxy, reply in
                 proxy.applicationReplacementCapabilities?(reply: reply)
             }

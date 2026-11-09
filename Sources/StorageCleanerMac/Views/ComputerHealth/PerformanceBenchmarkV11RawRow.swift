@@ -51,7 +51,8 @@ struct PerformanceBenchmarkV11RawRow: View {
                 currentResult: currentResult, previousResult: previousResult) {
                 Text((change.percent >= 0 ? "+" : "") + MSeriesV11PagePresentation.number(change.percent) + "% · "
                     + (abs(change.percent) < 0.000001 ? L10n.text("持平", "Same") : change.improved ? L10n.text("改善", "Better") : L10n.text("降低", "Worse")))
-                    .foregroundStyle(abs(change.percent) < 0.000001 ? palette.fg2 : change.improved ? FeatureLightfieldStatus.normal.color(palette) : palette.warningColor)
+                    .foregroundStyle(abs(change.percent) < 0.000001 ? AnyShapeStyle(palette.fg2)
+                        : AnyShapeStyle(change.improved ? FeatureLightfieldStatus.normal.color(palette) : palette.warningColor))
             } else { Text(L10n.text("上次：不可比", "Previous: incomparable")).foregroundStyle(palette.fg2) }
         }.monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok: raw-comparison
     }
@@ -70,7 +71,7 @@ struct PerformanceBenchmarkV11HistoryList: View {
                 Button { onOpen(record) } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 12) {
-                            Text(record.completedAt?.formatted(date: .abbreviated, time: .shortened) ?? MSeriesV11PagePresentation.unread)
+                            Text(record.completedAt?.appFormatted(date: .abbreviated, time: .shortened) ?? MSeriesV11PagePresentation.unread)
                             Spacer(minLength: 0)
                             Text(record.mSeriesV11 != nil ? "v11" : record.mSeries != nil ? "v10" : L10n.text("旧协议", "Legacy protocol"))
                         }
@@ -99,7 +100,7 @@ struct PerformanceBenchmarkV11HistoryList: View {
                     }.font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8).contentShape(Rectangle())
                 }.buttonStyle(FeatureLightfieldRowButtonStyle()).overlay(alignment: .bottom) { FeatureLightfieldHairline() }
-                    .accessibilityLabel(L10n.text("打开本机历史", "Open local history") + " · " + (record.completedAt?.formatted() ?? MSeriesV11PagePresentation.unread))
+                    .accessibilityLabel(L10n.text("打开本机历史", "Open local history") + " · " + (record.completedAt?.appFormatted(date: .numeric, time: .shortened) ?? MSeriesV11PagePresentation.unread))
             }
         }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
     }

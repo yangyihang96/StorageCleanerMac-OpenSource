@@ -160,7 +160,8 @@ final class ProjectArtifactTests: XCTestCase {
         let row = try XCTUnwrap(rows.first)
         XCTAssertNotNil(row.blockedReason)
         XCTAssertEqual(row.candidate.estimatedSizeBytes, 0)
-        XCTAssertEqual(ProjectArtifactView.sizeText(row), "未测量")
+        // D234＋旧值："未测量"（未本地化）；现随界面语言。
+        XCTAssertEqual(ProjectArtifactView.sizeText(row), L10n.text("未测量", "Not measured"))
         let view = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/ProjectArtifactView.swift")
         XCTAssertTrue(view.contains("\"扫描范围：\""))
         XCTAssertTrue(view.contains("@Published private(set) var roots"))

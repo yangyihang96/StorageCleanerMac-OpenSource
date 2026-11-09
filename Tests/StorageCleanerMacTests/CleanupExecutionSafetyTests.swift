@@ -923,7 +923,9 @@ final class CleanupExecutionSafetyTests: XCTestCase {
                 )
                 let request = try XCTUnwrap(fixture.requests.first)
                 let target = retainedFails ? try XCTUnwrap(request.retainedCopies.first).url : request.sourceURL
-                for failOnCall in [1, 3] {
+                // D244＋旧值：[1, 3]。执行时写入意图前原来用相同参数核对两次，
+                // 最终（含写入）复核是第 3 次读取；去掉重复后它是第 2 次。
+                for failOnCall in [1, 2] {
                     let digestReader = N6RefusingDigestReader(
                         failingPath: target.path, failOnCall: failOnCall, error: error, digest: fixture.digest
                     )

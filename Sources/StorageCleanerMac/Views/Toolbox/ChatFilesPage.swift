@@ -107,7 +107,7 @@ struct ChatFilesPage: View {
                 } label: {
                     Text(L10n.text("选择", "Selection")).font(.system(size: 12, weight: .semibold))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .fixedSize()
                 .disabled(store.isBusy)
             }
@@ -280,7 +280,7 @@ struct ChatFilesCopySheet: View {
             Text(L10n.text("只复制视频和文件；图片是聊天软件自己的格式，复制到别处打不开。每个文件复制后都会读回来逐字节核对（SHA-256）。原件保持不动，核对通过后，可以在列表里选“已复制并核对的原件”再移到废纸篓。",
                            "Only videos and files are copied; pictures are in the chat app's own format and cannot be opened elsewhere. Each file is read back and compared (SHA-256). The originals stay; once checked, choose “Originals Already Copied” in the list and move them to the Trash."))
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             if store.volumes.isEmpty {
                 Text(L10n.text("没有找到可写入的外置盘。", "No writable external drive was found."))

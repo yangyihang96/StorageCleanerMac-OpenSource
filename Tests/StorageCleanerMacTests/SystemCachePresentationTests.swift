@@ -49,7 +49,9 @@ final class SystemCachePresentationTests: XCTestCase {
     }
     func testConfirmedPlanIsUsedOnceAndInventoryRefreshFollowsClear() async throws {
         let fake = RecordingSystemCacheService(inventory: measured)
-        let store = try makeStore(fake)
+        // D249＋旧值：makeStore(fake)，确认清除也不得建操作目录。现在每次清除都写一张
+        // 回执，写在本测试自己的操作目录（工厂建立并清理）。
+        let store = try ScanStore.makeForTests(for: self, systemCacheService: fake)
         await store.refreshSystemCacheInventory()
         store.requestSystemCacheClear([.coreSymbolication])
         let plan = try XCTUnwrap(store.pendingSystemCacheClear)
@@ -60,6 +62,32 @@ final class SystemCachePresentationTests: XCTestCase {
         XCTAssertFalse(store.isClearingSystemCaches); XCTAssertNil(store.pendingSystemCacheClear)
         await store.confirmSystemCacheClear(planID: plan.id)
         XCTAssertEqual(fake.events, ["inventory", "clear", "inventory"])
+        let receipts = try store.activityJournal.loadAvailable().reports
+        XCTAssertEqual(receipts.map(\.rulesVersion), [SystemCacheClearReceipt.ruleID], "one clear, one receipt")
+        XCTAssertEqual(receipts.first?.items.map(\.deletedEntryCount), [2])
+        XCTAssertEqual(receipts.first?.summary.permanentlyFreedBytes, 4_096)
+    }
+    /// D249 supplement (install23, 10-28 11:41): the receipt was written, but
+    /// Operation History kept its old list until Refresh was pressed. The
+    /// history and My Activity read the journal through `operationReports`.
+    func testOperationHistoryListsTheClearWithoutARefresh() async throws {
+        let fake = RecordingSystemCacheService(inventory: measured)
+        let store = try ScanStore.makeForTests(for: self, systemCacheService: fake)
+        await store.refreshSystemCacheInventory()
+        store.requestSystemCacheClear([.coreSymbolication])
+        let plan = try XCTUnwrap(store.pendingSystemCacheClear)
+        await store.confirmSystemCacheClear(planID: plan.id)
+        let listed = await eventually {
+            store.operationReports.contains { $0.rulesVersion == SystemCacheClearReceipt.ruleID }
+        }
+        XCTAssertTrue(listed, "the clear is listed without pressing Refresh")
+    }
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<200 {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
     }
     func testFailureRefreshesInventoryAndShowsAResult() async throws {
         let fake = RecordingSystemCacheService(inventory: measured); fake.shouldFail = true

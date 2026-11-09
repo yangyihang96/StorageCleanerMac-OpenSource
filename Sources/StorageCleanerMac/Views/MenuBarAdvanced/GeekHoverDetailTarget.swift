@@ -809,7 +809,7 @@ struct GeekGPUHoverDetail: View {
                 )
                 GeekIStatRow(
                     title: L10n.text("采样", "Sampled"),
-                    value: sampledAt.map { $0.formatted(date: .omitted, time: .standard) } ?? "--",
+                    value: sampledAt.map { $0.appFormatted(date: .omitted, time: .standard) } ?? "--",
                     valueColor: .secondary
                 )
             }
@@ -1626,7 +1626,7 @@ struct GeekHistoryStatisticsRow: View {
 
     private func readout(_ title: String, value: Double?) -> some View {
         HStack(spacing: 3) {
-            Text(title).foregroundStyle(.secondary)
+            Text(title).foregroundStyle(.readableSecondary)
             Text(value.map { unit.formatted($0) } ?? "—")
         }
     }
@@ -1881,7 +1881,7 @@ struct GeekHoverValueRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
             Text(title)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
             Spacer(minLength: 4)
             Text(value)
@@ -1906,7 +1906,7 @@ struct GeekHoverLargeValue: View {
                 .lineLimit(1)
             Text(title)
                 .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
@@ -1921,7 +1921,7 @@ struct GeekHoverUnavailableState: View {
         VStack(spacing: 6) {
             Text(text)
                 .font(AdvancedPanelTypography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

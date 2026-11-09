@@ -109,7 +109,7 @@ struct PanelChartSamplingPlaceholder: View {
     var body: some View {
         Text(PanelChartSampling.placeholderText(sampledAt: sampledAt, isPaused: isPaused))
             .font(AdvancedPanelTypography.caption)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(.readableTertiary)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .accessibilityHidden(true)
             .menuBarTraceProbe { PanelChartPlaceholderProbe() }

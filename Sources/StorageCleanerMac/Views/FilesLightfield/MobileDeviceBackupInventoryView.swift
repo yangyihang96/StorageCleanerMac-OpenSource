@@ -55,7 +55,7 @@ enum MobileDeviceBackupPresentation {
 
     static func detail(
         _ backup: MobileDeviceBackup,
-        formatDate: (Date) -> String = { $0.formatted(date: .abbreviated, time: .shortened) }
+        formatDate: (Date) -> String = { $0.appFormatted(date: .abbreviated, time: .shortened) }
     ) -> String {
         var parts = [backup.backupDate.map { L10n.text("备份于 \(formatDate($0))", "Backed up \(formatDate($0))") }
             ?? L10n.text("备份时间未知", "Backup date unknown")]

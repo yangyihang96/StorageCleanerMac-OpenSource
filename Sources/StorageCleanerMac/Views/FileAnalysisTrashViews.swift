@@ -235,7 +235,7 @@ struct FileAnalysisTrashBar: View {
             if let notice = workspace.trashRefinementNotice {
                 Text(notice)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
             if workspace.trashPutBackCount > 0 {
                 Text(L10n.text("已从“操作记录”放回 \(ByteFormat.count(workspace.trashPutBackCount)) 项，已重新计入。",
@@ -247,7 +247,7 @@ struct FileAnalysisTrashBar: View {
                 HStack(alignment: .firstTextBaseline, spacing: AppDesignTokens.Spacing.medium) {
                     Text(notice)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     // Nothing else in the bar to close it with.
                     if workspace.trashSelections.isEmpty, workspace.trashOutcome == nil {
@@ -355,7 +355,7 @@ struct FileAnalysisTrashBar: View {
         } else if !outcome.movedPaths.isEmpty {
             Text(outcomeRestoreNote(outcome))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         ForEach(outcome.skipped.prefix(3)) { skipped in
@@ -373,7 +373,7 @@ struct FileAnalysisTrashBar: View {
             Text(L10n.text("另有 \(outcome.skipped.count - 3) 项未移动，详见“操作记录”。",
                            "\(L10n.items(outcome.skipped.count - 3)) more not moved; see Operation History."))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
     }
 
@@ -443,7 +443,7 @@ struct FileAnalysisTrashReviewSheet: View {
                     DisclosureGroup(L10n.text("详情", "Details")) {
                         Text(detail)
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -472,7 +472,7 @@ struct FileAnalysisTrashReviewSheet: View {
                     "\(L10n.items(review.readyItems.count)) can move · \(ByteFormat.storageString(review.readyBytes)) in total"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .monospacedDigit()
                 if review.blockedCount > 0 {
                     Text(L10n.text("另有 \(ByteFormat.count(review.blockedCount)) 项不会处理，原因见下方。",
@@ -516,7 +516,7 @@ struct FileAnalysisTrashReviewSheet: View {
             }
         }
         .font(AppDesignTokens.Typography.metadata)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -531,7 +531,7 @@ struct FileAnalysisTrashReviewSheet: View {
                 Text(L10n.text("正在与分析结果比对“\(title)”（已读 \(ByteFormat.count(progress.verifiedItemCount)) 项）",
                                "Comparing “\(title)” with the analysis (\(ByteFormat.count(progress.verifiedItemCount)) items read)"))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
             }
         }
@@ -581,26 +581,26 @@ private struct FileAnalysisTrashReviewRow: View {
                     Spacer(minLength: AppDesignTokens.Spacing.small)
                     Text(ByteFormat.storageString(item.selection.bytes))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .monospacedDigit()
                         .fixedSize()
                 }
                 Text(item.selection.path)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(item.selection.path)
                 HStack(spacing: AppDesignTokens.Spacing.small) {
                     Text(FileAnalysisTrashPresentation.itemDetail(item.selection))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     statusLabel
                 }
                 .font(AppDesignTokens.Typography.metadata)
                 if case .blocked(let block) = item.status {
                     Text(block.explanation(naming: unknownApplications))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if item.hasOtherHardLinks {
@@ -614,7 +614,7 @@ private struct FileAnalysisTrashReviewRow: View {
                     // D104 G1: clones or a local snapshot keep part of it.
                     Text(reclaimable)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

@@ -17,6 +17,7 @@
 # Exempt entries for the display gate's own tests are added with those tests.
 DisplayConfinementGateTests | exempt | routes every entry point through the gate with the original call replaced by a recorder; its windows are borderless, deferred and never shown, and its URLs and apps are fixtures that are refused or recorded, never opened
 AppDelegateBenchmarkTerminationTests | in-process | creates AppDelegate, whose termination path can show an alert (the reply is injected)
+MenuBarOnlyQuitDelegateD256Tests | in-process | creates AppDelegate, whose termination path can show an alert (the quit decision and the panel state are injected)
 AppInstallationConflictServiceTests | in-process | AppInstallationConflictController can reveal app copies in Finder (the reveal is injected)
 AppOpenPanelCoordinatorTests | in-process | presents NSOpenPanel through AppOpenPanelCoordinator, with and without a parent NSWindow
 AppUpdateAuthorizationRepairTests | in-process | AppUpdateBatchAuthorization can show the administrator password prompt (prompt and channel are fakes)
@@ -25,6 +26,7 @@ BenchmarkMonitorLayoutTests | in-process | hosts the benchmark monitor in an NSW
 BrowserPrivacyDisclosureTests | in-process | lays out browser-privacy pages in CalibrationAppKitLayoutHost, an NSWindow host
 BrowserPrivacyLightfieldNativeTests | in-process | lays out browser-privacy pages in CalibrationAppKitLayoutHost, an NSWindow host
 BrowserPrivacyPerformanceTests | in-process | orders a 1070x650 NSWindow front and lays out pages in CalibrationAppKitLayoutHost
+CareStudioAccessibilityD231Tests | in-process | hosts the round button and the clutter headline in V0LayoutHost windows and reads their accessibility tree (D231, D238)
 CareStudioNavigationTests | in-process | orders a 1280x763 NSWindow front with the main window and switches pages and widths to check the sidebar is full before the first scan and the icon rail on every page after it (D176; was: folded page by page on result pages)
 CareStudioWindowReviewTests | in-process | orders a 1070x735 NSWindow front to capture the studio managers for review; writes PNGs only when STORAGE_CLEANER_CARESTUDIO_EVIDENCE is set
 CombinedStatusIconSettingsWindowTests | in-process | hosts the combined status icon settings in an NSWindow and captures it (D153)
@@ -70,6 +72,7 @@ RuntimeUIRound201Tests | in-process | hosts 2.0.1 runtime UI in a 900x450 NSWind
 SafeCleanupLayoutTests | in-process | orders cleanup-page windows front and measures their layout
 SettingsLightfieldGeometryTests | in-process | lays out settings pages in CalibrationAppKitLayoutHost, an NSWindow host
 SettingsMiniWindowPreviewTests | in-process | lays out the settings mini-window preview in CalibrationAppKitLayoutHost
+SettingsPagesRenderReviewTests | in-process | renders the settings pages for review in a window that is never ordered in; runs only with SCM_SETTINGS_RENDER_DIR
 SmartScanScopeTests | in-process | lays out smart-scan scope pages in CalibrationAppKitLayoutHost, an NSWindow host
 SpaceMapTreemapWindowTests | in-process | hosts the Space Lens page with the blocks map in an NSWindow and drives it with synthetic events; writes PNGs only when STORAGE_CLEANER_SPACEMAP_EVIDENCE is set
 SpaceLensSidebarWindowTests | in-process | hosts the Space Lens sidebar in an NSWindow for bilingual geometry and filter, purpose, worth and reclaim interactions; exports PNGs only when STORAGE_CLEANER_SPACEMAP_EVIDENCE is set

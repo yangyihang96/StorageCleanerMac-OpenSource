@@ -133,6 +133,10 @@ enum L10n {
     }
 
     static var locale: Locale {
+        locale(usesChinese: usesChinese)
+    }
+
+    static func locale(usesChinese: Bool) -> Locale {
         usesChinese ? Locale(identifier: "zh_Hans") : Locale(identifier: "en_US_POSIX")
     }
 

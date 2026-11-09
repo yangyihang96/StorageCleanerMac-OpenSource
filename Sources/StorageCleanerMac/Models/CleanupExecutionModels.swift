@@ -1099,6 +1099,9 @@ struct CleanReportItem: Identifiable, Codable, Equatable, Sendable {
     let estimatedBytes: Int64
     let outcome: CleanItemOutcome
     var ruleRevision: Int? = nil
+    /// D249: entries removed inside a cleared system-cache folder (the folder
+    /// itself stays). Missing in every other and every older receipt.
+    var deletedEntryCount: Int? = nil
 }
 
 enum CleanReportOutcome: String, Codable, Sendable {
@@ -1135,9 +1138,11 @@ struct CleanupRestoreAuthorization: Codable, Equatable, Sendable {
 
     func permitsApplication(_ item: CleanReportItem, receipt: CleanupMoveReceipt) -> Bool {
         let source = URL(fileURLWithPath: sourcePath)
-        // D184 + old value: only /Applications. Utilities restore is restricted to D184 receipts.
+        // D184 + old value: only /Applications. Utilities restore is restricted to D184 receipts
+        // and D252's thin copy (moved aside by “Restore Original Name”).
         return (allowedRootPath == "/Applications"
-                || (allowedRootPath == "/Applications/Utilities" && ruleID == UniversalBinaryService.ruleID))
+                || (allowedRootPath == "/Applications/Utilities"
+                    && [UniversalBinaryService.ruleID, UniversalBinaryService.nameRestoreRuleID].contains(ruleID)))
             && sourcePath == PathSafety.lexicalPath(sourcePath)
             && source.deletingLastPathComponent().path == allowedRootPath
             && source.pathExtension.lowercased() == "app"
@@ -1146,6 +1151,12 @@ struct CleanupRestoreAuthorization: Codable, Equatable, Sendable {
             && receipt.originalPath == sourcePath && item.sourcePath == sourcePath
             && item.ruleID == ruleID && item.planItemID == planItemID
     }
+}
+
+/// D252: where the thinned app sits and which bundle it is.
+struct UniversalBinarySwapRecord: Codable, Equatable, Sendable {
+    let applicationPath: String
+    let thinnedIdentity: FileIdentity
 }
 
 struct CleanReport: Identifiable, Codable, Equatable, Sendable {
@@ -1171,6 +1182,11 @@ struct CleanReport: Identifiable, Codable, Equatable, Sendable {
     /// be recorded. Every item is then `.notProcessed` and nothing moved.
     /// Missing in older receipts.
     var startRefusal: CleanFailure? = nil
+    /// D252: an app thinning's swap, keyed by the moved original's path
+    /// (“… (before thinning).storagecleaner-thin-….app”), so Operation History
+    /// can swap the names back after putting the original back. Missing in
+    /// older receipts, which then offer only the put-back beside the thin app.
+    var thinningSwaps: [String: UniversalBinarySwapRecord]? = nil
 
     var authorizedApplicationRestorePaths: Set<String> {
         Set(items.compactMap { item in

@@ -19,7 +19,7 @@ enum BrowserPrivacyRecoveryText {
     }
 
     static func time(for entry: BrowserPrivacyRecoveryEntry) -> String {
-        BrowserPrivacyDateFormatter.string(entry.createdAt)
+        entry.createdAt.appFormatted(date: .abbreviated, time: .shortened)
     }
 
     /// What the deletion behind this backup did. Unknown stays unknown.
@@ -81,13 +81,13 @@ enum BrowserPrivacyRecoveryText {
 
     /// When the backup is removed automatically (D26).
     static func expiryNote(for entry: BrowserPrivacyRecoveryEntry) -> String {
-        let time = BrowserPrivacyDateFormatter.string(entry.expiresAt)
+        let time = entry.expiresAt.appFormatted(date: .abbreviated, time: .shortened)
         return L10n.text("\(time) 自动删除", "Removed automatically on \(time)")
     }
 
     static func restoredNote(for entry: BrowserPrivacyRecoveryEntry) -> String? {
         entry.restoredAt.map {
-            let time = BrowserPrivacyDateFormatter.string($0)
+            let time = $0.appFormatted(date: .abbreviated, time: .shortened)
             return L10n.text("已于 \(time) 恢复过", "Restored on \(time)")
         }
     }
@@ -148,7 +148,7 @@ enum BrowserPrivacyRecoveryText {
     ) -> String? {
         guard let latest = laterBackups.last else { return nil }
         let count = laterBackups.count
-        let latestTime = BrowserPrivacyDateFormatter.string(latest.createdAt)
+        let latestTime = latest.createdAt.appFormatted(date: .abbreviated, time: .shortened)
         if entry.rowBackup {
             return L10n.text("这份备份之后还有 \(ByteFormat.count(count)) 份同库备份（最近一份在 \(latestTime)）。补回行可能带回后续删除的记录；不会覆盖较新的冲突行，也不会撤销其他表。", "There are \(ByteFormat.count(count)) later backups of the same database (latest: \(latestTime)). Adding rows back may reintroduce records deleted later; newer conflicting rows and other tables are kept.")
         }
@@ -163,8 +163,8 @@ enum BrowserPrivacyRecoveryText {
     static func removalWarning(createdAt: Date?) -> String {
         let deletion = createdAt.map {
             L10n.text(
-                "\(BrowserPrivacyDateFormatter.string($0)) 那次删除",
-                "the deletion at \(BrowserPrivacyDateFormatter.string($0))"
+                "\($0.appFormatted(date: .abbreviated, time: .shortened)) 那次删除",
+                "the deletion at \($0.appFormatted(date: .abbreviated, time: .shortened))"
             )
         } ?? L10n.text("这次删除", "this deletion")
         return L10n.text(

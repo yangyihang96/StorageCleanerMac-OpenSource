@@ -18,7 +18,7 @@ struct ApplicationTerminatorSheet: View {
                     Text(L10n.text("请退出以下应用程序，以清理所有与之相关的项目：",
                                    "Please quit the following applications to clean all of their related items:"))
                         .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
             }
             VStack(spacing: 0) {
@@ -37,11 +37,11 @@ struct ApplicationTerminatorSheet: View {
                         case .quit:
                             Label(L10n.text("已退出", "Quit"), systemImage: "checkmark.circle.fill").foregroundStyle(AppDesignTokens.Palette.success)
                         case .cannotQuit:
-                            Text(L10n.text("无法退出", "Can't be quit")).foregroundStyle(.secondary)
+                            Text(L10n.text("无法退出", "Can't be quit")).foregroundStyle(.readableSecondary)
                             Button(L10n.text("强制退出", "Force Quit")) { model.quit(app.id, force: true) }
                             Button(L10n.text("忽略", "Ignore")) { model.ignoreRunning(app.id) }
                         case .ignored:
-                            Text(L10n.text("已忽略", "Ignored")).foregroundStyle(.secondary)
+                            Text(L10n.text("已忽略", "Ignored")).foregroundStyle(.readableSecondary)
                         }
                     }
                     .font(.system(size: 12))
@@ -63,7 +63,7 @@ struct ApplicationTerminatorSheet: View {
             }
             Text(L10n.text("忽略的应用不会被移除，它的项目保留原处。", "An ignored app is not removed; its items stay where they are."))
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
         .padding(20)
         .frame(width: 460)
@@ -99,7 +99,7 @@ struct ApplicationsRemovalProgressView: View {
                 .font(.system(size: 16, weight: .semibold))
             Text(L10n.text("\(index + 1) / \(total) · \(current)", "\(index + 1) of \(total) · \(current)"))
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -125,7 +125,7 @@ struct ApplicationsCompletionView: View {
                 .font(.system(size: 22, weight: .bold))
             Text(model.completionDescription)
                 .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 460)
             HStack(spacing: 12) {
@@ -177,7 +177,7 @@ struct ApplicationsLogSheet: View {
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(line.path).font(.system(size: 11)).textSelection(.enabled)
                                         if let note = note(line.status) {
-                                            Text(note).font(.system(size: 10)).foregroundStyle(.secondary)
+                                            Text(note).font(.system(size: 10)).foregroundStyle(.readableSecondary)
                                         }
                                     }
                                 }

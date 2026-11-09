@@ -607,7 +607,7 @@ struct LargeFilesScanLandingView: View {
             } label: {
                 Text(migrationSourceName).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
             }
-            .menuStyle(.borderlessButton).fixedSize()
+            .menuStyle(.borderlessButton).careStudioActionTint().fixedSize()
             .accessibilityLabel(L10n.text("来源", "Source"))
             .accessibilityValue(workspace.migrationSourcePath ?? L10n.text("用户可访问的文件夹", "User-accessible folders"))
             Spacer(minLength: 0)
@@ -648,7 +648,7 @@ struct LargeFilesScanLandingView: View {
                 Text(selectedVolume?.name ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))
                     .font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
             }
-            .menuStyle(.borderlessButton).fixedSize()
+            .menuStyle(.borderlessButton).careStudioActionTint().fixedSize()
             .disabled(isRefreshingVolumes)
             .accessibilityLabel(L10n.text("目标位置", "Destination"))
             .accessibilityValue(selectedVolume?.url.path ?? L10n.text("未连接可写的物理外接硬盘", "No writable physical external drive"))

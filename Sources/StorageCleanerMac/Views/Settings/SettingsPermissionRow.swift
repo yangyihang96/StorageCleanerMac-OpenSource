@@ -1,5 +1,7 @@
 import SwiftUI
 
+/// D272: one status and one action on each row (was 前往授权 and 重新检查 on every
+/// row, the second wrapping onto two lines). The section offers one 重新检查.
 struct SettingsPermissionRow: View {
     @Environment(\.colorScheme) private var scheme
     let title: String
@@ -7,53 +9,43 @@ struct SettingsPermissionRow: View {
     let status: String
     let statusKind: MetadataPillStatus
     let open: () -> Void
-    let refresh: () -> Void
-    var isChecking = false
     var isGranted = false
+    /// Notifications can be asked for from here, before System Settings is needed.
+    var request: (title: String, isDisabled: Bool, action: () -> Void)? = nil
 
     var body: some View {
-        let palette = FeatureLightfieldPalette.resolve(scheme)
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                Text(title).frame(width: 116, alignment: .leading)
-                Text(detail).foregroundStyle(palette.fg2).frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
-                state.frame(width: 194, alignment: .leading)
-                actions
-            }
-            VStack(alignment: .leading, spacing: 10) {
-                Text(title)
-                Text(detail).font(.system(size: 13)).foregroundStyle(palette.fg2)
+        SettingsRow(title: title, caption: detail) {
+            HStack(spacing: 16) {
                 state
-                HStack(spacing: 12) { actions }
-            }.padding(.vertical, 12)
+                if !isGranted { actions }
+            }
         }
-        .font(.system(size: 15))
-        .frame(maxWidth: .infinity, minHeight: FeatureLightfield.rowHeight, alignment: .leading)
-        .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .lightfieldComponentProbe("settings.access." + title)
     }
 
     private var state: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             if isGranted {
-                FeatureLightfieldCheck(selected: true, module: .green).accessibilityHidden(true)
+                LightfieldStatusGlyph(status: .none, symbol: "checkmark.circle.fill", color: AppDesignTokens.Palette.success)
+                    .accessibilityHidden(true)
             } else {
                 LightfieldStatusGlyph(status: statusKind)
             }
             Text(status).font(.system(size: 13))
-                .foregroundStyle(isGranted ? FeatureLightfieldPalette.accent(.green) : statusKind.lightfieldColor(FeatureLightfieldPalette.resolve(scheme)))
-                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(isGranted ? AppDesignTokens.Palette.success : statusKind.lightfieldColor(FeatureLightfieldPalette.resolve(scheme)))
+                .fixedSize()
         }.accessibilityElement(children: .combine)
     }
 
     @ViewBuilder private var actions: some View {
-        Button(L10n.text("前往授权", "Open Settings"), action: open)
-            .frame(width: 64).buttonStyle(FeatureLightfieldRowButtonStyle())
+        if let request {
+            SettingsLinkButton(title: request.title, action: request.action)
+                .disabled(request.isDisabled)
+                .accessibilityLabel(title + " · " + request.title)
+        }
+        SettingsLinkButton(title: L10n.text("前往授权", "Open Settings"), action: open)
             .accessibilityLabel(title + " · " + L10n.text("前往授权", "Open Settings"))
-        Button(L10n.text("重新检查", "Check Again"), action: refresh)
-            .frame(width: 56).buttonStyle(FeatureLightfieldRowButtonStyle()).disabled(isChecking)
-            .accessibilityLabel(title + " · " + L10n.text("重新检查", "Check Again"))
     }
 }

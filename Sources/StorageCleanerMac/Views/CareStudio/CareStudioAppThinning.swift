@@ -104,10 +104,10 @@ struct CareStudioAppThinning: View {
                         if let inventory = model.inventory {
                             Text(L10n.text("已跳过 \(ByteFormat.count(inventory.rootOwnedAppCount)) 个 root 拥有的应用，本批不处理。",
                                 "Skipped \(ByteFormat.count(inventory.rootOwnedAppCount)) root-owned apps; they are excluded from this batch."))
-                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                                .font(.system(size: 12)).foregroundStyle(.readableSecondary)
                             ForEach(inventory.skipped.keys.sorted(by: { $0.title < $1.title }), id: \.self) { reason in
                                 Text("\(reason.title) · \(ByteFormat.count(inventory.skipped[reason] ?? 0))")
-                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                                    .font(.system(size: 11)).foregroundStyle(.readableSecondary)
                             }
                             if inventory.unreadableLocations > 0 {
                                 Text(L10n.text("\(ByteFormat.count(inventory.unreadableLocations)) 个扫描位置无法读取，结果不完整。",
@@ -155,7 +155,7 @@ struct CareStudioAppThinning: View {
                 Text(app.name).fontWeight(.semibold)
                 Text(L10n.text("版本 \(app.version) · \(ByteFormat.count(app.files.count)) 个文件",
                     "Version \(app.version) · \(ByteFormat.count(app.files.count)) files"))
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .font(.system(size: 11)).foregroundStyle(.readableSecondary)
             }
             Spacer()
             Text(ByteFormat.storageString(app.savedBytes)).monospacedDigit()

@@ -34,7 +34,7 @@ struct RedactedSupportExportView: View {
             }
             Text(L10n.text("仅保存到本地，不上传；不含身份、路径、IP、密钥、进程清单与文件内容。",
                 "Saved locally, never uploaded; excludes identity, paths, IPs, secrets, process lists and file contents."))
-                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     LabeledContent(L10n.text("版本", "Version"), value: snapshot.appVersion ?? "—")

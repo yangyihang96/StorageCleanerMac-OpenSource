@@ -490,7 +490,7 @@ struct CareStudioClutterManager: View {
                     Button(L10n.text("改用系统照片图库", "Use the System Photo Library"), action: onUseSystemPhotoLibrary)
                 }
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.borderlessButton).careStudioActionTint()
             .fixedSize()
             .foregroundStyle(CareStudioManagerInk.accent)
             if !isSimilar {

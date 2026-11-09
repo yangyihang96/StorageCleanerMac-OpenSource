@@ -575,6 +575,39 @@ extension StartupItemsDomain.Item {
         return .valid
     }
 
+    /// D254 (G batch): why the item is under “Needs Attention”, from the same
+    /// evidence as `needsAttention`, so the row can say it (“1/3 个组件：残留配置”).
+    /// nil for every other item.
+    var attentionReasonText: String? {
+        guard needsAttention else { return nil }
+        var reasons: [String] = []
+        func add(_ reason: String) { if !reasons.contains(reason) { reasons.append(reason) } }
+        var affected = 0
+        for component in components {
+            var found = true
+            switch component.configurationState {
+            case .executableMissing: add(L10n.text("找不到程序", "Program missing"))
+            case .plistMissing: add(L10n.text("配置文件缺失", "Configuration file missing"))
+            case .malformed: add(L10n.text("配置格式错误", "Malformed configuration"))
+            case .signatureInvalid: add(L10n.text("签名异常", "Signature invalid"))
+            case .orphaned: add(L10n.text("残留配置", "Orphaned configuration"))
+            case .valid, .unknown: found = false
+            }
+            if component.diagnosticEvidence.contains("group-writable")
+                || component.diagnosticEvidence.contains("world-writable") {
+                add(L10n.text("权限过宽", "Permissions too broad")); found = true
+            }
+            if component.diagnosticEvidence.contains("unresolved-symbolic-link") {
+                add(L10n.text("链接解析不了", "Unresolved link")); found = true
+            }
+            if found { affected += 1 }
+        }
+        guard !reasons.isEmpty else { return nil }
+        let joined = reasons.joined(separator: L10n.text("、", ", "))
+        guard components.count > 1 else { return joined }
+        return L10n.text("\(affected)/\(components.count) 个组件：", "\(affected) of \(components.count) components: ") + joined
+    }
+
     var hasConfigurationIssue: Bool {
         switch configurationState {
         case .valid, .unknown:
@@ -774,6 +807,10 @@ extension StartupItemsDomain.Item {
 
     /// The attention category remains a focused review projection even though
     /// these rows also stay visible in the complete non-Apple list.
+    /// D235＋旧值“needsAttention，或可管理但归属置信度低于 high，或 manageability
+    /// == .unknown”: only real faults (broken or missing programs, invalid
+    /// signatures, loose permissions) count; an owner this app could not
+    /// confirm is shown in the item's own category, read-only where it was.
     var isPrimaryAttentionReviewItem: Bool {
         guard !isAppleSystem,
               !components.contains(where: {
@@ -781,12 +818,7 @@ extension StartupItemsDomain.Item {
                       || $0.state.management == .managedByOrganization
                       || $0.actionCapability.isManaged
               }) else { return false }
-        if needsAttention { return true }
-        if manageability == .directlyManageable
-            || manageability == .manageableThroughSystemSettings {
-            return attribution?.confidence ?? .unknown < .high
-        }
-        return manageability == .unknown
+        return needsAttention
     }
 
     var managementExplanation: String {
@@ -825,8 +857,12 @@ extension StartupItemsDomain.Item {
         }
     }
 
+    // D235＋旧值“needsAttention || manageability == .unknown”: an owner this
+    // app could not confirm is not a fault. On the review Mac 38 of 46
+    // background items read "Need Attention" for that alone (2026-10-27);
+    // they stay in their own categories, read-only, behind the lock.
     var isAttentionItem: Bool {
-        needsAttention || manageability == .unknown
+        needsAttention
     }
 
     var needsAttention: Bool {

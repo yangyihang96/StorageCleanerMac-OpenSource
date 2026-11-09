@@ -61,14 +61,14 @@ struct HelperPowerMetricsView: View {
                 }
                 Text(HelperPowerMetricsPresentation.detail(monitor.state, now: context.date))
                     .font(compact ? AdvancedPanelTypography.caption : AppTypography.caption)
-                    .foregroundStyle(lightfield ? FeatureLightfieldPalette.resolve(scheme).fg2 : AppDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(lightfield ? AnyShapeStyle(FeatureLightfieldPalette.resolve(scheme).fg2) : AnyShapeStyle(AppDesignTokens.Palette.secondaryText))
                     .fixedSize(horizontal: false, vertical: true)
                 if let failure = monitor.lastFailure {
                     Text(HelperPowerMetricsPresentation.detail(.failed(failure), now: context.date))
                         .font(compact ? AdvancedPanelTypography.caption : AppTypography.caption)
                         .foregroundStyle(AppDesignTokens.Palette.secondaryText)
                 }
-                Button(L10n.text("设置 › 权限 › 系统助手", "Settings › Access › System Helper")) {
+                Button(L10n.text("设置 › 权限与隐私 › 系统助手", "Settings › Access & Privacy › System Helper")) {
                     settingsCategory = .accessAndSetup
                     SystemHelperSettingsNavigation.shared.requestID = UUID()
                     openSettings()

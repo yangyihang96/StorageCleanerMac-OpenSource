@@ -118,7 +118,8 @@ final class DeclutterD4D5ContractTests: XCTestCase {
         }
         let rows = try section(actions, from: "var body: some View", to: "private func title(")
         XCTAssertTrue(rows.contains("action.reason.severity.title"))
-        XCTAssertTrue(rows.contains(".foregroundStyle(tint(action))"))
+        // D279＋旧值：.foregroundStyle(tint(action))（标题字按模块渐变取可读色，tint 本身不变）。
+        XCTAssertTrue(rows.contains(".foregroundStyle(CareStudioText(tint(action)))"))
         let tint = try section(actions, from: "private func tint(", to: "\n}")
         XCTAssertTrue(tint.contains("switch action.reason.severity"))
         for mapping in [

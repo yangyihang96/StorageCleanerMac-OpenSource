@@ -138,7 +138,8 @@ final class MemorySelectionSummaryTests: XCTestCase {
         XCTAssertTrue(row.contains("process.availability == .available"))
         // D178: memory as Activity Monitor writes it (was `ByteFormat.string(process.residentBytes)`).
         XCTAssertTrue(row.contains("ByteFormat.memoryString(process.residentBytes)"))
-        XCTAssertTrue(row.contains("process.capturedAt.formatted"))
+        // D275＋旧值：process.capturedAt.formatted。
+        XCTAssertTrue(row.contains("process.capturedAt.appFormatted"))
         XCTAssertFalse(row.contains("Button("))
         XCTAssertFalse(row.contains("Toggle("))
         XCTAssertFalse(row.contains("ScanStore"))

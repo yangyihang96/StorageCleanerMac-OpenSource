@@ -104,7 +104,7 @@ struct DuplicateFilesLightfieldView: View {
                         store.requestVerifiedDuplicateCleanup(disposition: .quarantine, workspace: workspace)
                     }.disabled(selected.isEmpty || isBusy)
                 } label: { Text(L10n.text("筛选与操作", "Filters and Actions")) }
-                    .menuStyle(.borderlessButton).fixedSize()
+                    .menuStyle(.borderlessButton).careStudioActionTint().fixedSize()
             }
             if store.duplicateCleanupProgress != nil {
                 Button(L10n.text("取消剩余项目", "Cancel Remaining"), action: store.cancelVerifiedDuplicateCleanupExecution)
@@ -250,7 +250,7 @@ struct LightfieldDuplicateRow: View {
             LightfieldStatusGlyph(status: isConfirmed ? .normal : .locked).frame(maxWidth: .infinity, maxHeight: .infinity)
             LightfieldPathText(path: item.path).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 .lightfieldComponentProbe("lightfield.duplicates.path." + item.id)
-            Text(modifiedAt.map { $0.formatted(date: .numeric, time: .omitted) } ?? L10n.text("未知", "Unknown"))
+            Text(modifiedAt.map { $0.appFormatted(date: .numeric, time: .omitted) } ?? L10n.text("未知", "Unknown"))
                 .font(.system(size: 13)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Text(ByteFormat.storageString(item.sizeBytes)).font(.system(size: 13)).monospacedDigit()
@@ -262,7 +262,7 @@ struct LightfieldDuplicateRow: View {
                 Button(L10n.text("复制路径", "Copy Path"), action: onCopyPath)
                 if let onIgnore { Button(IgnoreListMenu.title(count: 1), action: onIgnore).disabled(isBusy) }
             } label: { Text(kept ? L10n.text("保留此份", "Kept") : L10n.text("操作", "Actions")).font(.system(size: 13)).lineLimit(1) }
-                .menuStyle(.borderlessButton).frame(maxWidth: .infinity, maxHeight: .infinity)
+                .menuStyle(.borderlessButton).careStudioActionTint().frame(maxWidth: .infinity, maxHeight: .infinity)
                 .lightfieldComponentProbe("lightfield.duplicates.actions." + item.id)
         }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
             .overlay(alignment: .bottom) { FeatureLightfieldHairline() }
@@ -318,7 +318,7 @@ struct LightfieldSimilarPhotoTile: View {
                     Button(L10n.text("预览原件", "Quick Look")) { quickLookURL = URL(fileURLWithPath: item.path) }
                     Button(L10n.text("在访达中显示", "Show in Finder"), action: onReveal)
                     if let onIgnore { Button(IgnoreListMenu.title(count: 1), action: onIgnore).disabled(isBusy) }
-                } label: { Text(L10n.text("查看", "View")) }.menuStyle(.borderlessButton).disabled(item.status != .available)
+                } label: { Text(L10n.text("查看", "View")) }.menuStyle(.borderlessButton).careStudioActionTint().disabled(item.status != .available)
             }.font(.system(size: 13)).lineLimit(1)
         }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)
             .contextMenu { if let onIgnore { Button(IgnoreListMenu.title(count: 1), action: onIgnore).disabled(isBusy) } }

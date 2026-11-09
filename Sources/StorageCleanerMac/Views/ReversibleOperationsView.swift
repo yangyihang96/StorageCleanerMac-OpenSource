@@ -5,6 +5,7 @@ struct ReversibleOperationsView: View {
     var resumeUninstall: ((CleanReport) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRestore: CleanReport?
+    @State private var selectedNameRestore: CleanReport?
     @State private var expandedPlan: CleanPlanID?
     /// P2-6: receipts whose moved item is no longer where it was moved (for
     /// example after the Trash was emptied), per opened receipt.
@@ -30,7 +31,7 @@ struct ReversibleOperationsView: View {
             }
             Text(L10n.text("清空废纸篓后才释放空间；恢复前核验身份，同名冲突不覆盖。",
                            "Space is released after emptying Trash; restore verifies identity and never overwrites name conflicts."))
-                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
             if let warning = store.operationReportWarning {
                 Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(AppDesignTokens.Palette.warning)
             }
@@ -79,12 +80,14 @@ struct ReversibleOperationsView: View {
                                               ? "checkmark.circle" : "exclamationmark.circle")
                                     } else if let result = summary.presentation {
                                         Label(result.title, systemImage: result.systemImage)
-                                        Text(result.summary).foregroundStyle(.secondary)
+                                        Text(result.summary).foregroundStyle(.readableSecondary)
                                     }
                                     HStack(spacing: 4) {
                                         Text(summary.startedAt, style: .date)
+                                            .environment(\.locale, L10n.dateLocale)
                                         Text(summary.startedAt, style: .time)
-                                    }.foregroundStyle(.secondary)
+                                            .environment(\.locale, L10n.dateLocale)
+                                    }.foregroundStyle(.readableSecondary)
                                 }
                                 Spacer(minLength: 8)
                                 Button(expandedPlan == summary.planID ? L10n.text("收起", "Collapse") : L10n.text("详情", "Details")) {
@@ -107,6 +110,9 @@ struct ReversibleOperationsView: View {
                                     Text(L10n.text("原操作移走：", "Originally moved: ")
                                          + ByteFormat.storageString(summary.summary.movedToRecoverableLocationBytes))
                                         .font(AppDesignTokens.Typography.metadata)
+                                } else if summary.rulesVersion == SystemCacheClearReceipt.ruleID {
+                                    Text(SystemCacheClearReceipt.freedLabel(summary.summary))
+                                        .font(AppDesignTokens.Typography.metadata)
                                 }
                                 if let report = store.operationReportDetail, report.planID == summary.planID {
                                     if let resumeUninstall, AppUninstallService.canInspectResiduals(report) {
@@ -119,20 +125,31 @@ struct ReversibleOperationsView: View {
                                             .disabled(store.isRestoringRecordedOperation
                                                 || nothingLeftToRestore(in: report))
                                     }
+                                    // D252: after the put-back, one step back to the original name.
+                                    if UniversalBinaryService.offersOriginalNameRestore(report) {
+                                        Button(L10n.text("换回原名", "Restore Original Name")) { selectedNameRestore = report }
+                                            .disabled(store.isRestoringRecordedOperation)
+                                            .help(L10n.text("把放回的原应用换回原来的名字，瘦身版移到废纸篓，可从操作记录放回。",
+                                                            "Give the put-back original its name again and move the thinned copy to Trash; it can be put back from Operation History."))
+                                        if let message = store.thinningNameRestoreMessage {
+                                            Text(message).foregroundStyle(.readableSecondary)
+                                        }
+                                    }
                             ForEach(report.items) { item in
                                 HStack(alignment: .top) {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(URL(fileURLWithPath: item.sourcePath).lastPathComponent)
-                                        Text(item.sourcePath).foregroundStyle(.secondary).textSelection(.enabled)
+                                        Text(item.sourcePath).foregroundStyle(.readableSecondary).textSelection(.enabled)
                                     }
                                     Spacer(minLength: 12)
-                                    Text(itemLabel(item, report: report)).foregroundStyle(.secondary)
+                                    Text(itemLabel(item, report: report)).foregroundStyle(.readableSecondary)
                                 }.font(AppDesignTokens.Typography.metadata)
                             }
                             ForEach(Array((report.recoveryAttempts ?? []).enumerated()), id: \.offset) { _, attempt in
                                 HStack {
                                     Text(L10n.text("恢复记录", "Restore attempt"))
                                     Text(attempt.completedAt, style: .time)
+                                        .environment(\.locale, L10n.dateLocale)
                                     Spacer()
                                     Text(L10n.text("已恢复 \(ByteFormat.count(attempt.restoredCount)) 项", "\(ByteFormat.count(attempt.restoredCount)) restored"))
                                 }.font(AppDesignTokens.Typography.metadata)
@@ -193,6 +210,17 @@ struct ReversibleOperationsView: View {
             Text(L10n.text("仅恢复身份核实的回执。原位置已存在文件时跳过，不覆盖。",
                            "Only verified receipts can be restored. Existing destinations are skipped, never overwritten."))
         }
+        .confirmationDialog(L10n.text("换回原名？", "Restore the original name?"), isPresented: Binding(
+            get: { selectedNameRestore != nil }, set: { if !$0 { selectedNameRestore = nil } }
+        ), titleVisibility: .visible) {
+            Button(L10n.text("换回原名", "Restore Original Name")) {
+                if let selectedNameRestore { store.restoreThinnedApplicationName(selectedNameRestore) }
+                selectedNameRestore = nil
+            }
+        } message: {
+            Text(L10n.text("放回的原应用改回原来的名字，瘦身版移到废纸篓（可从操作记录放回）。两份应用都要在原处、身份核实且没有运行；否则不改动。",
+                           "The put-back original gets its name again and the thinned copy moves to Trash (it can be put back from Operation History). Both must be in place, verified and not running; otherwise nothing changes."))
+        }
     }
 
     /// D102 L4: the hardware operation record, kept apart from the receipts.
@@ -202,7 +230,7 @@ struct ReversibleOperationsView: View {
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
             Text(L10n.text("风扇、电源模式和 Mac mini 模式的写入，以及辅助程序自动交回系统控制的情况；只记在本机，不能撤销。",
                            "Fan, power mode and Mac mini mode writes, and the helper returning control to the system; kept on this Mac only and cannot be undone."))
-                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
             if hardwareHistoryUnreadable {
                 Label(L10n.text("硬件操作记录无法读取", "The hardware operation record could not be read"),
                       systemImage: "exclamationmark.triangle")
@@ -216,7 +244,7 @@ struct ReversibleOperationsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(HardwareOperationPresentation.title(record))
                         if let detail = HardwareOperationPresentation.detail(record) {
-                            Text(detail).foregroundStyle(.secondary)
+                            Text(detail).foregroundStyle(.readableSecondary)
                         }
                     }
                     Spacer(minLength: 12)
@@ -224,8 +252,10 @@ struct ReversibleOperationsView: View {
                         Text(HardwareOperationPresentation.outcome(record))
                         HStack(spacing: 4) {
                             Text(record.recordedAt, style: .date)
+                                .environment(\.locale, L10n.dateLocale)
                             Text(record.recordedAt, style: .time)
-                        }.foregroundStyle(.secondary)
+                                .environment(\.locale, L10n.dateLocale)
+                        }.foregroundStyle(.readableSecondary)
                     }
                 }.font(AppDesignTokens.Typography.metadata)
             }
@@ -261,6 +291,7 @@ struct ReversibleOperationsView: View {
         if let latest = (report.recoveryAttempts ?? []).flatMap(\.items).last(where: { $0.originalPath == item.sourcePath }) {
             return recoveryLabel(latest.outcome)
         }
+        if item.ruleID == SystemCacheClearReceipt.ruleID { return SystemCacheClearReceipt.itemLabel(item) }
         return OperationRecordPresentation.isTemporaryResource(item.ruleID)
             ? OperationRecordPresentation.temporaryItemLabel(item.outcome)
             : outcomeLabel(item.outcome, departed: departedReceiptPaths[report.planID] ?? [])

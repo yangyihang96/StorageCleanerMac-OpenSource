@@ -13,8 +13,8 @@ import Foundation
 /// Both make the kernel hand back file cache and purgeable memory. We keep
 /// CleanMyMac's step and stop rules and add two of our own: the push never
 /// exceeds what the kernel can drop without compressing anyone (free,
-/// speculative and purgeable pages and the file cache, less 1 GiB, at most
-/// half the RAM), and it stops as soon as the system's pressure level leaves
+/// speculative and purgeable pages and the file cache, each page counted
+/// once, less 1 GiB, at most half the RAM), and it stops as soon as the system's pressure level leaves
 /// normal. It never starts under raised pressure: the system is already
 /// reclaiming then, and more pressure only compresses or swaps other apps.
 /// The counters before and after are reported as measured; macOS counts the
@@ -23,7 +23,9 @@ enum MemoryReclaimer {
     /// One `host_statistics64` reading, in bytes.
     struct Reading: Sendable, Equatable {
         var physicalBytes: UInt64
+        /// vm_stat's free pages, without the speculative ones (D278).
         var freeBytes: UInt64
+        /// File pages read ahead; `fileBackedBytes` holds them too.
         var speculativeBytes: UInt64
         var inactiveBytes: UInt64
         var fileBackedBytes: UInt64
@@ -111,7 +113,10 @@ enum MemoryReclaimer {
     /// What the kernel can hand back without compressing anyone, less the
     /// headroom, at most half the RAM; 0 when that is under one step.
     static func budget(for reading: Reading) -> UInt64 {
-        let fileCache = min(reading.fileBackedBytes, reading.inactiveBytes)
+        // The speculative pages count once, as speculative, not again as
+        // file cache (D278).
+        let fileBacked = reading.fileBackedBytes - min(reading.fileBackedBytes, reading.speculativeBytes)
+        let fileCache = min(fileBacked, reading.inactiveBytes)
         let reclaimable = reading.freeBytes
             .addingReportingOverflow(reading.speculativeBytes).partialValue
             .addingReportingOverflow(reading.purgeableBytes).partialValue
@@ -185,7 +190,7 @@ enum MemoryReclaimer {
 
     static func liveReading() -> Reading? {
         var stats = vm_statistics64()
-        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        var count = SystemMemoryProbe.vmStatisticsCount
         let status = withUnsafeMutablePointer(to: &stats) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
                 host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
@@ -194,17 +199,30 @@ enum MemoryReclaimer {
         var rawPageSize: vm_size_t = 0
         guard status == KERN_SUCCESS,
               host_page_size(mach_host_self(), &rawPageSize) == KERN_SUCCESS, rawPageSize > 0 else { return nil }
-        let page = UInt64(rawPageSize)
-        func bytes(_ pages: natural_t) -> UInt64 { UInt64(pages).multipliedReportingOverflow(by: page).partialValue }
         return Reading(
+            statistics: stats,
+            pageSize: UInt64(rawPageSize),
             physicalBytes: ProcessInfo.processInfo.physicalMemory,
-            freeBytes: bytes(stats.free_count),
+            pressureLevelCode: SystemMemoryProbe.readSystemPressureLevelCode())
+    }
+}
+
+extension MemoryReclaimer.Reading {
+    /// The counters of one `host_statistics64` reading. D278: `free_count`
+    /// already holds the speculative pages (mach/vm_statistics.h), so free
+    /// leaves them out, as vm_stat does, and idle is `free_count`.
+    init(statistics stats: vm_statistics64, pageSize page: UInt64,
+         physicalBytes: UInt64, pressureLevelCode: Int32?) {
+        func bytes(_ pages: natural_t) -> UInt64 { UInt64(pages).multipliedReportingOverflow(by: page).partialValue }
+        self.init(
+            physicalBytes: physicalBytes,
+            freeBytes: bytes(stats.free_count - min(stats.free_count, stats.speculative_count)),
             speculativeBytes: bytes(stats.speculative_count),
             inactiveBytes: bytes(stats.inactive_count),
             fileBackedBytes: bytes(stats.external_page_count),
             purgeableBytes: bytes(stats.purgeable_count),
             compressedBytes: bytes(stats.compressor_page_count),
-            pressureLevelCode: SystemMemoryProbe.readSystemPressureLevelCode())
+            pressureLevelCode: pressureLevelCode)
     }
 }
 

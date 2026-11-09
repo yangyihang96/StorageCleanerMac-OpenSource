@@ -258,9 +258,14 @@ enum UniversalBinaryService {
                   try UniversalBinarySafety.stamp(app.url).identity == cloneRoot.identity else {
                 throw CleanupMoveError.invalidResult
             }
+            // D252: record the swap so Operation History can swap the names back
+            // after the put-back. Without the record only the put-back is offered.
+            var recorded = moveReport
+            recorded.thinningSwaps = [staging.path: .init(applicationPath: app.url.path, thinnedIdentity: cloneRoot.identity)]
+            if (try? env.persist(recorded, [staging.path: originalIdentity])) != nil { report = recorded }
             return result(.success, L10n.text("原应用已移入废纸篓，可从操作记录放回；清空废纸篓后才释放空间。",
                 "Original app moved to Trash; put it back from Operation History. Space is freed after emptying Trash."),
-                bytes: app.savedBytes, report: moveReport)
+                bytes: app.savedBytes, report: report)
         } catch {
             let skip = error as? UniversalBinarySkip
             var detail = skip?.title ?? (error is CancellationError ? UniversalBinarySkip.cancelled.title : error.localizedDescription)
@@ -302,6 +307,95 @@ enum UniversalBinaryService {
             let status: UniversalBinaryResult.Status = skip != nil && (cloneIdentity == nil || skip == .running
                 || skip == .changed || skip == .cancelled) ? .skipped : .failed
             return result(status, phase + L10n.text("：", ": ") + detail, report: report)
+        }
+    }
+
+    static let nameRestoreRuleID = "applications.universal-thinning.name-restore.d252"
+
+    /// D252 (G batch): Operation History puts a thinned app's original back
+    /// beside the thin copy, under its “… (before thinning)” staging name.
+    /// Offered once that put-back happened, and only for receipts that
+    /// recorded the swap.
+    static func offersOriginalNameRestore(_ report: CleanReport) -> Bool {
+        guard let swaps = report.thinningSwaps, !swaps.isEmpty else { return false }
+        let restored = Set((report.recoveryAttempts ?? []).flatMap(\.items)
+            .filter { $0.outcome == .restored }.map { PathSafety.lexicalPath($0.originalPath) })
+        return swaps.keys.contains { restored.contains(PathSafety.lexicalPath($0)) }
+    }
+
+    /// One step: swap the original and the thin copy back (`RENAME_SWAP`, both
+    /// identities checked first, neither app running), then move the thin copy,
+    /// renamed “… (thinned)”, to the Trash with its own receipt. A failure
+    /// before the Trash move swaps back; nothing is ever deleted.
+    static func restoreOriginalName(from report: CleanReport, environment env: UniversalBinaryEnvironment = .init(),
+                                    beforeMutation: @escaping @Sendable () async throws -> Void = {}) async -> UniversalBinaryResult? {
+        guard let swapRecord = report.thinningSwaps?.sorted(by: { $0.key < $1.key }).first else { return nil }
+        let stagingPath = swapRecord.key, record = swapRecord.value
+        guard let item = report.items.first(where: { $0.sourcePath == stagingPath }),
+              case .moved(let receipt) = item.outcome, let original = receipt.movedIdentity else { return nil }
+        let staging = URL(fileURLWithPath: stagingPath), app = URL(fileURLWithPath: record.applicationPath)
+        let name = app.deletingPathExtension().lastPathComponent
+        func result(_ status: UniversalBinaryResult.Status, _ detail: String, report: CleanReport? = nil) -> UniversalBinaryResult {
+            .init(id: app.path, name: name, status: status, detail: detail, report: report)
+        }
+        let thinName = name + L10n.text("（瘦身版）", " (thinned)") + ".storagecleaner-thin-\(UUID().uuidString).app"
+        let thin = app.deletingLastPathComponent().appendingPathComponent(thinName)
+        var swapped = false, renamed = false
+        do {
+            try await beforeMutation()
+            guard staging.deletingLastPathComponent() == app.deletingLastPathComponent(),
+                  UniversalBinarySafety.isStagingName(staging.lastPathComponent) else { throw UniversalBinarySkip.changed }
+            guard (try? UniversalBinarySafety.stamp(staging).identity) == original else {
+                return result(.skipped, L10n.text("请先在操作记录中恢复瘦身前的原应用。", "Restore the original app from Operation History first."))
+            }
+            guard try UniversalBinarySafety.stamp(app).identity == record.thinnedIdentity else { throw UniversalBinarySkip.changed }
+            let info = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
+            let identifiers = [info?["CFBundleIdentifier"] as? String].compactMap { $0 }
+            if await env.running(app, identifiers) { throw UniversalBinarySkip.running }
+            if await env.running(staging, identifiers) { throw UniversalBinarySkip.running }
+            try swap(staging, app, left: original, right: record.thinnedIdentity)
+            swapped = true
+            guard try UniversalBinarySafety.stamp(staging).identity == record.thinnedIdentity,
+                  renamex_np(staging.path, thin.path, UInt32(RENAME_EXCL)) == 0 else { throw UniversalBinarySkip.changed }
+            renamed = true
+            let bytes = CleanupByteCount.sum(try UniversalBinarySafety.tree(thin).values
+                .filter { $0.identity.entryKind == .regularFile }.map(\.size))
+            let moveReport = await RecordedTrashOperation.runAsync(
+                items: [.init(path: thin.path, bytes: bytes, identity: record.thinnedIdentity,
+                              allowedRestoreRoot: app.deletingLastPathComponent())],
+                ruleID: nameRestoreRuleID,
+                validate: { _ in
+                    try await beforeMutation()
+                    guard try UniversalBinarySafety.stamp(app).identity == original,
+                          try UniversalBinarySafety.stamp(thin).identity == record.thinnedIdentity else { throw UniversalBinarySkip.changed }
+                }, move: { source in try env.trash(source) }, metadata: env.metadata, persist: env.persist)
+            guard let moved = moveReport.restorableReceipts.first, moved.movedIdentity == record.thinnedIdentity else {
+                throw CleanupMoveError.invalidResult
+            }
+            let detail = moveReport.persistenceFailure == nil
+                ? L10n.text("已换回原名“\(name)”；瘦身版已移到废纸篓，可从操作记录放回。",
+                            "“\(name)” has its original name again; the thinned copy moved to Trash and can be put back from Operation History.")
+                : L10n.text("已换回原名“\(name)”，瘦身版已移到废纸篓；回执没有写完整，请在操作记录中核对。",
+                            "“\(name)” has its original name again and the thinned copy is in Trash; the receipt is incomplete, check Operation History.")
+            return result(.success, detail, report: moveReport)
+        } catch {
+            let skip = error as? UniversalBinarySkip
+            var detail = skip?.title ?? (error is CancellationError ? UniversalBinarySkip.cancelled.title : error.localizedDescription)
+            if swapped {
+                // Back to the put-back state: only while the thin copy is still here.
+                let current = renamed ? thin : staging
+                do {
+                    guard try UniversalBinarySafety.stamp(current).identity == record.thinnedIdentity else { throw UniversalBinarySkip.changed }
+                    if renamed {
+                        guard renamex_np(thin.path, staging.path, UInt32(RENAME_EXCL)) == 0 else { throw UniversalBinarySkip.changed }
+                    }
+                    try swap(staging, app, left: record.thinnedIdentity, right: original)
+                } catch {
+                    detail += L10n.text("；无法自动还原，两份应用都已保留。请查看操作记录和应用所在文件夹。",
+                        "; automatic rollback could not be confirmed. Both copies were kept; check Operation History and the app folder.")
+                }
+            }
+            return result(skip != nil && !swapped ? .skipped : .failed, detail)
         }
     }
 

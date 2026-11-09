@@ -49,6 +49,26 @@ struct AppWindowLayoutPolicy {
         )
     }
 
+    /// D243 (review P2-15): the visible frame a window belongs to, from the
+    /// screens as they are now: the one it overlaps most, else the main
+    /// screen's. `NSWindow.screen` can still name a display that was just
+    /// removed; the 2.0.1 main window stayed at x = −1316 with no display
+    /// there after a virtual display closed.
+    static func visibleFrame(for windowFrame: NSRect, screens: [NSRect], main: NSRect?) -> NSRect? {
+        var best: NSRect?
+        var bestArea: CGFloat = 0
+        for screen in screens {
+            let overlap = screen.intersection(windowFrame)
+            guard !overlap.isNull else { continue }
+            let area: CGFloat = overlap.width * overlap.height
+            if area > bestArea {
+                best = screen
+                bestArea = area
+            }
+        }
+        return best ?? main ?? screens.first
+    }
+
     static func isFullyVisible(_ frame: NSRect, in visibleFrame: NSRect) -> Bool {
         availableFrame(in: visibleFrame).contains(frame)
     }
@@ -311,6 +331,8 @@ struct MainWindowChromeConfigurator: NSViewRepresentable {
 
         @objc private func screenParametersDidChange(_ notification: Notification) {
             applyLayout(centerWhenResized: false)
+            // D243: and once more after AppKit has moved its windows' screens.
+            DispatchQueue.main.async { [weak self] in self?.applyLayout(centerWhenResized: false) }
         }
 
         @objc private func windowWillEnterFullScreen(_ notification: Notification) {
@@ -322,10 +344,12 @@ struct MainWindowChromeConfigurator: NSViewRepresentable {
         }
 
         private func applyLayout(centerWhenResized: Bool) {
+            // D243＋旧值“window.screen?.visibleFrame ?? NSScreen.main…”: the
+            // screens as they are now decide, not the window's last screen.
             guard let window,
-                  let visibleFrame = window.screen?.visibleFrame
-                    ?? NSScreen.main?.visibleFrame
-                    ?? NSScreen.screens.first?.visibleFrame else { return }
+                  let visibleFrame = AppWindowLayoutPolicy.visibleFrame(
+                    for: window.frame, screens: NSScreen.screens.map(\.visibleFrame),
+                    main: NSScreen.main?.visibleFrame) else { return }
 
             let maximumContentSize = AppWindowLayoutPolicy.maximumContentSize(in: visibleFrame)
             let minimumContentSize = AppWindowLayoutPolicy.minimumContentSize(in: visibleFrame)
@@ -615,6 +639,8 @@ struct MainContentHost<Content: View>: View {
         // the studio's translucent card instead of glass.
         .environment(\.careStudioSurface, studio != nil)
         .environment(\.smartScanFlowNamespace, FeatureLightfield.owns(route) ? lightfieldNamespace : nil)
+        .environment(\.careStudioActionText, studio.map { CareStudioInk.actionText(for: $0.family) })
+        .environment(\.careStudioTextGround, studio?.family)
         .tint(studio.map { CareStudioInk.tint(for: $0.family) } ?? theme.actionFill)
         .foregroundStyle(theme.primaryText, theme.secondaryText, theme.tertiaryText)
 
@@ -855,6 +881,7 @@ struct GlassToolbarButton: View {
             }
         }
         .buttonStyle(.bordered)
+        .careStudioActionTint()
         .controlSize(.regular)
         .disabled(isDisabled || isLoading)
         .help(title)

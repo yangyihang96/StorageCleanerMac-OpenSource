@@ -483,7 +483,10 @@ final class AppLifecycleReminderCenter: ObservableObject {
         case .junkCleanup: store?.showFilter(.green)
         case .uninstaller: store?.showFilter(.uninstall)
         }
-        if let open = MainWindowReopenCoordinator.shared.openMainWindow {
+        // D257: from the menu-bar-only state this brings the main program back.
+        if MenuBarOnlyMode.shared.isActive {
+            MainWindowReopenCoordinator.shared.requestMainWindow()
+        } else if let open = MainWindowReopenCoordinator.shared.openMainWindow {
             open()
         } else {
             NotificationCenter.default.post(name: .storageCleanerShowMainWindow, object: nil)

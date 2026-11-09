@@ -97,8 +97,10 @@ final class RuntimeUIRound201Tests: XCTestCase {
         XCTAssertTrue(picker.contains("Text(name(selection))"))
         XCTAssertTrue(picker.contains("if isCustom(item) {"))
         XCTAssertTrue(picker.contains("AngularGradient("))
-        let general = try source("Sources/StorageCleanerMac/Views/Settings/SettingsGeneral.swift")
-        let section = try r2SourceDeclaration("var panelAppearanceSection", in: general)
+        // D272: the picker went with the icon's options (was panelAppearanceSection
+        // in SettingsGeneral.swift).
+        let icon = try source("Sources/StorageCleanerMac/Views/Settings/SettingsCombinedStatusIcon.swift")
+        let section = try r2SourceDeclaration("private var statusColorRows", in: icon)
         // D135: the chart color picker, the other one with a custom item,
         // left with iStat's themes; was 2 ("Both pickers with a custom item mark it").
         XCTAssertEqual(section.components(separatedBy: "isCustom: { $0 == .custom }").count - 1, 1,

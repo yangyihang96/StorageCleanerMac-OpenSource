@@ -15,6 +15,8 @@ final class AppUpdater: NSObject, ObservableObject {
     private var relaunchWaiter: Task<Void, Never>?
     private var installLease: (coordinator: HeavyWorkCoordinator, lease: HeavyWorkCoordinator.Lease)?
     private let postponedNotice = RelaunchPostponedNotice()
+    /// D256: the install relaunch ends the process; it never only closes the main program.
+    var isInstallingUpdate: Bool { installLease != nil }
 
     private override init() {
         super.init()
@@ -93,6 +95,29 @@ extension AppUpdater: SPUUpdaterDelegate {
         relaunchWaiter = nil
         postponedNotice.close()
         releaseInstallLease()
+        // D271: no relaunch follows a failed install.
+        if error != nil { MenuBarOnlyRelaunch.clear() }
+    }
+
+    /// D271: a silently downloaded update installs when the process exits,
+    /// which a quit no longer does while the panel stays (D256). The install
+    /// is held for the menu-bar-only state: once the main program is closed
+    /// and nothing runs, it installs and relaunches into that state. Without
+    /// the panel Sparkle keeps installing at exit.
+    func updater(
+        _ updater: SPUUpdater,
+        willInstallUpdateOnQuit item: SUAppcastItem,
+        immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
+    ) -> Bool {
+        guard MenuBarOnlyMode.shared.isConfigured, AppQuitPreferences.keepsMenuBarPanelAfterQuit() else {
+            return false
+        }
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        MenuBarOnlyMode.shared.holdUpdateInstall {
+            MenuBarOnlyRelaunch.mark(fromBuild: build)
+            immediateInstallHandler()
+        }
+        return true
     }
 }
 

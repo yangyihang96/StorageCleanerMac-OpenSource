@@ -29,15 +29,60 @@ final class MyActivityHealthTests: XCTestCase {
         XCTAssertEqual(evaluate(MyActivityD187Fixtures.health(disk: warning)).reasons, [.diskWarning])
     }
 
-    func testFreeSpaceThresholdsExcludePurgeableSpace() {
+    /// D230＋旧值: was `testFreeSpaceThresholdsExcludePurgeableSpace`, which judged
+    /// `availableBytes` (filesystem-free) and ignored important-usage 900: free
+    /// 0/49 → problem, 50/99 → attention, 100/500 → good. The same thresholds
+    /// now apply to the space available for important use, as System Health's
+    /// capacity score does; the filesystem-free value decides only without it.
+    func testFreeSpaceThresholdsUseSpaceAvailableForImportantUse() {
         let thresholds: [(Int64, MyActivityHealth.Grade)] = [(0, .problem), (49, .problem), (50, .attention),
                                                           (99, .attention), (100, .good), (500, .good)]
         for (free, expected) in thresholds {
-            let capacity = CapacityTrendSnapshot(availability: .available, status: .healthy,
-                totalBytes: 1_000, availableBytes: free, availableForImportantUsageBytes: 900,
+            let important = CapacityTrendSnapshot(availability: .available, status: .healthy,
+                totalBytes: 1_000, availableBytes: 0, availableForImportantUsageBytes: free,
                 sevenDayDeltaBytes: nil, recordedAt: now)
-            XCTAssertEqual(evaluate(MyActivityD187Fixtures.health(capacity: capacity)).grade, expected, "free=\(free)")
+            XCTAssertEqual(evaluate(MyActivityD187Fixtures.health(capacity: important)).grade, expected, "important=\(free)")
+            let fallback = CapacityTrendSnapshot(availability: .available, status: .healthy,
+                totalBytes: 1_000, availableBytes: free, availableForImportantUsageBytes: nil,
+                sevenDayDeltaBytes: nil, recordedAt: now)
+            XCTAssertEqual(evaluate(MyActivityD187Fixtures.health(capacity: fallback)).grade, expected, "free=\(free)")
         }
+    }
+
+    /// D230: the review Mac (2026-10-27): 3.3% filesystem-free but 17.9% for
+    /// important use; the card said "Problems Found · below 5%" beside a bar
+    /// that read 82% used.
+    func testLowFilesystemFreeWithReclaimableSpaceIsNotASpaceProblem() {
+        let capacity = CapacityTrendSnapshot(availability: .available, status: .healthy,
+            totalBytes: 994_610_155_520, availableBytes: 32_455_352_320,
+            availableForImportantUsageBytes: 177_853_016_966, sevenDayDeltaBytes: nil, recordedAt: now)
+        let result = evaluate(MyActivityD187Fixtures.health(capacity: capacity))
+        XCTAssertEqual(result.grade, .good)
+        XCTAssertFalse(result.reasons.contains(.criticalSpace))
+        XCTAssertFalse(result.reasons.contains(.lowSpace))
+        XCTAssertNil(result.primaryReason)
+    }
+
+    func testBothMeasuresBelowFivePercentIsStillCritical() {
+        let capacity = CapacityTrendSnapshot(availability: .available, status: .healthy,
+            totalBytes: 1_000, availableBytes: 20, availableForImportantUsageBytes: 40,
+            sevenDayDeltaBytes: nil, recordedAt: now)
+        let result = evaluate(MyActivityD187Fixtures.health(capacity: capacity))
+        XCTAssertEqual(result.reasons, [.criticalSpace])
+        XCTAssertEqual(result.grade, .problem)
+        XCTAssertEqual(result.primaryReason, .criticalSpace)
+    }
+
+    /// D230: the card's reason line is the first reason of the highest grade.
+    func testPrimaryReasonIsTheFirstOfTheHighestGrade() {
+        XCTAssertEqual(MyActivityHealth(grade: .problem, reasons: [.backup, .diskFailure, .batteryService, .incomplete],
+                                        checkedAt: now).primaryReason, .diskFailure)
+        XCTAssertEqual(MyActivityHealth(grade: .attention, reasons: [.stale, .backup], checkedAt: now).primaryReason, .stale)
+        XCTAssertNil(MyActivityHealth(grade: .good, reasons: [], checkedAt: now).primaryReason)
+        let source = try? String(contentsOf: SwiftSourceScanning.projectRoot
+            .appendingPathComponent("Sources/StorageCleanerMac/Views/CareStudio/CareStudioActivityCards.swift"), encoding: .utf8)
+        XCTAssertTrue(source?.contains("if let reason = health.primaryReason {") == true)
+        XCTAssertTrue(source?.contains(".layoutProbe(\"careStudio.activity.health.reason\")") == true)
     }
 
     func testCapacityWarningDoesNotClaimLessThanTenPercentFree() {

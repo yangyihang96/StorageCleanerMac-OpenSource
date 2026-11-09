@@ -25,7 +25,7 @@ struct CleanupOperationOverlay: View {
 
                     Text(statusDetail)
                         .font(AppDesignTokens.Typography.body)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -41,7 +41,7 @@ struct CleanupOperationOverlay: View {
                         )
                     )
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 }
             }
             .padding(32)
@@ -114,7 +114,7 @@ struct CleanupOperationOverlay: View {
                 .monospacedDigit()
             Text(title)
                 .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 86)

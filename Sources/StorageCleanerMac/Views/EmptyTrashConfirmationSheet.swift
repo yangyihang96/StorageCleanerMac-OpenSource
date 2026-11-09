@@ -47,7 +47,7 @@ struct EmptyTrashConfirmationSheet: View {
                         "\(L10n.items(facts.itemCount)) · \(ByteFormat.storageString(frozen.summary.totalBytes)) · Delete Permanently"
                     ))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                 }
                 Spacer()
@@ -69,7 +69,7 @@ struct EmptyTrashConfirmationSheet: View {
                     "Only the \(ByteFormat.count(facts.itemCount)) item(s) in the Trash when this confirmation opened are deleted, and they cannot be restored. Files an earlier cleanup moved there can no longer be restored from Operation History. Items put in the Trash afterwards, and items replaced under the same name, are kept."
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
                 Toggle(isOn: $acknowledgesPermanentDeletion) {

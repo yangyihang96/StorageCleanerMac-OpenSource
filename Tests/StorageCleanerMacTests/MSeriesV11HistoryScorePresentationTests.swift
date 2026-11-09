@@ -41,7 +41,8 @@ final class MSeriesV11HistoryScorePresentationTests: XCTestCase {
                 XCTAssertEqual(display.historyMetric.caption, reason)
                 for scheme in [ColorScheme.light, .dark] {
                     let palette = FeatureLightfieldPalette.resolve(scheme)
-                    XCTAssertEqual(display.historyMetric.status?.color(palette), palette.fg3)
+                    // D279＋旧值：palette.fg3（灰字改成按渐变取色的样式，状态色函数仍给原值）。
+                    XCTAssertEqual(display.historyMetric.status?.color(palette), palette.fg3.base)
                 }
             }
         }

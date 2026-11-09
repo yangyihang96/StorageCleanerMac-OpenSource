@@ -24,7 +24,7 @@ struct AppUpdaterView: View {
                     systemImage: "eye.fill"
                 )
                 .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(AppDesignTokens.Palette.warning)
+                .foregroundStyle(CareStudioText(AppDesignTokens.Palette.warning))
                 .frame(maxWidth: .infinity, minHeight: 28)
                 .background(AppDesignTokens.Palette.warning.opacity(0.11))
                 .accessibilityLabel(
@@ -465,8 +465,8 @@ struct AppUpdateIdlePage: View {
         guard let lastSummary else { return .idle(L10n.text("尚未检查更新", "Updates not checked")) }
         return .completed(
             L10n.text(
-                "上次扫描：\(lastSummary.completedAt.formatted(date: .abbreviated, time: .shortened))",
-                "Last scanned: \(lastSummary.completedAt.formatted(date: .abbreviated, time: .shortened))"
+                "上次扫描：\(lastSummary.completedAt.appFormatted(date: .abbreviated, time: .shortened))",
+                "Last scanned: \(lastSummary.completedAt.appFormatted(date: .abbreviated, time: .shortened))"
             )
         )
     }
@@ -685,7 +685,7 @@ struct AppUpdateScanSummaryPage: View {
                     HStack(alignment: .top, spacing: 12) {
                         LightfieldStatusGlyph(status: .warning)
                         Text(warning).font(.system(size: 13)).textSelection(.enabled)
-                    }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).warningColor)
+                    }.foregroundStyle(CareStudioText(FeatureLightfieldPalette.resolve(scheme).warningColor))
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
                 }
                 HStack(spacing: 20) {
@@ -707,11 +707,11 @@ private struct AppUpdateWarningsView: View {
         VStack(alignment: .leading, spacing: 7) {
             Label(L10n.text("扫描提醒", "Scan Notices"), systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(AppDesignTokens.Palette.warning)
+                .foregroundStyle(CareStudioText(AppDesignTokens.Palette.warning))
             ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in
                 Text(warning)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .textSelection(.enabled)
             }
         }
@@ -834,7 +834,7 @@ private struct AppUpdateManagerPage: View {
                     "Showing \(ByteFormat.count(visibleEntries.count)) of \(ByteFormat.count(snapshot.entries.count)) apps; \(ByteFormat.count(selectedUpdateApplicationIDs.count)) selected, including \(selectedUpdateApplicationIDs.subtracting(visibleEligibleApplicationIDs).count) outside this filter"
                 ))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 ViewThatFits(in: .horizontal) {
                     HStack { selectionActions }
                     VStack(alignment: .leading, spacing: 8) { selectionActions }
@@ -860,7 +860,7 @@ private struct AppUpdateManagerPage: View {
             Button(L10n.text("清空选择", "Clear Selection")) {
                 selectedUpdateApplicationIDs.removeAll()
             }.disabled(selectedUpdateApplicationIDs.isEmpty)
-        }.menuStyle(.borderlessButton)
+        }.menuStyle(.borderlessButton).careStudioActionTint()
         Button(L10n.text("更新所选 · \(ByteFormat.count(selectedUpdateApplicationIDs.count))", "Update Selected · \(ByteFormat.count(selectedUpdateApplicationIDs.count))")) {
             onUpdateAutomatic(selectedUpdateApplicationIDs)
         }.appButtonChrome(.primary)
@@ -928,6 +928,7 @@ private struct AppUpdateManagerPage: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .featureLightfieldMenuTint()
             .frame(width: 138)
             .help(L10n.text("按更新能力筛选", "Filter by update capability"))
             .accessibilityLabel(L10n.text("更新能力筛选", "Update Capability Filter"))
@@ -939,6 +940,7 @@ private struct AppUpdateManagerPage: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .featureLightfieldMenuTint()
             .frame(width: 122)
             .help(L10n.text("应用排序", "Application sort order"))
             .accessibilityLabel(L10n.text("应用排序", "Application Sort Order"))
@@ -1118,23 +1120,23 @@ private struct AppUpdateCatalogRow: View {
                     .help(entry.application.name)
                 Text(versionText)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
                 Text(entry.application.source.trimmed.nonEmpty ?? L10n.text("来源待确认", "Source Unconfirmed"))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
                     .help(entry.application.path)
                 Label(entry.application.updateStatus == .ignored ? L10n.text("已忽略", "Ignored") : entry.category.title, systemImage: entry.category.systemImage)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(entry.category.color)
+                    .foregroundStyle(CareStudioText(entry.category.color))
                     .fixedSize(horizontal: false, vertical: true)
                 if !entry.canJoinAutomaticUpdateBatch,
                    let reason = entry.application.updateError?.trimmed.nonEmpty {
                     Text(reason)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1240,10 +1242,10 @@ private struct AppUpdateCatalogDetail: View {
                             .fixedSize(horizontal: false, vertical: true)
                         Label(entry.application.updateStatus == .ignored ? L10n.text("已忽略", "Ignored") : entry.category.title, systemImage: entry.category.systemImage)
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(entry.category.color)
+                            .foregroundStyle(CareStudioText(entry.category.color))
                         Text(app.bundleIdentifier.trimmed.nonEmpty ?? L10n.text("无 Bundle ID", "No Bundle ID"))
                             .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .textSelection(.enabled)
                     }
                 }
@@ -1278,7 +1280,7 @@ private struct AppUpdateCatalogDetail: View {
                         .font(.system(size: 14, weight: .semibold))
                     Text(app.releaseNotes?.trimmed.nonEmpty ?? L10n.text("暂无发布说明", "No release notes available"))
                         .font(.system(size: 12.5))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1289,7 +1291,7 @@ private struct AppUpdateCatalogDetail: View {
                 if let updateError = app.updateError?.trimmed.nonEmpty {
                     Label(updateError, systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AppDesignTokens.Palette.warning)
+                        .foregroundStyle(CareStudioText(AppDesignTokens.Palette.warning))
                         .textSelection(.enabled)
                 }
 
@@ -1327,7 +1329,7 @@ private struct AppUpdateCatalogDetail: View {
     }
 
     private var releaseDateText: String {
-        app.releaseDate?.formatted(date: .abbreviated, time: .omitted)
+        app.releaseDate?.appFormatted(date: .abbreviated, time: .omitted)
             ?? L10n.text("暂无", "Unavailable")
     }
 
@@ -1467,7 +1469,7 @@ private struct AppUpdateCatalogDetail: View {
                         "In-app automatic updates use a controlled executable and argument array; this displayed text is never evaluated."
                     ))
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
 
                     Text(command)
                         .font(.system(size: 11.5, weight: .medium, design: .monospaced))
@@ -1517,7 +1519,7 @@ private struct AppUpdateVersionComparison: View {
         HStack(spacing: 12) {
             version(title: L10n.text("当前版本", "Current"), value: app.currentVersionDisplay)
             Image(systemName: "arrow.right")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .accessibilityHidden(true)
             version(title: L10n.text("可用版本", "Available"), value: app.availableVersion?.display ?? L10n.text("暂无", "Unavailable"))
         }
@@ -1531,7 +1533,7 @@ private struct AppUpdateVersionComparison: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Text(value)
                 .font(.system(size: 14, weight: .semibold))
                 .monospacedDigit()
@@ -1549,13 +1551,13 @@ private struct AppUpdateFact: View {
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: systemImage)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 16)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(value)
                     .font(.system(size: 12.5, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
@@ -1580,11 +1582,11 @@ private struct AppUpdateActionNotice: View {
                 Text(title).font(.system(size: 13, weight: .semibold))
                 Text(detail)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         } icon: {
             Image(systemName: systemImage)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1642,7 +1644,7 @@ private struct AppUpdatePreparingPage: View {
                             Spacer()
                             Text(app.availableVersion?.display ?? L10n.text("版本待核验", "Version pending"))
                                 .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .monospacedDigit()
                         }
                     }
@@ -1699,7 +1701,7 @@ private struct AppUpdateProgressPage: View {
                             Spacer()
                             Text(progressCountText)
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .monospacedDigit()
                         }
 
@@ -1805,7 +1807,7 @@ private struct AppUpdateSessionItemRow: View {
             } else {
                 Image(systemName: "app.dashed")
                     .frame(width: 34, height: 34)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .accessibilityHidden(true)
             }
 
@@ -1815,12 +1817,12 @@ private struct AppUpdateSessionItemRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 6) {
                     Label(item.task.state.title, systemImage: item.task.state.systemImage)
-                        .foregroundStyle(item.task.state.color)
+                        .foregroundStyle(CareStudioText(item.task.state.color))
                     if let detail = item.task.detail?.trimmed.nonEmpty,
                        detail != item.task.errorDescription?.trimmed.nonEmpty {
                         Text("·")
                         Text(detail)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                 }
                 .font(.system(size: 11.5, weight: .medium))
@@ -1838,7 +1840,7 @@ private struct AppUpdateSessionItemRow: View {
                 if let error = item.task.errorDescription?.trimmed.nonEmpty {
                     Text(error)
                         .font(.system(size: 11.5))
-                        .foregroundStyle(AppDesignTokens.Palette.destructive)
+                        .foregroundStyle(CareStudioText(AppDesignTokens.Palette.destructive))
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
@@ -1848,7 +1850,7 @@ private struct AppUpdateSessionItemRow: View {
 
             Text(item.task.targetVersion?.display ?? "—")
                 .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .monospacedDigit()
         }
         .padding(.vertical, 5)
@@ -1914,7 +1916,7 @@ private struct AppUpdateReportPage: View {
                             Divider()
                             Text(sessionError)
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(AppDesignTokens.Palette.destructive)
+                                .foregroundStyle(CareStudioText(AppDesignTokens.Palette.destructive))
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2018,10 +2020,10 @@ private struct AppUpdateReportCount: View {
                 .accessibilityHidden(true)
             Text(title)
                 .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Text(value, format: .number)
                 .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                .foregroundStyle(color)
+                .foregroundStyle(CareStudioText(color))
                 .monospacedDigit()
         }
         .padding(.horizontal, 10)
@@ -2054,18 +2056,18 @@ private struct AppUpdateReportItemRow: View {
                     .font(.system(size: 13.5, weight: .semibold))
                 Text(versionText)
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                 if let detail = item.detail?.trimmed.nonEmpty,
                    detail != item.errorDescription?.trimmed.nonEmpty {
                     Text(detail)
                         .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
                 if let error = item.errorDescription?.trimmed.nonEmpty {
                     Text(error)
                         .font(.system(size: 11.5))
-                        .foregroundStyle(AppDesignTokens.Palette.destructive)
+                        .foregroundStyle(CareStudioText(AppDesignTokens.Palette.destructive))
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -2076,7 +2078,7 @@ private struct AppUpdateReportItemRow: View {
             VStack(alignment: .trailing, spacing: 6) {
                 Text(item.state.title)
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(item.state.color)
+                    .foregroundStyle(CareStudioText(item.state.color))
                 if item.canRetry {
                     AppButton(
                         title: L10n.text("重试（新批次，需再次授权）", "Retry (new batch; reauthorize)"),
@@ -2327,7 +2329,7 @@ private struct AppUpdateLogMetric: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(title)
                 .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
@@ -2367,9 +2369,9 @@ private struct AppUpdateLogRow: View {
                     .frame(width: 28, height: 28)
             }
 
-            Text(entry.timestamp.formatted(date: .omitted, time: .standard))
+            Text(entry.timestamp.appFormatted(date: .omitted, time: .standard))
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 82, alignment: .leading)
 
             Image(systemName: entry.state.systemImage)
@@ -2383,11 +2385,11 @@ private struct AppUpdateLogRow: View {
                         .font(.system(size: 13, weight: .semibold))
                     Text(entry.state.title)
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(entry.state.color)
+                        .foregroundStyle(CareStudioText(entry.state.color))
                 }
                 Text(versionAndSourceText)
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                     .textSelection(.enabled)
                 if entry.attemptCount > 0 {
@@ -2396,20 +2398,20 @@ private struct AppUpdateLogRow: View {
                         "Attempt \(ByteFormat.count(entry.attemptCount))"
                     ))
                     .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                 }
                 if let detail = entry.detail?.trimmed.nonEmpty {
                     Text(detail)
                         .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .textSelection(.enabled)
                 }
                 if let error = entry.errorDescription?.trimmed.nonEmpty {
                     HStack(alignment: .top) {
                         Text(error)
                             .font(.system(size: 11.5))
-                            .foregroundStyle(AppDesignTokens.Palette.destructive)
+                            .foregroundStyle(CareStudioText(AppDesignTokens.Palette.destructive))
                             .textSelection(.enabled)
                         Spacer()
                         AppButton(
@@ -2534,6 +2536,8 @@ private extension AppUpdateCatalogCategory {
         }
     }
 
+    /// D279: as words on the page this goes through `CareStudioText`, so it
+    /// reads on the module's gradient; glyphs and fills keep it as it is.
     var color: Color {
         switch self {
         case .automatic: .accentColor
@@ -2596,6 +2600,8 @@ private extension ApplicationUpdateTaskState {
         }
     }
 
+    /// D279: as words on the page this goes through `CareStudioText`, so it
+    /// reads on the module's gradient; glyphs and fills keep it as it is.
     var color: Color {
         switch self {
         case .completed: AppDesignTokens.Palette.success
@@ -2648,6 +2654,8 @@ private extension AppUpdateReportOutcome {
         }
     }
 
+    /// D279: as words on the page this goes through `CareStudioText`, so it
+    /// reads on the module's gradient; glyphs and fills keep it as it is.
     var color: Color {
         switch self {
         case .allSucceeded: AppDesignTokens.Palette.success

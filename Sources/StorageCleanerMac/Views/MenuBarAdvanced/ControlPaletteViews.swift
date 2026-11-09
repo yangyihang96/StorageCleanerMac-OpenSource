@@ -243,7 +243,7 @@ struct FanControlPaletteView: View {
         if telemetry.isFanless {
             Text(L10n.text("无风扇 · 被动散热", "No Fans · Passive Cooling"))
                 .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         } else {
             VStack(alignment: .leading, spacing: MiniWindowStyleTokens.cardSpacing) {
                 ForEach(sections) { choice in

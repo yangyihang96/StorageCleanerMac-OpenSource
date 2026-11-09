@@ -12,7 +12,7 @@ enum MemorySampleStatusPresentation {
     /// The headroom has one name everywhere: 系统压力余量 (review P2-4).
     static func evidence(snapshot: MemorySnapshot?) -> String {
         guard let snapshot else { return L10n.text("尚无内存样本", "No memory sample yet") }
-        let time = snapshot.generatedAt.formatted(.dateTime.year().month().day().hour().minute().second())
+        let time = snapshot.generatedAt.appFormatted(.dateTime.year().month().day().hour().minute().second())
         let explanation = L10n.text(
             "快照生成于 \(time)。压力等级（正常／升高／高）取自 macOS 系统，与活动监视器一致；压力百分比为 100% 减去系统压力余量，是估算，仅用于趋势。",
             "Snapshot generated at \(time). The pressure level (Normal / Elevated / High) comes from macOS, the same source as Activity Monitor; the pressure percentage is an estimate, 100% minus system pressure headroom, for trends only."
@@ -809,7 +809,7 @@ struct AdvancedValueRow: View {
                 .font(usesUniformTextSize
                     ? AdvancedPanelTypography.body
                     : AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
         }
         .frame(minHeight: 20)
@@ -835,7 +835,7 @@ struct AdvancedUnavailableRow: View {
         HStack(spacing: MiniWindowStyleTokens.inlineSpacing) {
             Text(title)
                 .font(AdvancedPanelTypography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
@@ -853,7 +853,7 @@ struct AdvancedCleanupItemRow: View {
                     .lineLimit(1)
                 Text(item.groupTitle.isEmpty ? item.kind : item.groupTitle)
                     .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)

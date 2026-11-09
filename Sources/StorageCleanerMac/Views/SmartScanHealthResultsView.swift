@@ -36,7 +36,7 @@ struct SmartScanHealthResultsView: View {
                 }
                 HealthRecentChangesView(events: snapshot.recentChanges, readFailed: snapshot.changeLogReadFailed,
                     journalReset: snapshot.changeLogWasReset)
-                Text(snapshot.generatedAt.formatted(date: .abbreviated, time: .standard))
+                Text(snapshot.generatedAt.appFormatted(date: .abbreviated, time: .standard))
                     .font(AppDesignTokens.TypeScale.caption).foregroundStyle(surfaces.textSecondary)
             } else {
                 Text(status?.title ?? unavailable).foregroundStyle(surfaces.textSecondary)

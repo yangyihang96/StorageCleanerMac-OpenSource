@@ -292,7 +292,9 @@ extension FileOperationBoundaryTests {
                 + #"plist["CFBundleIdentifier"]as?String==request.bundleIdentifier,"#
                 + #"(plist["CFBundleShortVersionString"]as?String??"")==request.version,"#
                 + #"(plist["CFBundleVersion"]as?String??"")==request.build else throwPOSIXError(.EINVAL)"#,
-            "NSRunningApplication.runningApplications(withBundleIdentifier:request.bundleIdentifier).isEmpty"
+            // D245＋旧值“NSRunningApplication.runningApplications(withBundleIdentifier:
+            // request.bundleIdentifier).isEmpty”: a root daemon sees no user's apps.
+            #"!RunningBundleCheck.mainExecutableIsRunning(bundlePath:source.path,executableName:plist["CFBundleExecutable"]as?String)"#
                 + " else throwPOSIXError(.EBUSY)",
             "fstatat(sourceFD,source.lastPathComponent,&final,AT_SYMLINK_NOFOLLOW)==0,final.st_dev==info.st_dev,"
                 + "final.st_ino==info.st_ino,final.st_birthtimespec.tv_sec==info.st_birthtimespec.tv_sec,"

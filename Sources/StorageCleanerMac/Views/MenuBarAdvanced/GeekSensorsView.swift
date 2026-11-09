@@ -52,7 +52,7 @@ struct GeekSensorFanRingPresentation {
         }
         accessibilityValue = explanation
         let provenance = telemetry.timestamp.map {
-            L10n.text("系统风扇读数 · 采样 \($0.formatted(date: .omitted, time: .standard))", "System fan telemetry · Sampled \($0.formatted(date: .omitted, time: .standard))")
+            L10n.text("系统风扇读数 · 采样 \($0.appFormatted(date: .omitted, time: .standard))", "System fan telemetry · Sampled \($0.appFormatted(date: .omitted, time: .standard))")
         } ?? L10n.text("系统风扇读数 · 采样时间未知", "System fan telemetry · Sample time unknown")
         let controlHint = telemetry.actualRPM != nil && !telemetry.isFanless && !telemetry.isSampling
             ? L10n.text("点击“风扇控制”或悬停风扇转速可打开控制。", "Click Fan Control or hover a fan speed to open controls.")
@@ -671,8 +671,8 @@ struct GeekSensorReadoutDetail: View {
                     GeekIStatRow(
                         title: L10n.text("采样", "Sampled"),
                         value: readout.isUpdating
-                            ? "\(sampledAt.formatted(date: .omitted, time: .standard)) · \(HardwareReadingText.updating)"
-                            : sampledAt.formatted(date: .omitted, time: .standard)
+                            ? "\(sampledAt.appFormatted(date: .omitted, time: .standard)) · \(HardwareReadingText.updating)"
+                            : sampledAt.appFormatted(date: .omitted, time: .standard)
                     )
                 }
                 ForEach(readout.detailRows) { row in
@@ -756,7 +756,7 @@ struct GeekDetailedTemperaturesDetail: View {
             if let sampledAt {
                 GeekIStatRow(
                     title: L10n.text("采样", "Sampled"),
-                    value: sampledAt.formatted(date: .omitted, time: .standard),
+                    value: sampledAt.appFormatted(date: .omitted, time: .standard),
                     valueColor: .secondary
                 )
             }

@@ -125,7 +125,7 @@ enum SpaceMapTreemapPainter {
         var color: Color {
             switch self {
             case .checked: CareStudioInk.primary.opacity(0.6)
-            case .hovered: CareStudioInk.secondary
+            case .hovered: CareStudioInk.secondary.base
             case .selected: CareStudioInk.primary
             }
         }

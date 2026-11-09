@@ -106,7 +106,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertEqual(occurrences(of: ".formStyle(", in: settings), 0)
         XCTAssertTrue(settings.contains("SettingsLightfieldGeometry(size: viewport.size, category: category)"))
         XCTAssertTrue(settings.contains("settings.selected-category.v1"))
-        XCTAssertGreaterThanOrEqual(occurrences(of: "LabeledContent(", in: settings), 8)
+        // D272: value rows replace LabeledContent, which put the value beside its title.
+        XCTAssertEqual(occurrences(of: "LabeledContent(", in: settings), 0)
+        XCTAssertGreaterThanOrEqual(occurrences(of: "SettingsValueRow(", in: settings), 4)
         XCTAssertFalse(settings.contains("ForEach(PanelDensity.menuBarChoices)"))
         XCTAssertFalse(panelChrome.contains("ForEach(PanelDensity.menuBarChoices)"))
         XCTAssertFalse(panelChrome.contains("Picker(L10n.text(\"面板模式\", \"Panel Mode\")"))
@@ -116,7 +118,9 @@ final class UIConsistencyRegressionTests: XCTestCase {
         XCTAssertFalse(panelSettings.contains("Form {"))
         XCTAssertFalse(settings.contains("AdvancedMonitorWindowCoordinator"))
         XCTAssertFalse(settings.contains("打开高级监控"))
-        XCTAssertTrue(settings.contains("DisclosureGroup"))
+        // D272: one expandable row in the settings (was also DisclosureGroup).
+        XCTAssertFalse(settings.contains("DisclosureGroup"))
+        XCTAssertTrue(settings.contains("SettingsExpandableRow("))
         XCTAssertTrue(settings.contains("L10n.text(\"关于\", \"About\")"))
         XCTAssertFalse(settings.contains("SettingsMetricPill"))
         XCTAssertFalse(settings.contains("headerSection"))

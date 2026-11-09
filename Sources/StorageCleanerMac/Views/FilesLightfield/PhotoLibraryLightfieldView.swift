@@ -118,7 +118,7 @@ private struct PhotoLibraryTile: View {
             if let image { Image(nsImage: image).resizable().scaledToFit().frame(height: 102).accessibilityHidden(true) }
             else { Text(L10n.text("本地缩略图不可用", "Local thumbnail unavailable")).frame(height: 102) }
             Text("\(photo.width) × \(photo.height)").font(.system(size: 13))
-            Text(photo.creationDate.map { $0.formatted(date: .numeric, time: .shortened) } ?? L10n.text("拍摄时间未知", "Capture date unknown"))
+            Text(photo.creationDate.map { $0.appFormatted(date: .numeric, time: .shortened) } ?? L10n.text("拍摄时间未知", "Capture date unknown"))
                 .font(.system(size: 13))
             if photo.favorite { Text(L10n.text("已收藏", "Favorite")) }
             if photo.edited { Text(L10n.text("已编辑", "Edited")) }

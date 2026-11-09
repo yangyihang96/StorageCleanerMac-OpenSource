@@ -1,35 +1,27 @@
 import SwiftUI
 
-/// Frozen B6 geometry. The preview owns its natural height; only its viewport scrolls.
-/// D210: a page with a minimum content height (the ignore list) keeps
-/// it in a shorter window; the footer follows the content and the whole page
-/// scrolls (`documentHeight` past the viewport). Other pages are unchanged.
+/// D272: every page starts at the same place, so the title stays put when the
+/// tab changes, and the page's height goes to its content (was B6's frozen
+/// geometry: the title at 52/12 on the pages with a preview and 96/92 on the
+/// others, with 108 pt kept for a footer repeating one sentence). The preview
+/// owns its natural height; only its viewport scrolls.
+/// D210: a page with a minimum content height (the ignore list) keeps it in a
+/// shorter window and the whole page scrolls (`documentHeight` past the
+/// viewport). Other pages are unchanged.
 struct SettingsLightfieldGeometry: Equatable {
     let title: CGRect
     let content: CGRect
-    let footer: CGRect
-    let hasPreview: Bool
     /// The page's height: the viewport's, unless the page scrolls.
     let documentHeight: CGFloat
 
     init(size: CGSize, category: SettingsCategory) {
-        hasPreview = category == .general || category == .miniWindow
-        let inset: CGFloat = hasPreview ? (size.width >= 760 ? 52 : 24) : (size.width >= 920 ? 96 : 24)
-        let titleY: CGFloat = hasPreview ? 12 : (size.height >= 650 ? 92 : 24)
-        let contentY: CGFloat = hasPreview ? 64 : titleY + 84
-        title = CGRect(x: inset, y: titleY, width: max(0, size.width - inset - (hasPreview ? 24 : inset)), height: 48)
-        let frozenFooter = CGRect(x: inset, y: max(contentY, size.height - 108), width: max(0, size.width - inset - (hasPreview ? 24 : inset)), height: min(108, max(0, size.height - contentY)))
-        let frozenContent = CGRect(x: inset, y: contentY, width: max(0, size.width - inset - (hasPreview ? 24 : inset)),
-            height: max(0, (hasPreview ? size.height : frozenFooter.minY - 24) - contentY))
-        if !hasPreview, frozenContent.height < category.minimumContentHeight {
-            content = CGRect(x: inset, y: contentY, width: frozenContent.width, height: category.minimumContentHeight)
-            footer = CGRect(x: inset, y: content.maxY + 24, width: frozenFooter.width, height: 108)
-            documentHeight = max(size.height, footer.maxY)
-        } else {
-            content = frozenContent
-            footer = frozenFooter
-            documentHeight = size.height
-        }
+        let inset: CGFloat = size.width >= 760 ? 52 : 24
+        let width = max(0, size.width - inset - 24)
+        title = CGRect(x: inset, y: 12, width: width, height: 48)
+        let contentY: CGFloat = 72
+        content = CGRect(x: inset, y: contentY, width: width,
+                         height: max(max(0, size.height - contentY), category.minimumContentHeight))
+        documentHeight = max(size.height, content.maxY)
     }
 }
 
@@ -44,6 +36,9 @@ extension SettingsCategory {
         case .miniWindow: .tileMiniWindow
         case .scanAndSafety: .tileScanSafety
         case .accessAndSetup: .statePermission
+        // D273: reuses the sparkle of the AI clutter tile, as Updates reuses the
+        // updater's picture.
+        case .aiAssistant: .tileAIClutter
         case .systemControl: .tileSystemControl
         case .updates: .updater
         // D207 补: the ignore list reuses the no-entry picture, as Updates
@@ -58,6 +53,21 @@ extension SettingsCategory {
     /// shorter window scrolls the whole page instead of squeezing it.
     var minimumContentHeight: CGFloat {
         self == .ignoreList ? SettingsIgnoreListMetrics.minimumHeight : 0
+    }
+
+    /// D273: a tab is wide enough for its whole title on two lines, broken at
+    /// the best space, so a narrow window never cuts a word (was `minWidth: 64`
+    /// for every tab: nine need 616 pt, and any one width that fits the window
+    /// breaks "Reminders" inside the word). Measured in the selected weight, so
+    /// selecting a tab moves nothing.
+    var minimumTabWidth: CGFloat {
+        let font = NSFont.systemFont(ofSize: SettingsTabBar.titleSize, weight: .semibold)
+        func width(_ words: ArraySlice<Substring>) -> CGFloat {
+            ceil((words.joined(separator: " ") as NSString).size(withAttributes: [.font: font]).width)
+        }
+        let words = title.split(separator: " ")
+        let narrowest = words.indices.dropFirst().map { max(width(words[..<$0]), width(words[$0...])) }.min() ?? width(words[...])
+        return narrowest + 2 * SettingsTabBar.tabPadding
     }
 }
 
@@ -90,24 +100,12 @@ struct SettingsLightfieldPane<Content: View>: View {
                     .frame(width: geometry.content.width, height: geometry.content.height, alignment: .topLeading)
                     .lightfieldComponentProbe("settings.content")
                     .offset(x: geometry.content.minX, y: geometry.content.minY)
-                if !geometry.hasPreview {
-                    VStack(alignment: .leading, spacing: 20) {
-                        FeatureLightfieldHairline()
-                        Text(L10n.text("偏好更改即时保存；系统操作仍需你明确执行。", "Preferences save immediately; system actions require your explicit action."))
-                            .font(.system(size: 13)).foregroundStyle(palette.fg2)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                    }
-                    .frame(width: geometry.footer.width, height: geometry.footer.height, alignment: .topLeading)
-                    .lightfieldComponentProbe("settings.footer")
-                    .offset(x: geometry.footer.minX, y: geometry.footer.minY)
-                }
             }
             if category.minimumContentHeight > 0 {
                 // D210: a page with a minimum height always sits in a
                 // scroll view (resizing past the threshold keeps the page and
-                // its selection); the title, the page and the footer scroll
-                // together only when the window is shorter than the page.
+                // its selection); the title and the page scroll together only
+                // when the window is shorter than the page.
                 ScrollView(.vertical) {
                     page
                         .frame(width: viewport.size.width, height: geometry.documentHeight, alignment: .topLeading)
@@ -129,7 +127,7 @@ struct SettingsLightfieldPane<Content: View>: View {
                 GeometryReader { proxy in
                     let topInset = proxy.safeAreaInsets.top
                     let canvas = CGSize(width: proxy.size.width, height: max(1, proxy.size.height - topInset))
-                    FeatureLightfieldBackdrop(module: .overview, phase: .landing,
+                    FeatureLightfieldBackdrop(module: .overview, phase: .result,
                         geometry: FeatureLightfieldGeometry(size: canvas, phase: .landing),
                         canvasTopInset: topInset)
                 }
@@ -145,6 +143,17 @@ struct SettingsLightfieldPane<Content: View>: View {
 /// move between them, and the version moves to About.
 struct SettingsTabBar: View {
     static let height: CGFloat = 72
+    // `SettingsCategory.minimumTabWidth` reads these two off the main actor.
+    nonisolated static let titleSize: CGFloat = 11
+    nonisolated static let tabPadding: CGFloat = 6
+    private static let tabSpacing: CGFloat = 2
+    private static let sideInset: CGFloat = 12
+    /// The least width the tabs lay out at, in the current language. It has to
+    /// stay within the window's minimum (`SettingsWindowConfigurator`).
+    static var minimumWidth: CGFloat {
+        let tabs = SettingsCategory.allCases
+        return tabs.map(\.minimumTabWidth).reduce(0, +) + tabSpacing * CGFloat(tabs.count - 1) + 2 * sideInset
+    }
     @Environment(\.colorScheme) private var scheme
     let selected: SettingsCategory
     let select: (SettingsCategory) -> Void
@@ -152,7 +161,7 @@ struct SettingsTabBar: View {
 
     var body: some View {
         let palette = FeatureLightfieldPalette.resolve(scheme)
-        HStack(spacing: 2) {
+        HStack(spacing: Self.tabSpacing) {
             ForEach(SettingsCategory.allCases) { category in
                 let isSelected = selected == category
                 Button {
@@ -173,15 +182,15 @@ struct SettingsTabBar: View {
                         }
                         .frame(width: 28, height: 28)
                         Text(category.title)
-                            .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                            .font(.system(size: Self.titleSize, weight: isSelected ? .semibold : .regular))
                             .lineLimit(2)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .foregroundStyle(palette.fg)
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, Self.tabPadding)
                     .padding(.vertical, 5)
-                    .frame(minWidth: 64, maxWidth: 104, minHeight: 60)
+                    .frame(minWidth: category.minimumTabWidth, maxWidth: 104, minHeight: 60)
                     .contentShape(Rectangle())
                     .background {
                         if isSelected {
@@ -197,7 +206,7 @@ struct SettingsTabBar: View {
                 .lightfieldComponentProbe("settings.tab." + category.rawValue)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Self.sideInset)
         .frame(maxWidth: .infinity)
         .frame(height: Self.height)
         .focusable()
@@ -260,6 +269,153 @@ struct LightfieldSettingsRow<Content: View>: View {
     }
 }
 
+/// D272: the settings row. A title with an optional caption on the left, its
+/// control or value on the right; `LightfieldSettingsSection` adds the hairline.
+/// Every page uses these rows, so a control is always found in the same place.
+/// D273: `detail` is a line right under the caption that stays plain when the
+/// caption has its own color; without a caption it does not show.
+struct SettingsRow<Control: View>: View {
+    @Environment(\.colorScheme) private var scheme
+    let title: String
+    var caption: String? = nil
+    var captionColor: Color? = nil
+    var detail: String? = nil
+    @ViewBuilder var control: Control
+
+    var body: some View {
+        let palette = FeatureLightfieldPalette.resolve(scheme)
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).fixedSize(horizontal: false, vertical: true)
+                if let caption, !caption.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(caption).font(.system(size: 13)).foregroundStyle(captionColor.map { AnyShapeStyle($0) } ?? AnyShapeStyle(palette.fg2))
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let detail, !detail.isEmpty {
+                            Text(detail).font(.system(size: 13)).foregroundStyle(palette.fg2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            control
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+/// D272: the one switch of the settings window (was a checkbox on most pages
+/// and a switch on two).
+struct SettingsSwitch: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(title, isOn: $isOn).labelsHidden().toggleStyle(.switch)
+            .tint(FeatureLightfieldPalette.accent(.overview))
+    }
+}
+
+struct SettingsToggleRow: View {
+    let title: String
+    var caption: String? = nil
+    @Binding var isOn: Bool
+
+    var body: some View {
+        SettingsRow(title: title, caption: caption) { SettingsSwitch(title: title, isOn: $isOn) }
+    }
+}
+
+struct SettingsPickerRow<Selection: Hashable, Options: View>: View {
+    let title: String
+    var caption: String? = nil
+    @Binding var selection: Selection
+    @ViewBuilder var options: Options
+
+    var body: some View {
+        SettingsRow(title: title, caption: caption) {
+            Picker(title, selection: $selection) { options }
+                .labelsHidden().pickerStyle(.menu).featureLightfieldMenuTint().fixedSize()
+        }
+    }
+}
+
+struct SettingsValueRow: View {
+    @Environment(\.colorScheme) private var scheme
+    let title: String
+    var caption: String? = nil
+    let value: String
+    var valueColor: Color? = nil
+
+    var body: some View {
+        SettingsRow(title: title, caption: caption) {
+            Text(value).font(.system(size: 13)).foregroundStyle(valueColor.map { AnyShapeStyle($0) } ?? AnyShapeStyle(FeatureLightfieldPalette.resolve(scheme).fg2))
+                .monospacedDigit().multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// D272: an action reads as one: accent text wherever it sits (was the row's
+/// plain text, which looked like a label).
+struct SettingsLinkButton: View {
+    @Environment(\.isEnabled) private var isEnabled
+    let title: String
+    var role: ButtonRole? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(title, role: role, action: action)
+            .buttonStyle(FeatureLightfieldRowButtonStyle())
+            .foregroundStyle(role == .destructive
+                ? AppDesignTokens.Palette.destructive
+                : FeatureLightfieldPalette.settingsAction)
+            .opacity(isEnabled ? 1 : 0.4)
+            .fixedSize()
+    }
+}
+
+/// A row that is one action.
+struct SettingsLinkRow: View {
+    let title: String
+    var role: ButtonRole? = nil
+    let action: () -> Void
+
+    var body: some View {
+        SettingsLinkButton(title: title, role: role, action: action).padding(.vertical, 8)
+    }
+}
+
+/// `LightfieldExpandableRow` as a settings row: the same weight as its neighbours.
+struct SettingsExpandableRow<Content: View>: View {
+    let title: String
+    var metadata = ""
+    @Binding var expanded: Bool
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        LightfieldExpandableRow(title: title, metadata: metadata, titleWeight: .regular,
+                                expanded: $expanded) { EmptyView() } content: { content }
+    }
+}
+
+/// D272: a page without a preview: one column of groups, as wide as a row reads
+/// well, in the same scroller as the pages with a preview.
+struct SettingsColumn<Content: View>: View {
+    static var maximumWidth: CGFloat { 760 }
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        FeatureOptionsScrollView(probePrefix: "settings.page", balancesContent: false, usesLightfield: true) {
+            VStack(alignment: .leading, spacing: 24) { content }
+                .frame(maxWidth: Self.maximumWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 24)
+        }
+    }
+}
+
 struct SettingsPalettePicker<Item: Hashable & Identifiable>: View {
     @Environment(\.colorScheme) private var scheme
     let title: String
@@ -303,9 +459,16 @@ struct SettingsPalettePicker<Item: Hashable & Identifiable>: View {
             Circle().fill(AngularGradient(colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red], center: .center))
                 .overlay { Circle().fill(color(item)).padding(6) }
         } else {
+            // D239＋旧值“1 pt 发丝线（hairColor，12% 不透明）”: near-black themes
+            // read as the same dark circle on the night settings background
+            // (review P2-14); a 2 pt ring of the foreground sets each apart.
             Circle().fill(color(item))
-                .overlay { Circle().strokeBorder(palette.hairColor, lineWidth: 1) }
+                .overlay { Circle().strokeBorder(Self.swatchRing(palette, scheme: scheme), lineWidth: 2) }
         }
+    }
+
+    static func swatchRing(_ palette: FeatureLightfieldPalette, scheme: ColorScheme) -> Color {
+        palette.fg.opacity(scheme == .dark ? 0.34 : 0.2)
     }
 }
 
@@ -313,6 +476,9 @@ struct SettingsPreviewColumns<Editor: View, Preview: View, Actions: View>: View 
     @ViewBuilder var editor: Editor
     @ViewBuilder var preview: Preview
     @ViewBuilder var actions: Actions
+    /// D272: only the module list applies its changes with buttons; the page
+    /// that saves at once has no actions bar.
+    private var hasActions: Bool { Actions.self != EmptyView.self }
     var body: some View {
         GeometryReader { viewport in
             if viewport.size.width >= 760 {
@@ -324,8 +490,10 @@ struct SettingsPreviewColumns<Editor: View, Preview: View, Actions: View>: View 
                         FeatureOptionsScrollView(probePrefix: "settings.editor", balancesContent: false, usesLightfield: true) {
                             editor.frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 24)
                         }
-                        FeatureLightfieldHairline()
-                        actions.frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
+                        if hasActions {
+                            FeatureLightfieldHairline()
+                            actions.frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
+                        }
                     }.frame(width: viewport.size.width - 352)
                     ScrollView { previewContent.padding(.horizontal, 24).padding(.bottom, 8) }
                         .frame(width: 352)
@@ -342,8 +510,10 @@ struct SettingsPreviewColumns<Editor: View, Preview: View, Actions: View>: View 
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 24)
                     }
                     .lightfieldComponentProbe("settings.editor.scrollViewport")
-                    FeatureLightfieldHairline()
-                    actions.frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
+                    if hasActions {
+                        FeatureLightfieldHairline()
+                        actions.frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
+                    }
                 }
             }
         }

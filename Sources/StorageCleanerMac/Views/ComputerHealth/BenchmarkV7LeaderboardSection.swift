@@ -84,8 +84,8 @@ struct BenchmarkV7LeaderboardSection: View {
             HStack(spacing: AppDesignTokens.Spacing.small) {
                 if let generatedAt = store.generatedAt {
                     Text(L10n.text(
-                        "更新于 \(generatedAt.formatted(date: .numeric, time: .shortened))",
-                        "Updated \(generatedAt.formatted(date: .numeric, time: .shortened))"
+                        "更新于 \(generatedAt.appFormatted(date: .numeric, time: .shortened))",
+                        "Updated \(generatedAt.appFormatted(date: .numeric, time: .shortened))"
                     ))
                 } else {
                     Text(L10n.text("尚未更新", "Not updated yet"))
@@ -102,7 +102,7 @@ struct BenchmarkV7LeaderboardSection: View {
                 }
             }
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -233,7 +233,7 @@ struct BenchmarkV7LeaderboardSection: View {
                 Text(L10n.text("正在读取全球排行榜…", "Loading global ranking…"))
             }
             .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(L10n.text("正在读取全球排行榜", "Loading global ranking"))
@@ -262,7 +262,7 @@ struct BenchmarkV7LeaderboardSection: View {
 
     private func staleResultsBanner(_ failure: BenchmarkV7LeaderboardFailure) -> some View {
         let generatedText = store.generatedAt.map {
-            $0.formatted(date: .numeric, time: .shortened)
+            $0.appFormatted(date: .numeric, time: .shortened)
         } ?? L10n.text("上次更新", "the last update")
         return VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.small) {
             statusLabel(
@@ -313,7 +313,7 @@ struct BenchmarkV7LeaderboardSection: View {
             )
         }
         .font(AppDesignTokens.Typography.metadata)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(AppDesignTokens.Palette.secondaryBackground.opacity(0.55))
@@ -343,7 +343,7 @@ struct BenchmarkV7LeaderboardSection: View {
                     }
                     Text(entry.displayName)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -386,10 +386,10 @@ struct BenchmarkV7LeaderboardSection: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.readableTertiary)
             Text(value)
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .monospacedDigit()
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -568,8 +568,8 @@ struct BenchmarkV7LeaderboardSection: View {
             return BenchmarkV7LeaderboardFailure.incompatibleResult.message
         }
         return L10n.text(
-            "将公开匿名名称“\(store.anonymousDisplayName)”、电脑机型“\(draft.computerModel)”、芯片“\(draft.processorModel)”、内存 \(draft.memoryGB) GB、总分 \(scoreText(draft.score))、测试日期 \(draft.completedAt.formatted(date: .numeric, time: .omitted)) 和协议 \(draft.versions.planVersion)。应用不会提交电脑名称、序列号、硬件 UUID、IP 地址或本机路径；Cloudflare 会为传输和滥用限流处理连接 IP，但不会把它放入公开榜单。服务还会接收测试指标、测试条件与随机安装标识，用于校验、更新和删除，但不会在榜单公开这些内容。",
-            "The public entry will include the anonymous name “\(store.anonymousDisplayName)”, computer model “\(draft.computerModel)”, chip “\(draft.processorModel)”, \(draft.memoryGB) GB memory, total score \(scoreText(draft.score)), test date \(draft.completedAt.formatted(date: .numeric, time: .omitted)), and protocol \(draft.versions.planVersion). The app does not send computer name, serial number, hardware UUID, IP address, or local paths as submission fields. Cloudflare processes the connection IP for transport and abuse rate limiting, but it is not included in the public leaderboard. The service also receives benchmark metrics, test conditions, and a random installation identifier for validation, updates, and removal, but does not show them publicly."
+            "将公开匿名名称“\(store.anonymousDisplayName)”、电脑机型“\(draft.computerModel)”、芯片“\(draft.processorModel)”、内存 \(draft.memoryGB) GB、总分 \(scoreText(draft.score))、测试日期 \(draft.completedAt.appFormatted(date: .numeric, time: .omitted)) 和协议 \(draft.versions.planVersion)。应用不会提交电脑名称、序列号、硬件 UUID、IP 地址或本机路径；Cloudflare 会为传输和滥用限流处理连接 IP，但不会把它放入公开榜单。服务还会接收测试指标、测试条件与随机安装标识，用于校验、更新和删除，但不会在榜单公开这些内容。",
+            "The public entry will include the anonymous name “\(store.anonymousDisplayName)”, computer model “\(draft.computerModel)”, chip “\(draft.processorModel)”, \(draft.memoryGB) GB memory, total score \(scoreText(draft.score)), test date \(draft.completedAt.appFormatted(date: .numeric, time: .omitted)), and protocol \(draft.versions.planVersion). The app does not send computer name, serial number, hardware UUID, IP address, or local paths as submission fields. Cloudflare processes the connection IP for transport and abuse rate limiting, but it is not included in the public leaderboard. The service also receives benchmark metrics, test conditions, and a random installation identifier for validation, updates, and removal, but does not show them publicly."
         )
     }
 

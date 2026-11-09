@@ -263,7 +263,7 @@ struct ApplicationsManagerView: View {
                 Button(L10n.text("扫描结果概览", "Scan Results")) { model.showsOverview = true }
                 Button(L10n.text("卸载记录", "Uninstall History")) { showsHistory = true }
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.borderlessButton).careStudioActionTint()
             .fixedSize()
             .foregroundStyle(CareStudioManagerInk.accent)
             if model.isLoadingResources || model.isScanningLeftovers || model.isScanningOtherApplications {
@@ -425,7 +425,7 @@ private struct ApplicationEntryRows: View {
 
     private var lastOpenedText: String {
         guard let date = entry.item.lastUsedAt else { return L10n.text("从未打开", "Never opened") }
-        return L10n.text("上次打开 ", "Last opened ") + date.formatted(date: .abbreviated, time: .omitted)
+        return L10n.text("上次打开 ", "Last opened ") + date.appFormatted(date: .abbreviated, time: .omitted)
     }
 
     var body: some View {

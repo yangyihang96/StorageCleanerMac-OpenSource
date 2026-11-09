@@ -42,6 +42,8 @@ final class StorageCapacityD195Tests: XCTestCase {
         XCTAssertTrue(card.contains("LightfieldDataBar(progress: capacity.userUsedRatio"))
         XCTAssertFalse(card.contains("progress: capacity.usedRatio"))
         let health = try String(contentsOf: root.appendingPathComponent("Features/Activity/MyActivityHealth.swift"), encoding: .utf8)
-        XCTAssertTrue(health.contains("let free = capacity.availableBytes"))
+        // D230＋旧值“let free = capacity.availableBytes”: the health grade now
+        // reads the important-usage figure too (the bar above already did).
+        XCTAssertTrue(health.contains("let free = capacity.availableForImportantUsageBytes ?? capacity.availableBytes"))
     }
 }

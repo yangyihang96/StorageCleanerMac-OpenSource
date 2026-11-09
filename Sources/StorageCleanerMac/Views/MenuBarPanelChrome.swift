@@ -622,6 +622,7 @@ struct PanelToolbarActions: View {
     @Environment(\.openSettings) private var openSettings
     @ObservedObject var store: ScanStore
     @ObservedObject var state: MenuBarPanelSettingsState
+    @ObservedObject private var menuBarOnly = MenuBarOnlyMode.shared
     let isRefreshing: Bool
     var showsLiveActions = true
     var hostsEditorPopover = true
@@ -696,6 +697,7 @@ struct PanelToolbarActions: View {
     private var moreMenuContents: some View {
         Button {
             UserDefaults.standard.set("miniWindow", forKey: "settings.selected-category.v1")
+            UserDefaults.standard.set(SettingsMenuBarPage.panelContent.rawValue, forKey: SettingsMenuBarPage.defaultsKey)
             openSettings()
         } label: {
             Text(L10n.text("小窗设置…", "Panel Settings…"))
@@ -723,13 +725,27 @@ struct PanelToolbarActions: View {
         Divider()
 
         Button(action: showMainWindow) {
-            Text(L10n.text("打开主窗口", "Open Main Window"))
+            // D257: after the main program was quit, this brings it back.
+            if menuBarOnly.isActive {
+                Text(L10n.text("打开主程序", "Open Main Program"))
+            } else {
+                Text(L10n.text("打开主窗口", "Open Main Window"))
+            }
         }
 
         Button {
             MenuBarStatusController.shared.dismissPanel()
         } label: {
             Text(L10n.text("关闭小窗", "Close Panel"))
+        }
+
+        Divider()
+
+        // D256: quits the process, panel included, with the usual termination work.
+        Button {
+            AppQuitIntent.shared.requestFinalTermination()
+        } label: {
+            Text(L10n.text("完全退出", "Quit Completely"))
         }
     }
 
@@ -814,7 +830,7 @@ struct PanelCircularGauge: View {
 
                     Text(title)
                         .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .lineLimit(2)
                         .truncationMode(.tail)
                         .multilineTextAlignment(.center)
@@ -827,7 +843,7 @@ struct PanelCircularGauge: View {
             if let displayDetail {
                 Text(displayDetail)
                     .font(AppPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }

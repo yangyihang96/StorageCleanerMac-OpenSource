@@ -19,6 +19,9 @@ FILE_HELPER_NAME="StorageCleanerFileOperationHelper"
 FILE_HELPER_LABEL="$BUNDLE_ID.FileOperationHelper"
 FILE_HELPER_PLIST="$FILE_HELPER_LABEL.plist"
 UPDATE_ASKPASS_NAME="StorageCleanerUpdateAskpass"
+# D260: the AI assistant bridge; see build_and_run.sh.
+AGENT_BRIDGE_PRODUCT="StorageCleanerAgentBridge"
+AGENT_BRIDGE_RELATIVE_PATH="Contents/Helpers/storage-cleaner-agent"
 MIN_SYSTEM_VERSION="14.0"
 REQUIRED_LINK_SDK_MAJOR="${REQUIRED_LINK_SDK_MAJOR:-26}"
 REQUIRED_ARCHITECTURE="${REQUIRED_ARCHITECTURE:-arm64}"
@@ -216,6 +219,7 @@ BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
 FAN_HELPER_BINARY="$BUILD_BIN_DIR/$FAN_HELPER_NAME"
 FILE_HELPER_BINARY="$BUILD_BIN_DIR/$FILE_HELPER_NAME"
 UPDATE_ASKPASS_BINARY="$BUILD_BIN_DIR/$UPDATE_ASKPASS_NAME"
+AGENT_BRIDGE_BINARY="$BUILD_BIN_DIR/$AGENT_BRIDGE_PRODUCT"
 SPARKLE_FRAMEWORK="$BUILD_BIN_DIR/Sparkle.framework"
 SPARKLE_LICENSE="$SWIFT_BUILD_DIR/artifacts/sparkle/Sparkle/LICENSE"
 
@@ -312,6 +316,10 @@ sign_app_bundle() {
   codesign "${sign_args[@]}" -i "$BUNDLE_ID.update-askpass" --sign "$SIGN_IDENTITY" \
     "$app_path/Contents/Resources/$UPDATE_ASKPASS_NAME" >/dev/null
   codesign --verify --strict "$app_path/Contents/Resources/$UPDATE_ASKPASS_NAME"
+  clean_attrs "$app_path/$AGENT_BRIDGE_RELATIVE_PATH"
+  codesign "${sign_args[@]}" -i "$BUNDLE_ID.agent-bridge" --sign "$SIGN_IDENTITY" \
+    "$app_path/$AGENT_BRIDGE_RELATIVE_PATH" >/dev/null
+  codesign --verify --strict "$app_path/$AGENT_BRIDGE_RELATIVE_PATH"
   codesign "${sign_args[@]}" --sign "$SIGN_IDENTITY" "$app_path" >/dev/null
   codesign --verify --deep --strict --verbose=4 "$app_path"
 }
@@ -493,6 +501,11 @@ verify_app_metadata() {
   assert_plist_value "$file_helper_plist" BundleProgram "Contents/Resources/$FILE_HELPER_NAME"
   grep -Fxq "Identifier=$FILE_HELPER_LABEL" <<<"$(codesign -dvvv "$file_helper_path" 2>&1)" \
     || { echo "$file_helper_path: wrong code-signing identifier" >&2; return 1; }
+  local agent_bridge_path="$app_path/$AGENT_BRIDGE_RELATIVE_PATH"
+  [ -x "$agent_bridge_path" ] || { echo "$app_path: missing the AI assistant bridge" >&2; return 1; }
+  grep -Fxq "Identifier=$BUNDLE_ID.agent-bridge" <<<"$(codesign -dvvv "$agent_bridge_path" 2>&1)" \
+    || { echo "$agent_bridge_path: wrong code-signing identifier" >&2; return 1; }
+  verify_executable_compatibility "$agent_bridge_path"
   [ -n "$(plist_value "$plist" NSAppBundlesUsageDescription)" ] \
     || { echo "$app_path: missing NSAppBundlesUsageDescription" >&2; return 1; }
   assert_plist_value "$app_path/Contents/Resources/BuildInfo.plist" version "$APP_VERSION"
@@ -638,6 +651,9 @@ write_and_verify_checksums() {
 /usr/bin/ditto --norsrc "$FAN_HELPER_BINARY" "$APP_FAN_HELPER"
 /usr/bin/ditto --norsrc "$FILE_HELPER_BINARY" "$APP_RESOURCES/$FILE_HELPER_NAME"
 /usr/bin/ditto --norsrc "$UPDATE_ASKPASS_BINARY" "$APP_RESOURCES/$UPDATE_ASKPASS_NAME"
+mkdir -p "$APP_BUNDLE/Contents/Helpers"
+/usr/bin/ditto --norsrc "$AGENT_BRIDGE_BINARY" "$APP_BUNDLE/$AGENT_BRIDGE_RELATIVE_PATH"
+chmod +x "$APP_BUNDLE/$AGENT_BRIDGE_RELATIVE_PATH"
 cat >"$APP_LAUNCH_DAEMONS/$FILE_HELPER_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

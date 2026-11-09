@@ -313,7 +313,7 @@ struct CleanupScanResultsView: View {
                     .overlay(alignment: .topTrailing) {
                         if showsClassicList && !usesClassicResults {
                             Button(L10n.text("返回卡片视图", "Back to Cards")) { showsClassicList = false }
-                                .buttonStyle(.link)
+                                .buttonStyle(.link).careStudioActionTint()
                                 .font(.system(size: 12, weight: .semibold))
                                 .padding(.top, 14)
                                 .padding(.trailing, 18)
@@ -620,7 +620,7 @@ struct CleanupScanResultsView: View {
                     _ = CleanupService.openFullDiskAccessSettings()
                 }
                 .buttonStyle(FeatureLightfieldRowButtonStyle())
-                .foregroundStyle(FeatureLightfieldPalette.accent(.green))
+                .foregroundStyle(FeatureLightfieldPalette.actionText(.green))
             }
             .padding(.vertical, 8)
 #if DEBUG
@@ -645,10 +645,10 @@ struct CleanupScanResultsView: View {
             }.disabled(!store.canEditV2CleanupSelection)
             Picker(L10n.text("筛选", "Filter"), selection: $resultFilter) {
                 ForEach(CleanupResultFilter.allCases) { value in Text(value.title).tag(value) }
-            }.pickerStyle(.menu)
+            }.pickerStyle(.menu).featureLightfieldMenuTint()
             Picker(L10n.text("排序", "Sort"), selection: $sortOrder) {
                 ForEach(CleanupResultSort.allCases) { value in Text(value.title).tag(value) }
-            }.pickerStyle(.menu)
+            }.pickerStyle(.menu).featureLightfieldMenuTint()
         }
         .font(.system(size: 13))
         .padding(.vertical, 6)
@@ -1248,7 +1248,7 @@ struct CleanupScanResultsView: View {
                 "\(ByteFormat.count(selectedLeafCount)) of \(ByteFormat.count(selectableLeafCount)) selected · \(ByteFormat.count(selectedCount)) groups"
             ))
             .font(AppDesignTokens.Typography.metadata)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .monospacedDigit()
     }
 
@@ -1435,7 +1435,7 @@ struct CleanupScanResultsView: View {
             if topCandidates.isEmpty {
                 Text(L10n.text("本次扫描没有达到显示阈值的项目。", "No item reached the display threshold."))
                     .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .padding(AppDesignTokens.Layout.sectionPadding)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .glassPanel(
@@ -1588,7 +1588,7 @@ struct CleanupScanResultsView: View {
                     if tierSubcategories.isEmpty {
                         Text(L10n.text("没有符合当前筛选条件的项目。", "No items match the current filter."))
                             .font(AppDesignTokens.Typography.body)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .padding(AppDesignTokens.Layout.sectionPadding)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .glassPanel(
@@ -1912,7 +1912,7 @@ struct CleanupScanResultsView: View {
                         "Capacity, scan coverage, and recommendations"
                     ))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 }
             }
         }
@@ -2112,7 +2112,7 @@ struct DeveloperCleanupThresholdControl: View {
                             "Older than this is yellow; within it is red. Over one year is always green."
                         ))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     }
                 } icon: {
                     Image(systemName: "calendar.badge.clock")
@@ -2192,7 +2192,7 @@ private struct CleanupReportSectionHeader: View {
                     .font(AppDesignTokens.Typography.sectionTitle)
                 Text(detail)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .help(detail)
             }
@@ -2260,7 +2260,7 @@ private struct CleanupStorageLegend: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(value)
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     .monospacedDigit()
@@ -2294,11 +2294,11 @@ private struct CleanupTopCandidateRow: View {
                 }
                 Text("\(candidate.subcategoryTitle) · \(candidate.reason)")
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(candidate.snapshot.standardizedPath)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.readableTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: AppDesignTokens.Spacing.small)
@@ -2335,7 +2335,7 @@ private struct CleanupReportAdviceRow: View {
                     .font(AppDesignTokens.Typography.inlineTitle)
                 Text(detail)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
@@ -2612,12 +2612,12 @@ private struct CleanupSubcategorySelectionView: View {
                             // D45 / U3: one sentence on what it is and what to do.
                             Text(CleanupRiskPresentation.oneLineReason(subcategory.reason))
                                 .font(AppDesignTokens.TypeScale.secondary)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .lineLimit(1)
                                 .help(subcategory.reason)
                             Text(itemCountSummary)
                             .font(AppDesignTokens.TypeScale.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.readableTertiary)
                             .monospacedDigit()
                         }
                         Spacer(minLength: AppDesignTokens.Spacing.small)
@@ -2925,7 +2925,7 @@ private struct CleanupCandidateRow: View {
                 if let developerArtifactLine {
                     Text(developerArtifactLine)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 // D93: belongs to and why (not) preselected; the effect is in the
@@ -2933,12 +2933,12 @@ private struct CleanupCandidateRow: View {
                 Text(L10n.text("属于 ", "Belongs to ") + candidate.ruleExplanation.ownership
                      + " · " + candidate.ruleExplanation.preselection)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let applicationVersionLine {
                     Text(applicationVersionLine)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let ownerStatusLine {
@@ -2989,14 +2989,14 @@ private struct CleanupCandidateRow: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L10n.text("所属工具", "Tool"))
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                         Text(tool.displayName)
                             .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     }
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L10n.text("残留类型", "Artifact Type"))
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                         Text(kind.displayName)
                             .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     }
@@ -3007,7 +3007,7 @@ private struct CleanupCandidateRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(L10n.text("完整路径", "Full Path"))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(candidate.snapshot.standardizedPath)
                     .font(AppDesignTokens.Typography.metadata)
                     .textSelection(.enabled)
@@ -3015,7 +3015,7 @@ private struct CleanupCandidateRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(L10n.text("判断依据", "Evidence"))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(candidate.reason)
                     .font(AppDesignTokens.Typography.body)
             }
@@ -3023,7 +3023,7 @@ private struct CleanupCandidateRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(L10n.text("创建时间", "Created"))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Text(developerCreationDetail)
                         .font(AppDesignTokens.Typography.body)
                         .monospacedDigit()
@@ -3031,7 +3031,7 @@ private struct CleanupCandidateRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(developerActivityTitle)
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Text(developerActivityDetail)
                         .font(AppDesignTokens.Typography.body)
                         .monospacedDigit()
@@ -3040,7 +3040,7 @@ private struct CleanupCandidateRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(CleanupMeasurementPresentation.status(candidate))
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(CleanupMeasurementPresentation.value(candidate))
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     .monospacedDigit()
@@ -3173,13 +3173,13 @@ private struct CleanupCandidateRow: View {
         // Tool logs are not graded by activity, so no threshold applies.
         guard candidate.developerArtifactKind != .logs else {
             return L10n.text(
-                "\(date.formatted(date: .abbreviated, time: .shortened)) · 距扫描约 \(days) 天",
-                "\(date.formatted(date: .abbreviated, time: .shortened)) · about \(days) days before scan"
+                "\(date.appFormatted(date: .abbreviated, time: .shortened)) · 距扫描约 \(days) 天",
+                "\(date.appFormatted(date: .abbreviated, time: .shortened)) · about \(days) days before scan"
             )
         }
         return L10n.text(
-            "\(date.formatted(date: .abbreviated, time: .shortened)) · 距扫描约 \(days) 天 · 本次阈值 \(session.developerInactivityThresholdDays) 天",
-            "\(date.formatted(date: .abbreviated, time: .shortened)) · about \(days) days before scan · \(session.developerInactivityThresholdDays)-day threshold"
+            "\(date.appFormatted(date: .abbreviated, time: .shortened)) · 距扫描约 \(days) 天 · 本次阈值 \(session.developerInactivityThresholdDays) 天",
+            "\(date.appFormatted(date: .abbreviated, time: .shortened)) · about \(days) days before scan · \(session.developerInactivityThresholdDays)-day threshold"
         )
     }
 
@@ -3193,8 +3193,8 @@ private struct CleanupCandidateRow: View {
         }
         let date = Date(timeIntervalSince1970: Double(nanoseconds) / 1_000_000_000)
         return L10n.text(
-            "\(date.formatted(date: .abbreviated, time: .shortened)) · 目录创建时间，不代表首次安装时间",
-            "\(date.formatted(date: .abbreviated, time: .shortened)) · folder creation time, not first install time"
+            "\(date.appFormatted(date: .abbreviated, time: .shortened)) · 目录创建时间，不代表首次安装时间",
+            "\(date.appFormatted(date: .abbreviated, time: .shortened)) · folder creation time, not first install time"
         )
     }
 
@@ -3360,7 +3360,7 @@ private struct CleanupResultSummaryCard: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Text(value)
                 .font(AppDesignTokens.Typography.inlineTitle)
                 .monospacedDigit()
@@ -3396,7 +3396,7 @@ private struct CleanupSpaceMetric: View {
                         metricIcon(size: 26)
                         Text(title)
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     metricText
@@ -3432,7 +3432,7 @@ private struct CleanupSpaceMetric: View {
             if layout.density == .regular {
                 Text(title)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text(value)
@@ -3441,7 +3441,7 @@ private struct CleanupSpaceMetric: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(detail)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .help(detail)
         }

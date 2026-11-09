@@ -445,7 +445,7 @@ struct GeekDisclosureIcon: View {
     var body: some View {
         AppSymbolGlyph(systemImage: systemImage, size: MiniWindowStyleTokens.disclosureGlyphSize,
                        weight: .semibold)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(.readableTertiary)
             .frame(width: MiniWindowStyleTokens.disclosureIconSlotSize,
                    height: MiniWindowStyleTokens.disclosureIconSlotSize)
             .accessibilityHidden(true)
@@ -463,7 +463,7 @@ struct GeekSecondaryProcessIcon: View {
         CachedAppIconView(path: path, size: MiniWindowStyleTokens.processIconSize) {
             AppSymbolGlyph(systemImage: fallback, size: MiniWindowStyleTokens.processIconSize,
                            renderingMode: .hierarchical)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
         .frame(width: MiniWindowStyleTokens.processIconSize,
                height: MiniWindowStyleTokens.processIconSize)
@@ -1251,29 +1251,42 @@ extension EnvironmentValues {
 /// Registers a level-one card as the anchor its secondary page opens against:
 /// the secondary's top edge is the card's top edge.
 ///
-/// The native reader reports when it is attached to a window or resized, but
-/// not when the card only moves. Opening a section recreates the overview
-/// cards inside the attached shell, which first lays the overview out at its
-/// default frame (bottom-aligned when the detail is taller than the overview,
-/// as the CPU page is) until the cascade layout arrives. When the new card
-/// reported in that frame, the registry kept the transient position and the
-/// CPU secondary opened below its card (38.5 pt in the batch 2b capture).
+/// Opening a section recreates the overview cards inside the attached shell,
+/// which first lays the overview out at its default frame (bottom-aligned when
+/// the detail is taller than the overview, as the CPU page is) until the
+/// cascade layout arrives. When the new card reported in that frame, the
+/// registry kept the transient position and the CPU secondary opened below its
+/// card (38.5 pt in the batch 2b capture).
 ///
 /// In the attached cascade the anchor is therefore derived from the card's
 /// layout frame and the cascade's overview frame, which is the frame the
 /// session measures from, so a window frame and a SwiftUI layout that are
 /// applied at different moments cannot disagree. With the overview alone in
-/// the window the native frame is used, re-read whenever the card moves.
+/// the window the native frame is used; the native reader reports it again
+/// when the card, an ancestor or the window moves (3f78cf63).
 struct GeekModuleAnchorRegistration: ViewModifier {
     @Environment(\.geekPanelHoverCoordinator) private var hoverCoordinator
     @Environment(\.geekOverviewAnchorPlacement) private var placement
     let destination: PanelSection
     let handle: SmallWindowAnchorHandle
 
-    private struct Trigger: Equatable {
-        let windowFrame: CGRect
+    /// D247: what `publish` reads, so the action runs only when that changes:
+    /// the card's frame in the overview beside a secondary page, only its top
+    /// offset there with the overview alone. The card's frame in the window
+    /// is not part of it: it changed with each frame the panel applied while
+    /// opening, several times in one frame, and SwiftUI logged "onChange(of:
+    /// Trigger) action tried to update multiple times per frame" once per card
+    /// (install22: five cards at launch).
+    struct Trigger: Equatable {
         let layoutFrame: CGRect
         let placement: GeekOverviewAnchorPlacement
+
+        init(layoutFrame: CGRect, placement: GeekOverviewAnchorPlacement) {
+            self.placement = placement
+            self.layoutFrame = placement == .overviewOnly
+                ? CGRect(x: 0, y: layoutFrame.minY, width: 0, height: 0)
+                : layoutFrame
+        }
     }
 
     func body(content: Content) -> some View {
@@ -1299,7 +1312,6 @@ struct GeekModuleAnchorRegistration: ViewModifier {
             .background {
                 GeometryReader { proxy in
                     let trigger = Trigger(
-                        windowFrame: proxy.frame(in: .global),
                         layoutFrame: proxy.frame(in: .named(GeekOverviewAnchorSpace.name)),
                         placement: placement
                     )
@@ -1558,7 +1570,7 @@ struct GeekMetricCell: View {
                 VStack(spacing: 2) {
                     Text(model.title.uppercased())
                         .font(AdvancedPanelTypography.captionStrong)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .lineLimit(1)
 
                     Text(displayValue)
@@ -1569,7 +1581,7 @@ struct GeekMetricCell: View {
 
                     Text(displayDetail)
                         .font(AdvancedPanelTypography.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, minHeight: 50)

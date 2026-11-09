@@ -91,7 +91,7 @@ struct LightfieldEnergyPage<PowerMetrics: View>: View {
             } label: {
                 Text(L10n.text("应用 · 按\(sortMode.title)排序", "Apps · Sorted by \(sortMode.title)"))
                     .font(.system(size: 13)).lineLimit(1)
-            }.menuStyle(.borderlessButton)
+            }.menuStyle(.borderlessButton).careStudioActionTint()
             Spacer(minLength: 0)
             Text(L10n.text("累计 Wh · 当前 W · 平均 W", "Total Wh · Current W · Average W")).font(.system(size: 13)).lineLimit(1)
         }.foregroundStyle(palette.fg3).frame(height: 28)

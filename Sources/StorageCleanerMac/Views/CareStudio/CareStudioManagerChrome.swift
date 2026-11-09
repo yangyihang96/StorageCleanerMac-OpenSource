@@ -49,6 +49,8 @@ struct CareStudioManagerChrome<Categories: View, Content: View, FooterDetail: Vi
             .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
             .padding(CareStudioMetrics.managerInset)
             .environment(\.colorScheme, .light)
+            // D279: the panel is white, not the module's gradient.
+            .environment(\.careStudioTextGround, nil)
         }
         .pageOwnsScrolling()
         .onAppear { CareStudioCanvas.shared.claim(chromeID, animating: false, label: "manager.\(module.rawValue)") }
@@ -96,7 +98,7 @@ struct CareStudioManagerChrome<Categories: View, Content: View, FooterDetail: Vi
                             + Text(sortTitle).foregroundStyle(CareStudioManagerInk.accent))
                             .font(.system(size: 12, weight: .semibold))
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.borderlessButton).careStudioActionTint()
                     .fixedSize()
                 }
             }

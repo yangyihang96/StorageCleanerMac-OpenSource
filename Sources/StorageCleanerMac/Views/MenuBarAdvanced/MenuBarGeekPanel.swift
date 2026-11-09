@@ -152,7 +152,7 @@ extension MenuBarAdvancedStatusView {
 
     var geekOverviewPage: some View {
         geekCanvas
-        .contextMenu { overviewContextMenu }
+        .modifier(MenuBarOnlyAwareContextMenu { overviewContextMenu })
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // Level-one anchors are measured from the overview shell's top-left
         // corner and, beside a secondary page, from the cascade's overview
@@ -689,7 +689,7 @@ struct GeekLiveNetworkValue: View {
 
                 Text(title)
                     .font(AdvancedPanelTypography.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .lineLimit(1)
             }
         }
@@ -716,7 +716,7 @@ struct GeekTelemetryRow: View {
         HStack(alignment: .firstTextBaseline, spacing: MiniWindowStyleTokens.inlineSpacing) {
             Text(title)
                 .font(AdvancedPanelTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
 
             Spacer(minLength: 6)

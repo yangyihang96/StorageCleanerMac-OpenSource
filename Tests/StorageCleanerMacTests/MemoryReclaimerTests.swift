@@ -42,8 +42,9 @@ final class MemoryReclaimerTests: XCTestCase {
     }
 
     func testBudgetIsTheDroppableMemoryLessHeadroomAndAtMostHalfTheRAM() {
-        // free 2 + speculative 0.5 + purgeable 0.5 + min(file 4, inactive 6) − 1 GiB headroom.
-        XCTAssertEqual(MemoryReclaimer.budget(for: Self.reading()), 6 * Self.gib)
+        // free 2 + speculative 0.5 + purgeable 0.5 + min(file 4 − speculative 0.5, inactive 6) − 1 GiB headroom.
+        // D278＋旧值：min(file 4, inactive 6)，speculative 在文件缓存里又算一次。
+        XCTAssertEqual(MemoryReclaimer.budget(for: Self.reading()), 5 * Self.gib + Self.gib / 2) // D278＋旧值：6 * Self.gib
         XCTAssertEqual(MemoryReclaimer.budget(for: Self.reading(physical: 8 * Self.gib)), 4 * Self.gib)
         XCTAssertEqual(MemoryReclaimer.budget(for: Self.reading(inactive: Self.gib)), 3 * Self.gib,
                        "only inactive file pages count as cache that can be dropped")
@@ -86,11 +87,12 @@ final class MemoryReclaimerTests: XCTestCase {
             Self.reading(compressed: Self.gib + 64 * Self.mib),
             Self.reading(compressed: Self.gib + 64 * Self.mib)
         ])
-        // Budget: speculative 0.5 + min(2, 2) − 1 = 1.5 GiB → six steps.
+        // Budget: speculative 0.5 + min(file 2 − speculative 0.5, inactive 2) − 1 = 1 GiB → four steps.
+        // D278＋旧值：speculative 0.5 + min(2, 2) − 1 = 1.5 GiB → six steps。
         let outcome = try XCTUnwrap(MemoryReclaimer.run(environment: system.environment, isCancelled: { false }))
         XCTAssertEqual(outcome.stopReason, .finished)
-        XCTAssertEqual(system.allocations, 6)
-        XCTAssertEqual(system.releases, 6)
+        XCTAssertEqual(system.allocations, 4) // D278＋旧值：6
+        XCTAssertEqual(system.releases, 4) // D278＋旧值：6
     }
 
     func testPushStopsAtOnceWhenPressureLeavesNormal() throws {

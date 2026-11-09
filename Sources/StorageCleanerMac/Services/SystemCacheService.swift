@@ -38,7 +38,7 @@ final class SystemCacheService: SystemCacheServicing {
         guard Bundle.main.url(forResource: "StorageCleanerFileOperationHelper", withExtension: nil) != nil else { return nil }
         do {
             let data = try await FileOperationReadRetry.perform {
-                let connection = try self.connect()
+                let connection = try await Self.connectOffMain()
                 defer { connection.invalidate() }
                 try await self.checkBuild(connection)
                 return try await Self.exchange(connection, timeout: 35) { proxy, reply in
@@ -60,7 +60,7 @@ final class SystemCacheService: SystemCacheServicing {
         do {
             try Task.checkCancellation()
             guard let bundled = Bundle.main.url(forResource: "StorageCleanerFileOperationHelper", withExtension: nil),
-                  AuthorizedApplicationMover.shared.trustedBundledHelper(bundled) else { throw SystemCacheServiceError.unavailable }
+                  await AuthorizedApplicationMover.trustedBundledHelper(bundled) else { throw SystemCacheServiceError.unavailable }
             try await AuthorizedApplicationMover.shared.prepareHelper()
             try await coordinator.requireValid(lease, owner: .cleanup)
             try Task.checkCancellation()
@@ -119,7 +119,16 @@ final class SystemCacheService: SystemCacheServicing {
         }
     }
 
-    private func connect() throws -> NSXPCConnection {
+    /// D241 (review P2-1): the signer lookup behind the requirement
+    /// (`SecCodeCopySelf`, signing information) is Security work the main
+    /// thread must not do; the 2.0.1 log had a pair of such faults after
+    /// every junk scan, from the inventory read below.
+    private nonisolated static func connectOffMain() async throws -> NSXPCConnection {
+        try await Task.detached(priority: .userInitiated) {
+            FileOperationConnectionHandoff(connection: try connect())
+        }.value.connection
+    }
+    private nonisolated static func connect() throws -> NSXPCConnection {
         guard let requirement = FileOperationPeerRequirement.currentSigner(peerIdentifier: FileOperationIdentity.helper) else {
             throw SystemCacheServiceError.unavailable
         }
@@ -133,7 +142,7 @@ final class SystemCacheService: SystemCacheServicing {
     /// a fresh helper. Once prepare starts, the connection is never replayed.
     private func verifiedConnection() async throws -> NSXPCConnection {
         try await FileOperationReadRetry.perform {
-            let connection = try self.connect()
+            let connection = try await Self.connectOffMain()
             do {
                 try await self.checkBuild(connection)
                 return connection
@@ -214,6 +223,12 @@ final class SystemCacheService: SystemCacheServicing {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { gate.fail() }
         }
     }
+}
+
+/// D241: hands a connection from the background task that built it to the
+/// caller that uses it; nothing else holds it in between.
+struct FileOperationConnectionHandoff: @unchecked Sendable {
+    let connection: NSXPCConnection
 }
 
 private final class SystemCacheAuthorization: @unchecked Sendable {

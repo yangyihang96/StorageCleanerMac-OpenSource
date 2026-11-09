@@ -104,7 +104,7 @@ struct ItemDetailView: View {
                     Text(ByteFormat.storageString(item.sizeBytes))
                         .font(AppDesignTokens.Typography.metadata)
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
 
                     if item.status == .movedToTrash {
                         Divider()
@@ -112,7 +112,7 @@ struct ItemDetailView: View {
 
                         Text(L10n.text("已移到废纸篓", "Moved to Trash"))
                             .font(AppDesignTokens.Typography.metadata)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                     }
                 }
             }
@@ -135,7 +135,7 @@ struct ItemDetailView: View {
                     .font(AppDesignTokens.Typography.sectionTitle)
                 Text(item.recommendation)
                     .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -149,7 +149,7 @@ struct ItemDetailView: View {
             HStack {
                 Text(L10n.text("路径", "Path"))
                     .font(AppDesignTokens.Typography.smallLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Spacer()
                 Button {
                     store.copyPath(item.path)
@@ -231,7 +231,7 @@ private struct DetailLine: View {
         HStack(alignment: .top, spacing: 12) {
             Text(title)
                 .font(AppDesignTokens.Typography.smallLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 54, alignment: .leading)
             Text(value)
                 .font(AppDesignTokens.Typography.body)

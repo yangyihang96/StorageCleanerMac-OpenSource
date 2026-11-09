@@ -8,79 +8,26 @@ enum SettingsCategory: String, CaseIterable, Hashable, Identifiable {
     case scanAndSafety
     case ignoreList
     case accessAndSetup
+    case aiAssistant
     case systemControl
     case updates
     case about
 
     var id: String { rawValue }
 
-    var columnMaxWidth: CGFloat {
-        self == .miniWindow ? .infinity : AppDesignTokens.Layout.settingsPageMaxWidth
-    }
-
-    var contentLeadingInset: CGFloat {
-        switch self {
-        case .miniWindow: AppDesignTokens.Layout.pagePadding
-        case .accessAndSetup: AppDesignTokens.Spacing.small + AppDesignTokens.Layout.sectionPadding
-        // The grouped macOS Form rows in the review capture start 30 pt in.
-        case .general, .scanAndSafety, .ignoreList, .systemControl, .updates, .about: 30
-        }
-    }
-
+    /// D272: each name says what the page holds. The raw values stay, so the
+    /// stored selection and every way into a page keep working.
     var title: String {
         switch self {
-        case .miniWindow: L10n.text("小窗", "Mini Window")
-        case .general:
-            L10n.text("通用", "General")
+        case .general: L10n.text("通用", "General")
+        case .miniWindow: L10n.text("菜单栏", "Menu Bar")
+        case .scanAndSafety: L10n.text("扫描与提醒", "Scan & Reminders")
         case .ignoreList: L10n.text("忽略列表", "Ignore List")
-        case .scanAndSafety:
-            L10n.text("扫描与安全", "Scan & Safety")
-        case .accessAndSetup:
-            L10n.text("权限", "Access")
-        case .systemControl:
-            L10n.text("系统控制", "System Control")
-        case .updates:
-            L10n.text("应用更新", "App Updates")
-        case .about:
-            L10n.text("关于", "About")
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .miniWindow: "rectangle.split.2x1"
-        case .general:
-            "gearshape"
-        case .ignoreList: "line.3.horizontal.decrease.circle"
-        case .scanAndSafety:
-            "checkmark.shield"
-        case .accessAndSetup:
-            "lock.shield"
-        case .systemControl:
-            "fan"
-        case .updates:
-            "arrow.triangle.2.circlepath"
-        case .about:
-            "info.circle"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .miniWindow: AppAppearanceColors.accent
-        case .general:
-            AppDesignTokens.Palette.information
-        case .ignoreList: AppDesignTokens.Palette.information
-        case .scanAndSafety:
-            AppDesignTokens.Palette.success
-        case .accessAndSetup:
-            AppDesignTokens.Palette.tertiary
-        case .systemControl:
-            AppDesignTokens.Palette.diagnostic
-        case .updates:
-            AppDesignTokens.Palette.warning
-        case .about:
-            AppDesignTokens.Palette.storage
+        case .accessAndSetup: L10n.text("权限与隐私", "Access & Privacy")
+        case .aiAssistant: L10n.text("AI 助手", "AI Assistant")
+        case .systemControl: L10n.text("风扇控制", "Fan Control")
+        case .updates: L10n.text("应用更新", "App Updates")
+        case .about: L10n.text("关于", "About")
         }
     }
 }
@@ -90,9 +37,9 @@ struct SettingsView: View {
     let cleanupArchitectureMode: CleanupArchitectureMode
     var scanStore: ScanStore?
     @State var isSettingsVisible = false
-    @State var settingsInterfaceExpanded = false
     @State var settingsMetricColorsExpanded = false
-    @ObservedObject var settingsConfiguration = GeekDashboardConfigurationStore.shared
+    @State var updateSourcesExpanded = false
+    @State var aboutDetailsExpanded = false
     @State var showsOperations = false
     @State var supportSnapshot: RedactedSupportSnapshot?
     @State var showsSupportExport = false
@@ -109,23 +56,17 @@ struct SettingsView: View {
     @AppStorage(IStatMenuThemePreferences.darkThemeKey) var menuThemeDarkID = IStatMenuTheme.defaultID
     @AppStorage(IStatMenuThemePreferences.lightThemeKey) var menuThemeLightID = IStatMenuTheme.defaultID
     @AppStorage(IStatMenuThemePreferences.vibrancyKey) var menuThemeVibrancy = true
-    @AppStorage(PanelPalettePreferences.statusThemeKey) var panelStatusPresetRaw = ""
-    @AppStorage(PanelPalettePreferences.statusCustomDayKey) var statusCustomDayHex = ""
-    @AppStorage(PanelPalettePreferences.statusCustomNightKey) var statusCustomNightHex = ""
-    // D136: the volumes hidden from the mini window's disk page.
-    @AppStorage(MiniWindowHiddenItems.disksKey) var hiddenDiskKeysRaw = ""
     @AppStorage(MaintenanceReminderService.defaultsKey) var maintenanceCadenceRawValue = MaintenanceReminderService.defaultCadence.rawValue
     @State var pendingCloseWindow: NSWindow?
     @AppStorage("settings.selected-category.v1") var selectedCategory = SettingsCategory.general
+    @AppStorage(SettingsMenuBarPage.defaultsKey) var menuBarPage = SettingsMenuBarPage.icon
     @AppStorage(PublicNetworkConsent.addressKey) var allowsPublicAddress = PublicNetworkConsent.defaultAllowsAddress
     @AppStorage(PublicNetworkConsent.countryKey) var allowsCountryLookup = false
     @State var scanHistorySummary = ScanHistorySummary(entries: [])
-    @State var excludedPaths: [String] = []
     @StateObject var ignoreListModel = SettingsIgnoreListModel(store: .shared)
     @State var ignoreSelection = Set<String>()
     @State var ignoreApplicationSelection = Set<String>()
     @State var showsIgnoreApplicationPicker = false
-    @State var exclusionNotice: SettingsNotice?
     @ObservedObject var helperSettingsNavigation = SystemHelperSettingsNavigation.shared
     @State var permissionNotice: SettingsNotice?
     @State var fullDiskAccessState = FullDiskAccessState.unknown
@@ -138,6 +79,9 @@ struct SettingsView: View {
     var isCheckingAccess: Bool { accessRefreshGate.isChecking }
     @State var isRequestingNotifications = false
     @State var isPreparingHelper = false
+    /// D229: the file-operation helper's row in Permissions › System Helper.
+    @ObservedObject var fileOperationHelper = FileOperationHelperEnabler.shared
+    @State var confirmsFileOperationHelper = false
     @State var diagnosticNotice: SettingsNotice?
     @State var updateSourceConfiguration = AppUpdateSourcePreferences.configuration()
     @State var applicationUpdatePreferences = ApplicationUpdatePreferences.snapshot()
@@ -147,13 +91,16 @@ struct SettingsView: View {
     @State var isLoadingFanCapability = false
     @StateObject var exclusionPanelCoordinator = AppOpenPanelCoordinator()
     @StateObject var fanControl: FanControlCoordinator
+    @StateObject var agentInterface: AgentInterface
 
     init(
         cleanupArchitectureMode: CleanupArchitectureMode = .v2Full,
         scanStore: ScanStore? = nil,
-        fanControl: @autoclosure @escaping @MainActor () -> FanControlCoordinator = FanControlCoordinator.shared
+        fanControl: @autoclosure @escaping @MainActor () -> FanControlCoordinator = FanControlCoordinator.shared,
+        agentInterface: @autoclosure @escaping @MainActor () -> AgentInterface = AgentInterface.shared
     ) {
         _fanControl = StateObject(wrappedValue: fanControl())
+        _agentInterface = StateObject(wrappedValue: agentInterface())
         self.cleanupArchitectureMode = cleanupArchitectureMode
         self.scanStore = scanStore
     }
@@ -187,7 +134,9 @@ struct SettingsView: View {
             GeometryReader { proxy in
                 let topInset = proxy.safeAreaInsets.top
                 let canvas = CGSize(width: proxy.size.width, height: max(1, proxy.size.height - topInset))
-                FeatureLightfieldBackdrop(module: .overview, phase: .landing,
+                // D274: a result page's quieter halo, in the landing's place. The column
+                // of actions sits on it, and at full strength measured about 3:1 there.
+                FeatureLightfieldBackdrop(module: .overview, phase: .result,
                     geometry: FeatureLightfieldGeometry(size: canvas, phase: .landing),
                     canvasTopInset: topInset)
             }
@@ -292,28 +241,21 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func settingsForm(for category: SettingsCategory) -> some View {
-        if category == .general {
-            generalSettings
-        } else if category == .ignoreList {
+        if category == .ignoreList {
             ignoreListSettings
         } else if category == .miniWindow {
             miniWindowSettings
         } else if category == .accessAndSetup {
             ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        permissionSetupSection
-                        networkPrivacySection
-                    }.padding(.bottom, 24)
+                SettingsColumn {
+                    permissionSetupSection
+                    networkPrivacySection
                 }
                 .onAppear { scrollToRequestedHelper(using: proxy) }
                 .onChange(of: helperSettingsNavigation.requestID) { scrollToRequestedHelper(using: proxy) }
             }
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) { settingsSections(for: category) }
-                    .padding(.bottom, 24)
-            }
+            SettingsColumn { settingsSections(for: category) }
         }
     }
 
@@ -329,26 +271,26 @@ struct SettingsView: View {
     @ViewBuilder
     private func settingsSections(for category: SettingsCategory) -> some View {
         switch category {
-        case .ignoreList: ignoreListSettings
-        case .miniWindow: EmptyView()
+        case .ignoreList, .miniWindow: EmptyView()
         case .general:
             interfaceSection
-            panelAppearanceSection
-            CombinedStatusIconSettingsSection()
             launchBehaviorSection
         case .scanAndSafety:
-            if let scanStore {
-                LightfieldSettingsSection {
-                    Button(L10n.text("查看逐项回执与恢复", "View receipts and recovery")) { showsOperations = true }
-                        .sheet(isPresented: $showsOperations) { ReversibleOperationsView(store: scanStore) }
-                } header: { Text(L10n.text("可恢复操作", "Recoverable Operations")) }
-            }
             maintenanceReminderSection
             AppLifecycleReminderSettingsSection()
-            exclusionSection
+            if let scanStore {
+                LightfieldSettingsSection {
+                    SettingsLinkRow(title: L10n.text("查看逐项回执与恢复", "View receipts and recovery")) {
+                        showsOperations = true
+                    }
+                    .sheet(isPresented: $showsOperations) { ReversibleOperationsView(store: scanStore) }
+                } header: { Text(L10n.text("可恢复操作", "Recoverable Operations")) }
+            }
         case .accessAndSetup:
             permissionSetupSection
             networkPrivacySection
+        case .aiAssistant:
+            AgentSettingsPage(interface: agentInterface)
         case .systemControl:
             fanControlSection
         case .updates:
@@ -367,6 +309,8 @@ struct SettingsView: View {
             refreshLaunchAtLoginStatus()
         case .accessAndSetup:
             refreshAccessStatus()
+        case .aiAssistant:
+            agentInterface.refreshForSettings()
         case .systemControl:
             fanControl.refreshStatus()
             isLoadingFanCapability = true
@@ -380,7 +324,6 @@ struct SettingsView: View {
             }
         case .scanAndSafety:
             scanHistorySummary = ScanHistoryService.summary()
-            excludedPaths = ScanExclusionService.excludedPaths()
         case .updates:
             updateSourceConfiguration = AppUpdateSourcePreferences.configuration()
             applicationUpdatePreferences = ApplicationUpdatePreferences.snapshot()
@@ -397,16 +340,9 @@ struct UpdateSourceOptionRow: View {
     @Binding var isEnabled: Bool
 
     var body: some View {
-        Toggle(isOn: $isEnabled) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(method.title)
-                    .font(.body)
-            }
+        LightfieldSettingsRow {
+            SettingsToggleRow(title: method.title, isOn: $isEnabled)
         }
-        .toggleStyle(.checkbox)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityLabel(method.title)
         .accessibilityValue(isEnabled ? L10n.text("已启用", "Enabled") : L10n.text("已停用", "Disabled"))
         .accessibilityHint(method.detail)
     }
@@ -482,7 +418,7 @@ struct SettingsNoticeView: View {
 
             Text(notice.text)
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 0)
@@ -491,35 +427,6 @@ struct SettingsNoticeView: View {
         .padding(.vertical, 8)
         .id(notice.text)
         .accessibilityElement(children: .combine)
-    }
-}
-
-struct ExclusionPathRow: View {
-    let path: String
-    let remove: () -> Void
-
-    private var displayName: String {
-        ScanExclusionService.displayName(for: path)
-    }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(displayName)
-                    .font(.system(size: 15))
-                    .lineLimit(1).truncationMode(.middle)
-                LightfieldPathText(path: path)
-            }
-
-            Spacer(minLength: 0)
-
-            Button(L10n.text("移除", "Remove"), action: remove)
-                .buttonStyle(FeatureLightfieldRowButtonStyle())
-                .accessibilityLabel(L10n.text("移除", "Remove") + " · " + displayName)
-                .help(path)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
     }
 }
 
@@ -538,15 +445,43 @@ struct SettingsWindowConfigurator: NSViewRepresentable {
         private static let standardControls: NSWindow.StyleMask = [.resizable, .miniaturizable]
         private weak var window: NSWindow?
         private var observation: NSKeyValueObservation?
+        /// Written on the main actor only; read once more by `deinit`.
+        nonisolated(unsafe) private var screenObserver: NSObjectProtocol?
+        nonisolated(unsafe) private var resizeObserver: NSObjectProtocol?
+
+        deinit {
+            if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+            if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+        }
 
         func keepStandardControls(_ window: NSWindow) {
             Self.restoreStandardControls(window)
             guard self.window !== window else { return }
             self.window = window
+            SettingsWindowConfigurator.applyPreferredSize(window)
+            if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+            resizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didEndLiveResizeNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    guard let window = self?.window else { return }
+                    SettingsWindowPlacement.rememberSize(window.frame.size)
+                }
+            }
             observation = window.observe(\.styleMask, options: [.new]) { [weak self] _, _ in
                 Task { @MainActor in
                     guard let window = self?.window else { return }
                     Self.restoreStandardControls(window)
+                }
+            }
+            // D243 (review P2-15): a display that closes takes no window with it.
+            if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+            screenObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    guard let window = self?.window else { return }
+                    SettingsWindowConfigurator.restoreVisibleFrameIfNeeded(window)
                 }
             }
         }
@@ -596,7 +531,7 @@ struct SettingsWindowConfigurator: NSViewRepresentable {
         window.standardWindowButton(.miniaturizeButton)?.isEnabled = true
         window.standardWindowButton(.zoomButton)?.isEnabled = true
 
-        let minimumSize = NSSize(width: 560, height: 390)
+        let minimumSize = SettingsWindowPlacement.minimumSize
         if window.minSize != minimumSize {
             window.minSize = minimumSize
         }
@@ -606,10 +541,10 @@ struct SettingsWindowConfigurator: NSViewRepresentable {
             window.maxSize = maximumSize
         }
 
-        restoreVisibleFrameIfNeeded(window)
+        Self.restoreVisibleFrameIfNeeded(window)
     }
 
-    private func restoreVisibleFrameIfNeeded(_ window: NSWindow) {
+    static func restoreVisibleFrameIfNeeded(_ window: NSWindow) {
         let visibleFrames = NSScreen.screens.map(\.visibleFrame)
         guard !visibleFrames.isEmpty,
               SettingsWindowPlacement.requiresRestoration(
@@ -625,18 +560,65 @@ struct SettingsWindowConfigurator: NSViewRepresentable {
            intersectingFrame.intersection(window.frame).area > 0 {
             targetFrame = intersectingFrame
         } else {
-            targetFrame = window.screen?.visibleFrame
-                ?? NSScreen.main?.visibleFrame
-                ?? visibleFrames[0]
+            // D243＋旧值“window.screen?.visibleFrame ?? …”: the window's last
+            // screen may be the display that just went away.
+            targetFrame = NSScreen.main?.visibleFrame ?? visibleFrames[0]
         }
         let restoredFrame = SettingsWindowPlacement.clamped(window.frame, to: targetFrame)
 
         guard restoredFrame != window.frame else { return }
         window.setFrame(restoredFrame, display: true)
     }
+
+    /// D274: once per window, for a screen the size does not fit and a window opened
+    /// again in the same run. Only the scene's own window: a test's host around this
+    /// view keeps the size it was given.
+    static func applyPreferredSize(_ window: NSWindow) {
+        guard !window.frameAutosaveName.isEmpty,
+              let frame = SettingsWindowPlacement.openingFrame(
+                window.frame,
+                size: SettingsWindowPlacement.preferredSize(),
+                within: NSScreen.screens.map(\.visibleFrame)
+              ),
+              frame != window.frame else { return }
+        window.setFrame(frame, display: true)
+    }
 }
 
 enum SettingsWindowPlacement {
+    /// D274: the content's ideal size (`SettingsView.body`) with the title bar.
+    static let openingSize = NSSize(width: 1180, height: 760)
+    static let minimumSize = NSSize(width: 560, height: 390)
+    static let rememberedSizeKey = "settings.window-size.v1"
+
+    /// The `Settings` scene's `.defaultSize`. AppKit's saved frame cannot keep the size:
+    /// this window is not resizable yet when its frame is restored, so only the top-left
+    /// comes back (traced 11-02), and every launch opened at SwiftUI's own 900 × 450.
+    static func preferredSize() -> NSSize {
+        preferredSize(remembered: UserDefaults.standard.string(forKey: rememberedSizeKey))
+    }
+
+    static func preferredSize(remembered: String?) -> NSSize {
+        guard let remembered else { return openingSize }
+        let size = NSSizeFromString(remembered)
+        return size.width >= minimumSize.width && size.height >= minimumSize.height ? size : openingSize
+    }
+
+    /// From the end of a drag only: being clamped to a smaller display is not a choice.
+    static func rememberSize(_ size: NSSize) {
+        UserDefaults.standard.set(NSStringFromSize(size), forKey: rememberedSizeKey)
+    }
+
+    /// Keeps the top-left, as dragging the corner would, then stays on the screen
+    /// holding most of the window.
+    static func openingFrame(_ frame: NSRect, size: NSSize, within visibleFrames: [NSRect]) -> NSRect? {
+        guard let visibleFrame = visibleFrames.max(by: {
+            $0.intersection(frame).area < $1.intersection(frame).area
+        }) else { return nil }
+        let sized = NSRect(x: frame.minX, y: frame.maxY - size.height, width: size.width, height: size.height)
+        return clamped(sized, to: visibleFrame)
+    }
+
     static func requiresRestoration(
         _ frame: NSRect,
         within visibleFrames: [NSRect]
@@ -678,7 +660,7 @@ struct ScanHistoryHealthStatusLine: View {
         if let status = entry.smartScanHealthStatus {
             Text(L10n.text("文件扫描 · \(status.title)", "File Scan · \(status.title)"))
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
                 .accessibilityIdentifier("scan-history.health-status")
         }

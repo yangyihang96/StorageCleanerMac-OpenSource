@@ -16,7 +16,9 @@ struct SettingsMiniWindowPreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(L10n.text("实时预览 · 与菜单栏小窗同尺寸", "Live preview · Same size as the menu-bar panel"))
+            // D232＋旧值“实时预览 · 与菜单栏小窗同尺寸”: the data is simulated,
+            // as the accessibility label below already said.
+            Text(L10n.text("模拟预览 · 与菜单栏小窗同尺寸", "Sample data · Same size as the menu-bar panel"))
                 .font(.system(size: 13))
                 .foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
                 .lineLimit(1)

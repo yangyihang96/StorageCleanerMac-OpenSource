@@ -36,3 +36,32 @@ public struct UpdateProcessSnapshot: Sendable {
         return pids.prefix(Int(found)).filter { $0 > 0 }.compactMap(Self.read)
     }
 }
+
+/// D245 (review P2-5): whether an application bundle's main program runs,
+/// from the process table. The file-operation helper is a root LaunchDaemon:
+/// `NSRunningApplication` sees no user session's applications there and always
+/// answered "none". This is the client's own check (`ApplicationTerminator
+/// .isRunning`: the app's instances), repeated just before the move; a program
+/// embedded elsewhere in the bundle does not count, as it does not there.
+public enum RunningBundleCheck {
+    /// Fails closed: an unreadable process table counts as running.
+    public static func mainExecutableIsRunning(bundlePath: String, executableName: String?) -> Bool {
+        guard let table = UpdateProcessSnapshot.table() else { return true }
+        return mainExecutableIsRunning(bundlePath: bundlePath, executableName: executableName, processes: table)
+    }
+
+    public static func mainExecutableIsRunning(bundlePath: String, executableName: String?,
+                                               processes: [UpdateProcessSnapshot]) -> Bool {
+        var directory = bundlePath
+        while directory.count > 1, directory.hasSuffix("/") { directory.removeLast() }
+        let programs = directory + "/Contents/MacOS/"
+        let live = processes.filter { !$0.zombie }
+        if let name = executableName, !name.isEmpty, !name.contains("/") {
+            return live.contains { $0.executable == programs + name }
+        }
+        // No usable CFBundleExecutable: any program directly in Contents/MacOS.
+        return live.contains {
+            $0.executable.hasPrefix(programs) && !$0.executable.dropFirst(programs.count).contains("/")
+        }
+    }
+}

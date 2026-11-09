@@ -540,7 +540,7 @@ struct GeekPowerHistoryChart: View {
                     if let statistics {
                         Text(metric.currentText(statistics.current))
                             .font(AdvancedPanelTypography.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .monospacedDigit()
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)

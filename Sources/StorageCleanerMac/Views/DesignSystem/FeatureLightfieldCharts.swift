@@ -209,7 +209,22 @@ struct LightfieldTrendChart: View {
         if let selection { return L10n.text("区间平均", "Range average") + " · " + valueFormat.detail(selection.average) }
         let index = hoveredIndex ?? samples.indices.last
         guard let index, samples.indices.contains(index) else { return L10n.text("未提供", "Unavailable") }
-        return samples[index].time.formatted(date: .omitted, time: .standard) + " · " + detail(at: index)
+        return readoutLabel(at: index, precise: true) + " · " + detail(at: index)
+    }
+    /// D253 (G batch): the accessibility value and the top-line readout name
+    /// the moment as the hover bubble does. A chart whose x axis is not wall
+    /// time (power, elapsed seconds; the benchmark results stamp samples with
+    /// `Date(timeIntervalSinceReferenceDate:)`) reads its x value; a clock
+    /// format read 90 s as “11:01:30 AM” at UTC+11.
+    static func readoutLabel(time: Date, xFraction: Double?, xValueFormat: LightfieldTrendValueFormat?,
+                             precise: Bool) -> String {
+        if let xValueFormat, let xFraction { return xValueFormat.detail(xFraction) }
+        return time.appFormatted(date: .omitted, time: precise ? .standard : .shortened)
+    }
+    private func readoutLabel(at index: Int, precise: Bool) -> String {
+        Self.readoutLabel(time: samples[index].time,
+                          xFraction: xFractions.flatMap { $0.indices.contains(index) ? $0[index] : nil },
+                          xValueFormat: xValueFormat, precise: precise)
     }
     /// Primary value, then each extra line by name ("82.0% · GPU 4.0%").
     private func detail(at index: Int) -> String {
@@ -357,7 +372,7 @@ struct LightfieldTrendChart: View {
                         .frame(width: 6, height: 6).position(point)
                 }
                 if hoverStyle.contains(.topLine) {
-                    Text(samples[index].time.formatted(date: .omitted, time: .shortened) + " · " + detail(at: index))
+                    Text(readoutLabel(at: index, precise: false) + " · " + detail(at: index))
                         .font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundStyle(palette.fg)
                         .lineLimit(1).minimumScaleFactor(0.8) // lightfield-scale-ok: chart-readout
                         .frame(width: min(150, size.width), alignment: .center)
@@ -494,7 +509,7 @@ private struct LightfieldBubble: View {
     var body: some View {
         let diameter = placement.radius * 2
         let palette = FeatureLightfieldPalette.resolve(scheme)
-        let color = item.id == LightfieldBubbleLayout.otherID ? palette.fg3
+        let color = item.id == LightfieldBubbleLayout.otherID ? palette.fg3.base
             : item.color ?? FeatureLightfieldPalette.accent(item.module)
         let dark = scheme == .dark
         // Approved glass bubble (files r3/r4 CSS): type-colour linear body,

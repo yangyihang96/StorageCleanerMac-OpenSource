@@ -102,6 +102,11 @@ struct StartupItemsView: View {
     /// about; these, as listed, are the ones that run (D168).
     @State private var maintenanceRunTasks: [SystemMaintenanceTaskID] = []
     @State private var confirmsMaintenanceRun = false
+    /// D229: Enable Background Helper; only this confirmed button registers
+    /// the helper from this page (D177: scans never do).
+    @ObservedObject private var helperEnabler = FileOperationHelperEnabler.shared
+    @State private var confirmsHelperEnable = false
+    @State private var helperFailure: String?
 
     init(store: ScanStore) {
         self.store = store
@@ -183,7 +188,7 @@ struct StartupItemsView: View {
                     // classic cleanup list.
                     if showsClassicConsole {
                         Button(L10n.text("返回卡片视图", "Back to Cards")) { showsClassicConsole = false }
-                            .buttonStyle(.link)
+                            .buttonStyle(.link).careStudioActionTint()
                             .font(.system(size: 12, weight: .semibold))
                             .padding(.top, 14)
                             .padding(.trailing, 18)
@@ -195,10 +200,20 @@ struct StartupItemsView: View {
         // read with the scan the user starts, as CleanMyMac's Performance scan does.
         .onChange(of: store.isLoadingStartupItems) { _, loading in
             if loading, !isFixture, !maintenance.isRefreshing { maintenance.refresh() }
+            // D229: a finished read may have met a changed helper.
+            if !loading, !isFixture { helperEnabler.refreshSoon() }
         }
+        .onAppear { if !isFixture { helperEnabler.refreshSoon() } }
         .featureFlowTransition(value: store.isLoadingStartupItems)
         .maintenanceRunConfirmation(maintenance, tasks: maintenanceRunTasks, isPresented: $confirmsMaintenanceRun) {
             maintenance.run(maintenanceRunTasks)
+        }
+        .fileOperationHelperEnableConfirmation(isPresented: $confirmsHelperEnable) { enableHelper() }
+        .alert(L10n.text("没能启用后台助手", "Could Not Enable the Helper"),
+               isPresented: Binding(get: { helperFailure != nil }, set: { if !$0 { helperFailure = nil } })) {
+            Button(L10n.text("好", "OK"), role: .cancel) {}
+        } message: {
+            Text(helperFailure ?? "")
         }
         // D94: Undo is in the result controls only. A toolbar item here
         // would add a window toolbar to this page alone and move the
@@ -249,17 +264,44 @@ struct StartupItemsView: View {
             onOpenSystemSettings: { SMAppService.openSystemSettingsLoginItems() },
             onUndo: store.canUndoLastStartupOperation ? { store.undoLastStartupOperation() } : nil,
             onStartOver: { store.startOverStartupItems() },
-            startOverActivity: store.heavyWorkActivityStore)
+            startOverActivity: store.heavyWorkActivityStore,
+            helper: helperAction)
+    }
+
+    /// D229: the helper's next step, when there is one. Approval needs no
+    /// confirmation (the helper is registered; only System Settings opens).
+    private var helperAction: CareStudioStartupHelperAction? {
+        guard let status = helperEnabler.status, status.actionTitle != nil else { return nil }
+        return CareStudioStartupHelperAction(status: status, isBusy: helperEnabler.isEnabling) {
+            if status == .requiresApproval { enableHelper() } else { confirmsHelperEnable = true }
+        }
+    }
+
+    private func enableHelper() {
+        Task { @MainActor in
+            let outcome = await helperEnabler.enable { [store] in store.refreshStartupItems() }
+            if case .failed(let message)? = outcome { helperFailure = message }
+        }
     }
 
     private var startupCoverageAction: some View {
-        Button(startupCoverageActionTitle) {
-            store.refreshStartupItems(includeBackgroundTaskDiagnostic: true)
+        HStack(spacing: 14) {
+            Button(startupCoverageActionTitle) {
+                store.refreshStartupItems(includeBackgroundTaskDiagnostic: true)
+            }
+            .buttonStyle(FeatureLightfieldRowButtonStyle())
+            .font(.system(size: 13))
+            .disabled(!store.canRefreshStartupItems)
+            .help(startupCoverageActionHelp)
+            // D229: the same way out as the unread login tile.
+            if !store.startupCoverage.managedItemCoverageAvailable, let helper = helperAction, let title = helper.title {
+                Button(title, action: helper.perform)
+                    .buttonStyle(FeatureLightfieldRowButtonStyle())
+                    .font(.system(size: 13))
+                    .disabled(helper.isBusy)
+                    .help(FileOperationHelperEnabler.confirmationMessage)
+            }
         }
-        .buttonStyle(FeatureLightfieldRowButtonStyle())
-        .font(.system(size: 13))
-        .disabled(!store.canRefreshStartupItems)
-        .help(startupCoverageActionHelp)
     }
 
     private var startupCoverageActionTitle: String {
@@ -276,12 +318,14 @@ struct StartupItemsView: View {
     }
 
     private var startupCoverageActionHelp: String {
+        // D229＋旧值“系统后台项读取诊断：<原因>”: the help says what this
+        // button does again, then why the last read failed.
         if let failure = store.startupCoverage.sources.first(where: {
             $0.source == .backgroundTaskDiagnostic
         })?.errorDescription {
             return L10n.text(
-                "系统后台项读取诊断：\(failure)",
-                "System background-item read diagnostic: \(failure)"
+                "再次读取 macOS 登录项与后台任务数据库；系统可能要求管理员确认。上次没读到：\(failure)",
+                "Reads the macOS login-item and background-task database again; the system may request administrator approval. Last time: \(failure)"
             )
         }
         if let help = StartupReadPresentation(coverage: store.startupCoverage).databaseReadHelp {
@@ -647,8 +691,8 @@ private struct EnergyImpactSummaryGrid: View {
                 value: snapshot.uptimeText,
                 detail: systemEnergy.map {
                     L10n.text(
-                        "从 \($0.monitoringStartedAt.formatted(date: .abbreviated, time: .shortened)) 开始记录",
-                        "Recording since \($0.monitoringStartedAt.formatted(date: .abbreviated, time: .shortened))"
+                        "从 \($0.monitoringStartedAt.appFormatted(date: .abbreviated, time: .shortened)) 开始记录",
+                        "Recording since \($0.monitoringStartedAt.appFormatted(date: .abbreviated, time: .shortened))"
                     )
                 } ?? L10n.text("监测尚未开始", "Monitoring has not started"),
                 systemImage: "power.circle.fill",
@@ -709,7 +753,7 @@ private struct EnergyImpactMeasurementBar: View {
             "The summary is a whole-system monitoring estimate; the list below shows attributable app energy only. \(snapshot.calibrationText)"
         ))
         .font(AppDesignTokens.Typography.secondary)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -724,7 +768,7 @@ private struct EnergyImpactMeasurementBar: View {
             ))
         }
         .font(AppDesignTokens.Typography.compactLabelEmphasis)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .fixedSize()
         .accessibilityElement(children: .combine)
     }
@@ -742,7 +786,7 @@ private struct EnergyImpactControlsBar: View {
                 "\(ByteFormat.count(visibleCount)) apps · \(ByteFormat.count(snapshot.processCount)) processes grouped"
             ))
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 8)
@@ -782,7 +826,7 @@ private struct EnergyImpactTableHeader: View {
                 Text(L10n.text("应用与能耗明细", "App energy details"))
                 Spacer(minLength: AppDesignTokens.Spacing.small)
                 Text(L10n.text("累计 · 当前 · 平均", "Energy · Current · Average"))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
             .font(AppDesignTokens.Typography.compactLabelEmphasis)
         }
@@ -808,17 +852,17 @@ private struct EnergyImpactTableHeader: View {
 
             Text(L10n.text("累计能耗", "Energy"))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 92, alignment: .trailing)
 
             Text(L10n.text("当前功率", "Current"))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 92, alignment: .trailing)
 
             Text(L10n.text("平均功率", "Average"))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 92, alignment: .trailing)
 
             Color.clear
@@ -970,7 +1014,7 @@ private struct EnergyImpactAppRow: View {
             "Running \(app.runningTimeText) · CPU \(app.cpuPercentText)"
         ))
         .font(AppDesignTokens.Typography.secondary)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -1004,9 +1048,9 @@ private struct EnergyImpactValueColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+            Text(title).font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
             Text(value).font(AppDesignTokens.Typography.inlineTitle).monospacedDigit()
-            Text(evidence.source.title).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+            Text(evidence.source.title).font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
         }
         .fixedSize(horizontal: false, vertical: true)
         .help(evidence.detail)
@@ -1174,7 +1218,7 @@ struct UninstallPreviewAppIcon: View {
                 .resizable()
                 .scaledToFit()
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 32, height: 32)
         }
             .shadow(color: AppDesignTokens.Elevation.prominentShadow, radius: 12, y: 6)
@@ -1361,7 +1405,7 @@ private struct OneClickPlanMetric: View {
                 .monospacedDigit()
             Text(title)
                 .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 11)
@@ -1386,7 +1430,7 @@ private struct OneClickUpdatePreviewRow: View {
                         .font(AppDesignTokens.Typography.compactLabelEmphasis)
                     Text(app.source.trimmed.nonEmpty ?? app.primaryUpdateProvider.rawValue)
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1403,7 +1447,7 @@ private struct OneClickUpdatePreviewRow: View {
                     "当前 \(app.currentVersionDisplay) → 最新 \(app.latestVersionDisplay)",
                     "Current \(app.currentVersionDisplay) → Latest \(app.latestVersionDisplay)"
                 ))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if !automaticallyUpdated && !guidedWebsite {
                     AppButton(
@@ -1414,7 +1458,7 @@ private struct OneClickUpdatePreviewRow: View {
                     )
                 } else if guidedWebsite {
                     Text(L10n.text("官网引导", "Website Guidance"))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
             }
             .font(AppDesignTokens.Typography.compactLabel)
@@ -1631,7 +1675,7 @@ struct DuplicateFilesView: View {
                             Button(scope.title) { workspace.scanScope = scope }.disabled(workspace.scopeUnavailableReason(scope) != nil)
                         }
                     } label: { Text(workspace.scanScope.title).font(.system(size: 13)) }
-                        .menuStyle(.borderlessButton).fixedSize()
+                        .menuStyle(.borderlessButton).careStudioActionTint().fixedSize()
                         .accessibilityLabel(L10n.text("扫描范围", "Scan Scope"))
                 }
                 .padding(.trailing, 6).frame(height: FeatureLightfield.optionHeight)
@@ -1665,7 +1709,7 @@ struct DuplicateFilesView: View {
                     Button(L10n.text("移除：", "Remove: ") + path) { workspace.removeExternalRoot(path) }
                 }
             } label: { Text(L10n.text("已添加 \(ByteFormat.count(workspace.configuredAdditionalRoots.count)) 个位置", "\(ByteFormat.count(workspace.configuredAdditionalRoots.count)) added locations")).font(.system(size: 13)) }
-                .menuStyle(.borderlessButton).frame(height: 40)
+                .menuStyle(.borderlessButton).careStudioActionTint().frame(height: 40)
         }
     }
 
@@ -1994,7 +2038,7 @@ struct DuplicateFilesView: View {
                     : "folder.fill.badge.checkmark"
             )
             .font(AppTypography.body)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .frame(maxWidth: .infinity, minHeight: 42)
             .background(AppAppearanceColors.ink.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8)
@@ -2079,7 +2123,7 @@ struct DuplicateFilesView: View {
                         systemImage: "checkmark.shield"
                     )
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .fixedSize()
             }
         }
@@ -2092,7 +2136,7 @@ struct DuplicateFilesView: View {
             "\(ByteFormat.count(progress.scannedDirectories)) folders and \(ByteFormat.count(progress.scannedFiles)) files scanned; \(ByteFormat.count(progress.hashedFiles)) fully hashed (\(ByteFormat.storageString(progress.hashedBytes)))"
         ))
         .font(AppDesignTokens.Typography.secondary)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.readableSecondary)
         .monospacedDigit()
         .lineLimit(1)
         .truncationMode(.tail)
@@ -2161,7 +2205,7 @@ struct DuplicateFilesView: View {
                         LazyVStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
                             Text(L10n.text("显示 \(ByteFormat.count(groups.count)) 组结果", "Showing \(ByteFormat.count(groups.count)) result groups"))
                                 .font(AppDesignTokens.Typography.secondary)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
 
                             ForEach(groups) { group in
                                 DuplicateGroupCard(
@@ -2186,7 +2230,7 @@ struct DuplicateFilesView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(L10n.text("相似照片候选", "Similar Photo Candidates"))
                         .font(AppDesignTokens.Typography.compactLabel)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                     Text(L10n.text("\(ByteFormat.count(groups.count)) 组", "\(ByteFormat.count(groups.count)) groups"))
                         .font(AppDesignTokens.Typography.metricValue)
                         .monospacedDigit()
@@ -2195,7 +2239,7 @@ struct DuplicateFilesView: View {
                         "For manual review only; visual similarity does not prove identical content."
                     ))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 }
             } else {
                 ViewThatFits(in: .horizontal) {
@@ -2222,13 +2266,13 @@ struct DuplicateFilesView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(L10n.text("扫描结果", "Scan Result"))
                 .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
             Text(L10n.text("\(ByteFormat.count(allGroups.count)) 组", "\(ByteFormat.count(allGroups.count)) groups"))
                 .font(AppDesignTokens.Typography.metricValue)
                 .monospacedDigit()
             Text(scanTimeText)
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
         .frame(minWidth: 150, alignment: .leading)
     }
@@ -2315,7 +2359,7 @@ struct DuplicateFilesView: View {
             duplicateProgressLabel
             if let path = workspace.scanProgress?.currentPath {
                 Text(path).font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(path)
+                    .foregroundStyle(.readableSecondary).lineLimit(1).truncationMode(.middle).help(path)
             }
             HStack { Spacer(); duplicateRuntimeActions }
         }
@@ -2330,7 +2374,7 @@ struct DuplicateFilesView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text((workspace.lastCompletedScanScope ?? workspace.scanScope).coverageDescription)
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
 
                     let addedRoots = workspace.lastScanSelectedRootPaths
@@ -2348,7 +2392,7 @@ struct DuplicateFilesView: View {
                                     // N17: added locations are walked first with their own quota.
                                     Text(L10n.text("你添加的位置 · 先扫描、单独计数", "Added location · scanned first with its own quota"))
                                         .font(AppDesignTokens.Typography.compactLabel)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(.readableSecondary)
                                 }
                                 Text(root.status == .scanned
                                     ? L10n.text(
@@ -2357,14 +2401,14 @@ struct DuplicateFilesView: View {
                                     )
                                     : duplicateSkipReasonTitle(root.skipReason))
                                     .font(AppDesignTokens.Typography.compactLabel)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.readableSecondary)
                                 if let cloudOnly = root.cloudOnlyFiles, cloudOnly > 0 {
                                     Text(L10n.text(
                                         "其中 \(ByteFormat.count(cloudOnly)) 个文件仅在云端，未下载比对",
                                         "\(ByteFormat.count(cloudOnly)) of them are cloud-only and were not compared"
                                     ))
                                     .font(AppDesignTokens.Typography.compactLabel)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.readableSecondary)
                                 }
                             }
                         }
@@ -2373,7 +2417,7 @@ struct DuplicateFilesView: View {
                     if let cloudOnly = coverage.cloudOnlySummary {
                         Label(cloudOnly, systemImage: "icloud")
                             .font(AppDesignTokens.Typography.secondary)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
@@ -2451,7 +2495,7 @@ struct DuplicateFilesView: View {
                         .font(AppDesignTokens.Typography.inlineTitle)
                     Text(CleanStartRefusalPresentation.message(refusal))
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
@@ -2476,7 +2520,7 @@ struct DuplicateFilesView: View {
                         "Moved \(ByteFormat.count(report.summary.movedItemCount)), skipped \(ByteFormat.count(report.summary.skippedItemCount)), failed \(ByteFormat.count(report.summary.failedItemCount)). Nothing was permanently deleted."
                     ))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     // D93: four groups with reasons; moved copies are not freed space.
                     OperationCompletionTallyView(tally: OperationCompletionTally(report: report))
                 }
@@ -2707,7 +2751,7 @@ private struct DuplicateCleanupConfirmationSheet: View {
                 "Review the retained and moving copies in every group. Identity, size, and full SHA-256 are checked again at execution time."
             ))
             .font(AppDesignTokens.Typography.secondary)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
 
             if let presentation {
                 if let facts {
@@ -2982,7 +3026,7 @@ private struct DuplicateGroupCard: View {
                         systemImage: "eye"
                     )
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                     LazyVGrid(
@@ -3036,7 +3080,7 @@ private struct SimilarImageReviewTile: View {
                 } else {
                     Image(systemName: "photo")
                         .font(.system(size: 27))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .accessibilityHidden(true)
                 }
             }
@@ -3050,19 +3094,19 @@ private struct SimilarImageReviewTile: View {
                 .truncationMode(.middle)
             Text(item.path)
                 .font(AppDesignTokens.Typography.metadata)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .help(item.path)
             Text(ByteFormat.storageString(item.sizeBytes))
                 .font(AppDesignTokens.Typography.metadata)
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
 
             if let previewUnavailableReason {
                 Text(previewUnavailableReason)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
 
             HStack(spacing: 8) {
@@ -3152,7 +3196,7 @@ private struct DuplicateFileRow: View {
                         ? L10n.text("完整 SHA-256 已确认", "Full SHA-256 confirmed")
                         : L10n.text("人工候选 · 默认不选", "Review candidate · Unselected by default"))
                     .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .focusable()
@@ -3170,7 +3214,7 @@ private struct DuplicateFileRow: View {
             Text(ByteFormat.storageString(item.sizeBytes))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
 
             AppIconButton(
                 title: L10n.text("快速预览", "Quick Look"),
@@ -3342,14 +3386,14 @@ private struct UtilityMetricCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 Text(value)
                     .font(AppDesignTokens.Typography.metricValue)
                     .monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
                     .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -3401,7 +3445,7 @@ private struct MemoryOptimizationResultPanel: View {
 
                 Text(statusDetail)
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 7) {
@@ -3793,7 +3837,7 @@ private struct MemoryReleasePanel: View {
                     "The pressure level comes from macOS (the same source as Activity Monitor); when macOS reports no level, it is estimated from the percentage (Elevated from 85%, High from 95%). Pressure estimate = 100 − system pressure headroom, for trends only; it is not memory usage."
                 ))
                 .font(AppDesignTokens.TypeScale.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 if compactLandingSummary {
                     recommendationSummary(includesAction: true)
@@ -4065,6 +4109,7 @@ private struct MemoryTrendHeader: View {
 
     private var timestamp: some View {
         Text(updatedAt, format: .dateTime.hour().minute().second())
+            .environment(\.locale, L10n.dateLocale)
             .font(AppDesignTokens.TypeScale.caption)
             .foregroundStyle(surfaces.textTertiary)
             .monospacedDigit()
@@ -4104,7 +4149,7 @@ private struct MemoryInlineMetric: View {
                 .appNumericTransition(value: value)
             Text(title)
                 .font(AppDesignTokens.Typography.compactLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .lineLimit(1)
         }
         .fixedSize(horizontal: true, vertical: false)
@@ -4183,6 +4228,7 @@ struct MemoryProcessSelectionPanel: View {
                     Text(L10n.text("进程快照", "Process snapshot"))
                     Text(L10n.text("采样于", "Sampled at"))
                     Text(snapshot.generatedAt, format: .dateTime.year().month().day().hour().minute().second())
+                        .environment(\.locale, L10n.dateLocale)
                         .monospacedDigit()
                 }
                 .font(AppDesignTokens.TypeScale.caption)
@@ -4528,7 +4574,7 @@ private struct MemoryReadOnlyProcessRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text(String(process.id))
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 60, alignment: .trailing)
                 .listColumn(.p2)
             Text(process.availability == .available ? ByteFormat.memoryString(process.residentBytes) : process.availability.title)
@@ -4540,7 +4586,7 @@ private struct MemoryReadOnlyProcessRow: View {
         .padding(.horizontal, 12)
         .frame(minHeight: 34)
         .listRowHover()
-        .help("\(process.path)\n\(sourceTitle) · \(process.capturedAt.formatted(date: .numeric, time: .standard))")
+        .help("\(process.path)\n\(sourceTitle) · \(process.capturedAt.appFormatted(date: .numeric, time: .standard))")
         .accessibilityElement(children: .combine)
         .accessibilityHint(L10n.text("只读进程样本", "Read-only process sample") + " · " + sourceTitle)
     }
@@ -4562,7 +4608,7 @@ private struct MemoryAppSelectionTableHeader: View {
 
             Text(L10n.text("内存", "Memory"))
                 .font(AppDesignTokens.TypeScale.captionEmphasis)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 94, alignment: .trailing)
         }
         .padding(.horizontal, AppDesignTokens.Spacing.medium)
@@ -4628,7 +4674,7 @@ private struct MemorySelectableAppRow: View {
                     if app.processCount > 1 {
                         Label("x\(ByteFormat.count(app.processCount))", systemImage: "square.stack.3d.up")
                             .font(AppDesignTokens.TypeScale.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .listColumn(.p2)
                     }
                 }
@@ -4646,7 +4692,7 @@ private struct MemorySelectableAppRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text(String(format: "%.1f%%", app.percent))
                     .font(AppDesignTokens.TypeScale.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
             }
             .frame(width: 94, alignment: .trailing)
@@ -4699,7 +4745,7 @@ private struct ProcessIcon: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: UtilitySizing.supportGlyph, height: UtilitySizing.supportGlyph)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: UtilitySizing.rowIconGlyph, height: UtilitySizing.rowIconGlyph)
         }
         .frame(width: UtilitySizing.rowIconFrame, height: UtilitySizing.rowIconFrame)
@@ -4718,14 +4764,14 @@ private struct InstalledAppRow: View {
                 Text(app.name).font(AppDesignTokens.Typography.compactLabelEmphasis)
                     .lineLimit(2).help(app.name)
                 Text(app.versionDisplay).font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary).lineLimit(1)
+                    .foregroundStyle(.readableSecondary).lineLimit(1)
                 Text((app.path as NSString).abbreviatingWithTildeInPath)
                     .font(AppDesignTokens.Typography.metadata)
                     .foregroundStyle(AppAppearanceColors.tertiaryText)
                     .lineLimit(1).truncationMode(.middle).help(app.path)
             }.frame(maxWidth: .infinity, alignment: .leading)
             Text(ByteFormat.storageString(app.sizeBytes)).font(AppDesignTokens.Typography.metadata)
-                .monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                .monospacedDigit().foregroundStyle(.readableSecondary).fixedSize()
         }
         .padding(.vertical, 8).padding(.horizontal, 4)
         .contentShape(Rectangle()).help(app.path)
@@ -4753,7 +4799,7 @@ private struct InstalledAppIcon: View {
                 .resizable()
                 .scaledToFit()
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .frame(width: 24, height: 24)
         }
             .frame(width: size, height: size)

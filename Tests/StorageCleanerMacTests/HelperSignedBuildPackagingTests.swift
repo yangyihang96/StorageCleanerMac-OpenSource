@@ -23,7 +23,8 @@ final class HelperSignedBuildPackagingTests: XCTestCase {
 
     func testAllReconnectSurfacesShowAndDisableDuringCooldown() throws {
         let settings = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/SettingsView.swift")
-        XCTAssertTrue(settings.contains("Button(fanControl.helperReconnectTitle)"))
+        // D272: was Button(fanControl.helperReconnectTitle); the settings link row now.
+        XCTAssertTrue(settings.contains("SettingsLinkRow(title: fanControl.helperReconnectTitle)"))
         XCTAssertTrue(settings.contains("fanControl.helperReconnectWaitSeconds > 0"))
         let palette = try MiniWindowLogicFixtures.source("Sources/StorageCleanerMac/Views/MenuBarAdvanced/ControlPaletteViews.swift")
         XCTAssertEqual(palette.components(separatedBy: "reconnectWaitSeconds: fanControl.helperReconnectWaitSeconds").count - 1, 2)

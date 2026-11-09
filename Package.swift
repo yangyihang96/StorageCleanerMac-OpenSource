@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "StorageCleanerUpdateAskpass", targets: ["StorageCleanerUpdateAskpass"]),
+        .executable(name: "StorageCleanerAgentBridge", targets: ["StorageCleanerAgentBridge"]),
         .executable(name: "StorageCleanerFileOperationHelper", targets: ["StorageCleanerFileOperationHelper"]),
         .executable(name: "StorageCleanerMac", targets: ["StorageCleanerMac"]),
         .executable(name: "StorageCleanerFinderExtension", targets: ["StorageCleanerFinderExtension"]),
@@ -27,6 +28,13 @@ let package = Package(
     targets: [
         .executableTarget(name: "StorageCleanerUpdateAskpass", dependencies: ["FileOperationShared"], path: "Sources/UpdateAskpass"),
         .target(name: "FileOperationShared"),
+        // D260: the bridge inside the App bundle (MCP server and command line)
+        // and the App's gateway. AgentGatewayCore holds what writes files, so
+        // the bridge's own targets contain no file writes at all.
+        .target(name: "AgentShared", dependencies: ["FileOperationShared"]),
+        .target(name: "AgentBridgeCore", dependencies: ["AgentShared", "FileOperationShared"]),
+        .target(name: "AgentGatewayCore", dependencies: ["AgentShared", "FileOperationShared"]),
+        .executableTarget(name: "StorageCleanerAgentBridge", dependencies: ["AgentBridgeCore"], path: "Sources/AgentBridge"),
         .target(name: "UninstallHandoffShared"),
         // D88: Finder Sync extension executable; script/build_and_run.sh wraps
         // it in Contents/PlugIns/StorageCleanerFinderExtension.appex.
@@ -53,6 +61,8 @@ let package = Package(
         .executableTarget(
             name: "StorageCleanerMac",
             dependencies: [
+                "AgentGatewayCore",
+                "AgentShared",
                 "CombinedStatusIcon",
                 "FanControlShared",
                 "FileOperationShared",
@@ -87,6 +97,16 @@ let package = Package(
             name: "MemoryFixtureApp",
             path: "Tests/StorageCleanerMacTests/Fixtures/MemoryFixtureApp"
         ),
+        // Test doubles for Tests/agent-e2e/run_e2e.py, like MemoryFixtureApp.
+        .executableTarget(name: "AgentFixtureHost", dependencies: ["AgentGatewayCore", "AgentShared", "FileOperationShared"],
+                          path: "Tests/AgentFixtureHost"),
+        .executableTarget(name: "AgentFixtureProbe", path: "Tests/AgentFixtureProbe"),
+        // D260: needs none of the App, so it also runs on its own in seconds.
+        .testTarget(
+            name: "AgentBridgeTests",
+            dependencies: ["AgentShared", "AgentBridgeCore", "AgentGatewayCore", "FileOperationShared"],
+            path: "Tests/AgentBridgeTests"
+        ),
         // D153: Status Trio 1.6.0's tests of the ported icon code (Apache
         // License 2.0) and this app's tests of the module. No test in it shows
         // a window: the module draws offscreen and onto a button it is given.
@@ -100,8 +120,8 @@ let package = Package(
         .target(name: "StorageCleanerTestDisplayBootstrap", path: "Tests/StorageCleanerTestDisplayBootstrap"),
         .testTarget(
             name: "StorageCleanerMacTests",
-            dependencies: ["StorageCleanerMac", "CombinedStatusIcon", "FanControlShared", "FileOperationShared", "UninstallHandoffShared", "CSQLite",
-                           "StorageCleanerTestDisplayBootstrap"],
+            dependencies: ["StorageCleanerMac", "AgentBridgeCore", "AgentGatewayCore", "AgentShared", "CombinedStatusIcon", "FanControlShared",
+                           "FileOperationShared", "UninstallHandoffShared", "CSQLite", "StorageCleanerTestDisplayBootstrap"],
             exclude: ["Fixtures"],
             swiftSettings: [
                 .define(

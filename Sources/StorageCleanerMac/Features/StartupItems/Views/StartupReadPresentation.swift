@@ -4,10 +4,15 @@ import Foundation
 /// launchd list happens to be empty. Shared by Performance and Smart Scan.
 struct StartupReadPresentation {
     let coverage: StartupCoverageReport
+    /// D229: the helper's registration when the caller has read it; an
+    /// unregistered or unapproved helper is then named as the reason, with
+    /// the way out, ahead of the read's own error.
+    var helper: FileOperationHelperStatus? = nil
     var isAvailable: Bool { coverage.managedItemCoverageAvailable }
     var unreadLoginTitle: String { L10n.text("没读到登录项", "Login Items Not Read") }
     var unreadReason: String {
-        coverage.sources.first { $0.source == .backgroundTaskDiagnostic && $0.errorDescription != nil }?.errorDescription
+        if let reason = helper?.unreadLoginReason { return reason }
+        return coverage.sources.first { $0.source == .backgroundTaskDiagnostic && $0.errorDescription != nil }?.errorDescription
             ?? L10n.text("需要后台助手或完整扫描才能读到", "The background helper or a full scan is needed to read these items.")
     }
 

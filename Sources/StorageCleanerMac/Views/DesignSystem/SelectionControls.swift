@@ -106,7 +106,7 @@ struct CapsuleSegmentedControl<Value: Hashable>: View {
                 .font(AppDesignTokens.TypeScale.bodyEmphasis)
                 .lineLimit(1)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
         .padding(.horizontal, 12)
         .frame(minHeight: 30)

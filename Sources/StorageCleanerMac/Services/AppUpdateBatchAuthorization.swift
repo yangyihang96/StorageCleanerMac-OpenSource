@@ -285,6 +285,12 @@ private final class AppUpdateCredentialLifetime: @unchecked Sendable {
 }
 
 enum AppUpdateBundledCodeTrust {
+    /// D241 (review P2-1): for main-actor callers; the static-code checks read
+    /// both bundles and their signatures.
+    static func matchesApplicationOffMain(_ url: URL, identifier: String) async -> Bool {
+        await Task.detached(priority: .userInitiated) { matchesApplication(url, identifier: identifier) }.value
+    }
+
     static func matchesApplication(_ url: URL, identifier: String) -> Bool {
         func certificates(_ url: URL, id: String) -> [SecCertificate]? {
             var code: SecStaticCode?; var info: CFDictionary?

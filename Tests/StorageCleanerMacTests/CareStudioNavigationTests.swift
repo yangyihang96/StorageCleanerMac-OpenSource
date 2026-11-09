@@ -312,6 +312,47 @@ final class CareStudioNavigationTests: XCTestCase {
         try XCTUnwrap(bitmap.representation(using: .png, properties: [:]), name).write(to: url)
     }
 
+    /// D242 (review P2-2): the 2.0.1 log had 150 lines of AppKit's “Invalid
+    /// view geometry: width/height is negative” while pages were browsed
+    /// (2026-10-26 19:36–19:41, 2026-10-27 01:11–01:18). Every module's first
+    /// page at the window's minimum, a short, the reference and a wide size;
+    /// AppKit's own report, read back from this process's log after each page,
+    /// must stay empty, and a finding names the page and the size.
+    func testEveryModulePageLaysOutWithoutNegativeViewGeometry() throws {
+        CareStudioCanvas.shared.resetForTesting()
+        let (window, scanStore) = try hostedMainWindow()
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        // Positive control: a throwaway view given a negative size is found,
+        // so an empty result below is not a log this test cannot read. In a
+        // long run the log drops faults past its rate limit (10-27 Debug gate);
+        // then this check cannot run and says so.
+        guard try NegativeViewGeometryLog.provokedReportIsReadable() else {
+            throw XCTSkip("this process's log does not show AppKit's negative-geometry report; run the class on its own")
+        }
+        let routes = CareStudioFamily.allCases.map(\.primaryRoute)
+        // The plan's 300 × 200 (below the window's minimum, as a window on a
+        // vanished display can report) and the sizes the window tests use.
+        let sizes = [NSSize(width: 300, height: 200), NSSize(width: 820, height: 520), NSSize(width: 1_024, height: 734),
+                     NSSize(width: 1_280, height: 763), NSSize(width: 1_500, height: 900)]
+        var findings: [String] = []
+        for size in sizes {
+            window.setContentSize(size)
+            for route in routes {
+                let start = Date()
+                scanStore.showFilter(route)
+                settle(window)
+                let faults = try NegativeViewGeometryLog.reports(since: start)
+                if !faults.isEmpty {
+                    findings.append("\(route) at \(Int(size.width))×\(Int(size.height)): \(faults.count) × \(Set(faults).sorted())")
+                }
+            }
+        }
+        XCTAssertEqual(findings, [], "AppKit reported negative view geometry")
+    }
+
     private func hostedMainWindow(frames: NavigationFrames? = nil) throws -> (NSWindow, ScanStore) {
         let heavyWorkCoordinator = HeavyWorkCoordinator()
         let heavyWorkActivityStore = HeavyWorkActivityStore(coordinator: heavyWorkCoordinator)

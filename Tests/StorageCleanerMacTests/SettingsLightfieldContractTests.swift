@@ -27,21 +27,18 @@ final class SettingsLightfieldContractTests: XCTestCase {
                 let bounds = CGRect(origin: .zero, size: CGSize(width: size.width, height: geometry.documentHeight))
                 XCTAssertTrue(bounds.contains(geometry.title), "\(window)/\(category)/title")
                 XCTAssertTrue(bounds.contains(geometry.content), "\(window)/\(category)/content")
-                XCTAssertTrue(bounds.contains(geometry.footer), "\(window)/\(category)/footer")
                 XCTAssertGreaterThanOrEqual(geometry.content.minY, geometry.title.maxY)
-                if !geometry.hasPreview {
-                    XCTAssertEqual(geometry.footer.minY - geometry.content.maxY, 24, accuracy: 0.5)
-                }
             }
         }
         let reference = CGSize(width: 970, height: 732)
-        let standard = SettingsLightfieldGeometry(size: reference, category: .accessAndSetup)
-        XCTAssertEqual(standard.title.origin, .init(x: 96, y: 92))
-        XCTAssertEqual(standard.content, CGRect(x: 96, y: 176, width: 778, height: 424))
-        XCTAssertEqual(standard.footer, CGRect(x: 96, y: 624, width: 778, height: 108))
-        let preview = SettingsLightfieldGeometry(size: reference, category: .general)
-        XCTAssertEqual(preview.title.origin, .init(x: 52, y: 12))
-        XCTAssertEqual(preview.content, CGRect(x: 52, y: 64, width: 894, height: 668))
+        // D272: every page starts at the same place, so the title stays put
+        // between tabs (was title (96, 92), content (96, 176, 778, 424) and a
+        // footer (96, 624, 778, 108) on the pages without a preview).
+        for category in SettingsCategory.allCases where category != .ignoreList {
+            let page = SettingsLightfieldGeometry(size: reference, category: category)
+            XCTAssertEqual(page.title.origin, .init(x: 52, y: 12), "\(category)")
+            XCTAssertEqual(page.content, CGRect(x: 52, y: 72, width: 894, height: 660), "\(category)")
+        }
     }
 
     func testAllSevenPagesUseB2SkeletonAndFlatRowsWithoutDiscardingActions() throws {
@@ -57,18 +54,25 @@ final class SettingsLightfieldContractTests: XCTestCase {
         for token in [".ultraThinMaterial", ".regularMaterial", ".thinMaterial", "NSVisualEffectView"] {
             XCTAssertFalse(settings.contains(token), token)
         }
-        for action in ["showsOperations = true", "addExclusion()", "copyExclusions()", "clearExclusions()",
+        // D272: was also "addExclusion()", "copyExclusions()", "clearExclusions()"
+        // (the Scan Exclusions group; the ignore list's Other category has them).
+        for action in ["showsOperations = true",
             "ApplicationUpdatePreferences", "resetUpdateSources()", "copyRuntimeDiagnostics()",
             "showsSupportExport", "await fanControl.unregisterHelper()", "await fanControl.selectMode(.maximum)"] {
             XCTAssertTrue(settings.contains(action), action)
         }
-        XCTAssertTrue(settings.contains("LightfieldPathText(path: path)"))
+        // D272: was also "LightfieldPathText(path: path)", in the removed exclusion row.
         XCTAssertTrue(settings.contains(".truncationMode(.middle)"))
-        XCTAssertTrue(settings.contains("偏好更改即时保存"), "General keeps its established immediate persistence semantics")
+        // D272: was XCTAssertTrue(settings.contains("偏好更改即时保存")) (the footer
+        // repeating that on every page). Preferences still save at once; only the
+        // module list has Apply.
     }
 
     func testSettingsColorsExposeEveryExistingPresetAndMetricKey() throws {
-        let general = try String(contentsOf: root.appendingPathComponent("Sources/StorageCleanerMac/Views/Settings/SettingsGeneral.swift"), encoding: .utf8)
+        // D272: these moved from General to the menu bar page's icon and appearance parts.
+        let general = try ["Sources/StorageCleanerMac/Views/Settings/SettingsMiniWindow.swift",
+                           "Sources/StorageCleanerMac/Views/Settings/SettingsCombinedStatusIcon.swift"]
+            .map { try String(contentsOf: root.appendingPathComponent($0), encoding: .utf8) }.joined(separator: "\n")
         for type in ["PanelStatusColorPreset", "PanelMetricColorRole"] {
             XCTAssertTrue(general.contains(type + ".allCases"), type)
         }
@@ -85,7 +89,8 @@ final class SettingsLightfieldContractTests: XCTestCase {
         XCTAssertEqual(PanelColorTheme.allCases.count, 6)
         XCTAssertEqual(PanelMetricColorRole.allCases.count, 18)
         XCTAssertEqual(Set(PanelMetricColorRole.allCases.map(\.defaultsKey)).count, 18)
-        XCTAssertTrue(general.contains("SettingsMiniWindowPreview(configuration: settingsConfiguration.configuration)"))
+        // D272: was settingsConfiguration.configuration (General had no draft).
+        XCTAssertTrue(general.contains("SettingsMiniWindowPreview(configuration: miniWindowDraft.value)"))
         XCTAssertTrue(general.contains("ColorPicker"))
         // D135: was XCTAssertTrue(general.contains("selectedSurfacePreset.wrappedValue == .original"))
         // (the custom background color showed only on the original surface).

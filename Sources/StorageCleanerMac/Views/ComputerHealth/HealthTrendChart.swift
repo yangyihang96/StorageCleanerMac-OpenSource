@@ -87,7 +87,7 @@ struct HealthTrendChart: View {
                         "Complete two checks to show a trend"
                     ))
                     .font(AppDesignTokens.Typography.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 72, alignment: .center)
             }
@@ -160,9 +160,9 @@ struct HealthTrendChart: View {
             )
             Spacer()
             if let first = points.first?.date, let last = points.last?.date {
-                Text("\(first.formatted(date: .numeric, time: .omitted)) – \(last.formatted(date: .numeric, time: .omitted))")
+                Text("\(first.appFormatted(date: .numeric, time: .omitted)) – \(last.appFormatted(date: .numeric, time: .omitted))")
                     .font(AppTypography.body)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.readableTertiary)
                     .monospacedDigit()
             }
         }
@@ -171,7 +171,7 @@ struct HealthTrendChart: View {
     private func legendItem(color: Color, title: String, value: String) -> some View {
         HStack(spacing: 6) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(title).foregroundStyle(.secondary)
+            Text(title).foregroundStyle(.readableSecondary)
             Text(value).fontWeight(.semibold).monospacedDigit()
         }
         .font(AppDesignTokens.Typography.secondary)

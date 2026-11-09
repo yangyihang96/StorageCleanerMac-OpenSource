@@ -191,6 +191,6 @@ struct SystemMaintenanceProbe: Sendable {
     }
 
     static func dateText(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .shortened)
+        date.appFormatted(date: .abbreviated, time: .shortened)
     }
 }

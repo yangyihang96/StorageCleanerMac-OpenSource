@@ -7,7 +7,7 @@ struct SettingsActivationRefresh: ViewModifier {
     let refresh: () -> Void
 
     static func shouldRefresh(isVisible: Bool, category: SettingsCategory) -> Bool {
-        isVisible && [.general, .accessAndSetup, .systemControl].contains(category)
+        isVisible && [.general, .accessAndSetup, .aiAssistant, .systemControl].contains(category)
     }
 
     func body(content: Content) -> some View {

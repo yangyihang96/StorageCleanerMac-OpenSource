@@ -35,10 +35,10 @@ struct CareStudioSystemCaches: View {
                                 }
                                 .disabled(store.isClearingSystemCaches || !SystemCachePresentation.isSelectable(item))
                                 .accessibilityIdentifier("systemCache.select.\(item.cache.rawValue)")
-                                Text(item.cache.explanation).font(.system(size: 12)).foregroundStyle(.secondary)
+                                Text(item.cache.explanation).font(.system(size: 12)).foregroundStyle(.readableSecondary)
                                 if item.failure != nil {
                                     Text(L10n.text("只量出了部分大小，或此缓存暂时无法读取。", "Only part of the size was measured, or this cache cannot currently be read."))
-                                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                                        .font(.system(size: 12)).foregroundStyle(.readableSecondary)
                                 }
                             }
                         }

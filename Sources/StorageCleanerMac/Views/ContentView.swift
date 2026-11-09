@@ -26,6 +26,8 @@ struct ContentView: View {
     @SceneStorage("selectedFilter.v2") private var selectedFilterRaw = ReviewFilter.overview.rawValue
     @State private var isShowingFirstLaunchOnboarding = false
     @State private var isShowingOperationHistory = false
+    /// D248: the focused command values of this window compare by it.
+    @State private var commandScope = MainWindowCommandScope()
 
     init(
         store: ScanStore,
@@ -163,7 +165,7 @@ struct ContentView: View {
         // every launch (10-22: only Smart Scan was left on screen).
         .focusedSceneValue(
             \.mainWindowSidebarAction,
-            MainWindowSidebarAction { toggleSidebarPresentation() }
+            MainWindowSidebarAction(scope: commandScope, reducesMotion: reduceMotion) { toggleSidebarPresentation() }
         )
         .focusedSceneValue(
             \.startupItemsKeyboardActions,
@@ -588,6 +590,7 @@ struct ContentView: View {
     private var startupItemsKeyboardActions: StartupItemsKeyboardActions? {
         guard navigationState.selectedFilter == .startup else { return nil }
         return StartupItemsKeyboardActions(
+            scope: commandScope,
             refresh: { store.refreshStartupItems() },
             focusSearch: {
                 NotificationCenter.default.post(name: .storageCleanerFocusStartupItemsSearch, object: nil)
@@ -1888,7 +1891,7 @@ private struct AccessRepairGuideSheet: View {
                         .font(AppDesignTokens.Typography.sheetTitle)
                     Text(headerDetail)
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -1975,7 +1978,7 @@ private struct AccessRepairStepRow: View {
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 Text(step.detail)
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -2068,7 +2071,7 @@ private struct HomeStatusBoard: View {
 
                 Text(!hasLiveResult ? L10n.text("上次可清理", "Last cleanable") : L10n.text("可安全清理", "Safe to clean"))
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         }
         .frame(minWidth: Layout.summaryWidth, alignment: .trailing)
@@ -2086,7 +2089,7 @@ private struct HomeStatusBoard: View {
 
             Text(statusDetail)
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let entry = summary?.entry {
@@ -2224,7 +2227,7 @@ private struct HomeStatusBoard: View {
         if hasLiveResult {
             return L10n.text("没有需要立即处理的可安全清理项目。", "No safe cleanup items need attention right now.")
         }
-        let dateText = summary.entry.date.formatted(date: .abbreviated, time: .shortened)
+        let dateText = summary.entry.date.appFormatted(date: .abbreviated, time: .shortened)
         switch summary.attentionLevel {
         case .current:
             return L10n.text("扫描于 \(dateText)", "Scanned \(dateText)")
@@ -2380,7 +2383,7 @@ private struct ScanReadinessPanel: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(L10n.text("系统权限开关由 macOS 管理；这里显示各文件夹当前是否能实际读取。", "macOS manages system permission switches; this list shows whether each folder is currently readable."))
                         .font(AppDesignTokens.Typography.metadata)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.bottom, 6)
 
@@ -2414,6 +2417,12 @@ private struct ScanReadinessPanel: View {
             elevated: (summary?.folderAuthorizationRequiredCount ?? 0) > 0,
             prominence: (summary?.folderAuthorizationRequiredCount ?? 0) > 0 ? .regular : .quiet
         )
+        // D276: the panel sits on the classic start page or on a plain sheet, not
+        // on a module gradient, so its buttons keep their own tints (the readiness
+        // colour on Check Current, the information blue on Allow Folders).
+        .environment(\.careStudioActionText, nil)
+        // D279: and its grey type keeps its own values.
+        .environment(\.careStudioTextGround, nil)
     }
 
     private var readinessCopy: some View {
@@ -2424,7 +2433,7 @@ private struct ScanReadinessPanel: View {
 
             Text(detail)
                 .font(AppDesignTokens.Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .layoutPriority(1)
@@ -2594,7 +2603,7 @@ private struct ScanReadinessStatusRow: View {
             ForEach(summary.items.prefix(6)) { item in
                 Image(systemName: item.location.systemImage)
                     .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .frame(width: 22, height: 22)
                     .overlay(alignment: .bottomTrailing) {
                         Image(systemName: statusSystemImage(for: item.status))
@@ -2682,7 +2691,7 @@ private struct ScanReadinessPermissionRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
                     .font(AppDesignTokens.Typography.metadata)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -2783,7 +2792,7 @@ private struct SmartCleanupFocusPanel: View {
 
             Text(detail)
                 .font(AppDesignTokens.Typography.secondary)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .layoutPriority(1)
@@ -3007,7 +3016,7 @@ private struct FocusInfoLabel: View {
     var body: some View {
         Label {
             Text(text)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         } icon: {
             Image(systemName: systemImage)
                 .foregroundStyle(tint)
@@ -3043,7 +3052,7 @@ private struct CleanupAmountMetric: View {
 
                 Text(isHistorical ? L10n.text("上次", "Last") : L10n.text("可清理", "Cleanable"))
                     .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
 
             ProgressView(value: progress, total: 1)
@@ -3168,7 +3177,7 @@ private struct CleanupPreviewSheet: View {
                         .font(AppDesignTokens.Typography.sheetTitle)
                     Text(L10n.text("按分类检查并选择；确认后只会移入废纸篓", "Review and choose by category; confirmed items only move to Trash"))
                         .font(AppDesignTokens.Typography.secondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.readableSecondary)
                 }
 
                 Spacer(minLength: 0)
@@ -3314,7 +3323,7 @@ private struct CleanupPreviewSheet: View {
                 )
             )
             .font(AppDesignTokens.Typography.body)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .monospacedDigit()
 
             Button {
@@ -3383,7 +3392,7 @@ private struct CleanupSelectionRing: View {
             VStack(spacing: AppDesignTokens.Spacing.compact) {
                 Text(L10n.text("已选择", "Selected"))
                     .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
 
                 Text(ByteFormat.storageString(selectedBytes))
                     .font(AppDesignTokens.Typography.metricValue)
@@ -3391,7 +3400,7 @@ private struct CleanupSelectionRing: View {
 
                 Text(L10n.items(selectedCount))
                     .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
             }
         }
@@ -3476,7 +3485,7 @@ private struct CleanupSelectionGroupView: View {
                         )
                     )
                     .font(AppDesignTokens.Typography.compactLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
                 }
 
@@ -3484,7 +3493,7 @@ private struct CleanupSelectionGroupView: View {
 
                 Text(ByteFormat.storageString(group.bytes))
                     .font(AppDesignTokens.Typography.compactLabelEmphasis)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .monospacedDigit()
             }
             .padding(.vertical, 10)
@@ -3541,7 +3550,7 @@ private struct CleanupPreviewRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text(item.path)
                     .font(AppDesignTokens.Typography.secondary)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let meaningfulCloseRequirement {
                     Label(
@@ -3559,7 +3568,7 @@ private struct CleanupPreviewRow: View {
             Text(ByteFormat.storageString(item.sizeBytes))
                 .font(AppDesignTokens.Typography.compactLabelEmphasis)
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

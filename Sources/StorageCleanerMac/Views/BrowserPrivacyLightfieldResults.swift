@@ -277,7 +277,7 @@ struct BrowserPrivacyLightfieldProfile: View {
                         Text(title).font(.system(size: 15, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text(BrowserPrivacyLightfieldPresentation.recordCount(site.records.count)
-                            + " · " + (site.latestVisit.map { L10n.text("最近 \(BrowserPrivacyDateFormatter.string($0))", "Latest \(BrowserPrivacyDateFormatter.string($0))") }
+                            + " · " + (site.latestVisit.map { L10n.text("最近 \($0.appFormatted(date: .abbreviated, time: .shortened))", "Latest \($0.appFormatted(date: .abbreviated, time: .shortened))") }
                                 ?? L10n.text("时间不可用", "Time unavailable")))
                             .font(.system(size: 13)).foregroundStyle(palette.fg2).lineLimit(1).truncationMode(.tail)
                         FeatureLightfieldDisclosureChevron(expanded: expanded)

@@ -170,7 +170,7 @@ extension BrowserPrivacyDataView {
                     Button(L10n.text("取消选择", "Clear Selection")) { store.selection = [] }
                         .disabled(store.selection.isEmpty)
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .fixedSize()
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(CareStudioManagerInk.accent)
@@ -301,7 +301,7 @@ extension BrowserPrivacyDataView {
             Text(L10n.text("保留站点会保护其子域，以及对该站点生效的父域 Cookie（例如保留 mail.google.com 也保护 .google.com）。",
                            "Keeping a site protects its subdomains and applicable parent-domain cookies (keeping mail.google.com also protects .google.com)."))
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             if store.keepingSites.isEmpty {
                 Text(L10n.text("还没有保留的站点。", "No sites are kept yet."))

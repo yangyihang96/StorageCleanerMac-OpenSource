@@ -1195,6 +1195,41 @@ final class CleanupJunkActionableTests: XCTestCase {
 
     // MARK: - Fixtures
 
+    /// D244 (review P2-4): before moving an item the executor checks it twice:
+    /// identity, path, volume and running apps before the intent is written,
+    /// and the full check (with recent writes) after it. 2.0.1 ran the first
+    /// check twice in a row with the same arguments, reading the item a third
+    /// time (D244＋旧值：3 snapshots of the item).
+    func testExecutionSnapshotsAnItemOnceBeforeAndOnceAfterTheIntent() async throws {
+        let fixture = try makeFixtureHome()
+        let item = fixture.home.appendingPathComponent("Library/Caches/com.example.recheck")
+        try write(bytes: 8_192, to: item.appendingPathComponent("data.bin"))
+        let bundled = try CleanupRuleSetLoader.loadBundled()
+        let rules = CleanupRuleSet(schemaVersion: bundled.schemaVersion, rulesVersion: bundled.rulesVersion,
+                                   rules: bundled.rules.filter { $0.id == "system.user-caches" }.map(lowered))
+        let session = try await scan(home: fixture.home, applications: fixture.applications, rules: rules,
+            environment: FixedApplicationEnvironment(snapshot: CleanupApplicationSnapshot(
+                installedBundleIdentifiers: ["com.example.recheck"])))
+        let candidate = try XCTUnwrap(session.candidates.first { $0.sourceURL.lastPathComponent == "com.example.recheck" })
+        var selection = CleanupSelection()
+        selection.setCandidates([candidate.id], selected: true, in: session)
+        let plan = try CleanPlanBuilder.makePlan(session: session, selection: selection, activeRules: rules, disposition: .trash)
+        let reader = CountingItemSnapshots(base: ActionableFixtureFileSystem(), path: candidate.sourceURL.path)
+        let executor = SafeCleanupExecutor(
+            metadataReader: reader,
+            mover: TrashFolderMover(trashURL: fixture.home.appendingPathComponent(".Trash")),
+            runningApplicationChecker: FixedRunningChecker(running: []),
+            coordinator: HeavyWorkCoordinator()
+        )
+        let report = await executor.execute(
+            plan: plan,
+            context: executionContext(session: session, rules: rules, home: fixture.home,
+                                      approved: Set(plan.items.map(\.id)))
+        ) { _ in }
+        XCTAssertEqual(report.summary.movedItemCount, 1, "\(report.items.map(\.outcome))")
+        XCTAssertEqual(reader.count, 2, "one check before the intent is written, the full one after it")
+    }
+
     private func scan(
         home: URL,
         applications: URL,
@@ -1411,6 +1446,27 @@ private struct ActionableFixtureFileSystem: ReadOnlyFileSystem {
         }
         return try FoundationReadOnlyFileSystem().children(of: directory)
     }
+}
+
+/// Counts `snapshot(at:)` of one path; everything else is the fixture's.
+private final class CountingItemSnapshots: ReadOnlyFileSystem, @unchecked Sendable {
+    private let base: ActionableFixtureFileSystem
+    private let path: String
+    private let lock = NSLock()
+    private var reads = 0
+    init(base: ActionableFixtureFileSystem, path: String) {
+        self.base = base
+        self.path = PathSafety.lexicalPath(path)
+    }
+    var count: Int { lock.withLock { reads } }
+    func snapshot(at url: URL) throws -> FileSnapshot {
+        if PathSafety.lexicalPath(url.path) == path { lock.withLock { reads += 1 } }
+        return try base.snapshot(at: url)
+    }
+    func aggregateSnapshot(at url: URL) throws -> FileSnapshot { try base.aggregateSnapshot(at: url) }
+    func children(of directory: URL) throws -> [URL] { try base.children(of: directory) }
+    func symbolicLinkDestination(of url: URL) throws -> String { try base.symbolicLinkDestination(of: url) }
+    func storageSharing(at url: URL) -> FileStorageSharing.Reading { base.storageSharing(at: url) }
 }
 
 private struct FixedApplicationEnvironment: CleanupApplicationEnvironment {

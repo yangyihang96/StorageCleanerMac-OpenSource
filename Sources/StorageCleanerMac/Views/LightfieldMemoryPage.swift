@@ -294,7 +294,7 @@ struct LightfieldMemoryAppRow: View {
                             // D154 batch 2: what a system process is (D164);
                             // nothing for processes without a note.
                             SystemProcessNoteButton.forProcess(name: process.name, path: process.path,
-                                tint: FeatureLightfieldPalette.resolve(scheme).fg3,
+                                tint: AnyShapeStyle(FeatureLightfieldPalette.resolve(scheme).fg3),
                                 openRelated: openRoute.map { open in { open(Self.route(for: $0)) } })
                             Text(process.availability == .available ? ByteFormat.memoryString(process.residentBytes) : "—")
                                 .font(.system(size: 13)).monospacedDigit().lineLimit(1).frame(width: metricsWidth, alignment: .trailing)

@@ -121,7 +121,7 @@ struct FileMigrationLightfieldView: View {
             } label: {
                 Text(destination?.name ?? L10n.text("未连接目标盘", "No Destination Drive"))
                     .font(.system(size: 15)).lineLimit(1).truncationMode(.middle).help(destination?.url.path ?? "")
-            }.menuStyle(.borderlessButton).frame(maxWidth: .infinity, alignment: .leading)
+            }.menuStyle(.borderlessButton).careStudioActionTint().frame(maxWidth: .infinity, alignment: .leading)
                 .disabled(busyID != nil || volumes.isEmpty)
             VStack(alignment: .leading, spacing: 5) {
                 Text(destination.map { L10n.text("可用 ", "Free ") + ByteFormat.storageString($0.availableBytes) + " · " + $0.fileSystem } ?? "—")
@@ -217,7 +217,7 @@ struct FileMigrationLightfieldView: View {
                 LightfieldPathText(path: path)
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 .lightfieldComponentProbe("lightfield.migration.name." + entry.id)
-            Text(entry.modifiedAt.map { $0.formatted(date: .numeric, time: .omitted) } ?? L10n.text("未知", "Unknown"))
+            Text(entry.modifiedAt.map { $0.appFormatted(date: .numeric, time: .omitted) } ?? L10n.text("未知", "Unknown"))
                 .font(.system(size: 13)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             VStack(alignment: .trailing, spacing: 1) {
@@ -250,7 +250,7 @@ struct FileMigrationLightfieldView: View {
                     Button(L10n.text("移到废纸篓", "Move to Trash"), role: .destructive) { onTrash(entry.item) }.disabled(busyID != nil)
                 }
             } label: { Text(L10n.text("操作", "Actions")).font(.system(size: 13)).lineLimit(1) }
-                .menuStyle(.borderlessButton).frame(maxWidth: .infinity, maxHeight: .infinity)
+                .menuStyle(.borderlessButton).careStudioActionTint().frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel(L10n.text("文件操作：", "File actions: ") + entry.item.title)
                 .lightfieldComponentProbe("lightfield.migration.actions." + entry.id)
         }.foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg)

@@ -176,7 +176,7 @@ struct CareStudioSpaceLensPage: View {
                         .buttonStyle(CareStudioRowButtonStyle())
                         .font(.system(size: position == pathLevels.count - 1 ? 17 : 13,
                                       weight: position == pathLevels.count - 1 ? .semibold : .medium))
-                        .foregroundStyle(position == pathLevels.count - 1 ? CareStudioInk.primary : CareStudioInk.secondary)
+                        .foregroundStyle(position == pathLevels.count - 1 ? AnyShapeStyle(CareStudioInk.primary) : AnyShapeStyle(CareStudioInk.secondary))
                         .lineLimit(1)
                         .disabled(isBusy || surface != 0)
                         .help(level.snapshot.path)
@@ -250,7 +250,7 @@ struct CareStudioSpaceLensPage: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(CareStudioInk.primary)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).careStudioActionTint()
         .fixedSize()
 #if DEBUG
         .layoutProbe("careStudio.spaceLens.more")

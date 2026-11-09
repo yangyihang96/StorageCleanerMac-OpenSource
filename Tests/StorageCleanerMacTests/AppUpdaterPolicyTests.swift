@@ -23,9 +23,10 @@ final class AppUpdaterPolicyTests: XCTestCase {
     }
 
     /// The Sparkle delegate may postpone the install relaunch and end that
-    /// postponement with the update cycle, nothing else. In particular it must
-    /// not choose, filter, gate or take over updates, so Sparkle's own
-    /// compatibility, channel, phased-rollout and skip rules stay in charge.
+    /// postponement with the update cycle, and (D271, 10-28) choose when a
+    /// silently downloaded update installs, nothing else. In particular it
+    /// must not choose, filter or gate updates, so Sparkle's own compatibility,
+    /// channel, phased-rollout and skip rules stay in charge.
     @MainActor
     func testSparkleDelegateImplementsOnlyTheRelaunchHooks() throws {
         let delegateProtocol = try XCTUnwrap(NSProtocolFromString("SPUUpdaterDelegate"))
@@ -54,6 +55,9 @@ final class AppUpdaterPolicyTests: XCTestCase {
         XCTAssertEqual(implemented, [
             "updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:",
             "updater:didFinishUpdateCycleForUpdateCheck:error:",
+            // D271: the install Sparkle would run at exit, held for the
+            // menu-bar-only state (D256 keeps the process at a quit).
+            "updater:willInstallUpdateOnQuit:immediateInstallationBlock:",
         ])
     }
 

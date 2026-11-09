@@ -43,29 +43,26 @@ extension SettingsView {
 
     var interfaceSection: some View {
         LightfieldSettingsSection {
-            Picker(L10n.text("界面语言", "Interface Language"), selection: selectedLanguage) {
+            SettingsPickerRow(title: L10n.text("界面语言", "Interface Language"), selection: selectedLanguage) {
                 ForEach(AppLanguage.allCases) { language in
                     Text(language.title)
                         .tag(language)
                 }
             }
-            .pickerStyle(.menu)
 
-            Picker(L10n.text("外观", "Appearance"), selection: selectedAppearance) {
+            SettingsPickerRow(title: L10n.text("外观", "Appearance"), selection: selectedAppearance) {
                 ForEach(AppAppearance.allCases) { appearance in
                     Text(appearance.title)
                         .tag(appearance)
                 }
             }
-            .pickerStyle(.menu)
 
-            Picker(L10n.text("底色主题", "Night Canvas"), selection: selectedCanvasTheme) {
+            SettingsPickerRow(title: L10n.text("夜间底色", "Night Canvas"), selection: selectedCanvasTheme) {
                 ForEach(AppCanvasTheme.allCases) { theme in
                     Text(theme.title)
                         .tag(theme)
                 }
             }
-            .pickerStyle(.menu)
         } header: {
             Text(L10n.text("界面", "Interface"))
         }
@@ -73,31 +70,35 @@ extension SettingsView {
 
     var launchBehaviorSection: some View {
         LightfieldSettingsSection {
-            Toggle(
-                L10n.text("登录后自动打开存储清理助手", "Open Storage Cleaner at Login"),
+            SettingsToggleRow(
+                title: L10n.text("登录后自动打开存储清理助手", "Open Storage Cleaner at Login"),
+                caption: launchAtLoginCaption,
                 isOn: launchAtLoginBinding
             )
             .disabled(isChangingLaunchAtLogin || launchAtLoginStatus == nil)
 
-            LabeledContent(
-                L10n.text("系统状态", "System Status"),
-                value: launchAtLoginStatusTitle
-            )
+            KeepMenuBarPanelAfterQuitToggle()
 
-            Button {
-                SMAppService.openSystemSettingsLoginItems()
-            } label: {
-                Text(
-                    L10n.text("打开登录项设置", "Open Login Item Settings")
-                )
+            if launchAtLoginStatus == .requiresApproval {
+                SettingsLinkRow(title: L10n.text("打开登录项设置", "Open Login Item Settings")) {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
             }
-            .buttonStyle(FeatureLightfieldRowButtonStyle())
 
             if let launchAtLoginNotice {
                 SettingsNoticeView(notice: launchAtLoginNotice)
             }
         } header: {
-            Text(L10n.text("启动行为", "Launch Behavior"))
+            Text(L10n.text("启动与退出", "Startup & Quit"))
+        }
+    }
+
+    /// The switch already says on or off; the system's state is shown only
+    /// while it says something else.
+    var launchAtLoginCaption: String? {
+        switch launchAtLoginStatus {
+        case .requiresApproval?, .notFound?: launchAtLoginStatusTitle
+        default: nil
         }
     }
 
@@ -178,93 +179,20 @@ extension SettingsView {
             isChangingLaunchAtLogin = false
         }
     }
+}
 
-    var generalSettings: some View {
-        SettingsPreviewColumns {
-            VStack(alignment: .leading, spacing: 20) {
-                LightfieldExpandableRow(title: L10n.text("界面", "Interface"),
-                    metadata: selectedAppearance.wrappedValue.title + " · " + selectedLanguage.wrappedValue.title,
-                    expanded: $settingsInterfaceExpanded) { EmptyView() } content: { interfaceSection }
-                panelAppearanceSection
-                CombinedStatusIconSettingsSection()
-                launchBehaviorSection
-            }
-        } preview: {
-            SettingsMiniWindowPreview(configuration: settingsConfiguration.configuration)
-        } actions: {
-            Text(L10n.text("偏好更改即时保存", "Preferences save immediately"))
-                .font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(colorScheme).fg2)
-        }
+/// D256: General → Launch Behavior. On by default: quitting closes the main
+/// program and the menu-bar panel keeps running; Quit Completely is in the
+/// panel's More menu. A login launch then opens the panel alone (D258).
+struct KeepMenuBarPanelAfterQuitToggle: View {
+    @AppStorage(AppQuitPreferences.keepsMenuBarPanelKey) private var keepsPanel = true
+
+    var body: some View {
+        SettingsToggleRow(
+            title: L10n.text("退出主程序后保留菜单栏小窗", "Keep the Menu Bar Panel After Quitting"),
+            caption: L10n.text(
+                "退出主程序后小窗继续在菜单栏运行；要连小窗一起退出，用小窗“更多”菜单里的“完全退出”。",
+                "The panel keeps running in the menu bar after you quit. To quit it too, choose Quit Completely in the panel's More menu."),
+            isOn: $keepsPanel)
     }
-
-    var panelAppearanceSection: some View {
-        LightfieldSettingsSection {
-            // D135: iStat's menu themes, one for the dark appearance and one
-            // for the light (both indigo by default); 匹配系统外观 picks dark
-            // or light, transparent while 透明效果 is on.
-            SettingsPalettePicker(title: L10n.text("深色外观主题", "Dark Appearance Theme"),
-                items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeDarkID, isDark: true),
-                name: { $0.name }, color: { $0.swatch(isDark: true, vibrancy: menuThemeVibrancy) })
-            SettingsPalettePicker(title: L10n.text("浅色外观主题", "Light Appearance Theme"),
-                items: IStatMenuThemeChoice.all, selection: menuThemeBinding($menuThemeLightID, isDark: false),
-                name: { $0.name }, color: { $0.swatch(isDark: false, vibrancy: menuThemeVibrancy) })
-            Toggle(L10n.text("透明效果", "Vibrancy"), isOn: $menuThemeVibrancy)
-                .help(L10n.text("选“匹配系统外观”时使用透明主题。", "Uses the transparent theme with System Appearance."))
-            SettingsPalettePicker(title: L10n.text("菜单栏项目颜色", "Menu Bar Item Colors"),
-                items: PanelStatusColorPreset.allCases, selection: selectedStatusPreset,
-                name: { $0.title }, color: {
-                    $0.ink(dark: colorScheme == .dark, customDayHex: statusCustomDayHex, customNightHex: statusCustomNightHex)
-                        .map(Color.init(nsColor:)) ?? MiniWindowColorPalette.secondaryText
-                }, isCustom: { $0 == .custom })
-            if selectedStatusPreset.wrappedValue == .custom {
-                ColorPicker(L10n.text("菜单栏日间颜色", "Menu Bar Day Color"),
-                    selection: statusColorBinding(storedValue: $statusCustomDayHex, dark: false), supportsOpacity: false)
-                ColorPicker(L10n.text("菜单栏夜间颜色", "Menu Bar Night Color"),
-                    selection: statusColorBinding(storedValue: $statusCustomNightHex, dark: true), supportsOpacity: false)
-            }
-            LightfieldExpandableRow(title: L10n.text("各指标独立颜色", "Individual Metric Colors"),
-                metadata: L10n.text("18 项", "18 metrics"), expanded: $settingsMetricColorsExpanded) { EmptyView() } content: {
-                ForEach(PanelMetricColorRole.allCases) { role in PanelMetricColorPicker(role: role) }
-            }
-            // D136: iStat's Statistics › Reset Disk Filtering shows every
-            // hidden volume again.
-            LabeledContent(L10n.text("隐藏的磁盘", "Hidden Disks"), value: hiddenDiskCountTitle)
-                .help(L10n.text("在小窗磁盘卷详情的右上角隐藏磁盘卷。", "Hide a volume from the top-right corner of its detail in the panel."))
-            Button {
-                hiddenDiskKeysRaw = ""
-            } label: {
-                Text(L10n.text("显示隐藏的磁盘", "Show Hidden Disks"))
-            }
-            .buttonStyle(FeatureLightfieldRowButtonStyle())
-            .disabled(hiddenDiskCount == 0)
-        } header: { Text(L10n.text("菜单栏小窗", "Menu-Bar Panel")) }
-    }
-
-    var hiddenDiskCount: Int {
-        MiniWindowHiddenItems.keys(from: hiddenDiskKeysRaw).count
-    }
-
-    var hiddenDiskCountTitle: String {
-        hiddenDiskCount == 0
-            ? L10n.text("无", "None")
-            : L10n.text("\(ByteFormat.count(hiddenDiskCount)) 个", ByteFormat.count(hiddenDiskCount))
-    }
-
-    var selectedStatusPreset: Binding<PanelStatusColorPreset> {
-        Binding {
-            PanelStatusColorPreset(rawValue: panelStatusPresetRaw) ?? .original
-        } set: { panelStatusPresetRaw = $0.rawValue }
-    }
-
-    func statusColorBinding(storedValue: Binding<String>, dark: Bool) -> Binding<Color> {
-        Binding {
-            PanelAppearancePreferences.color(from: storedValue.wrappedValue)
-                ?? Color(nsColor: PanelStatusColorPreset.blue.ink(dark: dark) ?? .systemBlue)
-        } set: { color in
-            if let value = PanelAppearancePreferences.hexString(from: color) {
-                storedValue.wrappedValue = value
-            }
-        }
-    }
-
 }

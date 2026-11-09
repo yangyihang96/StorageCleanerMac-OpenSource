@@ -2105,7 +2105,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("不改变权限，也不影响存储清理助手自身的 Sparkle 更新"))
         XCTAssertTrue(source.contains("Disabling a source only stops its remote checks"))
         XCTAssertTrue(source.contains("permissions and Storage Cleaner's own Sparkle updates are unchanged"))
-        XCTAssertTrue(source.contains("value: \"\\(updateSourceConfiguration.enabledCount)/\\(AppUpdateMethod.allCases.count)\""))
+        XCTAssertTrue(source.contains("\\(updateSourceConfiguration.enabledCount)/\\(AppUpdateMethod.allCases.count)"))
         XCTAssertTrue(source.contains("resetUpdateSources()"))
         XCTAssertTrue(source.contains("get: { updateSourceConfiguration.includes(method) }"))
         XCTAssertTrue(source.contains("set: { setUpdateSource(method, isEnabled: $0) }"))
@@ -2615,9 +2615,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         XCTAssertTrue(store.contains("仅移除本机记录，不会删除任何文件"))
         XCTAssertTrue(store.contains("仅移除记录，不会清空废纸篓或删除文件"))
         XCTAssertTrue(store.contains("仅影响更新列表，不会安装软件"))
-        XCTAssertTrue(settings.contains("扫描排除项清单已复制"))
-        XCTAssertTrue(settings.contains("已从扫描排除项移除"))
-        XCTAssertTrue(settings.contains("已清空扫描排除项"))
+        // D272: were "扫描排除项清单已复制", "已从扫描排除项移除" and "已清空扫描排除项",
+        // messages of the Scan Exclusions group's unreachable actions (D207 moved
+        // the exclusions to the ignore list's Other category).
+        XCTAssertFalse(settings.contains("扫描排除项"))
     }
 
     func testStartupAndMemoryActionMessagesKeepDisableAndQuitBoundariesClear() throws {
@@ -2779,7 +2780,7 @@ final class SystemUtilitySafetyTests: XCTestCase {
             versionFile.components(separatedBy: "DEFAULT_APP_BUILD=").count - 1,
             1
         )
-        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=2.0.1"))
+        XCTAssertTrue(versionFile.contains("DEFAULT_APP_VERSION=2.0.2"))
         XCTAssertNotNil(
             versionFile.range(
                 of: #"(?m)^DEFAULT_APP_BUILD=\d{14}$"#,
@@ -3456,7 +3457,10 @@ final class SystemUtilitySafetyTests: XCTestCase {
         // D175: ⌃⌘S folds the sidebar to icons and back and never hides the
         // column (was XCTAssertTrue: ContentView sent toggleSidebar).
         XCTAssertFalse(contentSource.contains("#selector(NSSplitViewController.toggleSidebar(_:))"))
-        XCTAssertTrue(contentSource.contains("MainWindowSidebarAction { toggleSidebarPresentation() }"))
+        // D248＋旧值 "MainWindowSidebarAction { toggleSidebarPresentation() }":
+        // the value now names its window and the Reduce Motion setting it read.
+        XCTAssertTrue(contentSource.contains(
+            "MainWindowSidebarAction(scope: commandScope, reducesMotion: reduceMotion) { toggleSidebarPresentation() }"))
         XCTAssertTrue(contentSource.contains("private func toggleSidebarPresentation() {\n        withAnimation(AppMotion.layout(reduceMotion: reduceMotion)) {\n            sidebarPresentation.toggle()"))
         XCTAssertTrue(modulePresentationSource.contains("coordinator.keepSidebarShown(in: window)"))
         XCTAssertTrue(modulePresentationSource.contains("sidebarItem.canCollapse = false"))

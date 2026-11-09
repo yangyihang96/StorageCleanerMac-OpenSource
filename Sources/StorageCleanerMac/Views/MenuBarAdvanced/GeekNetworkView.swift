@@ -207,7 +207,7 @@ extension MenuBarAdvancedStatusView {
                     .lineLimit(1)
             }
             .font(.system(size: GeekIStatCardGeometry.textFontSize))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .frame(maxWidth: .infinity, minHeight: GeekIStatSectionGeometry.rowHeight, alignment: .leading)
             .accessibilityLabel(geekNetworkProcessStatusAccessibilityText)
         }
@@ -1121,7 +1121,7 @@ private struct GeekWiFiPowerControl: View {
             } else {
                 Text("—")
                     .font(AdvancedPanelTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
                     .accessibilityLabel(L10n.text(
                         "Wi-Fi 控制不可用",
                         "Wi-Fi control unavailable"

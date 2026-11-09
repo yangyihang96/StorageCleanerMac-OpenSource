@@ -97,7 +97,7 @@ struct LightfieldComponentGallery: View {
                 // Approved performance run monitor: CPU / GPU, no bands, no axis.
                 LightfieldTrendChart(samples: Self.cpuSamples, module: .performance, height: 48,
                     title: "2 分钟 CPU / GPU 负载", primaryName: "CPU",
-                    series: [.init(id: "gpu", name: "GPU", color: FeatureLightfieldPalette.resolve(scheme).fg2, samples: Self.gpuSamples)],
+                    series: [.init(id: "gpu", name: "GPU", color: FeatureLightfieldPalette.resolve(scheme).fg2.base, samples: Self.gpuSamples)],
                     legend: .series, showsPressureBands: false, axis: .hidden, fillsArea: false, showsCurrentValue: false)
                     .frame(width: 520).padding(.top, 16)
             }

@@ -17,6 +17,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var terminationTimeout: Duration = .seconds(3)
     var replyToApplicationShouldTerminate:
         (@MainActor (NSApplication) -> Void)?
+    /// D256: a user's quit closes only the main program while the panel stays.
+    var quitDecision: @MainActor () -> AppQuitDecision = {
+        // Configured only once a status item exists (AppLaunchWork): without a
+        // panel to keep (unit tests, acceptance) nothing else is read.
+        guard MenuBarOnlyMode.shared.isConfigured,
+              AppQuitPreferences.keepsMenuBarPanelAfterQuit() else { return .terminate }
+        return AppQuitPolicy.decision(
+            reason: AppQuitIntent.shared.reason(
+                currentEvent: NSAppleEventManager.shared().currentAppleEvent,
+                isInstallingUpdate: AppUpdater.shared.isInstallingUpdate),
+            // D270: a status item the system has not placed in a menu bar
+            // (hidden in System Settings) leaves no panel to keep.
+            keepsMenuBarPanel: true, hasMenuBarPanel: MenuBarStatusController.shared.isShowingStatusItem)
+    }
+    var enterMenuBarOnly: @MainActor () -> Void = { MenuBarOnlyMode.shared.enter() }
 
     private var terminationReplySent = false
     private var terminationCleanupTask: Task<Void, Never>?
@@ -31,6 +46,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// only opens the review.
     func application(_ application: NSApplication, open urls: [URL]) {
         ExternalUninstallRequestCenter.shared.receive(openedURLs: urls)
+        // D257: the event opens its own main window; the main program comes
+        // back around it without asking for a second one.
+        MenuBarOnlyMode.shared.leaveWithoutOpeningWindow()
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        AppLaunchCoordinator.shared.register(delegate: self)
+        // D258: a login item's launch starts with the panel alone, and so
+        // does (D271) the relaunch after an update installed from that state.
+        let isLoginLaunch = AppLaunchKind.isLoginItemLaunch(NSAppleEventManager.shared().currentAppleEvent)
+        let isRelaunchAfterUpdate = MenuBarOnlyRelaunch.consume(
+            currentBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")
+        if AppQuitPreferences.keepsMenuBarPanelAfterQuit(),
+           isLoginLaunch || isRelaunchAfterUpdate || MenuBarOnlyMode.isLoginLaunchRehearsalRequested {
+            MenuBarOnlyMode.shared.beginAtLaunch()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -38,13 +69,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Never let macOS Session Restore relaunch an app that was merely left
         // open when the user shut down or logged out.
         NSApp.disableRelaunchOnLogin()
+        let isMenuBarOnly = MenuBarOnlyMode.shared.isActive
 #if DEBUG || STORAGE_CLEANER_BETA
         // An isolated latency-script launch stays out of the way: no Dock
         // icon, no activation, no main window.
         let isLatencyScript = MenuBarLatencyScript.isRequested
-        NSApp.setActivationPolicy(isLatencyScript ? .accessory : .regular)
+        NSApp.setActivationPolicy(isLatencyScript || isMenuBarOnly ? .accessory : .regular)
 #else
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(isMenuBarOnly ? .accessory : .regular)
 #endif
         // D106: an acceptance session deletes nothing on its own; the next
         // normal launch removes what has expired by then.
@@ -69,9 +101,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AppArtwork.applyDockIcon(for: colorScheme)
             }
         }
+        AppQuitIntent.shared.startObservingSession()
+        // D255: the panel and the termination work do not wait for a window.
+        AppLaunchCoordinator.shared.start(delegate: self)
 #if DEBUG || STORAGE_CLEANER_BETA
         guard !isLatencyScript else { return }
 #endif
+        // D258: a login launch does not come forward.
+        guard !isMenuBarOnly else { return }
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -82,6 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
+        // D256: none of the termination work runs; fan control and live
+        // monitoring go on for the panel (D257).
+        if quitDecision() == .keepMenuBarPanel {
+            enterMenuBarOnly()
+            return .terminateCancel
+        }
         startupApplicationUpdateScheduler.cancelForTermination()
         guard prepareBenchmarkForTermination != nil
                 || prepareApplicationUpdatesForTermination != nil
@@ -143,9 +186,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestStartupItemCancellation?()
         requestMemoryOptimizationCancellation?()
         FanControlCoordinator.shared.disconnectForTermination()
+        AgentInterface.shared.terminate()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // D257: opening the app again while only the panel runs brings the
+        // main program back; leave() opens the window itself.
+        if MenuBarOnlyMode.shared.isActive {
+            MenuBarOnlyMode.shared.leave()
+            return false
+        }
         NSApp.activate(ignoringOtherApps: true)
         // WindowGroup restores its default value for Dock/reopen events. Do
         // not also call openWindow here or SwiftUI creates a second main window.
@@ -181,6 +231,12 @@ final class MainWindowReopenCoordinator {
     private init() {}
 
     func requestMainWindow() {
+        // D257: from the menu-bar-only state the main program comes back
+        // first; leave() calls this again to open the window.
+        if MenuBarOnlyMode.shared.isActive {
+            MenuBarOnlyMode.shared.leave()
+            return
+        }
         if let openMainWindow {
             openMainWindow()
         } else {
@@ -189,12 +245,30 @@ final class MainWindowReopenCoordinator {
     }
 }
 
-struct MainWindowSidebarAction {
+/// D248: the main window a focused command value belongs to, kept in that
+/// window's state. A value made of closures is new on every body evaluation
+/// and SwiftUI cannot compare closures, so each redraw was an update of the
+/// focused value; several in one frame logged "FocusedValue update tried to
+/// update multiple times per frame" (install22 at launch). The values compare
+/// by this scope, and by what else their closures read from the body.
+struct MainWindowCommandScope: Hashable {
+    private let id = UUID()
+}
+
+struct MainWindowSidebarAction: Equatable {
+    let scope: MainWindowCommandScope
+    /// The fold animates unless Reduce Motion is on; a change must replace
+    /// the closure that read it.
+    let reducesMotion: Bool
     let perform: @MainActor () -> Void
 
     @MainActor
     func callAsFunction() {
         perform()
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.scope == rhs.scope && lhs.reducesMotion == rhs.reducesMotion
     }
 }
 
@@ -303,7 +377,7 @@ struct StorageCleanerMacApp: App {
     @StateObject private var macBenchmarkLeaderboardStore: BenchmarkV7LeaderboardStore
     @StateObject private var updater = AppUpdater.shared
     @StateObject private var menuBarStatusController = MenuBarStatusController.shared
-    @StateObject private var installationConflictController = AppInstallationConflictController()
+    @StateObject private var installationConflictController: AppInstallationConflictController
     @AppStorage(L10n.languageDefaultsKey) private var languageRawValue = AppLanguage.system.rawValue
     @AppStorage(L10n.appearanceDefaultsKey) private var appearanceRawValue = AppAppearance.system.rawValue
 
@@ -355,14 +429,13 @@ struct StorageCleanerMacApp: App {
             }
         ))
 #if DEBUG
-        _browserPrivacyStore = StateObject(wrappedValue:
-            BrowserPrivacyPreviewFixture.isRequested
-                ? BrowserPrivacyPreviewFixture.makeStore()
-                : BrowserPrivacyStore()
-        )
+        let privacyStore = BrowserPrivacyPreviewFixture.isRequested
+            ? BrowserPrivacyPreviewFixture.makeStore()
+            : BrowserPrivacyStore()
 #else
-        _browserPrivacyStore = StateObject(wrappedValue: BrowserPrivacyStore())
+        let privacyStore = BrowserPrivacyStore()
 #endif
+        _browserPrivacyStore = StateObject(wrappedValue: privacyStore)
         let benchmarkCatalog = MacBenchmarkProductionBaselineCatalog.runtimeCatalog()
         let benchmarkProcessor = MacBenchmarkResultProcessor(
             baselineCatalog: benchmarkCatalog
@@ -389,7 +462,7 @@ struct StorageCleanerMacApp: App {
         _macBenchmarkLeaderboardStore = StateObject(
             wrappedValue: benchmarkLeaderboardStore
         )
-        _macBenchmarkStore = StateObject(wrappedValue: MacBenchmarkStore(
+        let benchmarkStore = MacBenchmarkStore(
             service: benchmarkService,
             resultProcessor: benchmarkProcessor,
             historyRepository: MacBenchmarkHistoryRepository(
@@ -406,7 +479,10 @@ struct StorageCleanerMacApp: App {
             sustainedService: sustainedBenchmarkService,
             v7Coordinator: benchmarkV7Coordinator,
             v11TelemetryBridge: benchmarkTelemetry
-        ))
+        )
+        _macBenchmarkStore = StateObject(wrappedValue: benchmarkStore)
+        let conflictController = AppInstallationConflictController()
+        _installationConflictController = StateObject(wrappedValue: conflictController)
 #if DEBUG || STORAGE_CLEANER_BETA
         // SwiftUI can defer the only Window scene on a fresh menu-bar launch.
         // Keep fixture screenshots on the existing panel path without changing
@@ -467,6 +543,12 @@ struct StorageCleanerMacApp: App {
         let rawAppearance = UserDefaults.standard.string(forKey: L10n.appearanceDefaultsKey)
         (AppAppearance(rawValue: rawAppearance ?? AppAppearance.system.rawValue) ?? .system)
             .applyAppKitPreference()
+        // D255: started by applicationDidFinishLaunching, with or without a window.
+        let launchWork = AppLaunchWork(
+            store: scanStore, computerHealthStore: healthStore, benchmarkStore: benchmarkStore,
+            heavyWorkCoordinator: coordinator, installationConflictController: conflictController,
+            browserPrivacyStore: privacyStore)
+        AppLaunchCoordinator.shared.prepare { delegate in launchWork.run(delegate: delegate) }
     }
 
     /// Two GUI instances of this app fight over the single privileged fan
@@ -524,79 +606,10 @@ struct StorageCleanerMacApp: App {
                 .environment(\.locale, L10n.locale)
                 .preferredColorScheme(preferredColorScheme)
                 .onAppear {
-                    [weak benchmarkStore = macBenchmarkStore,
-                     store = store,
-                     coordinator = heavyWorkCoordinator] in
-#if DEBUG || STORAGE_CLEANER_BETA
-                    // Started from init for the latency script (see above).
-                    guard !MenuBarLatencyScript.isRequested else { return }
-#endif
-                    appDelegate.requestBenchmarkCancellation = { [weak benchmarkStore] in
-                        benchmarkStore?.cancelAll()
-                    }
-                    appDelegate.requestApplicationUpdateCancellation = { [weak store] in
-                        StartupApplicationUpdateScheduler.shared.cancelForTermination()
-                        store?.requestApplicationUpdateCancellation()
-                    }
-                    appDelegate.requestStartupItemCancellation = { [weak store] in
-                        store?.requestStartupItemCancellation()
-                    }
-                    appDelegate.requestMemoryOptimizationCancellation = { [weak store] in
-                        store?.cancelMemoryOptimization()
-                    }
-                    appDelegate.prepareBenchmarkForTermination = { [weak benchmarkStore] in
-                        guard let benchmarkStore else { return }
-                        benchmarkStore.cancelAll()
-                        await benchmarkStore.waitUntilIdle()
-                        _ = await coordinator.waitUntilOwnerInactive(.benchmark)
-                    }
-                    appDelegate.prepareApplicationUpdatesForTermination = { [weak store] in
-                        StartupApplicationUpdateScheduler.shared.cancel()
-                        await store?.prepareApplicationUpdatesForTermination()
-                    }
-                    appDelegate.prepareStartupItemsForTermination = { [weak store] in
-                        await store?.prepareStartupItemsForTermination()
-                    }
-                    appDelegate.prepareMemoryOptimizationForTermination = { [weak store] in
-                        await store?.prepareMemoryOptimizationForTermination()
-                    }
-                    appDelegate.prepareMetricHistoryForTermination = { [weak store] in
-                        await store?.flushMenuBarMetricHistory()
-                        await store?.stopAndFlushSystemEnergyMonitoring()
-                    }
-                    appDelegate.prepareFanControlForTermination = {
-                        await FanControlCoordinator.shared.prepareForTermination()
-                    }
                     localizeMainMenu()
-                    menuBarStatusController.install(
-                        store: store,
-                        computerHealthStore: computerHealthStore
-                    )
-                    AppLifecycleReminderCenter.shared.start(store: store)
-                    store.prepareMenuBarLiveStatusOnLaunch()
-                    Task {
-#if DEBUG || STORAGE_CLEANER_BETA
-                        // Isolated visual sessions start unmeasured, without restoring live health history.
-                        if !MiniWindowDemoData.isEnabled {
-                            await computerHealthStore.prepareMenuBarHealthOnLaunch()
-                        }
-#else
-                        await computerHealthStore.prepareMenuBarHealthOnLaunch()
-#endif
-                    }
-                    store.startSystemEnergyMonitoring()
-                    StartupApplicationUpdateScheduler.shared.scheduleIfDue(
-                        shouldCheck: { ApplicationUpdateCheckSchedule.shouldCheck() },
-                        executionAvailable: { store.canRefreshAppUpdates },
-                        priorityReady: { MenuBarSamplingContext.shared.startupPriorityReady
-                            && store.menuBarMonitorSnapshot?.cpuUsageBreakdown != nil },
-                        operation: { store.prepareApplicationUpdatesOnLaunch() }
-                    )
-                    store.reconcileInterruptedOperationsOnLaunch()
-                    Task {
-                        await benchmarkStore?.prepareLifecycleOnLaunch()
-                        await installationConflictController.checkIfNeeded()
-                    }
+                    // D255: the launch work normally ran already, from
+                    // applicationDidFinishLaunching; this covers a window that comes first.
+                    AppLaunchCoordinator.shared.start(delegate: nil)
                 }
                 .onChange(of: languageRawValue) { _, _ in
                     localizeMainMenu()
@@ -708,6 +721,7 @@ struct StorageCleanerMacApp: App {
                 .environment(\.locale, L10n.locale)
                 .preferredColorScheme(preferredColorScheme)
         }
+        .defaultSize(SettingsWindowPlacement.preferredSize())
     }
 
     private var preferredColorScheme: ColorScheme? {
@@ -738,6 +752,13 @@ private struct MainWindowReopenBridge<Content: View>: View {
                 }
             }
 #endif
+            // D258: the window SwiftUI opens at a login launch is built, so
+            // Open Main Program can use its openWindow, but never shown.
+            .background {
+                if MenuBarOnlyMode.shared.isLaunchWindowSuppressionPending {
+                    HiddenLaunchWindowSuppressor()
+                }
+            }
             .onAppear {
                 MainWindowReopenCoordinator.shared.openMainWindow = {
                     openWindow(id: "main", value: "primary")
@@ -748,6 +769,139 @@ private struct MainWindowReopenBridge<Content: View>: View {
                 openWindow(id: "main", value: "primary")
                 NSApp.activate(ignoringOtherApps: true)
             }
+    }
+}
+
+/// D255: what the main window's appearance used to start.
+@MainActor
+struct AppLaunchWork {
+    let store: ScanStore
+    let computerHealthStore: ComputerHealthStore
+    let benchmarkStore: MacBenchmarkStore
+    let heavyWorkCoordinator: HeavyWorkCoordinator
+    let installationConflictController: AppInstallationConflictController
+    let browserPrivacyStore: BrowserPrivacyStore
+
+    func run(delegate: AppDelegate?) {
+#if DEBUG || STORAGE_CLEANER_BETA
+        // Started from init for the latency script (StorageCleanerMacApp).
+        guard !MenuBarLatencyScript.isRequested else { return }
+#endif
+        if let delegate { installTerminationWork(on: delegate) }
+        // D267: off until the user turns it on, and needs no window.
+        AgentInterface.shared.start(source: AgentStoreReadSource(store: store, health: computerHealthStore))
+        let menuBarStatusController = MenuBarStatusController.shared
+        menuBarStatusController.install(store: store, computerHealthStore: computerHealthStore)
+        // D256: a quit keeps the panel only when there is one in the menu bar
+        // (an acceptance session installs none).
+        if menuBarStatusController.hasStatusItem {
+            MenuBarOnlyMode.shared.configure(menuBarOnlyDependencies())
+        }
+        // D270: a launch that began with the panel alone opens the main
+        // program when the system does not place its status item in a menu
+        // bar in time (System Settings → Menu Bar → Allow in the Menu Bar is
+        // off for this app); `isVisible` stays true for such an item.
+        Task { @MainActor in
+            _ = await menuBarStatusController.waitForStatusItemPlacement(timeout: MenuBarStatusItemPlacement.launchWait)
+            MenuBarOnlyMode.shared.statusItemVisibilityChanged(isShowing: menuBarStatusController.isShowingStatusItem)
+        }
+        AppLifecycleReminderCenter.shared.start(store: store)
+        store.prepareMenuBarLiveStatusOnLaunch()
+        let computerHealthStore = computerHealthStore
+        Task {
+#if DEBUG || STORAGE_CLEANER_BETA
+            // Isolated visual sessions start unmeasured, without restoring live health history.
+            if !MiniWindowDemoData.isEnabled {
+                await computerHealthStore.prepareMenuBarHealthOnLaunch()
+            }
+#else
+            await computerHealthStore.prepareMenuBarHealthOnLaunch()
+#endif
+        }
+        store.startSystemEnergyMonitoring()
+        let store = store
+        StartupApplicationUpdateScheduler.shared.scheduleIfDue(
+            shouldCheck: { ApplicationUpdateCheckSchedule.shouldCheck() },
+            executionAvailable: { store.canRefreshAppUpdates },
+            priorityReady: { MenuBarSamplingContext.shared.startupPriorityReady
+                && store.menuBarMonitorSnapshot?.cpuUsageBreakdown != nil },
+            operation: { store.prepareApplicationUpdatesOnLaunch() }
+        )
+        store.reconcileInterruptedOperationsOnLaunch()
+        let benchmarkStore = benchmarkStore, installationConflictController = installationConflictController
+        Task {
+            await benchmarkStore.prepareLifecycleOnLaunch()
+            await installationConflictController.checkIfNeeded()
+        }
+    }
+
+    private func installTerminationWork(on appDelegate: AppDelegate) {
+        let store = store, benchmarkStore = benchmarkStore, coordinator = heavyWorkCoordinator
+        appDelegate.requestBenchmarkCancellation = { [weak benchmarkStore] in
+            benchmarkStore?.cancelAll()
+        }
+        appDelegate.requestApplicationUpdateCancellation = { [weak store] in
+            StartupApplicationUpdateScheduler.shared.cancelForTermination()
+            store?.requestApplicationUpdateCancellation()
+        }
+        appDelegate.requestStartupItemCancellation = { [weak store] in
+            store?.requestStartupItemCancellation()
+        }
+        appDelegate.requestMemoryOptimizationCancellation = { [weak store] in
+            store?.cancelMemoryOptimization()
+        }
+        appDelegate.prepareBenchmarkForTermination = { [weak benchmarkStore] in
+            guard let benchmarkStore else { return }
+            benchmarkStore.cancelAll()
+            await benchmarkStore.waitUntilIdle()
+            _ = await coordinator.waitUntilOwnerInactive(.benchmark)
+        }
+        appDelegate.prepareApplicationUpdatesForTermination = { [weak store] in
+            StartupApplicationUpdateScheduler.shared.cancel()
+            await store?.prepareApplicationUpdatesForTermination()
+        }
+        appDelegate.prepareStartupItemsForTermination = { [weak store] in
+            await store?.prepareStartupItemsForTermination()
+        }
+        appDelegate.prepareMemoryOptimizationForTermination = { [weak store] in
+            await store?.prepareMemoryOptimizationForTermination()
+        }
+        appDelegate.prepareMetricHistoryForTermination = { [weak store] in
+            await store?.flushMenuBarMetricHistory()
+            await store?.stopAndFlushSystemEnergyMonitoring()
+        }
+        appDelegate.prepareFanControlForTermination = {
+            await FanControlCoordinator.shared.prepareForTermination()
+        }
+    }
+
+    /// D257/D259: fan control and live monitoring are not part of it.
+    private func menuBarOnlyDependencies() -> MenuBarOnlyMode.Dependencies {
+        let store = store, benchmarkStore = benchmarkStore, privacy = browserPrivacyStore
+        return MenuBarOnlyMode.Dependencies(
+            cancelBenchmark: { [weak benchmarkStore] in benchmarkStore?.cancelAll() },
+            closeWindows: { MenuBarOnlyMode.closeMainProgramWindows() },
+            setActivationPolicy: { NSApp.setActivationPolicy($0) },
+            flushMetrics: { [weak store] in await store?.flushMenuBarMetricHistory() },
+            releaseMemory: { [weak store, weak privacy] in
+                guard let store, store.releaseMainWindowData(privacy: privacy) else { return false }
+                Task {
+                    await AppIconCache.shared.purge()
+                    await MenuBarDerivedCache.shared.purge()
+                }
+                return true
+            },
+            waitUntilIdle: { [weak store] in
+                // At least one pause, so a refusal that is not a heavy-work
+                // lease (a scan starting) does not spin.
+                repeat {
+                    try? await Task.sleep(for: .seconds(5))
+                } while store?.heavyWorkActivityStore.activeOwner != nil && !Task.isCancelled
+            },
+            openMainWindow: { MainWindowReopenCoordinator.shared.requestMainWindow() },
+            activate: { NSApp.activate(ignoringOtherApps: true) },
+            isPanelShown: { MenuBarStatusController.shared.isPanelShown }
+        )
     }
 }
 

@@ -148,7 +148,7 @@ extension MenuBarAdvancedStatusView {
                         } else {
                             Text(L10n.text("未获得进程数据", "No process data"))
                                 .geekIStatLabelText()
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.readableSecondary)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .accessibilityLabel(L10n.text("未获得内存进程数据", "No memory process data"))
                         }

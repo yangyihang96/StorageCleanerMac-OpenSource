@@ -100,8 +100,10 @@ final class D64DeclutterAContractTests: XCTestCase {
         let category = try segment(settings, from: "enum SettingsCategory:", to: "struct SettingsView:")
         // D207＋旧值：七类，没有 "ignoreList"。D207 照 CleanMyMac 加了第八页“忽略列表”；
         // 不加装饰标题、不加教程的要求不变，新页签同样用插画（D207 补）。
-        XCTAssertEqual(SettingsCategory.allCases.map(\.rawValue), ["general", "miniWindow", "scanAndSafety", "ignoreList", "accessAndSetup", "systemControl", "updates", "about"])
-        for name in ["general", "miniWindow", "scanAndSafety", "ignoreList", "accessAndSetup", "systemControl", "updates", "about"] {
+        // D265＋旧值：八类，没有 "aiAssistant"。D265 加了第九页“AI 助手”，放在“权限与隐私”后面（D273）；
+        // 同样用插画，旧的内部值都没变。
+        XCTAssertEqual(SettingsCategory.allCases.map(\.rawValue), ["general", "miniWindow", "scanAndSafety", "ignoreList", "accessAndSetup", "aiAssistant", "systemControl", "updates", "about"])
+        for name in ["general", "miniWindow", "scanAndSafety", "ignoreList", "accessAndSetup", "aiAssistant", "systemControl", "updates", "about"] {
             XCTAssertTrue(category.contains("    case " + name), name)
         }
         XCTAssertFalse(category.contains("var subtitle:"))
@@ -167,7 +169,8 @@ final class D64DeclutterAContractTests: XCTestCase {
                      "public-IP lookup can be turned off, and region lookup requires separate consent", "失联或过热时恢复 macOS 控制"] {
             XCTAssertTrue(settings.contains(copy), copy)
         }
-        XCTAssertTrue(settings.contains("Text(PermissionSafetyDisclosure.settingsHelper.text)"))
+        // D272: was Text(PermissionSafetyDisclosure.settingsHelper.text); the row's caption now.
+        XCTAssertTrue(settings.contains("caption: PermissionSafetyDisclosure.settingsHelper.text"))
         XCTAssertTrue(onboarding.contains("detail: PermissionSafetyDisclosure.onboardingHelper.text"))
     }
 
@@ -184,27 +187,24 @@ final class D64DeclutterAContractTests: XCTestCase {
                 }
             }
         }
-        let view = try segment(settings, from: "struct SettingsNoticeView:", to: "struct ExclusionPathRow:")
+        // D272: was up to "struct ExclusionPathRow:" (the row went with the Scan Exclusions group).
+        let view = try segment(settings, from: "struct SettingsNoticeView:", to: "struct SettingsWindowConfigurator:")
         XCTAssertTrue(view.contains("if notice.showsWarningSymbol {\n                AppSymbolIcon("))
         XCTAssertTrue(view.contains("Text(notice.text)"))
         XCTAssertTrue(view.contains(".accessibilityElement(children: .combine)"))
-        let row = try segment(settings, from: "struct ExclusionPathRow:", to: "struct SettingsWindowConfigurator:")
-        XCTAssertFalse(row.contains("AppSymbolIcon("))
-        XCTAssertTrue(row.contains("LightfieldPathText(path: path)"))
-        XCTAssertTrue(row.contains("Button(L10n.text(\"移除\", \"Remove\"), action: remove)"))
-        XCTAssertTrue(row.contains(".buttonStyle(FeatureLightfieldRowButtonStyle())"))
-        XCTAssertTrue(row.contains("action: remove"))
     }
 
     func testUpdateSourceNoticeKeepsRemotePermissionAndSelfUpdateBoundaries() throws {
         let settings = try source("Views/SettingsView.swift")
         let updates = try r2SourceDeclaration("var updateSourceSection:", in: settings)
-        let boundary = try segment(updates, from: "\n            Text(L10n.text(\n", to: "\n            SettingsNoticeView(")
+        // D272: the group's footer holds these sentences (was a text between
+        // the rows, above a notice).
+        let boundary = try XCTUnwrap(updates.components(separatedBy: "} footer: {").last)
         XCTAssertTrue(boundary.contains("关闭来源仅停止该来源的远程检查，不改变权限，也不影响存储清理助手自身的 Sparkle 更新。"))
         XCTAssertTrue(boundary.contains("Disabling a source only stops its remote checks; permissions and Storage Cleaner's own Sparkle updates are unchanged."))
         XCTAssertTrue(boundary.contains(".fixedSize(horizontal: false, vertical: true)"))
         XCTAssertFalse(updates.contains(".lineLimit(1)"))
-        XCTAssertTrue(updates.contains("value: \"\\(updateSourceConfiguration.enabledCount)/\\(AppUpdateMethod.allCases.count)\""))
+        XCTAssertTrue(updates.contains("\\(updateSourceConfiguration.enabledCount)/\\(AppUpdateMethod.allCases.count)"))
         XCTAssertTrue(updates.contains("get: { updateSourceConfiguration.includes(method) }"))
         XCTAssertTrue(updates.contains("set: { setUpdateSource(method, isEnabled: $0) }"))
         XCTAssertTrue(updates.contains("resetUpdateSources()"))
@@ -331,7 +331,8 @@ final class D64DeclutterAContractTests: XCTestCase {
         XCTAssertTrue(PermissionSafetyDisclosure.onboardingHelper.english.contains("one administrator approval"))
         let settings = try source("Views/SettingsView.swift")
         let permissions = try segment(settings, from: "var permissionSetupSection:", to: "var helperAccessActions:")
-        XCTAssertTrue(permissions.contains("Text(PermissionSafetyDisclosure.settingsHelper.text)"))
+        // D272: was Text(PermissionSafetyDisclosure.settingsHelper.text); the row's caption now.
+        XCTAssertTrue(permissions.contains("caption: PermissionSafetyDisclosure.settingsHelper.text"))
         let onboarding = try source("Views/FirstLaunchOnboardingView.swift")
         let helper = try segment(onboarding, from: "private var helperCard:", to: "private var notificationCard:")
         XCTAssertTrue(helper.contains("detail: PermissionSafetyDisclosure.onboardingHelper.text"))
@@ -408,7 +409,8 @@ final class D64DeclutterAContractTests: XCTestCase {
             XCTAssertEqual(geometry.title.minX, geometry.content.minX, "\(category)")
             XCTAssertEqual(geometry.title.width, geometry.content.width, "\(category)")
             XCTAssertGreaterThan(geometry.content.minY, geometry.title.maxY)
-            XCTAssertEqual(geometry.content.minX, category == .general || category == .miniWindow ? 52 : 96)
+            // D272: every page starts at 52 (was 96 on the pages without a preview).
+            XCTAssertEqual(geometry.content.minX, 52)
         }
         let settings = try source("Views/SettingsView.swift")
         let pane = try r2SourceDeclaration("private func settingsPane(", in: settings)

@@ -46,7 +46,12 @@ struct CombinedStatusIconSettingsSection: View {
     @State private var bluetoothExpanded: Bool
     @State private var chargeLimitReadable = true
 
+    /// D272: the icon's own options show while the combined icon is the
+    /// menu-bar display; a test with every group open sees them all.
+    private let showsEveryOption: Bool
+
     init(expandsGroups: Bool = false) {
+        showsEveryOption = expandsGroups
         _batteryExpanded = State(initialValue: expandsGroups)
         _connectionExpanded = State(initialValue: expandsGroups)
         _bluetoothExpanded = State(initialValue: expandsGroups)
@@ -68,21 +73,78 @@ struct CombinedStatusIconSettingsSection: View {
 
     var body: some View {
         let palette = FeatureLightfieldPalette.resolve(scheme)
-        LightfieldSettingsSection {
-            Picker(L10n.text("菜单栏常驻显示", "Menu Bar Display"), selection: statusModeBinding) {
-                ForEach(MenuBarStatusDisplayMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
+        VStack(alignment: .leading, spacing: 24) {
+            LightfieldSettingsSection {
+                SettingsRow(title: L10n.text("菜单栏常驻显示", "Menu Bar Display")) {
+                    Picker(L10n.text("菜单栏常驻显示", "Menu Bar Display"), selection: statusModeBinding) {
+                        ForEach(MenuBarStatusDisplayMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .featureLightfieldMenuTint()
+                    .fixedSize()
                 }
-            }
-            .pickerStyle(.menu)
 #if DEBUG
-            .layoutProbe(Self.rowProbe + "mode")
+                .layoutProbe(Self.rowProbe + "mode")
 #endif
+                statusColorRows
+            } header: {
+                Text(L10n.text("显示", "Display"))
+            }
+            if showsEveryOption || statusModeBinding.wrappedValue == .combinedStatus {
+                combinedIconSection(palette: palette)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusColorRows: some View {
+        SettingsPalettePicker(title: L10n.text("图标颜色", "Icon Color"),
+            items: PanelStatusColorPreset.allCases, selection: selectedStatusPreset,
+            name: { $0.title }, color: {
+                $0.ink(dark: scheme == .dark, customDayHex: statusCustomDayHex, customNightHex: statusCustomNightHex)
+                    .map(Color.init(nsColor:)) ?? MiniWindowColorPalette.secondaryText
+            }, isCustom: { $0 == .custom })
+        if selectedStatusPreset.wrappedValue == .custom {
+            SettingsRow(title: L10n.text("日间颜色", "Day Color")) {
+                ColorPicker(L10n.text("日间颜色", "Day Color"),
+                    selection: statusColorBinding(storedValue: $statusCustomDayHex, dark: false), supportsOpacity: false)
+                    .labelsHidden()
+            }
+            SettingsRow(title: L10n.text("夜间颜色", "Night Color")) {
+                ColorPicker(L10n.text("夜间颜色", "Night Color"),
+                    selection: statusColorBinding(storedValue: $statusCustomNightHex, dark: true), supportsOpacity: false)
+                    .labelsHidden()
+            }
+        }
+    }
+
+    private var selectedStatusPreset: Binding<PanelStatusColorPreset> {
+        Binding {
+            PanelStatusColorPreset(rawValue: statusPresetRaw) ?? .original
+        } set: { statusPresetRaw = $0.rawValue }
+    }
+
+    private func statusColorBinding(storedValue: Binding<String>, dark: Bool) -> Binding<Color> {
+        Binding {
+            PanelAppearancePreferences.color(from: storedValue.wrappedValue)
+                ?? Color(nsColor: PanelStatusColorPreset.blue.ink(dark: dark) ?? .systemBlue)
+        } set: { color in
+            if let value = PanelAppearancePreferences.hexString(from: color) {
+                storedValue.wrappedValue = value
+            }
+        }
+    }
+
+    private func combinedIconSection(palette: FeatureLightfieldPalette) -> some View {
+        LightfieldSettingsSection {
             preview(palette: palette)
 #if DEBUG
                 .layoutProbe(Self.rowProbe + "preview")
 #endif
-            sliderRow(L10n.text("图标渲染范围", "Icon Size"),
+            sliderRow(L10n.text("图标大小", "Icon Size"),
                       L10n.text("调整菜单栏图标的渲染尺寸，可选 16–36 pt。",
                                 "Adjusts the menu bar icon render size from 16–36 pt."),
                       slider: Self.iconSizeSlider, stored: $iconSize, palette: palette)
@@ -97,12 +159,10 @@ struct CombinedStatusIconSettingsSection: View {
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
-            LightfieldExpandableRow(title: L10n.text("电池显示", "Battery Display"),
-                                    expanded: $batteryExpanded) { EmptyView() } content: {
+            SettingsExpandableRow(title: L10n.text("电池显示", "Battery Display"), expanded: $batteryExpanded) {
                 childRows { batteryRows(palette: palette) }
             }
-            LightfieldExpandableRow(title: L10n.text("连接图标样式", "Connection Icon Style"),
-                                    expanded: $connectionExpanded) { EmptyView() } content: {
+            SettingsExpandableRow(title: L10n.text("连接图标样式", "Connection Icon Style"), expanded: $connectionExpanded) {
                 childRows { connectionRows(palette: palette) }
             }
             labeledRow(L10n.text("音量指示样式", "Volume Indicator Style"),
@@ -115,8 +175,7 @@ struct CombinedStatusIconSettingsSection: View {
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
-            LightfieldExpandableRow(title: L10n.text("蓝牙音频", "Bluetooth Audio"),
-                                    expanded: $bluetoothExpanded) { EmptyView() } content: {
+            SettingsExpandableRow(title: L10n.text("蓝牙音频", "Bluetooth Audio"), expanded: $bluetoothExpanded) {
                 childRows { bluetoothRows(palette: palette) }
             }
         } header: {
@@ -236,7 +295,7 @@ struct CombinedStatusIconSettingsSection: View {
                         Text(Self.displayName(choice)).tag(choice)
                     }
                 }
-                .pickerStyle(.menu).labelsHidden().frame(width: 200)
+                .pickerStyle(.menu).featureLightfieldMenuTint().labelsHidden().frame(width: 200)
             }
         }
         toggleRow(L10n.text("蓝牙音量使用蓝色", "Use blue for Bluetooth volume"),
@@ -324,18 +383,7 @@ struct CombinedStatusIconSettingsSection: View {
         _ title: String, _ subtitle: String?, palette: FeatureLightfieldPalette,
         @ViewBuilder control: () -> Control
     ) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                if let subtitle {
-                    Text(subtitle).font(.system(size: 12)).foregroundStyle(palette.fg2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            control()
-        }
-        .padding(.vertical, 8)
+        SettingsRow(title: title, caption: subtitle) { control() }
 #if DEBUG
         .layoutProbe(Self.rowProbe + title)
 #endif
@@ -348,7 +396,7 @@ struct CombinedStatusIconSettingsSection: View {
     private func toggleRow(_ title: String, _ subtitle: String?, isOn: Binding<Bool>,
                            palette: FeatureLightfieldPalette) -> some View {
         labeledRow(title, subtitle, palette: palette) {
-            Toggle(title, isOn: isOn).labelsHidden().toggleStyle(.switch)
+            SettingsSwitch(title: title, isOn: isOn)
         }
     }
 

@@ -122,8 +122,9 @@ struct FeatureLightfieldPalette: Equatable, Sendable {
     }
     var warningColor: Color { Self.color(warning) }
     var fg: Color { Self.color(foreground[0]) }
-    var fg2: Color { Self.color(foreground[1]) }
-    var fg3: Color { Self.color(foreground[2]) }
+    /// D279: the two greys read 4.5:1 on a module's gradient (`CareStudioText`).
+    var fg2: CareStudioText { CareStudioText(Self.color(foreground[1])) }
+    var fg3: CareStudioText { CareStudioText(Self.color(foreground[2])) }
     var hairColor: Color { Self.color(hair).opacity(0.12) }
     var hoverColor: Color { Self.color(hover).opacity(0.04) }
     static func accents(_ module: ReviewFilter) -> [UInt32]? {
@@ -141,6 +142,57 @@ struct FeatureLightfieldPalette: Equatable, Sendable {
         if let values = accents(module) { return color(values[secondary ? 1 : 0]) }
         return module.moduleTheme.accent
     }
+    /// D274: text that acts in the settings window. As text the overview accent reads
+    /// on the night canvas (5.5–6.4:1 measured) but not on the day one (2.3–2.4:1). The
+    /// darker of its pair is 5.2–5.9:1 across the day canvas. Fills keep the accent.
+    static let settingsAction = AppAppearanceColors.adaptive(light: 0x2A55D6, dark: accent(.overview))
+    /// D276: text that acts on a main-window page (a link, the unit beside a reading) in
+    /// the page's accent, moved until it reads 4.5:1 on the module's gradient
+    /// (`CareStudioInk.actionText`). As text the accent measured 2.0:1 on the day update
+    /// pages; fills keep it.
+    static func actionText(_ module: ReviewFilter) -> Color {
+        guard let values = accents(module) else { return accent(module) }
+        let family = CareStudioFamily(route: module)
+        return values == family.palette.action
+            ? CareStudioInk.actionText(for: family)
+            : CareStudioInk.actionText(for: family, light: values[0], deep: values[1])
+    }
+    /// D282: the primary's fill, top and bottom: the page's accent pair, or where that is
+    /// the module's `action`, the module's `buttonFill`. Deeper on applications and my
+    /// tools, where the white label under the primary's 8% top light read 3.8:1 and
+    /// 4.43:1. Checks, charts and links keep the accent.
+    static func fills(_ module: ReviewFilter) -> [UInt32]? {
+        guard let values = accents(module) else { return nil }
+        let palette = CareStudioFamily(route: module).palette
+        return values == palette.action ? palette.buttonFill : values
+    }
+    /// D281: the primary's label on its fill (`fills`, D282): white, or the day ink where
+    /// that reads better (`CareStudioInk.fillLabel`); white where the page has no accent pair.
+    static func fillLabel(_ module: ReviewFilter) -> Color {
+        guard let values = fills(module) else { return .white }
+        return CareStudioInk.fillLabel(values)
+    }
+}
+
+/// D274: a pop-up menu draws its title and arrows in the tint (measured on macOS 27).
+/// The tint around it is `ModuleTheme.actionFill`, chosen for white labels on a fill,
+/// so on the night canvas the title measured 2.7:1, disabled 1.5:1. A menu's title is
+/// the setting's value and reads like the row's title; blue stays for what acts.
+/// Before the macOS 26 controls the tint is left alone: not seen there, and white
+/// arrows on an accent the tint replaced would disappear.
+private struct FeatureLightfieldMenuTint: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            content.tint(FeatureLightfieldPalette.resolve(scheme).fg)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func featureLightfieldMenuTint() -> some View { modifier(FeatureLightfieldMenuTint()) }
 }
 
 /// Reads placement decisions after the shell has supplied its actual geometry.
@@ -398,7 +450,7 @@ struct FeatureLightfieldPage<Content: View>: View {
                             Button(statusActionTitle, action: statusAction)
                                 .disabled(!statusActionEnabled)
                                 .buttonStyle(FeatureLightfieldRowButtonStyle(minimumHitHeight: compactResult ? 44 : nil))
-                                .foregroundStyle(FeatureLightfieldPalette.accent(module))
+                                .foregroundStyle(FeatureLightfieldPalette.actionText(module))
                                 .fixedSize()
                                 .lightfieldComponentProbe("lightfield.status.action")
                         }
@@ -587,20 +639,25 @@ struct FeatureLightfieldButtonStyle: ButtonStyle {
     var compact = false
     func makeBody(configuration: Configuration) -> some View {
         let accent = FeatureLightfieldPalette.accent(module)
+        // D282: the fill, its rim and its light take the page's fill pair
+        // (`FeatureLightfieldPalette.fills`); a cancel button keeps the accent rim.
+        let fill = FeatureLightfieldPalette.fills(module).map { $0.map(FeatureLightfieldPalette.color) }
+            ?? [accent, FeatureLightfieldPalette.accent(module, secondary: true)]
+        let rim = isCancel ? accent : fill[0]
         let shape = RoundedRectangle(cornerRadius: 12)
         configuration.label.font(.system(size: compact ? 13 : 17, weight: .semibold)).labelStyle(.titleOnly)
             .lineLimit(1).truncationMode(.tail)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(height: compact ? FeatureLightfield.resultActionHeight : nil)
-            .foregroundStyle(isCancel ? FeatureLightfieldPalette.resolve(scheme).fg : .white)
+            .foregroundStyle(isCancel ? FeatureLightfieldPalette.resolve(scheme).fg : FeatureLightfieldPalette.fillLabel(module))
             .background {
                 if !isCancel {
-                    shape.fill(LinearGradient(stops: [.init(color: accent, location: 0),
-                        .init(color: FeatureLightfieldPalette.accent(module, secondary: true), location: 1)], startPoint: .top, endPoint: .bottom))
+                    shape.fill(LinearGradient(stops: [.init(color: fill[0], location: 0),
+                        .init(color: fill[1], location: 1)], startPoint: .top, endPoint: .bottom))
                     shape.fill(LinearGradient(colors: [.white.opacity(0.08), .clear], startPoint: .top, endPoint: .bottom))
                 }
             }
-            .overlay { shape.strokeBorder(accent.opacity(isCancel ? 0.8 : 0.7), lineWidth: 1) }
+            .overlay { shape.strokeBorder(rim.opacity(isCancel ? 0.8 : 0.7), lineWidth: 1) }
             .overlay {
                 // Inset top highlight (prototype `inset 0 1px 0` white 25%). It
                 // follows the rounded shape; a clipped 2 pt bar would poke out
@@ -610,7 +667,7 @@ struct FeatureLightfieldButtonStyle: ButtonStyle {
                         .init(color: .clear, location: 0.08)], startPoint: .top, endPoint: .bottom), lineWidth: 1)
                 }
             }
-            .shadow(color: isCancel || compact ? .clear : accent.opacity(0.35), radius: compact ? 0 : 30, y: compact ? 0 : 10)
+            .shadow(color: isCancel || compact ? .clear : rim.opacity(0.35), radius: compact ? 0 : 30, y: compact ? 0 : 10)
             .lightfieldComponentProbe("lightfield.primary")
             .padding(.vertical, compact ? (FeatureLightfield.resultActionHitHeight - FeatureLightfield.resultActionHeight) / 2 : 0)
             .contentShape(Rectangle())
@@ -804,7 +861,7 @@ struct FeatureLightfieldProgress<Details: View, Actions: View>: View {
                     Text(measured.map { String(Int($0 * 100)) } ?? "—").font(.system(size: 64, weight: .bold)).monospacedDigit()
                     // Unknown progress shows "—" alone; a unit after it would read as a value.
                     if measured != nil {
-                        Text("%").font(.system(size: 24, weight: .semibold)).foregroundStyle(FeatureLightfieldPalette.accent(module))
+                        Text("%").font(.system(size: 24, weight: .semibold)).foregroundStyle(FeatureLightfieldPalette.actionText(module))
 #if DEBUG
                             .layoutProbe("lightfield.progress.unit")
 #endif
@@ -838,7 +895,7 @@ struct FeatureLightfieldProgress<Details: View, Actions: View>: View {
 #endif
                     }
                     ForEach(visibleMetrics) { metric in
-                        (Text(metric.title + " · ").foregroundColor(palette.fg2) + Text(metric.value).foregroundColor(palette.fg).bold())
+                        (Text(metric.title + " · ").foregroundStyle(palette.fg2) + Text(metric.value).foregroundColor(palette.fg).bold())
                             .monospacedDigit()
                             .lineLimit(1)
                             .accessibilityLabel(metric.title + " · " + metric.value)
@@ -893,7 +950,7 @@ struct FeatureLightfieldResults<Rows: View>: View {
                 Text(label).font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.resolve(scheme).fg2).lineLimit(1).help(label)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     FeatureLightfieldNumber(value: value, precision: precision)
-                    Text(unit).font(.system(size: 24, weight: .semibold)).foregroundStyle(FeatureLightfieldPalette.accent(module))
+                    Text(unit).font(.system(size: 24, weight: .semibold)).foregroundStyle(FeatureLightfieldPalette.actionText(module))
                 }
             }.padding(.leading, 96).frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .leading)
         }
@@ -941,8 +998,13 @@ enum FeatureLightfieldStatus: String, Sendable { case normal, warning, failure, 
         case .normal: FeatureLightfieldPalette.color(palette.normal)
         case .warning: FeatureLightfieldPalette.color(palette.warning)
         case .failure: FeatureLightfieldPalette.color(palette.failure)
-        case .unknown: palette.fg3
+        case .unknown: palette.fg3.base
         }
+    }
+    /// D279: as a glyph or a label; `unknown` is grey type and reads on the
+    /// page's gradient (`CareStudioText`), the status colours keep their values.
+    func style(_ palette: FeatureLightfieldPalette) -> AnyShapeStyle {
+        self == .unknown ? AnyShapeStyle(palette.fg3) : AnyShapeStyle(color(palette))
     }
     var symbol: String {
         switch self { case .normal: "checkmark.circle.fill"; case .warning: "exclamationmark.triangle.fill"; case .failure: "xmark.circle.fill"; case .unknown: "questionmark.circle" }

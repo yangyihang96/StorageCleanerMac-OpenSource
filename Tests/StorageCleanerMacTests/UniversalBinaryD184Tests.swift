@@ -1,4 +1,5 @@
 import Darwin
+import FileOperationShared
 import XCTest
 @testable import StorageCleanerMac
 
@@ -689,5 +690,163 @@ final class UniversalBinaryInventoryTests: XCTestCase {
         XCTAssertEqual(safety.components(separatedBy: "removefile(").count - 1, 1)
         XCTAssertTrue(safety.contains("isStagingName(clone.lastPathComponent)"))
         XCTAssertTrue(safety.contains("stamp(clone).identity == identity"))
+    }
+}
+
+/// D252 (G batch, install22 13:37): Operation History put PureMac's original
+/// back beside the thinned app, as “PureMac（瘦身前）.storagecleaner-thin-….app”;
+/// getting the original name back took two manual file moves. A thinning now
+/// records its swap, and after the put-back one step swaps the names back and
+/// moves the thin copy to the Trash with its own receipt.
+final class UniversalBinaryNameRestoreD252Tests: XCTestCase {
+    private func thinnedAndPutBack(_ fixture: D184Fixture, env: UniversalBinaryEnvironment) async throws
+        -> (report: CleanReport, original: FileIdentity, thinned: FileIdentity, staging: URL) {
+        let original = try UniversalBinarySafety.stamp(fixture.app).identity
+        let candidate = try await fixture.candidate(env)
+        let result = await UniversalBinaryService.execute([candidate], environment: env)
+        XCTAssertEqual(result.map(\.status), [.success], result.map(\.detail).joined())
+        var report = try XCTUnwrap(result.first?.report)
+        let receipt = try XCTUnwrap(report.restorableReceipts.first)
+        let recovered = await CleanupRecoveryService().restoreOne(receipt, userHomeURL: fixture.root,
+            trashURL: fixture.trash, quarantineRootURL: fixture.root.appendingPathComponent("quarantine"),
+            allowedApplicationPaths: [])
+        XCTAssertEqual(recovered.outcome, .restored)
+        report.recoveryAttempts = [CleanupRecoveryReport(completedAt: Date(), items: [
+            CleanupRecoveryItem(id: UUID(), originalPath: receipt.originalPath, outcome: .restored)])]
+        return (report, original, try UniversalBinarySafety.stamp(fixture.app).identity,
+                URL(fileURLWithPath: receipt.originalPath))
+    }
+
+    func testThinningRecordsTheSwapInItsReceipt() async throws {
+        let fixture = try D184Fixture(self)
+        let candidate = try await fixture.candidate()
+        let result = await UniversalBinaryService.execute([candidate], environment: fixture.environment())
+        let report = try XCTUnwrap(result.first?.report)
+        let receipt = try XCTUnwrap(report.restorableReceipts.first)
+        let swap = try XCTUnwrap(report.thinningSwaps?[receipt.originalPath])
+        XCTAssertEqual(swap.applicationPath, fixture.app.path)
+        XCTAssertEqual(swap.thinnedIdentity, try UniversalBinarySafety.stamp(fixture.app).identity)
+        XCTAssertEqual(try Self.replayed(fixture).thinningSwaps, report.thinningSwaps,
+                       "the record is in the journal on disk, not only in memory")
+        XCTAssertFalse(UniversalBinaryService.offersOriginalNameRestore(report), "not before the put-back")
+        var older = report
+        older.thinningSwaps = nil
+        older.recoveryAttempts = [CleanupRecoveryReport(completedAt: Date(), items: [
+            CleanupRecoveryItem(id: UUID(), originalPath: receipt.originalPath, outcome: .restored)])]
+        XCTAssertFalse(UniversalBinaryService.offersOriginalNameRestore(older), "receipts without the record keep only the put-back")
+    }
+
+    func testOneStepGivesTheOriginalItsNameAndTrashesTheThinCopy() async throws {
+        let fixture = try D184Fixture(self)
+        let env = fixture.environment()
+        let (report, original, thinned, staging) = try await thinnedAndPutBack(fixture, env: env)
+        XCTAssertTrue(UniversalBinaryService.offersOriginalNameRestore(report))
+        let result = try await XCTUnwrapAsync(await UniversalBinaryService.restoreOriginalName(from: report, environment: env))
+        XCTAssertEqual(result.status, .success, result.detail)
+        XCTAssertEqual(try UniversalBinarySafety.stamp(fixture.app).identity, original, "the original has its name again")
+        XCTAssertEqual(try Data(contentsOf: fixture.binary), D184Fat.make())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
+        XCTAssertEqual(try fixture.leftovers(), [])
+        let moved = try XCTUnwrap(result.report?.restorableReceipts.first)
+        XCTAssertEqual(moved.movedIdentity, thinned)
+        XCTAssertEqual(try Data(contentsOf: moved.resultingItemURL.appendingPathComponent("Contents/MacOS/fixture")), D184Fat.native)
+        XCTAssertTrue(UniversalBinarySafety.isStagingName(URL(fileURLWithPath: moved.originalPath).lastPathComponent))
+        XCTAssertNotEqual(moved.originalPath, staging.path, "the thin copy is not filed under the “before thinning” name")
+        XCTAssertEqual(result.report?.rulesVersion, UniversalBinaryService.nameRestoreRuleID)
+        let thinBytes = CleanupByteCount.sum(try UniversalBinarySafety.tree(moved.resultingItemURL).values
+            .filter { $0.identity.entryKind == .regularFile }.map(\.size))
+        XCTAssertGreaterThan(thinBytes, Int64(D184Fat.native.count) - 1)
+        XCTAssertEqual(result.report?.summary.movedToRecoverableLocationBytes, thinBytes, "the receipt carries the thin copy's size")
+
+        // The thin copy's own receipt puts it back beside the app, under its staging name.
+        let back = await CleanupRecoveryService().restoreOne(moved, userHomeURL: fixture.root,
+            trashURL: fixture.trash, quarantineRootURL: fixture.root.appendingPathComponent("quarantine"),
+            allowedApplicationPaths: [])
+        XCTAssertEqual(back.outcome, .restored)
+        XCTAssertEqual(try UniversalBinarySafety.stamp(URL(fileURLWithPath: moved.originalPath)).identity, thinned)
+        XCTAssertEqual(try UniversalBinarySafety.stamp(fixture.app).identity, original)
+    }
+
+    func testOptionalReceiptFieldsSurviveAJournalReplay() throws {
+        // Every later write is an event; replaying an event used to rebuild the
+        // report from a fixed field list and drop these two.
+        let fixture = try D184Fixture(self)
+        var report = try XCTUnwrap(SystemCacheClearReceipt.report(plan: SystemCacheClearPlan(items: [
+            SystemCacheInventoryItem(cache: .iconServices, allocatedBytes: 1, entryCount: 1, device: 1, inode: 2, failure: nil),
+        ]), reply: nil, outcomeUnknown: true, startedAt: Date(), completedAt: Date()))
+        report.startRefusal = CleanFailure(code: .unexpected, detailCode: "d252-probe")
+        report.thinningSwaps = ["/Applications/A（瘦身前）.storagecleaner-thin-\(UUID().uuidString).app": UniversalBinarySwapRecord(
+            applicationPath: "/Applications/A.app",
+            thinnedIdentity: FileIdentity(deviceID: 1, inode: 3, entryKind: .directory, creationTimeNanoseconds: nil))]
+        try fixture.journal.checkpoint(report, expectedIdentities: [:])
+        report.persistenceFailure = "d252-second-write"
+        try fixture.journal.checkpoint(report, expectedIdentities: [:])
+        let replayed = try Self.replayed(fixture)
+        XCTAssertEqual(replayed.persistenceFailure, "d252-second-write", "the second write was replayed as an event")
+        XCTAssertEqual(replayed.startRefusal, report.startRefusal)
+        XCTAssertEqual(replayed.thinningSwaps, report.thinningSwaps)
+    }
+
+    func testTheThinCopyCanBePutBackFromUtilities() async throws {
+        let fixture = try D184Fixture(self)
+        let candidate = try await fixture.candidate()
+        let result = await UniversalBinaryService.execute([candidate], environment: fixture.environment())
+        let row = try XCTUnwrap(result.first?.report?.items.first)
+        let identity = try XCTUnwrap(candidate.tree[""]?.identity)
+        let path = "/Applications/Utilities/Fixture（瘦身版）.storagecleaner-thin-\(UUID().uuidString).app"
+        let receipt = CleanupMoveReceipt(originalPath: path, resultingItemURL: fixture.trash.appendingPathComponent("Fixture.app"),
+            disposition: .trash, movedIdentity: identity, verification: .identityVerified, movedAt: Date())
+        let item = CleanReportItem(id: row.id, planItemID: row.planItemID, ruleID: UniversalBinaryService.nameRestoreRuleID,
+            sourcePath: path, estimatedBytes: row.estimatedBytes, outcome: .moved(receipt))
+        let allowed = CleanupRestoreAuthorization(sourcePath: path, allowedRootPath: "/Applications/Utilities",
+            sourceIdentity: identity, ruleID: UniversalBinaryService.nameRestoreRuleID, planItemID: row.planItemID)
+        XCTAssertTrue(allowed.permitsApplication(item, receipt: receipt), "D252: same place the thinning could put back")
+    }
+
+    /// Reads a copy of the journal at another path: from disk, never from
+    /// the in-process event cache.
+    private static func replayed(_ fixture: D184Fixture) throws -> CleanReport {
+        let copy = fixture.root.appendingPathComponent("receipts-replay-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.copyItem(at: fixture.journal.directory, to: copy)
+        return try XCTUnwrap(CleanupReportJournal(directory: copy).loadAvailable().reports.first)
+    }
+
+    func testNothingMovesWhileAnAppRunsOrAfterTheThinCopyChanged() async throws {
+        let fixture = try D184Fixture(self)
+        var env = fixture.environment()
+        let (report, original, thinned, staging) = try await thinnedAndPutBack(fixture, env: env)
+        env.running = { _, _ in true }
+        let running = try await XCTUnwrapAsync(await UniversalBinaryService.restoreOriginalName(from: report, environment: env))
+        XCTAssertEqual(running.status, .skipped, running.detail)
+        XCTAssertEqual(try UniversalBinarySafety.stamp(fixture.app).identity, thinned)
+        XCTAssertEqual(try UniversalBinarySafety.stamp(staging).identity, original)
+
+        env.running = { _, _ in false }
+        let replacement = fixture.root.appendingPathComponent("replacement.app")
+        try FileManager.default.copyItem(at: fixture.app, to: replacement)
+        try FileManager.default.removeItem(at: fixture.app)
+        try FileManager.default.moveItem(at: replacement, to: fixture.app)
+        let changed = try await XCTUnwrapAsync(await UniversalBinaryService.restoreOriginalName(from: report, environment: env))
+        XCTAssertNotEqual(changed.status, .success, changed.detail)
+        XCTAssertEqual(try UniversalBinarySafety.stamp(staging).identity, original, "the put-back original stays where it is")
+    }
+
+    func testTheOriginalMustBePutBackFirst() async throws {
+        let fixture = try D184Fixture(self)
+        let env = fixture.environment()
+        let candidate = try await fixture.candidate(env)
+        let executed = await UniversalBinaryService.execute([candidate], environment: env)
+        var report = try XCTUnwrap(executed.first?.report)
+        let receipt = try XCTUnwrap(report.restorableReceipts.first)
+        report.recoveryAttempts = [CleanupRecoveryReport(completedAt: Date(), items: [
+            CleanupRecoveryItem(id: UUID(), originalPath: receipt.originalPath, outcome: .restored)])]
+        let thinned = try UniversalBinarySafety.stamp(fixture.app).identity
+        let result = try await XCTUnwrapAsync(await UniversalBinaryService.restoreOriginalName(from: report, environment: env))
+        XCTAssertEqual(result.status, .skipped, result.detail)
+        XCTAssertEqual(try UniversalBinarySafety.stamp(fixture.app).identity, thinned, "the thinned app is untouched")
+    }
+
+    private func XCTUnwrapAsync<T>(_ value: T?, file: StaticString = #filePath, line: UInt = #line) async throws -> T {
+        try XCTUnwrap(value, file: file, line: line)
     }
 }

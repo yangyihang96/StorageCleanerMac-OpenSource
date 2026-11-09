@@ -56,7 +56,7 @@ struct CareStudioRecentItemsSheet: View {
         VStack(alignment: .leading, spacing: AppDesignTokens.Spacing.medium) {
             Text(RecentItemsPresentation.detail).font(AppDesignTokens.Typography.metadata)
             Text(L10n.text("默认不勾选。请按列表选择要清理的记录。", "Nothing is selected by default. Choose the lists you want to clear."))
-                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                .font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
             if let snapshot = store.snapshot {
                 Text(RecentItemsPresentation.summary(snapshot))
                 if snapshot.unreadableLocations > 0 {
@@ -78,10 +78,10 @@ struct CareStudioRecentItemsSheet: View {
                                             }
                                             VStack(alignment: .leading, spacing: 2) {
                                                 Text(store.name(for: list))
-                                                Text(list.url.lastPathComponent).font(AppDesignTokens.Typography.metadata).foregroundStyle(.secondary)
+                                                Text(list.url.lastPathComponent).font(AppDesignTokens.Typography.metadata).foregroundStyle(.readableSecondary)
                                             }
                                             Spacer()
-                                            Text(RecentItemsPresentation.count(list.entryCount)).foregroundStyle(.secondary)
+                                            Text(RecentItemsPresentation.count(list.entryCount)).foregroundStyle(.readableSecondary)
                                         }
                                     }
                                     .toggleStyle(.checkbox)
@@ -103,11 +103,11 @@ struct CareStudioRecentItemsSheet: View {
             OperationConfirmationFactsView(facts: store.confirmationFacts)
             if store.confirmation?.isEmpty != false {
                 Text(L10n.text("尚未勾选列表。请先选择要移除的列表。", "No lists are checked. Choose lists before removing them."))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
             if coordinator == nil {
                 Text(L10n.text("预览中不能执行清理。", "Cleanup is unavailable in this preview."))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.readableSecondary)
             }
         }
     }
@@ -122,7 +122,7 @@ struct CareStudioRecentItemsSheet: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(URL(fileURLWithPath: item.sourcePath).lastPathComponent)
                             Text(RecentItemsPresentation.verification(result.verification[item.sourcePath] ?? .unknown))
-                                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                .foregroundStyle(.readableSecondary).fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)

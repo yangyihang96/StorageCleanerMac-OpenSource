@@ -50,8 +50,8 @@ struct ComputerHealthWorkspaceView: View {
         }
         if let checkedAt = healthStore.lastRefreshAt {
             return .idle(L10n.text(
-                "上次检查：\(checkedAt.formatted(date: .abbreviated, time: .shortened))",
-                "Last check: \(checkedAt.formatted(date: .abbreviated, time: .shortened))"
+                "上次检查：\(checkedAt.appFormatted(date: .abbreviated, time: .shortened))",
+                "Last check: \(checkedAt.appFormatted(date: .abbreviated, time: .shortened))"
             ))
         }
         return .idle(L10n.text("尚未检查系统健康", "System health not checked"))

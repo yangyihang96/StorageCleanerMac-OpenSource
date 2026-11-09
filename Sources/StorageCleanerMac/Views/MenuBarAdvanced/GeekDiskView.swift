@@ -587,7 +587,7 @@ enum GeekDiskHealthTimestamp {
         guard let checkedAt, checkedAt.timeIntervalSinceReferenceDate.isFinite else {
             return L10n.text("健康读取时间未知", "Health read time unknown")
         }
-        let timestamp = checkedAt.formatted(date: .numeric, time: .standard)
+        let timestamp = checkedAt.appFormatted(date: .numeric, time: .standard)
         return L10n.text("健康读取：\(timestamp)", "Health read: \(timestamp)")
             + " · " + ageText(checkedAt, now: now)
     }

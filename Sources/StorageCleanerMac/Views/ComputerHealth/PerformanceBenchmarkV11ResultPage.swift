@@ -66,7 +66,7 @@ struct PerformanceBenchmarkV11ResultPage: View {
                                                     .lightfieldComponentProbe("performance.helper.required.summary")
                                                 Button(L10n.text("去设置 · 系统助手", "Settings · System Helper"), action: helperSettings)
                                                     .buttonStyle(FeatureLightfieldRowButtonStyle()).font(.system(size: 13))
-                                                    .foregroundStyle(FeatureLightfieldPalette.accent(.performance))
+                                                    .foregroundStyle(FeatureLightfieldPalette.actionText(.performance))
                                                     .lightfieldComponentProbe("performance.helper.settings.summary")
                                             }
                                         }
@@ -135,7 +135,7 @@ struct PerformanceBenchmarkV11ResultPage: View {
                     ForEach(metrics) { metric in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(metric.label).font(.system(size: 13)).foregroundStyle(palette.fg2)
-                            (Text(metric.valuePrefix).font(.system(size: 13)).foregroundColor(palette.fg2) + Text(metric.value).font(.system(size: 22, weight: .semibold)).foregroundColor(metric.status?.color(palette) ?? palette.fg)).monospacedDigit()
+                            (Text(metric.valuePrefix).font(.system(size: 13)).foregroundStyle(palette.fg2) + Text(metric.value).font(.system(size: 22, weight: .semibold)).foregroundColor(metric.status?.color(palette) ?? palette.fg)).monospacedDigit()
                                 .lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok: result-secondary
                             Text(metric.caption).font(.system(size: 11)).foregroundStyle(palette.fg2).fixedSize(horizontal: false, vertical: true)
                         }.frame(maxWidth: .infinity, alignment: .leading).lightfieldComponentProbe("performance.summary.secondary." + metric.id)
@@ -145,7 +145,7 @@ struct PerformanceBenchmarkV11ResultPage: View {
         }.foregroundStyle(palette.fg).overlay(alignment: .bottomTrailing) {
             if !MSeriesV11PagePresentation.hasMeasuredEfficiency(envelope) {
                 Button(L10n.text("去设置 · 系统助手", "Settings · System Helper"), action: helperSettings)
-                    .buttonStyle(FeatureLightfieldRowButtonStyle()).font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.accent(.performance))
+                    .buttonStyle(FeatureLightfieldRowButtonStyle()).font(.system(size: 13)).foregroundStyle(FeatureLightfieldPalette.actionText(.performance))
                     .lightfieldComponentProbe("performance.helper.settings.summary")
                     .frame(width: width >= 740 ? min(196, width * 0.224) + 6 : (width - 16) / 2, alignment: .leading)
                     .zIndex(1)
@@ -173,7 +173,7 @@ struct PerformanceBenchmarkV11ResultPage: View {
                             Text(ratio.map { MSeriesV11PagePresentation.number($0, digits: 2) + "×" } ?? MSeriesV11PagePresentation.calibration)
                                 .font(.system(size: 17, weight: .semibold, design: .monospaced)).lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok: result-ratio
                                 .frame(maxWidth: ratio == nil ? .infinity : nil, alignment: .leading)
-                                .foregroundStyle(restricted ? palette.fg3 : palette.fg)
+                                .foregroundStyle(restricted ? AnyShapeStyle(palette.fg3) : AnyShapeStyle(palette.fg))
                                 .lightfieldComponentProbe("performance.ratio." + ids[index])
                         }
                         if ratio == nil { Text(names[index]).font(.system(size: 13)).foregroundStyle(palette.fg2).lineLimit(1) }
@@ -205,7 +205,7 @@ struct PerformanceBenchmarkV11ResultPage: View {
                 Text(L10n.text("无法取得有效实测功率区间；能效分与曲线暂不可用。", "No valid measured power interval; efficiency score and curve unavailable."))
                     .font(.system(size: 13)).foregroundStyle(palette.fg2).fixedSize(horizontal: false, vertical: true)
                 Button(L10n.text("去设置 · 系统助手", "Settings · System Helper"), action: helperSettings)
-                    .buttonStyle(FeatureLightfieldRowButtonStyle()).foregroundStyle(FeatureLightfieldPalette.accent(.performance)).font(.system(size: 13))
+                    .buttonStyle(FeatureLightfieldRowButtonStyle()).foregroundStyle(FeatureLightfieldPalette.actionText(.performance)).font(.system(size: 13))
                     .lightfieldComponentProbe("performance.helper.settings.curve")
             } else {
                 let powerMax = max(10, (points.compactMap(\.meanPowerW).max() ?? 0) * 1.1)

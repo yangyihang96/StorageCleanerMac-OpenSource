@@ -66,7 +66,7 @@ struct CareStudioCleaningTaskList: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(task.title)
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(task.state == .waiting ? CareStudioInk.secondary : CareStudioInk.primary)
+                            .foregroundStyle(task.state == .waiting ? AnyShapeStyle(CareStudioInk.secondary) : AnyShapeStyle(CareStudioInk.primary))
                         Text(detail(task))
                             .font(.system(size: 11))
                             .foregroundStyle(CareStudioInk.secondary)

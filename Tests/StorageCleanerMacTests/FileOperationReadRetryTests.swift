@@ -98,7 +98,9 @@ final class FileOperationReadRetryTests: XCTestCase {
         let cacheClass = try r2SourceDeclaration("final class SystemCacheService:", in: cache)
         let inventory = try r2SourceDeclaration("func inventory() async -> SystemCacheInventoryReply?", in: cacheClass)
         XCTAssertTrue(inventory.contains("FileOperationReadRetry.perform"))
-        XCTAssertTrue(inventory.contains("let connection = try self.connect()"))
+        // D241＋旧值“let connection = try self.connect()”: the connection (and the
+        // Security signer lookup behind its requirement) is built off the main thread.
+        XCTAssertTrue(inventory.contains("let connection = try await Self.connectOffMain()"))
         XCTAssertTrue(inventory.contains("timeout: 35"))
         let clear = try r2SourceDeclaration("func clear(", in: cacheClass)
         XCTAssertFalse(clear.contains("FileOperationReadRetry.perform"))

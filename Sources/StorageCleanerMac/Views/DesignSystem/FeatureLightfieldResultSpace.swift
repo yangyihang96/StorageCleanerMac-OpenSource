@@ -85,10 +85,10 @@ struct FeatureLightfieldCompactMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value.label).font(.system(size: 11)).foregroundStyle(palette.fg2).lineLimit(1)
-            (Text(value.valuePrefix).font(.system(size: 13)).foregroundColor(palette.fg2)
+            (Text(value.valuePrefix).font(.system(size: 13)).foregroundStyle(palette.fg2)
                 + Text(value.value).font(.system(size: 22, weight: .semibold)).foregroundColor(value.status?.color(palette) ?? palette.fg)
                 + Text(value.unit.isEmpty ? "" : " " + value.unit).font(.system(size: 13))
-                    .foregroundColor(FeatureLightfieldPalette.accent(module)))
+                    .foregroundColor(FeatureLightfieldPalette.actionText(module)))
                 .monospacedDigit().lineLimit(1).minimumScaleFactor(0.5) // lightfield-scale-ok: compact-result-value
                 .lightfieldComponentProbe(valueProbe)
         }.frame(maxWidth: .infinity, alignment: .leading)

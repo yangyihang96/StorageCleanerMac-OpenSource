@@ -142,7 +142,7 @@ struct BrowserPrivacyRecordPresentation: Equatable, Sendable {
         self.title = recordedTitle ?? address.collapsed
         self.category = category.isInformative ? category.title : nil
         self.visitCount = visitCount
-        latestVisit = latestVisitedAt.map(BrowserPrivacyDateFormatter.string)
+        latestVisit = latestVisitedAt.map { $0.appFormatted(date: .abbreviated, time: .shortened) }
         accessibilityLabel = [
             browserName,
             profileName,
@@ -252,7 +252,7 @@ struct BrowserPrivacyVisitPresentation: Identifiable, Equatable, Sendable {
             }
             return Self(
                 id: record.id,
-                time: record.visitedAt.map(BrowserPrivacyDateFormatter.string)
+                time: record.visitedAt.map { $0.appFormatted(date: .abbreviated, time: .shortened) }
                     ?? L10n.text("时间不可用", "Time unavailable"),
                 detail: details.isEmpty ? nil : details.joined(separator: " · ")
             )
@@ -438,14 +438,5 @@ struct BrowserPrivacyRecordIdentityView: View {
                 style: .continuous
             ))
             .accessibilityHidden(true)
-    }
-}
-
-enum BrowserPrivacyDateFormatter {
-    static func string(_ date: Date) -> String {
-        date.formatted(
-            Date.FormatStyle(date: .abbreviated, time: .shortened)
-                .locale(L10n.locale)
-        )
     }
 }

@@ -433,7 +433,8 @@ final class AppIconCacheTests: XCTestCase {
         for fallback in fallbackClosures {
             XCTAssertTrue(fallback.contains("Image(systemName:"))
             XCTAssertTrue(fallback.contains(".symbolRenderingMode(.hierarchical)"))
-            XCTAssertTrue(fallback.contains(".foregroundStyle(.secondary)"))
+            // D280＋旧值：.foregroundStyle(.secondary)（层级灰在模块渐变上取可读级别，渐变外原样）。
+            XCTAssertTrue(fallback.contains(".foregroundStyle(.readableSecondary)"))
         }
 
         XCTAssertTrue(uninstallPreviewFallback.contains(".resizable()"))
@@ -455,7 +456,8 @@ final class AppIconCacheTests: XCTestCase {
         // D64 migrates the retired compact icon to the shared live glyph.
         XCTAssertTrue(compactProcessFallback.contains("AppSymbolGlyph(systemImage: fallback"))
         XCTAssertTrue(compactProcessFallback.contains("renderingMode: .hierarchical"))
-        XCTAssertTrue(compactProcessFallback.contains(".foregroundStyle(.secondary)"))
+        // D280＋旧值：.foregroundStyle(.secondary)。
+        XCTAssertTrue(compactProcessFallback.contains(".foregroundStyle(.readableSecondary)"))
         XCTAssertTrue(compactProcessFallback.contains("size: MiniWindowStyleTokens.processIconSize"))
         XCTAssertFalse(compactProcessFallback.contains(".background(.thinMaterial"))
         XCTAssertFalse(

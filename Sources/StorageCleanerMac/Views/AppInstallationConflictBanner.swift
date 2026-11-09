@@ -34,7 +34,7 @@ struct AppInstallationConflictBanner: View {
                     )
                 )
                 .font(AppTypography.monospaced)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .help(conflict.currentRuntimePath)
             }
@@ -67,7 +67,7 @@ struct AppInstallationConflictBanner: View {
     private func copyLine(_ copy: InstalledAppCopy) -> some View {
         Text("\(copy.url.path) · \(copy.versionDisplay)")
             .font(AppTypography.monospaced)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.readableSecondary)
             .fixedSize(horizontal: false, vertical: true)
             .help("\(copy.url.path) · \(copy.versionDisplay)")
     }

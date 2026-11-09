@@ -19,7 +19,7 @@ struct ApplicationsOverviewView: View {
             Text(L10n.text("我们在您的 Mac 上找到了 \(ByteFormat.count(model.entries.count)) 个应用程序。", "We’ve found \(ByteFormat.count(model.entries.count)) apps on your Mac."))
                 .font(.system(size: 17, weight: .semibold))
             if model.ignoredTotal > 0 {
-                Text(model.ignoredSummary).font(.system(size: 13)).foregroundStyle(.secondary)
+                Text(model.ignoredSummary).font(.system(size: 13)).foregroundStyle(.readableSecondary)
             }
             LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                 if let updates = availableUpdateCount, updates > 0 {
@@ -102,7 +102,7 @@ struct ApplicationsOverviewView: View {
             Text(L10n.text("正在后台扫描之前卸载软件遗留的各类文件，该过程可能需要片刻。",
                            "Looking for files left behind by previously uninstalled applications in the background. This may take a moment."))
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.readableSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
@@ -119,7 +119,7 @@ struct ApplicationsOverviewView: View {
                 .frame(width: 34, height: 34)
                 .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             Text(title).font(.system(size: 13, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(detail).font(.system(size: 11)).foregroundStyle(.readableSecondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 2)
             HStack(spacing: 8) {
                 if let primary {

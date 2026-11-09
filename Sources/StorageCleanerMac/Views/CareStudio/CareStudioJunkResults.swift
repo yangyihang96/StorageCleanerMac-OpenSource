@@ -222,11 +222,25 @@ struct CareStudioJunkResultsPage: View {
                          "Results may be incomplete: \(reasons.joined(separator: "; ")).")
     }
 
+    /// D237 (review P2-12): places without read permission get the way to
+    /// grant it, next to the notice that counts them.
+    nonisolated static func coverageNoticeActionTitle(_ limits: ScanCoverageLimits) -> String? {
+        limits.isLimited && limits.deniedLocationCount > 0
+            ? L10n.text("打开完整磁盘访问设置", "Open Full Disk Access") : nil
+    }
+
     @ViewBuilder
     private var notices: some View {
         VStack(spacing: 6) {
             if let coverage = Self.coverageNotice(session.coverageLimits) {
-                CareStudioNotice(systemImage: "exclamationmark.triangle.fill", text: coverage)
+                if let actionTitle = Self.coverageNoticeActionTitle(session.coverageLimits) {
+                    CareStudioNotice(systemImage: "exclamationmark.triangle.fill", text: coverage,
+                                     actionTitle: actionTitle) {
+                        _ = CleanupService.openFullDiskAccessSettings()
+                    }
+                } else {
+                    CareStudioNotice(systemImage: "exclamationmark.triangle.fill", text: coverage)
+                }
             }
             if let notice = store.accessReturnNotice, notice.sessionID == session.id {
                 CareStudioNotice(systemImage: "lock.open.fill",
@@ -475,6 +489,9 @@ struct CareStudioTileModel: Identifiable {
     /// one. Without it the tile keeps its round symbol.
     var art: GeneratedArt? = nil
     var reviewTint: Color? = nil
+    /// D236: false when the tile has nothing to review (Smart Scan's "nothing
+    /// found" cards already offer no Review).
+    var showsReview = true
 }
 
 /// CleanMyMac's bento: with three or more tiles the first is a tall tile
@@ -559,7 +576,8 @@ struct CareStudioTileGrid: View {
             return [CGRect(x: 0, y: 0, width: size.width, height: tallHeight)]
         }
         if count == 2 {
-            let width = (size.width - gap) / 2
+            // D242: never a negative size, however narrow (review P2-2).
+            let width = max(0, (size.width - gap) / 2)
             let height = tallHeight
             return [CGRect(x: 0, y: 0, width: width, height: height),
                     CGRect(x: width + gap, y: 0, width: width, height: height)]
@@ -570,10 +588,10 @@ struct CareStudioTileGrid: View {
         let rowHeight = max(minimumRowHeight,
                             min(maxRowHeight, (size.height - CGFloat(rows - 1) * gap) / CGFloat(rows)),
                             (minimumLargeHeight - CGFloat(rows - 1) * gap) / CGFloat(rows))
-        let leftWidth = (size.width - 2 * gap) / 3
+        let leftWidth = max(0, (size.width - 2 * gap) / 3)
         let rightX = leftWidth + gap
-        let rightWidth = size.width - rightX
-        let cellWidth = (rightWidth - gap) / 2
+        let rightWidth = max(0, size.width - rightX)
+        let cellWidth = max(0, (rightWidth - gap) / 2)
         var frames = [CGRect(x: 0, y: 0, width: leftWidth,
                              height: CGFloat(rows) * rowHeight + CGFloat(rows - 1) * gap)]
         for index in 0..<rest {
@@ -672,7 +690,9 @@ struct CareStudioTile: View {
                         }
                     }
                     Spacer(minLength: 6)
-                    CareStudioPillButton(title: model.reviewTitle, compact: true, action: model.onReview)
+                    if model.showsReview {
+                        CareStudioPillButton(title: model.reviewTitle, compact: true, action: model.onReview)
+                    }
                     if let cleanTitle = model.cleanTitle, let onClean = model.onClean {
                         CareStudioPillButton(title: cleanTitle, filled: true, compact: true, action: onClean)
                             .disabled(!model.cleanEnabled)

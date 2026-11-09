@@ -83,6 +83,29 @@ Sparkle update acceptance. This applies only to 2.0.1 and does not change
 hardware safety checks or future distribution defaults. See
 [the validation record](docs/RELEASE_VALIDATION_2.0.1.md).
 
+### 2.0.2 authorization (2026-11-07)
+
+The owner asked to publish 2.0.2 ("发布 2.0.2") and chose a full public release
+of `2.0.2` under the same terms as 2.0.1: Apple Development signing without
+notarization or stapling, disclosed in the GitHub Release, packaged README and
+appcast item. The owner chose to publish the source release, the update release
+with its appcast item and the sanitized open-source snapshot together, after
+being told that the source still names competitor products in code comments,
+tests and internal documents, as it did in 2.0.1. The changelog entries for the
+contrast work (D276, D279–D282) were added first. The owner chose to ship with
+three open items recorded in the validation record: a few text and background
+pairs still measure below 4.5:1; the Mac mini mode's `SleepDisabled` setting
+was observed at 0 for 33–85 seconds while the background helper was replaced,
+cause not proven at the time (that code is unchanged since 2.0.1; the
+validation record later traced the 10-minute drop to a third-party
+remote-control app's root helper, not to 2.0.2); and the D277 and D278
+memory-reading fixes were not verified on macOS 15.6.1 or 26.6.2. Each outward
+step, and the real Sparkle update check on the local production install
+(`/Applications/存储清理助手.app`, public 2.0.1), is confirmed with the owner
+before it runs. This applies only to 2.0.2 and does not change hardware safety
+checks or future distribution defaults. See
+[the validation record](docs/RELEASE_VALIDATION_2.0.2.md).
+
 ## 4. Sparkle and publication
 
 After notarized artifacts exist:

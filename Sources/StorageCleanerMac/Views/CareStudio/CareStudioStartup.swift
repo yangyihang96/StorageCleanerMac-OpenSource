@@ -67,6 +67,20 @@ struct CareStudioStartupActions {
     /// The exclusive work Start Over waits for: maintenance tasks run from
     /// this page hold the cleanup lease (item 13).
     var startOverActivity: HeavyWorkActivityStore? = nil
+    /// D229: Enable Background Helper (Open Login Items while macOS waits
+    /// for approval) on the unread login tile; nil when there is nothing to do.
+    var helper: CareStudioStartupHelperAction? = nil
+}
+
+/// D229: the file-operation helper's next step, as the page offers it.
+struct CareStudioStartupHelperAction {
+    let status: FileOperationHelperStatus
+    var isBusy = false
+    let perform: () -> Void
+
+    var title: String? {
+        isBusy ? L10n.text("正在启用…", "Enabling…") : status.actionTitle
+    }
 }
 
 struct CareStudioStartupResultsPage: View {
@@ -153,27 +167,40 @@ struct CareStudioStartupResultsPage: View {
     }
 
     private func tiles(_ summary: StartupItemsPresentation) -> [CareStudioTileModel] {
-        let reading = StartupReadPresentation(coverage: coverage)
-        let loginItems = summary.allItems.filter { $0.consoleCategory == .loginItems }
-        // Item 13's evidence showed "You Have 1 Login Items": one is singular.
-        let login = summary.count(for: .loginItems)
-        let background = summary.count(for: .background)
-        let updates = summary.count(for: .updatesAndSync)
-        func open(_ category: StartupItemsCategory) -> () -> Void {
+        Self.tiles(summary, coverage: coverage, helper: actions.helper, leadingTiles: leadingTiles) { category in
             {
                 managerCategory = category
                 withAnimation(CareStudioMotion.animation(0.2, reduceMotion: reduceMotion)) { showsManager = true }
             }
         }
-        var tiles = leadingTiles + [
-            CareStudioTileModel(
-                id: "login", module: .startup,
-                title: reading.loginTitle(count: login),
-                detail: reading.loginDetail,
-                systemImage: "power",
-                iconPaths: loginItems.compactMap(\.applicationIconPath).prefix(3).map { $0 },
-                subgroupSymbols: ["power", "person.crop.circle.fill", "macwindow"],
-                reviewTitle: L10n.text("查看", "Review"), onReview: open(.loginItems), art: .tileLoginItems),
+    }
+
+    /// The result tiles in order (static so tests can read them, D229).
+    static func tiles(_ summary: StartupItemsPresentation, coverage: StartupCoverageReport,
+                      helper offered: CareStudioStartupHelperAction?, leadingTiles: [CareStudioTileModel],
+                      open: (StartupItemsCategory) -> () -> Void) -> [CareStudioTileModel] {
+        var reading = StartupReadPresentation(coverage: coverage)
+        reading.helper = offered?.status
+        let loginItems = summary.allItems.filter { $0.consoleCategory == .loginItems }
+        // Item 13's evidence showed "You Have 1 Login Items": one is singular.
+        let login = summary.count(for: .loginItems)
+        let background = summary.count(for: .background)
+        let updates = summary.count(for: .updatesAndSync)
+        // D229: unread login items carry the reason and the way out.
+        let helper = reading.isAvailable ? nil : offered
+        let loginTile = CareStudioTileModel(
+            id: "login", module: .startup,
+            title: reading.loginTitle(count: login),
+            detail: reading.loginDetail,
+            systemImage: "power",
+            iconPaths: loginItems.compactMap(\.applicationIconPath).prefix(3).map { $0 },
+            subgroupSymbols: ["power", "person.crop.circle.fill", "macwindow"],
+            reviewTitle: L10n.text("查看", "Review"), onReview: open(.loginItems),
+            cleanTitle: helper?.title, cleanEnabled: helper?.isBusy == false, onClean: helper?.perform,
+            art: .tileLoginItems, reviewTint: reading.isAvailable ? nil : .yellow)
+        // D229: when the read failed, the login tile leads as the large tile
+        // (its reason and button need the room); a small tile shows no detail.
+        var tiles = (reading.isAvailable ? leadingTiles + [loginTile] : [loginTile] + leadingTiles) + [
             CareStudioTileModel(
                 id: "background", module: .startup,
                 title: reading.backgroundTitle(count: background),
@@ -185,13 +212,17 @@ struct CareStudioStartupResultsPage: View {
                 title: L10n.text("\(ByteFormat.count(updates)) 个更新与同步项",
                                  updates == 1 ? "1 Update & Sync Item" : "\(ByteFormat.count(updates)) Update & Sync Items"),
                 systemImage: "arrow.triangle.2.circlepath",
-                reviewTitle: L10n.text("查看", "Review"), onReview: open(.updatesAndSync), art: .tileSync)
+                reviewTitle: L10n.text("查看", "Review"), onReview: open(.updatesAndSync), art: .tileSync,
+                // D236: nothing to review behind “0 个更新与同步项” (review P2-10).
+                showsReview: updates > 0)
         ]
         if summary.count(for: .attention) > 0 {
             tiles.append(CareStudioTileModel(
                 id: "attention", module: .startup,
                 title: L10n.text("\(summary.count(for: .attention)) 个需要关注", "\(summary.count(for: .attention)) Need Attention"),
-                detail: L10n.text("失效、找不到程序或归属不明的启动项。", "Broken items, missing programs or unknown owners."),
+                // D235＋旧值“失效、找不到程序或归属不明的启动项。”
+                detail: L10n.text("失效、找不到程序、签名异常或权限过宽的启动项。",
+                                  "Broken items, missing programs, invalid signatures or loose permissions."),
                 systemImage: "exclamationmark.triangle.fill",
                 reviewTitle: L10n.text("查看", "Review"), onReview: open(.attention), art: .tileAttention))
         }
@@ -242,6 +273,8 @@ struct CareStudioStartupManager: View {
             .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
             .padding(CareStudioMetrics.managerInset)
             .environment(\.colorScheme, .light)
+            // D279: the panel is white, not the module's gradient.
+            .environment(\.careStudioTextGround, nil)
         }
         .onAppear { CareStudioCanvas.shared.claim(chromeID, animating: false, label: "startupManager") }
         .onDisappear { CareStudioCanvas.shared.release(chromeID) }
@@ -302,7 +335,7 @@ struct CareStudioStartupManager: View {
                         + Text(sort.title).foregroundStyle(CareStudioManagerInk.accent))
                         .font(.system(size: 12, weight: .semibold))
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton).careStudioActionTint()
                 .fixedSize()
             }
         }
@@ -434,8 +467,9 @@ struct CareStudioStartupManager: View {
             L10n.text("负责检查更新或同步数据的后台项目。停用后需要手动更新或同步。",
                       "Background items that check for updates or sync data. Turned off, you update or sync by hand.")
         case .attention:
-            L10n.text("失效、找不到程序、签名异常或归属不明的项目。只能查看或在系统设置中处理。",
-                      "Broken items, missing programs, invalid signatures or unknown owners. View them or handle them in System Settings.")
+            // D235＋旧值“失效、找不到程序、签名异常或归属不明的项目。只能查看或在系统设置中处理。”
+            L10n.text("失效、找不到程序、签名异常或权限过宽的项目。只能查看或在系统设置中处理。归属未确认的项目留在原来的类别里，带锁标记，只能查看。",
+                      "Broken items, missing programs, invalid signatures or loose permissions. View them or handle them in System Settings. Items whose owner is unconfirmed stay in their own category, locked and view-only.")
         }
     }
 }
@@ -478,6 +512,15 @@ struct CareStudioStartupRow: View {
                     .foregroundStyle(CareStudioManagerInk.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                // D254: the row names why it needs attention.
+                if let reason = item.attentionReasonText {
+                    Text(L10n.text("需要关注：", "Needs attention: ") + reason)
+                        .font(.system(size: 11))
+                        .foregroundStyle(CareStudioManagerInk.warning)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(reason)
+                }
             }
             Spacer(minLength: 8)
             Text(item.displayStatus)

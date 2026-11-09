@@ -18,13 +18,12 @@ enum AuthorizedMoveError: LocalizedError {
 
 @MainActor final class AuthorizedApplicationMover {
     static let shared = AuthorizedApplicationMover()
-    private let service = SMAppService.daemon(plistName: FileOperationIdentity.helper + ".plist")
 
     func move(app: InstalledAppItem, identity: FileIdentity, sessionID: UUID,
               direction: AuthorizedFileMove.Direction = .trash, existingTrash: URL? = nil,
               beforeMove: @escaping @Sendable () async throws -> Void) async throws -> URL {
         guard let helper = Bundle.main.url(forResource: "StorageCleanerFileOperationHelper", withExtension: nil),
-              trustedBundledHelper(helper) else { throw AuthorizedMoveError.unavailable }
+              await Self.trustedBundledHelper(helper) else { throw AuthorizedMoveError.unavailable }
         // The coordinator owns the cleanup lease before any registration. Never
         // replace a worker during an in-flight or quarantined operation.
         try Task.checkCancellation()
@@ -49,13 +48,9 @@ enum AuthorizedMoveError: LocalizedError {
                                    direction: direction, existingTrash: existingTrash)
         let trash = URL(fileURLWithPath: request.trashPath)
         let data = try JSONEncoder().encode(request)
-        guard let requirement = FileOperationPeerRequirement.currentSigner(peerIdentifier: FileOperationIdentity.helper) else {
-            throw AuthorizedMoveError.unavailable
-        }
-        let connection = NSXPCConnection(machServiceName: FileOperationIdentity.helper, options: .privileged)
-        connection.setCodeSigningRequirement(requirement)
-        connection.remoteObjectInterface = NSXPCInterface(with: FileOperationHelperProtocol.self)
-        connection.resume()
+        let connection = try await Task.detached(priority: .userInitiated) {
+            FileOperationConnectionHandoff(connection: try Self.connect())
+        }.value.connection
         defer { connection.invalidate() }
         let preparedData: Data
         do { preparedData = try await exchange(data, authorization: authorization.form, connection: connection) }
@@ -156,33 +151,49 @@ enum AuthorizedMoveError: LocalizedError {
         let key = FileOperationIdentity.helper + ".registeredBuild"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
         guard !build.isEmpty else { throw AuthorizedMoveError.unavailable }
+        let refresh = refreshRegisteredBuild && (forceRefresh || UserDefaults.standard.string(forKey: key) != build)
+        let status: SMAppService.Status
         do {
-            var refreshed = false
-            if refreshRegisteredBuild && service.status == .enabled && (forceRefresh || UserDefaults.standard.string(forKey: key) != build) {
-                try await service.unregister()
-                refreshed = true
-                UserDefaults.standard.removeObject(forKey: key)
-                try Task.checkCancellation()
+            let worker = Task.detached(priority: .userInitiated) {
+                try await Self.registerHelper(refreshing: refresh, registeredBuildKey: key)
             }
-            if service.status == .notRegistered || service.status == .notFound {
-                do { try service.register() }
-                catch {
-                    // BTM can briefly reject registration even after the async
-                    // bootout callback. Retry once only for this observed race.
-                    let failure = error as NSError
-                    guard refreshed, failure.domain == "SMAppServiceErrorDomain", failure.code == 1,
-                          service.status == .notRegistered || service.status == .notFound else { throw error }
-                    try await Task.sleep(for: .milliseconds(500))
-                    try service.register()
-                }
-            }
+            status = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
         } catch is CancellationError { throw CancellationError() }
         catch {
             throw NSError(domain: "UninstallAuthorization.helper-registration", code: 1,
                           userInfo: [NSUnderlyingErrorKey: error])
         }
-        guard service.status == .enabled else { throw AuthorizedMoveError.approvalRequired }
+        guard status == .enabled else { throw AuthorizedMoveError.approvalRequired }
         if refreshRegisteredBuild { UserDefaults.standard.set(build, forKey: key) }
+    }
+
+    /// D250 (G batch): ServiceManagement checks this app's signature on the
+    /// calling thread for every register and unregister; on the main thread
+    /// each call reported two Security “should not be called on the main
+    /// thread” faults (install22, 13:21). The daemon is now (un)registered
+    /// here, off the main thread, with its own service object.
+    nonisolated private static func registerHelper(refreshing: Bool, registeredBuildKey key: String) async throws -> SMAppService.Status {
+        let service = SMAppService.daemon(plistName: FileOperationIdentity.helper + ".plist")
+        var refreshed = false
+        if refreshing && service.status == .enabled {
+            try await service.unregister()
+            refreshed = true
+            UserDefaults.standard.removeObject(forKey: key)
+            try Task.checkCancellation()
+        }
+        if service.status == .notRegistered || service.status == .notFound {
+            do { try service.register() }
+            catch {
+                // BTM can briefly reject registration even after the async
+                // bootout callback. Retry once only for this observed race.
+                let failure = error as NSError
+                guard refreshed, failure.domain == "SMAppServiceErrorDomain", failure.code == 1,
+                      service.status == .notRegistered || service.status == .notFound else { throw error }
+                try await Task.sleep(for: .milliseconds(500))
+                try service.register()
+            }
+        }
+        return service.status
     }
 
     func restore(_ receipt: CleanupMoveReceipt, beforeMove: @escaping @Sendable () async throws -> Void) async throws {
@@ -201,8 +212,27 @@ enum AuthorizedMoveError: LocalizedError {
             existingTrash: source, beforeMove: beforeMove)
     }
 
-    // D182 reuses this verifier before cache clearing can register the helper.
-    func trustedBundledHelper(_ url: URL) -> Bool {
+    /// D241 (review P2-1): the signer requirement and the connection are
+    /// built off the main thread (Security's `SecCodeCopySelf`).
+    nonisolated private static func connect() throws -> NSXPCConnection {
+        guard let requirement = FileOperationPeerRequirement.currentSigner(peerIdentifier: FileOperationIdentity.helper) else {
+            throw AuthorizedMoveError.unavailable
+        }
+        let connection = NSXPCConnection(machServiceName: FileOperationIdentity.helper, options: .privileged)
+        connection.setCodeSigningRequirement(requirement)
+        connection.remoteObjectInterface = NSXPCInterface(with: FileOperationHelperProtocol.self)
+        connection.resume()
+        return connection
+    }
+
+    /// D182 reuses this verifier before cache clearing can register the
+    /// helper. D229/D241: it runs off the main thread; Security's static-code
+    /// validation reads the bundles and their signatures.
+    nonisolated static func trustedBundledHelper(_ url: URL) async -> Bool {
+        await Task.detached(priority: .userInitiated) { isTrustedBundledHelper(url) }.value
+    }
+
+    nonisolated static func isTrustedBundledHelper(_ url: URL) -> Bool {
         func certificate(_ url: URL, identifier: String) -> [SecCertificate]? {
             var code: SecStaticCode?; var info: CFDictionary?
             guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,

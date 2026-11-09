@@ -226,10 +226,10 @@ struct HealthActionList: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("\(action.reason.severity.title) · \(title(action))")
                             .font(AppDesignTokens.Typography.cardTitle)
-                            .foregroundStyle(tint(action))
+                            .foregroundStyle(CareStudioText(tint(action)))
                         Text(detail(action))
                             .font(AppDesignTokens.Typography.secondary)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.readableSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
@@ -309,6 +309,8 @@ struct HealthActionList: View {
         return BatterySettingsActionResolver.resolve(batterySettingsState)
     }
 
+    /// D279: as words on the page the title goes through `CareStudioText`, so it
+    /// reads on the module's gradient; nothing else uses it.
     private func tint(_ action: HealthDashboardAction) -> Color {
         switch action.reason.severity {
         case .critical: AppDesignTokens.Palette.destructive
